@@ -8,6 +8,7 @@ pub mod dialect;
 pub mod driver;
 pub mod drivers;
 pub mod manager;
+pub mod commands;
 
 use serde::{Deserialize, Serialize};
 
