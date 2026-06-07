@@ -8,3 +8,4 @@ ref-ui/_extract/
 diff.png
 *-actual.png
 *-diff.png
+.gstack/
