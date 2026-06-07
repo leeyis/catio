@@ -29,7 +29,8 @@
 - **T3** `const D = window.DATA` → 组件内 `const D = useData()`（来自 `state/DataContext`）；纯函数（如 `buildSidebarTree`、`highlightSQL`）改为参数传入，不读全局。
 - **T4** `style={{ WebkitAppRegion: 'drag' }}` → `data-tauri-drag-region` 属性；`'no-drag'` 区域删除该样式（默认即不可拖）。
 - **T5** 给组件 props 加 TS 类型（来自 `services/types.ts`）；事件处理器参数补类型。
-- **T6** 文件首行加 `/* ported from ref-ui/_extract/blobN.txt — verbatim per plan T1-T6 */`。
+- **T6** 文件首行加 `/* ported from ref-ui/_extract/blobN.txt — verbatim per plan T1-T7 */`。
+- **T7（i18n 外置 UI 文案，spec §14）** 组件内**界面**中文字面量 → `t('ns.key')`（`useTranslation` 来自 react-i18next）；同时在 `src/i18n/zh.json` 写入**原中文原文**、`src/i18n/en.json` 写入英文译文。带变量用插值 `t('ns.key', { n })`。**演示/mock 文本不动**（AI 对话、连接名、示例 SQL、片段描述等占位数据保持原样）。命名空间按组件区域：`common/shell/home/vault/settings/panels/workbench/dbviews/modals/auth`。默认语言 zh，故默认渲染与原型逐字一致。
 
 **worked example**（shell `ConnRow` 片段）：
 
@@ -448,6 +449,53 @@ export function useTweaks(initial: Tweaks = TWEAK_DEFAULTS) {
 
 ---
 
+## Task 6B: i18n 基建（spec §14）
+
+**Files:** Create: `src/i18n/{index.ts, zh.json, en.json}`, `src/state/LanguageContext.tsx`; Modify: `src/main.tsx`(初始化 i18n + 包 LanguageProvider), `package.json`(加 i18next/react-i18next); Test: `tests/i18n.test.ts`
+
+- [ ] **Step 1: 装依赖** `npm i i18next react-i18next`
+
+- [ ] **Step 2: 写失败测试**
+
+```ts
+import i18n from '../src/i18n'
+it('defaults to zh and switches to en', async () => {
+  expect(i18n.language).toBe('zh')
+  expect(i18n.t('common.newConnection')).toBe('新建连接')
+  await i18n.changeLanguage('en')
+  expect(i18n.t('common.newConnection')).toBe('New connection')
+})
+```
+
+- [ ] **Step 3: 运行 → 失败** Expected: FAIL
+
+- [ ] **Step 4: 实现 i18n**
+
+`src/i18n/zh.json` / `en.json`：先放种子键（如 `common.newConnection`）；后续组件移植按 T7 增量补键。
+`src/i18n/index.ts`:
+```ts
+import i18n from 'i18next'
+import { initReactI18next } from 'react-i18next'
+import zh from './zh.json'
+import en from './en.json'
+const saved = (typeof localStorage !== 'undefined' && localStorage.getItem('catio-lang')) || 'zh'
+i18n.use(initReactI18next).init({
+  resources: { zh: { translation: zh }, en: { translation: en } },
+  lng: saved, fallbackLng: 'zh', interpolation: { escapeValue: false },
+})
+export default i18n
+```
+`LanguageContext.tsx`：`useLang()` 返回 `{ lang, setLang }`；`setLang` 调 `i18n.changeLanguage`、写 `localStorage('catio-lang')`、设 `document.documentElement.lang`。
+`main.tsx`：`import './i18n'` 并用 `<LanguageProvider>` 包裹 App（在 DataProvider 内外均可）。
+
+- [ ] **Step 5: 运行 → 通过** Expected: PASS
+
+- [ ] **Step 6: Commit** `git add -A && git commit -m "feat: i18n infrastructure (zh default, en switch)"`
+
+> 此后所有含界面文案的组件移植任务（Task 9-15）按 **T7** 外置中文串到 zh.json/en.json。语言切换器在 Task 13(panels)或 Task 10(SettingsView) 内实现：Settings 加语言选择项。
+
+---
+
 ## Task 7: 图标集 `components/Icon.tsx`（移植 blob8）
 
 **Files:** Create: `src/components/Icon.tsx`; Test: `tests/icon.test.tsx`
@@ -525,7 +573,7 @@ it('nests tunneled dbs under their bastion host', () => {
 
 - [ ] **Step 2: 运行 → 失败** Expected: FAIL
 
-- [ ] **Step 3: 移植 HomeView+VaultView（blob4）、SettingsView（blob12）（T1-T6）** —— `window.DATA`→`useData()`；`Stat`/`SectionHead` 等子组件随文件保留或从 atoms import。SettingsView 的认证相关 props 先按原型签名保留（Task 14/15 接 App 状态）。
+- [ ] **Step 3: 移植 HomeView+VaultView（blob4）、SettingsView（blob12）（T1-T7）** —— `window.DATA`→`useData()`；`Stat`/`SectionHead` 等子组件随文件保留或从 atoms import。SettingsView 的认证相关 props 先按原型签名保留（Task 14/15 接 App 状态）。**按 T7 外置界面中文到 zh/en.json**（home/vault/settings 命名空间）。**SettingsView 内新增语言选择项**（中文/English，调 `useLang().setLang`），样式与既有主题/密度偏好项一致。
 
 - [ ] **Step 4: 运行 → 通过** Expected: PASS
 
@@ -719,6 +767,10 @@ Expected: 差异 < 1%。用 Read 工具目视两图确认无可辨差异。
 
 手动走查（spec §11.3）：开/关/切标签、切面板、切主题、侧栏过滤+分组折叠、隧道嵌套展示、认证流程（首次运行→创建→锁定→解锁→隔离 vault）。行为须与原型一致。
 
+- [ ] **Step 3B: i18n 核对（spec §14）**
+
+默认 zh 各屏与原型像素一致；Settings 切到 English 后界面文案变英文、布局不崩（合理换行/省略可接受）、刷新后保持。扫描组件内残留未外置的界面中文字面量（演示/mock 文本除外）：`node -e` 或 grep 检查 `src/components` 下 .tsx 中作者书写的中文串是否都已走 `t(...)`。
+
 - [ ] **Step 4: 最终 typecheck + 全测试**
 
 Run: `npx tsc --noEmit && npm test`
@@ -730,7 +782,7 @@ Expected: 全绿。
 
 ## Self-Review（已执行）
 
-- **Spec 覆盖**：§4 目录→Task1-2;§5 组件映射→Task7-15;§6 接缝→Task5;§7 资源→Task2;§8 主题→Task6;§9 窗口装饰→Task16;§10 砍 EDITMODE→Task6;§11 验收→Task17-18。认证(§2 目标5)→Task14。无遗漏。
+- **Spec 覆盖**：§4 目录→Task1-2;§5 组件映射→Task7-15;§6 接缝→Task5;§7 资源→Task2;§8 主题→Task6;§9 窗口装饰→Task16;§10 砍 EDITMODE→Task6;§11 验收→Task17-18;§14 i18n→Task6B + T7(Task9-15) + SettingsView 语言切换器(Task10)。认证(§2 目标5)→Task14。无遗漏。
 - **占位符**：新文件均给出真实代码；port 任务以"源 blob + T1-T6 规则 + worked example"替代逐行粘贴（源已逐字在仓库 `_extract/`，粘贴 4000 行属冗余）。
 - **类型一致**：`useData()`、`buildSidebarTree(items,filter)`、`highlightSQL(code)`、`nextTheme(t)`、`runQuery(connId,sql)` 在定义与引用处签名一致。
 
