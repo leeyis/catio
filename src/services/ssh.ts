@@ -1,5 +1,5 @@
 import { DATA } from './mockData'
-import type { Sftp, Tunnel, Monitor, TermLine } from './types'
+import type { Sftp, SftpItem, Tunnel, Monitor, TermLine } from './types'
 
 // ---- Tauri guard — function so tests can set window.__TAURI_INTERNALS__ dynamically ----
 const isTauri = (): boolean =>
@@ -69,10 +69,34 @@ export async function listen<T>(event: string, cb: (payload: T) => void): Promis
   return tauriListen<T>(event, e => cb(e.payload))
 }
 
-// ---- Mock fallbacks (panels use these until B/C/D rewire them) ----
+// ---- SFTP ----
 
-export async function getSftp(_id: string): Promise<Sftp> {
+export async function getSftp(sessionId: string, path?: string): Promise<Sftp> {
+  if (isTauri() && sessionId) {
+    const items = await tauriInvoke<SftpItem[]>('sftp_list', { sessionId, path: path ?? '.' })
+    return { path: path ?? '.', items }
+  }
   return DATA.sftp
+}
+
+export async function sftpUpload(sessionId: string, localPath: string, remotePath: string): Promise<void> {
+  return tauriInvoke('sftp_upload', { sessionId, localPath, remotePath })
+}
+
+export async function sftpDownload(sessionId: string, remotePath: string, localPath: string): Promise<void> {
+  return tauriInvoke('sftp_download', { sessionId, remotePath, localPath })
+}
+
+export async function sftpMkdir(sessionId: string, path: string): Promise<void> {
+  return tauriInvoke('sftp_mkdir', { sessionId, path })
+}
+
+export async function sftpRename(sessionId: string, from: string, to: string): Promise<void> {
+  return tauriInvoke('sftp_rename', { sessionId, from, to })
+}
+
+export async function sftpDelete(sessionId: string, path: string, isDir: boolean): Promise<void> {
+  return tauriInvoke('sftp_delete', { sessionId, path, isDir })
 }
 
 export async function getTunnels(_id: string): Promise<Tunnel[]> {

@@ -6,6 +6,7 @@ use ssh::manager::SessionManager;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_http::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(SessionManager::default())
         .invoke_handler(tauri::generate_handler![
             ssh::conn::ssh_connect,

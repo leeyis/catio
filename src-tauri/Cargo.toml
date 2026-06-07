@@ -24,6 +24,7 @@ russh-sftp = "2.3.0"
 thiserror = "2.0.18"
 base64 = "0.22.1"
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "process"] }
+tauri-plugin-dialog = "2.7.1"
 
 [profile.release]
 panic = "abort"
