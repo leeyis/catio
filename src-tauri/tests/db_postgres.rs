@@ -57,3 +57,54 @@ async fn pg_query_truncates_at_max_rows() {
     assert_eq!(r.rows.len(), 10);
     assert!(r.truncated);
 }
+
+#[tokio::test]
+async fn pg_introspects_schema_and_structure() {
+    let Some(args) = pg_args() else {
+        eprintln!("SKIP pg_introspects_schema_and_structure: set CATIO_TEST_PG_URL=host:port:user:pw:db");
+        return;
+    };
+    let driver = connect(&args).await.unwrap();
+
+    // Setup: drop then recreate test tables
+    driver.query("DROP TABLE IF EXISTS catio_it_child", 1).await.ok();
+    driver.query("DROP TABLE IF EXISTS catio_it_parent", 1).await.ok();
+    driver.query(
+        "CREATE TABLE catio_it_parent (id int PRIMARY KEY, name text)",
+        1,
+    ).await.unwrap();
+    driver.query(
+        "CREATE TABLE catio_it_child (id int PRIMARY KEY, \
+         parent_id int REFERENCES catio_it_parent(id))",
+        1,
+    ).await.unwrap();
+
+    // list_schemas: "public" must be present
+    let schemas = driver.list_schemas().await.unwrap();
+    assert!(schemas.iter().any(|s| s == "public"), "public schema missing: {:?}", schemas);
+
+    // list_tables: catio_it_parent must appear in public
+    let tables = driver.list_tables("public").await.unwrap();
+    assert!(
+        tables.iter().any(|t| t.name == "catio_it_parent"),
+        "catio_it_parent not found in table list: {:?}", tables
+    );
+
+    // table_structure: id column must be PK
+    let st = driver.table_structure("public", "catio_it_parent").await.unwrap();
+    assert!(
+        st.columns.iter().any(|c| c.name == "id" && c.key == "PK"),
+        "expected id PK, got: {:?}", st.columns
+    );
+
+    // er_relations: catio_it_child -> catio_it_parent FK must appear
+    let rels = driver.er_relations("public").await.unwrap();
+    assert!(
+        rels.iter().any(|r| r.from == "catio_it_child" && r.to == "catio_it_parent"),
+        "expected child->parent relation, got: {:?}", rels
+    );
+
+    // Cleanup
+    driver.query("DROP TABLE catio_it_child", 1).await.ok();
+    driver.query("DROP TABLE catio_it_parent", 1).await.ok();
+}

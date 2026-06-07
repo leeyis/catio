@@ -184,16 +184,223 @@ impl Driver for PostgresDriver {
         }
         Ok(QueryResult { columns: cols, rows, rows_affected: None, truncated })
     }
+    // ---- A7: schema / structure / ER introspection ----
+    // SQL adapted from dbx crates/dbx-core/src/db/postgres.rs, Apache-2.0
+
     async fn list_schemas(&self) -> Result<Vec<String>, DbError> {
-        Err(DbError::Unsupported("schema (A7)".into()))
+        let client = self.pool.get().await
+            .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
+        // adapted from dbx list_schemas L1248
+        let rows = client.query(
+            "SELECT n.nspname AS schema_name \
+             FROM pg_catalog.pg_namespace n \
+             WHERE n.nspname NOT IN ('information_schema', 'pg_catalog', 'pg_toast') \
+             AND n.nspname NOT LIKE 'pg_toast_temp_%' \
+             AND n.nspname NOT LIKE 'pg_temp_%' \
+             ORDER BY n.nspname",
+            &[],
+        ).await.map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        Ok(rows.iter().map(|r| r.get::<_, String>(0)).collect())
     }
-    async fn list_tables(&self, _schema: &str) -> Result<Vec<TableInfo>, DbError> {
-        Err(DbError::Unsupported("schema (A7)".into()))
+
+    async fn list_tables(&self, schema: &str) -> Result<Vec<TableInfo>, DbError> {
+        let client = self.pool.get().await
+            .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
+        // adapted from dbx list_tables / postgres_tables_sql L1112
+        let rows = client.query(
+            "SELECT c.relname AS table_name, \
+             CASE c.relkind \
+               WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'VIEW' \
+               ELSE 'BASE TABLE' \
+             END AS table_type, \
+             c.reltuples::bigint AS rows_estimate \
+             FROM pg_catalog.pg_class c \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','f','p') \
+             ORDER BY c.relname",
+            &[&schema],
+        ).await.map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        Ok(rows.iter().map(|r| {
+            let kind = if r.get::<_, String>(1) == "VIEW" { "view" } else { "table" };
+            let est: Option<i64> = r.try_get::<_, Option<i64>>(2).ok().flatten()
+                .filter(|&v| v >= 0);
+            TableInfo { name: r.get::<_, String>(0), kind: kind.into(), rows_estimate: est }
+        }).collect())
     }
-    async fn table_structure(&self, _schema: &str, _table: &str) -> Result<TableStructure, DbError> {
-        Err(DbError::Unsupported("structure (A7)".into()))
+
+    async fn table_structure(&self, schema: &str, table: &str) -> Result<TableStructure, DbError> {
+        use crate::db::driver::{ColumnDef, IndexDef, ForeignKeyDef};
+        let client = self.pool.get().await
+            .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
+
+        // ---- columns ----
+        // adapted from dbx POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL L1321 (broadest compat)
+        // Also collects FK column names so we can set key="FK" where appropriate.
+        let col_rows = client.query(
+            "SELECT c.column_name, \
+             CASE WHEN c.data_type = 'USER-DEFINED' THEN c.udt_name ELSE c.data_type END AS full_type, \
+             c.is_nullable = 'YES' AS is_nullable, \
+             c.column_default, \
+             EXISTS ( \
+               SELECT 1 FROM information_schema.table_constraints tc \
+               JOIN information_schema.key_column_usage kcu \
+                 ON kcu.constraint_catalog = tc.constraint_catalog \
+                AND kcu.constraint_schema  = tc.constraint_schema \
+                AND kcu.constraint_name    = tc.constraint_name \
+                AND kcu.table_schema       = tc.table_schema \
+                AND kcu.table_name         = tc.table_name \
+               WHERE tc.constraint_type = 'PRIMARY KEY' \
+                 AND tc.table_schema = c.table_schema \
+                 AND tc.table_name   = c.table_name \
+                 AND kcu.column_name = c.column_name \
+             ) AS is_pk, \
+             EXISTS ( \
+               SELECT 1 FROM information_schema.table_constraints tc \
+               JOIN information_schema.key_column_usage kcu \
+                 ON kcu.constraint_catalog = tc.constraint_catalog \
+                AND kcu.constraint_schema  = tc.constraint_schema \
+                AND kcu.constraint_name    = tc.constraint_name \
+                AND kcu.table_schema       = tc.table_schema \
+                AND kcu.table_name         = tc.table_name \
+               WHERE tc.constraint_type = 'FOREIGN KEY' \
+                 AND tc.table_schema = c.table_schema \
+                 AND tc.table_name   = c.table_name \
+                 AND kcu.column_name = c.column_name \
+             ) AS is_fk, \
+             EXISTS ( \
+               SELECT 1 FROM information_schema.table_constraints tc \
+               JOIN information_schema.key_column_usage kcu \
+                 ON kcu.constraint_catalog = tc.constraint_catalog \
+                AND kcu.constraint_schema  = tc.constraint_schema \
+                AND kcu.constraint_name    = tc.constraint_name \
+                AND kcu.table_schema       = tc.table_schema \
+                AND kcu.table_name         = tc.table_name \
+               WHERE tc.constraint_type = 'UNIQUE' \
+                 AND tc.table_schema = c.table_schema \
+                 AND tc.table_name   = c.table_name \
+                 AND kcu.column_name = c.column_name \
+             ) AS is_uni \
+             FROM information_schema.columns c \
+             WHERE c.table_schema = $1 AND c.table_name = $2 \
+             ORDER BY c.ordinal_position",
+            &[&schema, &table],
+        ).await.map_err(|e| DbError::QueryFailed(e.to_string()))?;
+
+        let columns: Vec<ColumnDef> = col_rows.iter().map(|r| {
+            let is_pk: bool = r.try_get(4).unwrap_or(false);
+            let is_fk: bool = r.try_get(5).unwrap_or(false);
+            let is_uni: bool = r.try_get(6).unwrap_or(false);
+            let key = if is_pk { "PK" } else if is_fk { "FK" } else if is_uni { "UNI" } else { "" };
+            ColumnDef {
+                name: r.get::<_, String>(0),
+                type_name: r.try_get::<_, Option<String>>(1).ok().flatten().unwrap_or_default(),
+                nullable: r.try_get::<_, bool>(2).unwrap_or(true),
+                default: r.try_get::<_, Option<String>>(3).ok().flatten(),
+                key: key.into(),
+            }
+        }).collect();
+
+        // ---- indexes ----
+        // adapted from dbx POSTGRES_INDEXES_SQL L1526; columns array_agg → join with ", "
+        let idx_rows = client.query(
+            "SELECT i.relname AS index_name, \
+             array_agg(COALESCE(a.attname, pg_get_indexdef(ix.indexrelid, k.n::int, true)) \
+               ORDER BY k.n) AS columns, \
+             ix.indisunique AS is_unique, \
+             am.amname AS index_type \
+             FROM pg_index ix \
+             JOIN pg_class t ON t.oid = ix.indrelid \
+             JOIN pg_class i ON i.oid = ix.indexrelid \
+             JOIN pg_namespace n ON n.oid = t.relnamespace \
+             JOIN pg_am am ON am.oid = i.relam \
+             JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, n) ON true \
+             LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum AND k.attnum > 0 \
+             WHERE n.nspname = $1 AND t.relname = $2 \
+             GROUP BY i.relname, i.oid, ix.indisunique, ix.indpred, ix.indrelid, am.amname \
+             ORDER BY i.relname",
+            &[&schema, &table],
+        ).await.map_err(|e| DbError::QueryFailed(e.to_string()))?;
+
+        let indexes: Vec<IndexDef> = idx_rows.iter().map(|r| {
+            let cols: Vec<String> = r.try_get::<_, Vec<String>>(1).unwrap_or_default();
+            IndexDef {
+                name: r.get::<_, String>(0),
+                columns: cols.join(", "),
+                unique: r.try_get::<_, bool>(2).unwrap_or(false),
+                method: r.try_get::<_, String>(3).unwrap_or_else(|_| "btree".into()),
+            }
+        }).collect();
+
+        // ---- foreign keys ----
+        // adapted from dbx list_foreign_keys L1646 + referential_constraints for on_delete/on_update
+        let fk_rows = client.query(
+            "SELECT fk.column_name, \
+             pk.table_schema AS ref_schema, pk.table_name AS ref_table, pk.column_name AS ref_column, \
+             rc.delete_rule, rc.update_rule \
+             FROM information_schema.table_constraints tc \
+             JOIN information_schema.key_column_usage fk \
+               ON fk.constraint_name   = tc.constraint_name \
+               AND fk.constraint_schema = tc.constraint_schema \
+               AND fk.table_schema      = tc.table_schema \
+               AND fk.table_name        = tc.table_name \
+             JOIN information_schema.referential_constraints rc \
+               ON rc.constraint_name   = tc.constraint_name \
+               AND rc.constraint_schema = tc.constraint_schema \
+             JOIN information_schema.key_column_usage pk \
+               ON pk.constraint_name   = rc.unique_constraint_name \
+               AND pk.constraint_schema = rc.unique_constraint_schema \
+               AND pk.ordinal_position  = fk.position_in_unique_constraint \
+             WHERE tc.constraint_type = 'FOREIGN KEY' \
+               AND fk.table_schema = $1 AND fk.table_name = $2 \
+             ORDER BY fk.constraint_name, fk.ordinal_position",
+            &[&schema, &table],
+        ).await.map_err(|e| DbError::QueryFailed(e.to_string()))?;
+
+        let fks: Vec<ForeignKeyDef> = fk_rows.iter().map(|r| {
+            let ref_schema: String = r.get::<_, String>(1);
+            let ref_table: String = r.get::<_, String>(2);
+            let ref_col: String = r.get::<_, String>(3);
+            ForeignKeyDef {
+                column: r.get::<_, String>(0),
+                references: format!("{}.{}.{}", ref_schema, ref_table, ref_col),
+                on_delete: r.try_get::<_, String>(4).unwrap_or_else(|_| "NO ACTION".into()),
+                on_update: r.try_get::<_, String>(5).unwrap_or_else(|_| "NO ACTION".into()),
+            }
+        }).collect();
+
+        Ok(TableStructure { columns, indexes, fks })
     }
-    async fn er_relations(&self, _schema: &str) -> Result<Vec<ErRelation>, DbError> {
-        Err(DbError::Unsupported("er (A7)".into()))
+
+    async fn er_relations(&self, schema: &str) -> Result<Vec<ErRelation>, DbError> {
+        let client = self.pool.get().await
+            .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
+        // adapted from dbx list_foreign_keys L1646; schema-level (no table filter)
+        let rows = client.query(
+            "SELECT fk.table_name AS from_table, fk.column_name AS from_col, \
+             pk.table_name AS to_table, pk.column_name AS to_col \
+             FROM information_schema.table_constraints tc \
+             JOIN information_schema.key_column_usage fk \
+               ON fk.constraint_name   = tc.constraint_name \
+               AND fk.constraint_schema = tc.constraint_schema \
+               AND fk.table_schema      = tc.table_schema \
+               AND fk.table_name        = tc.table_name \
+             JOIN information_schema.referential_constraints rc \
+               ON rc.constraint_name   = tc.constraint_name \
+               AND rc.constraint_schema = tc.constraint_schema \
+             JOIN information_schema.key_column_usage pk \
+               ON pk.constraint_name   = rc.unique_constraint_name \
+               AND pk.constraint_schema = rc.unique_constraint_schema \
+               AND pk.ordinal_position  = fk.position_in_unique_constraint \
+             WHERE tc.constraint_type = 'FOREIGN KEY' \
+               AND fk.table_schema = $1 \
+             ORDER BY fk.table_name, fk.constraint_name, fk.ordinal_position",
+            &[&schema],
+        ).await.map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        Ok(rows.iter().map(|r| ErRelation {
+            from: r.get::<_, String>(0),
+            from_col: r.get::<_, String>(1),
+            to: r.get::<_, String>(2),
+            to_col: r.get::<_, String>(3),
+        }).collect())
     }
 }
