@@ -35,3 +35,25 @@ async fn pg_wrong_password_is_auth_failed() {
     let err = connect(&args).await.err().expect("should fail");
     assert!(matches!(err, catio_lib::db::DbError::AuthFailed));
 }
+
+#[tokio::test]
+async fn pg_query_returns_generic_rows() {
+    let Some(args) = pg_args() else { return; };
+    let driver = connect(&args).await.unwrap();
+    let r = driver.query("SELECT 1 AS n, 'hi' AS s, true AS b", 100).await.unwrap();
+    assert_eq!(r.columns.len(), 3);
+    assert_eq!(r.columns[0].name, "n");
+    assert_eq!(r.rows.len(), 1);
+    assert_eq!(r.rows[0][0], serde_json::json!(1));
+    assert_eq!(r.rows[0][1], serde_json::json!("hi"));
+    assert_eq!(r.rows[0][2], serde_json::json!(true));
+}
+
+#[tokio::test]
+async fn pg_query_truncates_at_max_rows() {
+    let Some(args) = pg_args() else { return; };
+    let driver = connect(&args).await.unwrap();
+    let r = driver.query("SELECT * FROM generate_series(1, 50)", 10).await.unwrap();
+    assert_eq!(r.rows.len(), 10);
+    assert!(r.truncated);
+}

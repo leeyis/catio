@@ -56,6 +56,77 @@ fn default_database(profile: Option<&str>) -> Option<String> {
     }
 }
 
+/// Map a single PG column value to serde_json::Value.
+/// Type branches adapted from dbx crates/dbx-core/src/db/postgres.rs execute_query, Apache-2.0.
+fn pg_value_to_json(
+    row: &tokio_postgres::Row,
+    idx: usize,
+    ty: &tokio_postgres::types::Type,
+    safe_i64: &dyn Fn(i64) -> serde_json::Value,
+    bin_to_json: &dyn Fn(&[u8]) -> serde_json::Value,
+) -> serde_json::Value {
+    use serde_json::Value;
+    use tokio_postgres::types::Type;
+
+    match ty {
+        &Type::BOOL => match row.try_get::<_, Option<bool>>(idx) {
+            Ok(Some(v)) => Value::Bool(v),
+            _ => Value::Null,
+        },
+        &Type::INT2 => match row.try_get::<_, Option<i16>>(idx) {
+            Ok(Some(v)) => Value::Number((v as i32).into()),
+            _ => Value::Null,
+        },
+        &Type::INT4 => match row.try_get::<_, Option<i32>>(idx) {
+            Ok(Some(v)) => Value::Number(v.into()),
+            _ => Value::Null,
+        },
+        &Type::INT8 => match row.try_get::<_, Option<i64>>(idx) {
+            Ok(Some(v)) => safe_i64(v),
+            _ => Value::Null,
+        },
+        &Type::OID => match row.try_get::<_, Option<u32>>(idx) {
+            Ok(Some(v)) => Value::Number(v.into()),
+            _ => Value::Null,
+        },
+        &Type::FLOAT4 => match row.try_get::<_, Option<f32>>(idx) {
+            Ok(Some(v)) => serde_json::Number::from_f64(v as f64)
+                .map(Value::Number)
+                .unwrap_or(Value::Null),
+            _ => Value::Null,
+        },
+        &Type::FLOAT8 => match row.try_get::<_, Option<f64>>(idx) {
+            Ok(Some(v)) => serde_json::Number::from_f64(v)
+                .map(Value::Number)
+                .unwrap_or(Value::Null),
+            _ => Value::Null,
+        },
+        &Type::BYTEA => match row.try_get::<_, Option<Vec<u8>>>(idx) {
+            Ok(Some(v)) => bin_to_json(&v),
+            _ => Value::Null,
+        },
+        // String-like types: TEXT, VARCHAR, BPCHAR, NAME, UUID
+        &Type::TEXT | &Type::VARCHAR | &Type::BPCHAR | &Type::NAME | &Type::UUID => {
+            match row.try_get::<_, Option<String>>(idx) {
+                Ok(Some(v)) => Value::String(v),
+                _ => Value::Null,
+            }
+        },
+        // JSON / JSONB: try serde_json::Value directly
+        &Type::JSON | &Type::JSONB => {
+            match row.try_get::<_, Option<serde_json::Value>>(idx) {
+                Ok(Some(v)) => v,
+                _ => Value::Null,
+            }
+        },
+        // Fallback (includes temporal types TIMESTAMP/DATE/TIME/INTERVAL etc.): try String, then Null
+        _ => match row.try_get::<_, Option<String>>(idx) {
+            Ok(Some(v)) => Value::String(v),
+            _ => Value::Null,
+        },
+    }
+}
+
 #[async_trait]
 impl Driver for PostgresDriver {
     fn db_type(&self) -> DatabaseType { DatabaseType::Postgres }
@@ -67,9 +138,51 @@ impl Driver for PostgresDriver {
         Ok(row.get::<_, String>(0))
     }
 
-    // 以下方法 Task A6/A7 实现；先用 Unsupported 占位让其编译
-    async fn query(&self, _sql: &str, _max_rows: u32) -> Result<QueryResult, DbError> {
-        Err(DbError::Unsupported("query (A6)".into()))
+    async fn query(&self, sql: &str, max_rows: u32) -> Result<QueryResult, DbError> {
+        use crate::db::result::{ColumnInfo, safe_i64_to_json, binary_to_json};
+        use serde_json::Value;
+        let client = self.pool.get().await
+            .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
+        let stmt = client.prepare(sql).await
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+
+        // Write statements (UPDATE/INSERT/DELETE/DDL) have no result columns.
+        // Use execute() to get rows_affected count instead of fetching rows.
+        if stmt.columns().is_empty() {
+            let affected = client.execute(&stmt, &[]).await
+                .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+            return Ok(QueryResult {
+                columns: vec![],
+                rows: vec![],
+                rows_affected: Some(affected),
+                truncated: false,
+            });
+        }
+
+        let cols: Vec<ColumnInfo> = stmt.columns().iter().map(|c| ColumnInfo {
+            name: c.name().to_string(),
+            type_name: c.type_().name().to_string(),
+            pk: false,
+        }).collect();
+
+        let pg_rows = client.query(&stmt, &[]).await
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+
+        let mut rows: Vec<Vec<Value>> = Vec::new();
+        let mut truncated = false;
+        for (i, row) in pg_rows.iter().enumerate() {
+            if i as u32 >= max_rows {
+                truncated = true;
+                break;
+            }
+            let mut out = Vec::with_capacity(cols.len());
+            for (idx, col) in stmt.columns().iter().enumerate() {
+                let v = pg_value_to_json(row, idx, col.type_(), &safe_i64_to_json, &binary_to_json);
+                out.push(v);
+            }
+            rows.push(out);
+        }
+        Ok(QueryResult { columns: cols, rows, rows_affected: None, truncated })
     }
     async fn list_schemas(&self) -> Result<Vec<String>, DbError> {
         Err(DbError::Unsupported("schema (A7)".into()))
