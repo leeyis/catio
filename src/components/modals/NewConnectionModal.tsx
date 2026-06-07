@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn, IconBtn, Segmented, Toggle, ConnGlyph } from '../atoms'
 import { useData } from '../../state/DataContext'
+import type { AuthMethod } from '../../services/ssh'
 
 // ---- Prop types ----
 
@@ -46,6 +47,8 @@ export function NewConnectionModal({ onClose }: NewConnectionModalProps) {
   const [engineOpen, setEngineOpen] = useState(false)
   const engineRef = useRef<HTMLDivElement>(null)
   const [proto, setProto] = useState('ssh')
+  const [authMethod, setAuthMethod] = useState<AuthMethod['method']>('password')
+  const [keyPath, setKeyPath] = useState('')
   const [tunnel, setTunnel] = useState(true)
   const [via, setVia] = useState('h-bastion')
   const [tested, setTested] = useState(false)
@@ -182,6 +185,35 @@ export function NewConnectionModal({ onClose }: NewConnectionModalProps) {
               </label>
             </div>
           </div>
+
+          {/* auth method — host/SSH only */}
+          {kind === 'host' && (
+            <div className="col gap10" style={{ marginBottom: 14 }}>
+              <div className="col" style={{ gap: 6 }}>
+                <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.authMethod')}</span>
+                <Segmented
+                  value={authMethod}
+                  onChange={v => setAuthMethod(v as AuthMethod['method'])}
+                  options={[
+                    { value: 'password', label: t('modals.authPassword') },
+                    { value: 'keyFile', label: t('modals.authKeyFile') },
+                  ]}
+                />
+              </div>
+              {authMethod === 'keyFile' && (
+                <label className="col" style={{ gap: 5 }}>
+                  <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.keyPath')}</span>
+                  <input
+                    value={keyPath}
+                    onChange={e => setKeyPath(e.target.value)}
+                    placeholder={t('modals.keyPathPlaceholder')}
+                    className="mono"
+                    style={{ height: 36, padding: '0 12px', borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }}
+                  />
+                </label>
+              )}
+            </div>
+          )}
 
           {/* tunnel / proxyjump — the integration bridge */}
           <div style={{ border: '1px solid var(--border-hairline)', borderRadius: 14, overflow: 'hidden', marginBottom: 6 }}>

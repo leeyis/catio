@@ -256,7 +256,16 @@
     "testConnection": "Test connection",
     "testPassed": "Test passed · 28ms",
     "cancel": "Cancel",
-    "saveAndConnect": "Save & connect"
+    "saveAndConnect": "Save & connect",
+    "authMethod": "Auth method",
+    "authPassword": "Password",
+    "authKeyFile": "Key file",
+    "keyPath": "Key path",
+    "keyPathPlaceholder": "e.g. ~/.ssh/id_ed25519",
+    "secretPromptPassword": "Enter password",
+    "secretPromptPassphrase": "Enter key passphrase",
+    "secretPromptSubmit": "Confirm",
+    "secretPromptCancel": "Cancel"
   },
   "auth": {
     "initTitle": "Initialize workspace",

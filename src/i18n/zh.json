@@ -256,7 +256,16 @@
     "testConnection": "测试连接",
     "testPassed": "测试通过 · 28ms",
     "cancel": "取消",
-    "saveAndConnect": "保存并连接"
+    "saveAndConnect": "保存并连接",
+    "authMethod": "认证方式",
+    "authPassword": "密码",
+    "authKeyFile": "密钥文件",
+    "keyPath": "密钥路径",
+    "keyPathPlaceholder": "例如 ~/.ssh/id_ed25519",
+    "secretPromptPassword": "输入密码",
+    "secretPromptPassphrase": "输入密钥口令",
+    "secretPromptSubmit": "确认",
+    "secretPromptCancel": "取消"
   },
   "auth": {
     "initTitle": "初始化工作区",
