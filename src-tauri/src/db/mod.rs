@@ -5,6 +5,8 @@ pub mod ids;
 pub mod result;
 pub mod capabilities;
 pub mod dialect;
+pub mod driver;
+pub mod manager;
 
 use serde::{Deserialize, Serialize};
 
