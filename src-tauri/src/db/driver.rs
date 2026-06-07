@@ -111,6 +111,8 @@ pub async fn connect(args: &ConnectArgs) -> Result<Arc<dyn Driver>, DbError> {
             Ok(Arc::new(crate::db::drivers::rqlite::RqliteDriver::connect(args).await?)),
         DatabaseType::Elasticsearch =>
             Ok(Arc::new(crate::db::drivers::elasticsearch::ElasticsearchDriver::connect(args).await?)),
+        DatabaseType::Mongodb =>
+            Ok(Arc::new(crate::db::drivers::mongo::MongoDriver::connect(args).await?)),
         other => Err(DbError::Unsupported(format!("{:?} (later phase)", other))),
     }
 }

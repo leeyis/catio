@@ -7,3 +7,4 @@ pub mod http;
 pub mod clickhouse;
 pub mod rqlite;
 pub mod elasticsearch;
+pub mod mongo;
