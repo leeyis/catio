@@ -1,21 +1,189 @@
 /* ported from ref-ui/_extract/blob9.txt — verbatim per plan T1-T7 */
-import React from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
-import { IconBtn, Toggle } from '../atoms'
+import { IconBtn, Toggle, Segmented, Btn } from '../atoms'
 import { useData } from '../../state/DataContext'
+import type { Tunnel } from '../../services/types'
 import { PanelShell } from './PanelShell'
+import { getTunnels, tunnelOpen, tunnelClose, listen } from '../../services/ssh'
 
 export interface TunnelsPanelProps {
   onClose: () => void
+  sessionId?: string
 }
 
-export function TunnelsPanel({ onClose }: TunnelsPanelProps) {
+// ---- New-forward overlay form ----
+interface NewForwardFormProps {
+  onSubmit: (kind: 'L' | 'R' | 'D', bind: string, target: string) => void
+  onCancel: () => void
+}
+
+function NewForwardForm({ onSubmit, onCancel }: NewForwardFormProps) {
+  const { t } = useTranslation()
+  const [kind, setKind] = useState<'L' | 'R' | 'D'>('L')
+  const [bind, setBind] = useState('')
+  const [target, setTarget] = useState('')
+
+  const handleSubmit = (e?: React.FormEvent) => {
+    e?.preventDefault()
+    if (!bind.trim()) return
+    onSubmit(kind, bind.trim(), target.trim())
+  }
+
+  const inputStyle: React.CSSProperties = {
+    height: 30, padding: '0 10px', borderRadius: 8, fontSize: 12,
+    border: '1px solid var(--border-default)', background: 'var(--surface-sunken)',
+    color: 'var(--text-primary)', outline: 'none', width: '100%', boxSizing: 'border-box',
+  }
+
+  return (
+    <form onSubmit={handleSubmit}
+      style={{
+        position: 'absolute', top: 40, right: 12, zIndex: 20,
+        background: 'var(--surface-card)', border: '1px solid var(--border-default)',
+        borderRadius: 12, padding: 14, display: 'flex', flexDirection: 'column', gap: 10,
+        boxShadow: 'var(--shadow-overlay, 0 8px 24px rgba(0,0,0,.18))', width: 260,
+        animation: 'growUp .14s ease',
+      }}>
+      <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-primary)' }}>
+        {t('panels.newForward')}
+      </span>
+      <Segmented
+        size="sm"
+        options={[
+          { value: 'L', label: t('panels.fwdLocal') },
+          { value: 'R', label: t('panels.fwdRemote') },
+          { value: 'D', label: t('panels.fwdDynamic') },
+        ]}
+        value={kind}
+        onChange={v => setKind(v as 'L' | 'R' | 'D')}
+      />
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>{t('panels.fwdBind')}</span>
+        <input
+          style={inputStyle}
+          placeholder="localhost:8080"
+          value={bind}
+          onChange={e => setBind(e.target.value)}
+          autoFocus
+        />
+      </div>
+      {kind !== 'D' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>{t('panels.fwdTarget')}</span>
+          <input
+            style={inputStyle}
+            placeholder="10.0.4.2:5432"
+            value={target}
+            onChange={e => setTarget(e.target.value)}
+          />
+        </div>
+      )}
+      <div className="row gap6" style={{ justifyContent: 'flex-end' }}>
+        <Btn variant="ghost" size="sm" onClick={onCancel}>{t('panels.cancel')}</Btn>
+        <Btn variant="primary" size="sm" onClick={() => handleSubmit()} disabled={!bind.trim()}>{t('panels.fwdAdd')}</Btn>
+      </div>
+    </form>
+  )
+}
+
+// ---- Main panel ----
+
+export function TunnelsPanel({ onClose, sessionId }: TunnelsPanelProps) {
   const { t } = useTranslation()
   const D = useData()
   const typeLabel: Record<string, string> = { L: 'Local', R: 'Remote', D: 'Dynamic' }
+
+  const [tunnels, setTunnels] = useState<Tunnel[]>(D.tunnels)
+  const [showForm, setShowForm] = useState(false)
+  const overlayRef = useRef<HTMLDivElement>(null)
+
+  const load = () => {
+    getTunnels(sessionId).then(list => setTunnels(list)).catch(() => {
+      // keep current state on error
+    })
+  }
+
+  // Load on mount and sessionId change
+  useEffect(() => {
+    load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId])
+
+  // Subscribe to per-tunnel live byte-count events
+  useEffect(() => {
+    if (!sessionId) return
+    const unlisteners: Array<() => void> = []
+    tunnels.forEach(t2 => {
+      listen<{ bytesUp: number; bytesDown: number }>(`tunnel://${t2.id}`, payload => {
+        setTunnels(prev =>
+          prev.map(row =>
+            row.id === t2.id
+              ? { ...row, bytes: formatBytesLocal(payload.bytesUp + payload.bytesDown) }
+              : row,
+          ),
+        )
+      }).then(unlisten => unlisteners.push(unlisten))
+    })
+    return () => { unlisteners.forEach(fn => fn()) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, tunnels.map(t2 => t2.id).join(',')])
+
+  // Close overlay when clicking outside
+  useEffect(() => {
+    if (!showForm) return
+    const handler = (e: MouseEvent) => {
+      if (overlayRef.current && !overlayRef.current.contains(e.target as Node)) {
+        setShowForm(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [showForm])
+
+  const handleToggle = (t2: Tunnel, nowOn: boolean) => {
+    if (!sessionId) return
+    if (!nowOn && t2.status === 'up') {
+      // OFF → close tunnel
+      tunnelClose(t2.id).then(() => load()).catch(() => load())
+    }
+    // ON → reopening a closed tunnel needs original spec; not wired (deferred)
+  }
+
+  const handleCreate = (kind: 'L' | 'R' | 'D', bind: string, target: string) => {
+    if (!sessionId) return
+    setShowForm(false)
+    tunnelOpen(sessionId, { kind, bind, target: kind === 'D' ? null : target || null })
+      .then(() => load())
+      .catch(() => load())
+  }
+
   return (
-    <PanelShell icon="link" title={t('panels.tunnelsTitle')} sub={t('panels.tunnelsSub')} onClose={onClose} actions={<IconBtn name="plus" size={15} variant="bare" title={t('panels.newForward')} />}>
+    <PanelShell
+      icon="link"
+      title={t('panels.tunnelsTitle')}
+      sub={t('panels.tunnelsSub')}
+      onClose={onClose}
+      actions={
+        <div ref={overlayRef} style={{ position: 'relative' }}>
+          <IconBtn
+            name="plus"
+            size={15}
+            variant="bare"
+            title={t('panels.newForward')}
+            onClick={() => setShowForm(v => !v)}
+            active={showForm}
+          />
+          {showForm && (
+            <NewForwardForm
+              onSubmit={handleCreate}
+              onCancel={() => setShowForm(false)}
+            />
+          )}
+        </div>
+      }
+    >
       {/* jump chain */}
       <div className="col" style={{ padding: '12px 12px', borderBottom: '1px solid var(--border-hairline)', gap: 8 }}>
         <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.4px', textTransform: 'uppercase', color: 'var(--text-faint)' }}>{t('panels.proxyJump')}</span>
@@ -32,7 +200,7 @@ export function TunnelsPanel({ onClose }: TunnelsPanelProps) {
         </div>
       </div>
       <div className="grow" style={{ overflowY: 'auto', padding: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
-        {D.tunnels.map(t2 => (
+        {tunnels.map(t2 => (
           <div key={t2.id} className="col" style={{ border: '1px solid var(--border-hairline)', borderRadius: 12, padding: 11, gap: 8, background: 'var(--surface-card)' }}>
             <div className="row" style={{ justifyContent: 'space-between' }}>
               <div className="row gap8">
@@ -42,7 +210,7 @@ export function TunnelsPanel({ onClose }: TunnelsPanelProps) {
                   <span style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{typeLabel[t2.type]} · via {t2.via}</span>
                 </div>
               </div>
-              <Toggle on={t2.status === 'up'} size="sm" />
+              <Toggle on={t2.status === 'up'} size="sm" onChange={nowOn => handleToggle(t2, nowOn)} />
             </div>
             <div className="row mono gap6" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
               <span style={{ color: 'var(--signal-green)' }}>{t2.local}</span>
@@ -56,4 +224,13 @@ export function TunnelsPanel({ onClose }: TunnelsPanelProps) {
       </div>
     </PanelShell>
   )
+}
+
+// local copy to avoid circular imports in this module
+function formatBytesLocal(n: number): string {
+  if (n === 0) return '0 B'
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`
 }

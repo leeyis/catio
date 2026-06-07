@@ -228,7 +228,13 @@
     "detailLastUsed": "Last used",
     "lastUsedAgo": "{{time}} ago",
     "detailCredentials": "Credentials",
-    "connect": "Connect"
+    "connect": "Connect",
+    "fwdLocal": "Local",
+    "fwdRemote": "Remote",
+    "fwdDynamic": "Dynamic",
+    "fwdBind": "Bind address",
+    "fwdTarget": "Target",
+    "fwdAdd": "Add"
   },
   "modals": {
     "newConnection": "New connection",

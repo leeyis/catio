@@ -1,6 +1,17 @@
 import { DATA } from './mockData'
 import type { Sftp, SftpItem, Tunnel, Monitor, TermLine } from './types'
 
+// ---- Tunnel wire shape from Tauri backend ----
+export interface TunnelStatusWire {
+  id: string
+  kind: string
+  bind: string
+  target: string | null
+  bytesUp: number
+  bytesDown: number
+  status: string
+}
+
 // ---- Tauri guard — function so tests can set window.__TAURI_INTERNALS__ dynamically ----
 const isTauri = (): boolean =>
   typeof window !== 'undefined' &&
@@ -99,8 +110,46 @@ export async function sftpDelete(sessionId: string, path: string, isDir: boolean
   return tauriInvoke('sftp_delete', { sessionId, path, isDir })
 }
 
-export async function getTunnels(_id: string): Promise<Tunnel[]> {
+// ---- Bytes formatter ----
+export function formatBytes(n: number): string {
+  if (n === 0) return '0 B'
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`
+}
+
+function wireTunnelToFrontend(w: TunnelStatusWire): Tunnel {
+  const kind = (w.kind === 'L' || w.kind === 'R' || w.kind === 'D') ? w.kind as 'L' | 'R' | 'D' : 'L'
+  return {
+    id: w.id,
+    type: kind,
+    label: w.target ?? w.bind,
+    via: '',
+    local: w.bind,
+    remote: w.target ?? '(dynamic)',
+    status: w.status === 'up' ? 'up' : 'down',
+    bytes: formatBytes((w.bytesUp ?? 0) + (w.bytesDown ?? 0)),
+  }
+}
+
+export async function getTunnels(sessionId?: string): Promise<Tunnel[]> {
+  if (isTauri() && sessionId) {
+    const list = await tauriInvoke<TunnelStatusWire[]>('tunnel_list')
+    return list.map(wireTunnelToFrontend)
+  }
   return DATA.tunnels
+}
+
+export async function tunnelOpen(
+  sessionId: string,
+  spec: { kind: 'L' | 'R' | 'D'; bind: string; target?: string | null },
+): Promise<string> {
+  return tauriInvoke<string>('tunnel_open', { sessionId, spec })
+}
+
+export async function tunnelClose(tunnelId: string): Promise<void> {
+  return tauriInvoke('tunnel_close', { tunnelId })
 }
 
 export async function getMonitor(_id: string): Promise<Monitor> {

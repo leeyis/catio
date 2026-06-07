@@ -228,7 +228,13 @@
     "detailLastUsed": "最近使用",
     "lastUsedAgo": "{{time}} 前",
     "detailCredentials": "凭据",
-    "connect": "连接"
+    "connect": "连接",
+    "fwdLocal": "本地",
+    "fwdRemote": "远程",
+    "fwdDynamic": "动态",
+    "fwdBind": "绑定地址",
+    "fwdTarget": "目标",
+    "fwdAdd": "添加"
   },
   "modals": {
     "newConnection": "新建连接",
