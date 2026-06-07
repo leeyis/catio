@@ -34,6 +34,8 @@ chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 rust_decimal = "1.42.0"
 rusqlite = { version = "0.32", features = ["bundled", "load_extension", "column_decltype"] }
 duckdb = { version = "1.3", features = ["bundled"] }
+tiberius = { version = "0.12.3", default-features = false, features = ["tds73", "chrono", "rust_decimal", "rustls"] }
+tokio-util = { version = "0.7.18", features = ["compat"] }
 
 [profile.release]
 panic = "abort"

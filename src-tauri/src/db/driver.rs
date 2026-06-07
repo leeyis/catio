@@ -103,6 +103,8 @@ pub async fn connect(args: &ConnectArgs) -> Result<Arc<dyn Driver>, DbError> {
             Ok(Arc::new(crate::db::drivers::sqlite::SqliteDriver::connect(args).await?)),
         DatabaseType::Duckdb =>
             Ok(Arc::new(crate::db::drivers::duckdb::DuckDbDriver::connect(args).await?)),
+        DatabaseType::Sqlserver =>
+            Ok(Arc::new(crate::db::drivers::sqlserver::SqlServerDriver::connect(args).await?)),
         other => Err(DbError::Unsupported(format!("{:?} (later phase)", other))),
     }
 }
