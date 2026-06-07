@@ -1,9 +1,11 @@
 /* ported from ref-ui/_extract/blob12.txt — verbatim per plan T1-T7 */
-import React from 'react'
+import React, { useState, useRef, useEffect } from 'react'
 import { Trans, useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn, IconBtn, Toggle, Segmented } from '../atoms'
 import { useLang } from '../../state/LanguageContext'
+import { useAgentConfig } from '../../state/agentConfig'
+import { fetchModels } from '../../services'
 
 // ---- Prop types ----
 
@@ -224,11 +226,198 @@ function SecuritySettings({ authEnabled, users = [], currentUser, ownerUser, onE
   )
 }
 
+// ---- Agent config block ----
+
+function AgentConfigBlock() {
+  const { t } = useTranslation()
+  const { config, update } = useAgentConfig()
+  const [models, setModels] = useState<string[]>([])
+  const [loading, setLoading] = useState(false)
+  const [fetchError, setFetchError] = useState('')
+  const [modelOpen, setModelOpen] = useState(false)
+  const modelRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!modelOpen) return
+    function handleClickOutside(e: MouseEvent) {
+      if (modelRef.current && !modelRef.current.contains(e.target as Node)) {
+        setModelOpen(false)
+      }
+    }
+    window.addEventListener('mousedown', handleClickOutside)
+    return () => window.removeEventListener('mousedown', handleClickOutside)
+  }, [modelOpen])
+
+  async function handleFetch() {
+    setLoading(true)
+    setFetchError('')
+    try {
+      const list = await fetchModels(config)
+      setModels(list)
+      if (!config.model && list.length > 0) {
+        update({ model: list[0] })
+      }
+    } catch (err) {
+      setFetchError(t('settings.agentFetchError'))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const inputStyle: React.CSSProperties = {
+    height: 36,
+    padding: '0 12px',
+    borderRadius: 10,
+    border: '1px solid var(--border-hairline-alt)',
+    background: 'var(--surface-sunken)',
+    fontSize: 13,
+    color: 'var(--text-primary)',
+    outline: 'none',
+    width: '100%',
+    boxSizing: 'border-box',
+  }
+
+  const labelStyle: React.CSSProperties = {
+    fontSize: 11.5,
+    fontWeight: 600,
+    color: 'var(--text-tertiary)',
+    marginBottom: 5,
+    display: 'block',
+  }
+
+  const rowWrapStyle: React.CSSProperties = {
+    padding: '14px 16px',
+    border: '1px solid var(--border-hairline)',
+    borderRadius: 14,
+    background: 'var(--surface-card)',
+    marginBottom: 8,
+  }
+
+  return (
+    <div style={{ marginBottom: 20 }}>
+      {/* Provider */}
+      <div style={rowWrapStyle}>
+        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+          <div className="row gap12">
+            <div className="icon-badge" style={{ width: 34, height: 34, borderRadius: 10, color: 'var(--text-tertiary)' }}>
+              <Icon name="sparkles" size={16} />
+            </div>
+            <div className="col" style={{ lineHeight: 1.4 }}>
+              <span style={{ fontSize: 13.5, fontWeight: 600 }}>{t('settings.agentProvider')}</span>
+            </div>
+          </div>
+          <Segmented
+            value={config.provider}
+            onChange={v => update({ provider: v as 'ollama' | 'openai' })}
+            options={[
+              { value: 'ollama', label: t('settings.agentProviderOllama') },
+              { value: 'openai', label: t('settings.agentProviderOpenai') },
+            ]}
+          />
+        </div>
+      </div>
+
+      {/* Endpoint URL */}
+      <div style={rowWrapStyle}>
+        <label className="col" style={{ gap: 5 }}>
+          <span style={labelStyle}>{t('settings.agentEndpointUrl')}</span>
+          <input
+            style={inputStyle}
+            value={config.provider === 'ollama' ? config.ollamaBaseUrl : config.openaiBaseUrl}
+            onChange={e => {
+              if (config.provider === 'ollama') {
+                update({ ollamaBaseUrl: e.target.value })
+              } else {
+                update({ openaiBaseUrl: e.target.value })
+              }
+            }}
+            placeholder={config.provider === 'ollama' ? 'http://localhost:11434' : 'https://api.openai.com'}
+          />
+        </label>
+      </div>
+
+      {/* API Key — only for openai */}
+      {config.provider === 'openai' && (
+        <div style={rowWrapStyle}>
+          <label className="col" style={{ gap: 5 }}>
+            <span style={labelStyle}>{t('settings.agentApiKey')}</span>
+            <div className="row" style={{ height: 36, borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', paddingLeft: 10, paddingRight: 12, gap: 6, alignItems: 'center' }}>
+              <Icon name="lock" size={12} style={{ color: 'var(--text-faint)', flex: 'none' }} />
+              <input
+                type="password"
+                value={config.openaiKey}
+                onChange={e => update({ openaiKey: e.target.value })}
+                placeholder={t('settings.agentApiKeyPlaceholder')}
+                style={{ flex: 1, height: '100%', border: 'none', background: 'transparent', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }}
+              />
+            </div>
+          </label>
+        </div>
+      )}
+
+      {/* Model picker + fetch button */}
+      <div style={rowWrapStyle}>
+        <span style={labelStyle}>{t('settings.agentModelLabel')}</span>
+        <div className="row gap8" style={{ alignItems: 'flex-start' }}>
+          {/* Dropdown */}
+          <div ref={modelRef} style={{ position: 'relative', flex: 1 }}>
+            <button
+              onClick={() => setModelOpen(o => !o)}
+              style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8, height: 36, padding: '0 12px', borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', cursor: 'pointer', textAlign: 'left' }}
+            >
+              <span style={{ flex: 1, fontSize: 13, color: config.model ? 'var(--text-primary)' : 'var(--text-faint)' }}>
+                {config.model || t('settings.agentSelectModel')}
+              </span>
+              <Icon name="chevron-down" size={14} style={{ color: 'var(--text-faint)', transform: modelOpen ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform .14s' }} />
+            </button>
+            {modelOpen && (
+              <div style={{ position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0, zIndex: 80, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', borderRadius: 10, boxShadow: 'var(--shadow-dropdown)', maxHeight: 260, overflowY: 'auto' }}>
+                {models.length === 0 ? (
+                  <div style={{ padding: '10px 14px', fontSize: 12, color: 'var(--text-faint)' }}>{t('settings.agentNoModels')}</div>
+                ) : (
+                  models.map(m => {
+                    const active = config.model === m
+                    return (
+                      <button key={m}
+                        onClick={() => { update({ model: m }); setModelOpen(false) }}
+                        style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', border: 'none', background: active ? 'var(--accent-soft)' : 'transparent', cursor: 'pointer', textAlign: 'left' }}
+                      >
+                        <span style={{ flex: 1, fontSize: 13, fontWeight: active ? 600 : 400, color: active ? 'var(--accent-primary)' : 'var(--text-primary)' }}>{m}</span>
+                        {active && <Icon name="check" size={13} style={{ color: 'var(--accent-primary)' }} />}
+                      </button>
+                    )
+                  })
+                )}
+              </div>
+            )}
+          </div>
+          {/* Fetch button */}
+          <Btn
+            variant="secondary"
+            size="sm"
+            icon={loading ? 'loader' : 'refresh-cw'}
+            disabled={loading}
+            onClick={() => { void handleFetch() }}
+          >
+            {loading ? t('settings.agentFetching') : t('settings.agentFetchModels')}
+          </Btn>
+        </div>
+        {/* Inline error */}
+        {fetchError && (
+          <div style={{ marginTop: 8, fontSize: 11.5, color: 'var(--danger-fg)' }}>
+            {fetchError}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function AISettings() {
   const { t } = useTranslation()
   return (
     <Block title={t('settings.aiSettingsTitle')} hint={t('settings.aiSettingsHint')}>
-      <SettingRow icon="box" title={t('settings.aiModel')} desc={t('settings.aiModelDesc')} control={<span className="chip">claude-sonnet</span>} />
+      <AgentConfigBlock />
       <SettingRow icon="terminal" title={t('settings.aiTermBuffer')} desc={t('settings.aiTermBufferDesc')} control={<Toggle on={true} />} />
       <SettingRow icon="database" title={t('settings.aiDbSchema')} desc={t('settings.aiDbSchemaDesc')} control={<Toggle on={true} />} />
       <SettingRow icon="radar" title={t('settings.aiMultiHost')} desc={t('settings.aiMultiHostDesc')} control={<Toggle on={true} />} />

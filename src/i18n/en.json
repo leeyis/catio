@@ -378,7 +378,19 @@
     "aboutDesc": "Integrates <b>Reach</b>'s secure SSH workbench with <b>DBX</b>'s lightweight database client into a cross-platform desktop app — servers, tunnels, databases, and AI, all in one place.",
     "themeDawnSub": "Dawn · Clear & Bright",
     "themeAmberSub": "Amber · Warm Champagne",
-    "themeGroveSub": "Grove · Silent Forest"
+    "themeGroveSub": "Grove · Silent Forest",
+    "agentProvider": "Model provider",
+    "agentProviderOllama": "Ollama",
+    "agentProviderOpenai": "OpenAI compatible",
+    "agentEndpointUrl": "Endpoint URL",
+    "agentApiKey": "API key",
+    "agentApiKeyPlaceholder": "sk-...",
+    "agentModelLabel": "Model",
+    "agentFetchModels": "Fetch models",
+    "agentFetching": "Fetching...",
+    "agentFetchError": "Fetch failed — check endpoint, key, and service availability",
+    "agentNoModels": "No models",
+    "agentSelectModel": "Select model..."
   },
   "app": {
     "noSessions": "No open sessions",

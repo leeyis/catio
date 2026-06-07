@@ -378,8 +378,20 @@
     "aboutDesc": "把 <b>Reach</b> 的安全 SSH 工作台与 <b>DBX</b> 的轻量数据库客户端整合到一个跨平台桌面应用——服务器、隧道、数据库与 AI，一处搞定。",
     "themeDawnSub": "Dawn · 明亮通透",
     "themeAmberSub": "Amber · 暖笺香槟",
-    "themeGroveSub": "Grove · 荧林静默"
-  },
+    "themeGroveSub": "Grove · 荧林静默",
+    "agentProvider": "模型提供商",
+    "agentProviderOllama": "Ollama",
+    "agentProviderOpenai": "OpenAI 兼容",
+    "agentEndpointUrl": "服务端点",
+    "agentApiKey": "API 密钥",
+    "agentApiKeyPlaceholder": "sk-...",
+    "agentModelLabel": "模型",
+    "agentFetchModels": "拉取模型",
+    "agentFetching": "拉取中...",
+    "agentFetchError": "拉取失败，请检查端点 / 密钥 / 服务是否可用",
+    "agentNoModels": "暂无模型",
+    "agentSelectModel": "选择模型..."
+  },
   "app": {
     "noSessions": "没有打开的会话",
     "noSessionsHint": "从左侧 Vault 选择一个主机或数据库开始",

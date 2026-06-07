@@ -35,3 +35,5 @@ export async function getHistory(_connId: string): Promise<HistoryItem[]> { retu
 export async function getSnippets(): Promise<Snippet[]> { return DATA.snippets }
 
 export { DATA }
+
+export { fetchModels } from './models'
