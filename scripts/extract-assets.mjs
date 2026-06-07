@@ -9,7 +9,8 @@ fs.mkdirSync(fontsDir, { recursive: true })
 const re = /"([0-9a-f-]{36})":\{"mime":"font\/woff2","compressed":(true|false),"data":"([A-Za-z0-9+/=]+)"/g
 let m, count = 0
 while ((m = re.exec(h))) {
-  const [, uuid, , data] = m
+  const [, uuid, compressed, data] = m
+  if (compressed === 'true') throw new Error(`font ${uuid} is gzip-compressed — decompress before writing`)
   fs.writeFileSync(path.join(fontsDir, uuid + '.woff2'), Buffer.from(data, 'base64'))
   count++
 }
@@ -17,6 +18,7 @@ if (count !== 13) throw new Error(`expected 13 fonts, got ${count}`)
 
 // 2) CSS: from first @font-face to next unescaped quote
 const at = h.indexOf('@font-face')
+if (at === -1) throw new Error('CSS @font-face not found in HTML — source embedding format may have changed')
 let i = at, buf = []
 const BS = '\\'
 while (i < h.length) {
