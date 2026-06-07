@@ -1,5 +1,35 @@
 {
   "common": {
     "newConnection": "新建连接"
+  },
+  "shell": {
+    "toggleTheme": "切换主题",
+    "notifications": "通知",
+    "settings": "设置",
+    "minimize": "最小化",
+    "maximize": "最大化",
+    "close": "关闭",
+    "expandSidebar": "展开侧栏",
+    "collapseSidebar": "收起",
+    "details": "详情",
+    "lockWorkspace": "锁定工作区",
+    "filterPlaceholder": "过滤…",
+    "vault": "Vault",
+    "all": "全部",
+    "hosts": "主机",
+    "databases": "数据库",
+    "noMatchingConns": "无匹配连接",
+    "privateWorkspace": "这是你的私有工作区",
+    "vaultEmptyHint": "{{user}} 的主机与数据库与其他用户隔离",
+    "newConnToStart": "新建连接以开始",
+    "localLoginIsolated": "本地登录 · 已隔离",
+    "activeStatus": "3 active · 1 tunnel",
+    "railAi": "Catio Agent · 跨终端与数据库",
+    "railSftp": "SFTP 文件",
+    "railMonitor": "系统监控",
+    "railTunnels": "端口转发 / 跳板",
+    "railSnippets": "片段库",
+    "railHistory": "历史",
+    "railMcp": "MCP / CLI"
   }
 }

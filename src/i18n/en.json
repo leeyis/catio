@@ -1,5 +1,35 @@
 {
   "common": {
     "newConnection": "New connection"
+  },
+  "shell": {
+    "toggleTheme": "Toggle theme",
+    "notifications": "Notifications",
+    "settings": "Settings",
+    "minimize": "Minimize",
+    "maximize": "Maximize",
+    "close": "Close",
+    "expandSidebar": "Expand sidebar",
+    "collapseSidebar": "Collapse",
+    "details": "Details",
+    "lockWorkspace": "Lock workspace",
+    "filterPlaceholder": "Filter…",
+    "vault": "Vault",
+    "all": "All",
+    "hosts": "Hosts",
+    "databases": "Databases",
+    "noMatchingConns": "No matching connections",
+    "privateWorkspace": "This is your private workspace",
+    "vaultEmptyHint": "{{user}}'s hosts and databases are isolated from other users",
+    "newConnToStart": "New connection to get started",
+    "localLoginIsolated": "Local login · Isolated",
+    "activeStatus": "3 active · 1 tunnel",
+    "railAi": "Catio Agent · Cross-terminal & database",
+    "railSftp": "SFTP Files",
+    "railMonitor": "System Monitor",
+    "railTunnels": "Port Forwarding / Tunnels",
+    "railSnippets": "Snippets",
+    "railHistory": "History",
+    "railMcp": "MCP / CLI"
   }
 }
