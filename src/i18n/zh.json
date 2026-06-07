@@ -149,7 +149,7 @@
     "mcpOpenWindow": "允许 MCP 打开 Catio 窗口",
     "mcpOpenWindowDesc": "代理可直接在 UI 中打开表",
     "aboutTitle": "关于 Catio",
-    "aboutDesc": "把 Reach 的安全 SSH 工作台与 DBX 的轻量数据库客户端整合到一个跨平台桌面应用——服务器、隧道、数据库与 AI，一处搞定。",
+    "aboutDesc": "把 <b>Reach</b> 的安全 SSH 工作台与 <b>DBX</b> 的轻量数据库客户端整合到一个跨平台桌面应用——服务器、隧道、数据库与 AI，一处搞定。",
     "themeDawnSub": "Dawn · 明亮通透",
     "themeAmberSub": "Amber · 暖笺香槟",
     "themeGroveSub": "Grove · 荧林静默"

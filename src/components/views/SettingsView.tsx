@@ -1,6 +1,6 @@
 /* ported from ref-ui/_extract/blob12.txt — verbatim per plan T1-T7 */
 import React from 'react'
-import { useTranslation } from 'react-i18next'
+import { Trans, useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn, IconBtn, Toggle, Segmented } from '../atoms'
 import { useLang } from '../../state/LanguageContext'
@@ -271,7 +271,7 @@ function AboutSettings() {
         <div className="logo-mark" style={{ width: 56, height: 56, borderRadius: 18 }}><span className="mono" style={{ fontSize: 26, fontWeight: 700 }}>&gt;_</span></div>
         <div className="col" style={{ gap: 4 }}>
           <span style={{ fontSize: 18, fontWeight: 700, letterSpacing: '-0.3px' }}>Catio</span>
-          <span style={{ fontSize: 12.5, color: 'var(--text-secondary)', lineHeight: 1.5, maxWidth: 420 }}>{t('settings.aboutDesc')}</span>
+          <span style={{ fontSize: 12.5, color: 'var(--text-secondary)', lineHeight: 1.5, maxWidth: 420 }}><Trans i18nKey="settings.aboutDesc" components={{ b: <b /> }} /></span>
           <div className="row gap6" style={{ marginTop: 6 }}><span className="chip mono">Tauri</span><span className="chip mono">Rust</span><span className="chip mono">40+ databases</span><span className="chip mono">15 MB</span></div>
         </div>
       </div>
