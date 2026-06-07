@@ -7,7 +7,8 @@ import { DATA } from '../../services/mockData'
 // ---- mock listActiveDbConnections so we can control capabilities per-test ----
 const h = vi.hoisted(() => ({
   list: vi.fn(() => [] as import('../../state/dbConnections').ActiveDbConnection[]),
-  runQuery: vi.fn(),
+  tablePreview: vi.fn(),
+  getSchema: vi.fn(),
 }))
 
 vi.mock('../../state/dbConnections', async (importOriginal) => {
@@ -18,7 +19,7 @@ vi.mock('../../state/dbConnections', async (importOriginal) => {
 // ---- mock the db service so the live-connection data path can be driven without Tauri ----
 vi.mock('../../services/db', async (importOriginal) => {
   const mod = await importOriginal<typeof import('../../services/db')>()
-  return { ...mod, runQuery: h.runQuery }
+  return { ...mod, tablePreview: h.tablePreview, getSchema: h.getSchema }
 })
 
 import { DbWorkbench } from './DbWorkbench'
@@ -28,13 +29,25 @@ const wrap = (ui: React.ReactNode) =>
 
 const CONN = DATA.byId['d-orders'] // has id: 'd-orders', kind: 'db'
 
+/** A minimal real schema (public.orders) the backend `getSchema` would return. */
+const LIVE_SCHEMA = {
+  db: 'conn',
+  schemas: [{
+    name: 'public', open: false,
+    tables: [{ name: 'orders', rows: '', cols: 0 }],
+    views: [], functions: [],
+  }],
+}
+
 describe('DbWorkbench capability-gating', () => {
   beforeEach(() => {
     h.list.mockReset()
-    h.runQuery.mockReset()
-    // Default: resolve to an empty result so capability-gating tests (which now have an
-    // active connection → live fetch) don't crash on an undefined promise.
-    h.runQuery.mockResolvedValue({ columns: [], rows: [] })
+    h.tablePreview.mockReset()
+    h.getSchema.mockReset()
+    // Defaults so capability-gating tests (which now have an active connection →
+    // live fetch + schema load) don't crash on an undefined promise.
+    h.tablePreview.mockResolvedValue({ columns: [], rows: [] })
+    h.getSchema.mockResolvedValue(LIVE_SCHEMA)
   })
 
   it('all tabs enabled when no active connection (mock/demo path)', () => {
@@ -133,13 +146,13 @@ describe('DbWorkbench capability-gating', () => {
 describe('DbWorkbench live-connection data path', () => {
   beforeEach(() => {
     h.list.mockReset()
-    h.runQuery.mockReset()
-    // Default: resolve to an empty result so capability-gating tests (which now have an
-    // active connection → live fetch) don't crash on an undefined promise.
-    h.runQuery.mockResolvedValue({ columns: [], rows: [] })
+    h.tablePreview.mockReset()
+    h.getSchema.mockReset()
+    h.tablePreview.mockResolvedValue({ columns: [], rows: [] })
+    h.getSchema.mockResolvedValue(LIVE_SCHEMA)
   })
 
-  it('fetches real rows via runQuery and renders them in the DataGrid when connected', async () => {
+  it('fetches real rows via tablePreview (real schema/table, not hardcoded) and renders them when connected', async () => {
     h.list.mockReturnValue([
       {
         connId: 'conn-live',
@@ -153,7 +166,7 @@ describe('DbWorkbench live-connection data path', () => {
       },
     ])
     // The backend returns its own columns/rows (distinct from the mock orders data).
-    h.runQuery.mockResolvedValue({
+    h.tablePreview.mockResolvedValue({
       columns: [
         { name: 'id', type: 'int', pk: true },
         { name: 'label', type: 'text' },
@@ -163,9 +176,11 @@ describe('DbWorkbench live-connection data path', () => {
 
     wrap(<DbWorkbench conn={CONN} />)
 
-    // runQuery is called for the selected table with a schema-qualified SELECT.
-    await waitFor(() => expect(h.runQuery).toHaveBeenCalled())
-    expect(h.runQuery).toHaveBeenCalledWith('conn-live', 'SELECT * FROM public.orders')
+    // tablePreview is called with the REAL schema/table from getSchema — not a
+    // hardcoded `SELECT * FROM public.<table>`. (schema='public' here because the
+    // postgres connection has schema namespaces; engines without them pass undefined.)
+    await waitFor(() => expect(h.tablePreview).toHaveBeenCalled())
+    expect(h.tablePreview).toHaveBeenCalledWith('conn-live', 'public', 'orders', 100, 0)
 
     // Fetched rows render (proves connId/sql/columns/rows threaded into DataGrid).
     expect(await screen.findByText('live-alpha')).toBeInTheDocument()
@@ -174,9 +189,9 @@ describe('DbWorkbench live-connection data path', () => {
     expect(screen.getByText('label')).toBeInTheDocument()
   })
 
-  it('uses the mock orders data (no runQuery) when there is no active connection', () => {
+  it('uses the mock orders data (no tablePreview) when there is no active connection', () => {
     h.list.mockReturnValue([])
     wrap(<DbWorkbench conn={CONN} />)
-    expect(h.runQuery).not.toHaveBeenCalled()
+    expect(h.tablePreview).not.toHaveBeenCalled()
   })
 })

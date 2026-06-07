@@ -28,6 +28,7 @@ pub fn run() {
             db::commands::db_preview_dml,
             db::commands::db_apply_edits,
             db::commands::db_query_page,
+            db::commands::db_table_preview,
             db::commands::db_history,
             db::commands::db_snippets,
             db::commands::db_save_snippet

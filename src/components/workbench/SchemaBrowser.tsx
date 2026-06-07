@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { ConnGlyph, StatusDot } from '../atoms'
 import { useData } from '../../state/DataContext'
-import type { SchemaTable } from '../../services/types'
+import type { SchemaNamespace, SchemaTable } from '../../services/types'
 
 export interface SchemaBrowserProps {
   onPick: (name: string) => void
@@ -15,12 +15,19 @@ export interface SchemaBrowserProps {
   sqlActive: boolean
   disabledSql?: boolean
   disabledEr?: boolean
+  /**
+   * When connected to a live backend, the real schema namespace to render the
+   * tree from. Omitted on the mock/demo path → falls back to the seeded mock
+   * schema so the demo stays pixel-identical.
+   */
+  namespace?: SchemaNamespace
 }
 
-export function SchemaBrowser({ onPick, active, onNewQuery, onOpenER, erActive, sqlActive, disabledSql, disabledEr }: SchemaBrowserProps) {
+export function SchemaBrowser({ onPick, active, onNewQuery, onOpenER, erActive, sqlActive, disabledSql, disabledEr, namespace }: SchemaBrowserProps) {
   const { t } = useTranslation()
   const D = useData()
-  const s = D.schema.schemas[0]
+  // Live path: render from the supplied namespace; mock path: seeded schema (pixel-identical).
+  const s = namespace ?? D.schema.schemas[0]
   const [open, setOpen] = useState({ public: true, tables: true, views: false, fns: false })
   const [expanded, setExpanded] = useState<Record<string, boolean>>({ orders: false })
   const [q, setQ] = useState('')
@@ -54,7 +61,7 @@ export function SchemaBrowser({ onPick, active, onNewQuery, onOpenER, erActive, 
       </div>
       {/* tree */}
       <div className="grow" style={{ overflowY: 'auto', padding: '0 6px 10px' }}>
-        <TreeNode icon="database" iconColor="var(--signal-blue)" label="public" count={s.tables.length + ' tables'} open={open.public} onToggle={() => setOpen(o => ({ ...o, public: !o.public }))} depth={0} />
+        <TreeNode icon="database" iconColor="var(--signal-blue)" label={s.name} count={s.tables.length + ' tables'} open={open.public} onToggle={() => setOpen(o => ({ ...o, public: !o.public }))} depth={0} />
         {open.public && <>
           <TreeNode icon="folder" label={t('workbench.tables')} count={tables.length} open={open.tables} onToggle={() => setOpen(o => ({ ...o, tables: !o.tables }))} depth={1} />
           {open.tables && tables.map(tbl => {

@@ -111,6 +111,20 @@ export async function queryPage(connId: string, sql: string, limit: number, offs
   return tauriInvoke<QueryResult>('db_query_page', { connId, sql, limit, offset })
 }
 
+/**
+ * Dialect-correct paginated table preview. The backend builds a
+ * `SELECT * FROM <qualified table>` with engine-aware identifier quoting and
+ * pagination (so MySQL/SQLite/SQLServer/ClickHouse etc. work, not just PG).
+ * `schema` is dropped server-side when the engine has no schema namespace.
+ * Falls back to mock outside Tauri.
+ */
+export async function tablePreview(
+  connId: string, schema: string | undefined, table: string, limit: number, offset: number,
+): Promise<QueryResult> {
+  if (!isTauri()) return mockQueryResult()
+  return tauriInvoke<QueryResult>('db_table_preview', { connId, schema, table, limit, offset })
+}
+
 // ---- History & saved snippets ----
 
 /** Execution history for a connection (most-recent first). Falls back to mock outside Tauri. */

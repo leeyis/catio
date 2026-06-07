@@ -3,7 +3,7 @@ import { useState, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn, IconBtn, Segmented } from '../atoms'
-import { previewDml, applyEdits, queryPage, type EditRequest } from '../../services/db'
+import { previewDml, applyEdits, queryPage, tablePreview, type EditRequest } from '../../services/db'
 import type { ResultColumn } from '../../services/types'
 
 export interface DataGridProps {
@@ -19,8 +19,14 @@ export interface DataGridProps {
   table?: string
   /** Optional schema qualifier for generated DML. */
   schema?: string
-  /** Base SQL re-run for server-side pagination (when connId is set). */
+  /** Base SQL re-run for server-side pagination (when connId is set, legacy raw-SQL path). */
   sql?: string
+  /**
+   * When set, pagination uses the dialect-correct `tablePreview` (schema/table)
+   * backend command instead of re-running a raw `sql`. Preferred for the live
+   * table-data path so identifier quoting/qualification lives in one place.
+   */
+  livePreview?: boolean
   /** Called after a successful apply so the parent can re-fetch. */
   onRefresh?: () => void
   /** When true, `truncated` badge is shown (server reported a capped result). */
@@ -43,7 +49,7 @@ function colIcon(col: ResultColumn): string {
   return 'type'
 }
 
-export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortable', writable = true, connId, table = 'orders', schema, sql, onRefresh, truncated, loadError }: DataGridProps) {
+export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortable', writable = true, connId, table = 'orders', schema, sql, livePreview, onRefresh, truncated, loadError }: DataGridProps) {
   const { t } = useTranslation()
   const [sel, setSel] = useState({ r: 2, c: 3 })
   const [sortCol, setSortCol] = useState<string | null>(null)
@@ -96,10 +102,22 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   const pages = serverRows ? page + (serverTruncated ? 1 : 0) : Math.max(1, Math.ceil(baseRows.length / PAGE))
   const showTruncated = serverRows ? serverTruncated : !!truncated
 
+  // Fetch one server page. Prefer the dialect-correct tablePreview (schema/table)
+  // when the parent opts in via `livePreview`; else fall back to the raw-SQL queryPage.
+  const fetchPage = useMemo(() => {
+    if (connId && livePreview) {
+      return (limit: number, offset: number) => tablePreview(connId, schema, table, limit, offset)
+    }
+    if (connId && sql) {
+      return (limit: number, offset: number) => queryPage(connId, sql, limit, offset)
+    }
+    return null
+  }, [connId, livePreview, sql, schema, table])
+
   async function gotoPage(next: number) {
     if (next < 1) return
-    if (connId && sql) {
-      const res = await queryPage(connId, sql, PAGE, (next - 1) * PAGE)
+    if (fetchPage) {
+      const res = await fetchPage(PAGE, (next - 1) * PAGE)
       setServerRows(res.rows)
       setServerTruncated(!!res.truncated)
       setPage(next)
@@ -112,8 +130,8 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
     const n = Number(v)
     setPageSize(n)
     setPage(1)
-    if (connId && sql) {
-      queryPage(connId, sql, n, 0).then(res => { setServerRows(res.rows); setServerTruncated(!!res.truncated) })
+    if (fetchPage) {
+      fetchPage(n, 0).then(res => { setServerRows(res.rows); setServerTruncated(!!res.truncated) })
     }
   }
 
@@ -174,8 +192,8 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
       setApplyMsg(t('dbviews.rowsAffected', { count: affected }))
       setEdits({})
       setPreview(null)
-      if (connId && sql) {
-        const res = await queryPage(connId, sql, PAGE, (page - 1) * PAGE)
+      if (fetchPage) {
+        const res = await fetchPage(PAGE, (page - 1) * PAGE)
         setServerRows(res.rows)
         setServerTruncated(!!res.truncated)
       }
@@ -189,6 +207,11 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   }
 
   const editCount = Object.keys(edits).length
+  // Toolbar table chip: live path uses the real schema/table (no bogus `public.`);
+  // mock/demo path keeps the original `public.orders` label for pixel parity.
+  const toolbarLabel = connId ? (schema ? `${schema}.${table}` : table) : 'public.orders'
+  // Row count shown in the toolbar: live path reflects the loaded page rows; mock keeps rows.length.
+  const rowCount = connId ? baseRows.length : rows.length
   const gridTemplate = '46px ' + columns.map(c => c.name === 'channel' || c.name === 'currency' ? '92px' : c.name === 'created_at' || c.name === 'updated_at' ? '150px' : c.name === 'customer_id' ? '150px' : 'minmax(96px, 1fr)').join(' ')
 
   return (
@@ -197,9 +220,9 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
       <div className="row" style={{ justifyContent: 'space-between', padding: '8px 12px', borderBottom: '1px solid var(--border-hairline)', gap: 10 }}>
         <div className="row gap8">
           <span className="chip" style={{ background: 'var(--accent-soft)', color: 'var(--accent-primary)', fontWeight: 600 }}>
-            <Icon name="table-2" size={12} /> public.orders
+            <Icon name="table-2" size={12} /> {toolbarLabel}
           </span>
-          <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}><b className="mono" style={{ color: 'var(--text-secondary)' }}>{rows.length}</b> {t('dbviews.rows')} · <span className="mono">42 ms</span></span>
+          <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}><b className="mono" style={{ color: 'var(--text-secondary)' }}>{rowCount}</b> {t('dbviews.rows')}{connId ? '' : <> · <span className="mono">42 ms</span></>}</span>
           {editCount > 0 && (
             <span className="chip" style={{ background: 'color-mix(in srgb, var(--signal-amber) 14%, transparent)', color: 'var(--signal-amber)', fontWeight: 600 }}>
               <Icon name="pencil" size={11} /> {editCount} {t('dbviews.unsavedEdits')}

@@ -7,8 +7,11 @@ import { DataGrid, StructureView, SqlConsole, ERDiagram } from '../dbviews'
 import { SchemaBrowser } from './SchemaBrowser'
 import { useData } from '../../state/DataContext'
 import { listActiveDbConnections } from '../../state/dbConnections'
-import { runQuery, type DbCapabilities } from '../../services/db'
-import type { Connection, ResultColumn } from '../../services/types'
+import { getSchema, tablePreview, type DbCapabilities } from '../../services/db'
+import type { Connection, ResultColumn, Schema, SchemaNamespace } from '../../services/types'
+
+/** Initial page size for the live table preview (matches DataGrid's default). */
+const PREVIEW_PAGE = 100
 
 export interface DbWorkbenchProps {
   conn: Connection
@@ -49,26 +52,56 @@ export function DbWorkbench({ conn, density }: DbWorkbenchProps) {
   const [tableTab, setTableTab] = useState('data') // data | structure
   const effectiveTableTab = (!caps.structureEdit && tableTab === 'structure') ? 'data' : tableTab
   const [queryN, setQueryN] = useState(1)
-  const tbl = D.schema.schemas[0].tables.find(t => t.name === (obj.type === 'table' ? obj.table : ''))
+
+  // ---- Real schema tree (only when connected) ----
+  // `liveSchema` holds the backend-introspected schema; null means "use the mock schema".
+  const [liveSchema, setLiveSchema] = useState<Schema | null>(null)
+  useEffect(() => {
+    if (!connId) { setLiveSchema(null); return }
+    let cancelled = false
+    getSchema(connId)
+      .then(sc => { if (!cancelled) setLiveSchema(sc) })
+      .catch(() => { if (!cancelled) setLiveSchema(null) })
+    return () => { cancelled = true }
+  }, [connId])
+
+  const selectedTable = obj.type === 'table' ? obj.table : null
+
+  // Which schema namespace are we browsing? Live: the namespace that contains the
+  // selected table, else the first namespace. Mock: the seeded public namespace.
+  const namespace: SchemaNamespace = useMemo(() => {
+    const ns = liveSchema?.schemas
+    if (ns && ns.length) {
+      return ns.find(n => n.tables.some(tb => tb.name === selectedTable))
+        ?? ns.find(n => n.views.some(v => v.name === selectedTable))
+        ?? ns[0]
+    }
+    return D.schema.schemas[0]
+  }, [liveSchema, selectedTable, D.schema])
+
+  // The schema qualifier passed to the dialect-correct preview. Only meaningful when
+  // the engine has schema namespaces; the backend drops it otherwise.
+  const selectedSchema = caps.schemas ? namespace.name : undefined
+
+  const tbl = namespace.tables.find(t => t.name === (obj.type === 'table' ? obj.table : ''))
 
   // ---- Live table-data fetch (only when there is an active backend connection) ----
   // `live` holds the real QueryResult for the selected table; null means "use the mock path".
-  const selectedTable = obj.type === 'table' ? obj.table : null
-  // SQL re-run by the grid for pagination/refresh. Schema-qualified to match the browser.
-  const liveSql = selectedTable ? `SELECT * FROM public.${selectedTable}` : null
   const [live, setLive] = useState<{ columns: ResultColumn[]; rows: unknown[][] } | null>(null)
   const [liveErr, setLiveErr] = useState<string | null>(null)
 
   useEffect(() => {
     // Only fetch when connected to a real backend AND viewing a table.
-    if (!connId || !selectedTable || !liveSql) { setLive(null); setLiveErr(null); return }
+    if (!connId || !selectedTable) { setLive(null); setLiveErr(null); return }
     let cancelled = false
     setLiveErr(null)
-    runQuery(connId, liveSql)
+    // Dialect-correct, identifier-quoted, paginated preview (works for all engines,
+    // not just Postgres). Schema qualification lives in the backend command.
+    tablePreview(connId, selectedSchema, selectedTable, PREVIEW_PAGE, 0)
       .then(res => { if (!cancelled) setLive({ columns: res.columns, rows: res.rows }) })
       .catch(e => { if (!cancelled) setLiveErr(e instanceof Error ? e.message : String(e)) })
     return () => { cancelled = true }
-  }, [connId, selectedTable, liveSql])
+  }, [connId, selectedTable, selectedSchema])
 
   function pickTable(name: string) { setObj({ type: 'table', table: name }) }
   function newQuery() {
@@ -84,7 +117,8 @@ export function DbWorkbench({ conn, density }: DbWorkbenchProps) {
     <div style={{ display: 'flex', alignItems: 'stretch', height: '100%', minHeight: 0, overflow: 'hidden' }}>
       <SchemaBrowser onPick={pickTable} active={obj.type === 'table' ? obj.table : null}
         onNewQuery={newQuery} onOpenER={openER} erActive={obj.type === 'er'} sqlActive={obj.type === 'sql'}
-        disabledSql={!caps.sqlConsole} disabledEr={!caps.er} />
+        disabledSql={!caps.sqlConsole} disabledEr={!caps.er}
+        namespace={connId ? namespace : undefined} />
       <div className="col grow" style={{ minWidth: 0, minHeight: 0, overflow: 'hidden' }}>
         {obj.type === 'table' && (
           <>
@@ -92,7 +126,7 @@ export function DbWorkbench({ conn, density }: DbWorkbenchProps) {
               <div className="row gap7" style={{ minWidth: 0 }}>
                 <div className="icon-badge" style={{ width: 28, height: 28, borderRadius: 8, background: 'var(--accent-soft)', color: 'var(--accent-primary)' }}><Icon name="table-2" size={15} /></div>
                 <div className="col" style={{ lineHeight: 1.25, minWidth: 0 }}>
-                  <span className="mono ell" style={{ fontSize: 13.5, fontWeight: 700 }}>public.{obj.table}</span>
+                  <span className="mono ell" style={{ fontSize: 13.5, fontWeight: 700 }}>{connId ? (selectedSchema ? `${selectedSchema}.${obj.table}` : obj.table) : `public.${obj.table}`}</span>
                   <span className="mono" style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{tbl ? `${tbl.rows} ${t('workbench.rowsLabel')} · ${tbl.cols} ${t('workbench.colsLabel')}` : ''}</span>
                 </div>
               </div>
@@ -107,8 +141,8 @@ export function DbWorkbench({ conn, density }: DbWorkbenchProps) {
                     columns={(live?.columns ?? [])}
                     rows={(live?.rows ?? [])}
                     statusTones={D.statusTones} density={density} key={obj.table}
-                    writable={caps.writable} connId={connId} table={obj.table} schema="public"
-                    sql={liveSql ?? undefined} loadError={liveErr ?? undefined} />
+                    writable={caps.writable} connId={connId} table={obj.table} schema={selectedSchema}
+                    livePreview loadError={liveErr ?? undefined} />
                 : <DataGrid
                     columns={D.ordersColumns.map((c): ResultColumn => ({ name: c.name, type: c.type, pk: c.pk, fk: c.fk, icon: c.icon }))}
                     rows={D.ordersRows.map(r => D.ordersColumns.map(c => (r as unknown as Record<string, unknown>)[c.name]))}

@@ -199,3 +199,66 @@ pub async fn db_query_page(conn_id: String, sql: String, limit: u32, offset: u32
     let drv = mgr.get(&conn_id).await.ok_or(DbError::NotFound(conn_id))?;
     drv.paginated_query(&sql, limit, offset).await
 }
+
+/// Build a dialect-correct, identifier-quoted qualified table name.
+///
+/// Mirrors dml.rs's `qualified`, but only qualifies with a schema when the
+/// engine actually has schema namespaces (`has_schemas`) AND a non-empty
+/// schema was supplied. Engines without schemas (MySQL/SQLite/ClickHouse/...)
+/// always get the bare quoted table name.
+fn qualified_name(
+    db: crate::db::DatabaseType, has_schemas: bool, schema: Option<&str>, table: &str,
+) -> String {
+    use crate::db::dialect::quote_ident;
+    match schema {
+        Some(s) if has_schemas && !s.is_empty() =>
+            format!("{}.{}", quote_ident(db, s), quote_ident(db, table)),
+        _ => quote_ident(db, table),
+    }
+}
+
+/// Dialect-correct, paginated `SELECT * FROM <qualified table>`.
+///
+/// Qualification respects the engine's schema capability so non-Postgres
+/// engines (MySQL/SQLite/SQLServer/ClickHouse/...) get correct quoting and
+/// no bogus `public.` prefix. Pagination is dialect-aware via
+/// `paginated_query` (SQLServer OFFSET/FETCH vs LIMIT/OFFSET).
+#[tauri::command]
+pub async fn db_table_preview(conn_id: String, schema: Option<String>, table: String,
+    limit: u32, offset: u32, mgr: tauri::State<'_, ConnManager>) -> Result<QueryResult, DbError> {
+    let drv = mgr.get(&conn_id).await.ok_or(DbError::NotFound(conn_id))?;
+    let has_schemas = drv.capabilities().schemas;
+    let qualified = qualified_name(drv.db_type(), has_schemas, schema.as_deref(), &table);
+    drv.paginated_query(&format!("SELECT * FROM {}", qualified), limit, offset).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::qualified_name;
+    use crate::db::DatabaseType;
+
+    #[test]
+    fn pg_with_schema_is_quoted_and_qualified() {
+        let q = qualified_name(DatabaseType::Postgres, true, Some("public"), "orders");
+        assert_eq!(q, r#""public"."orders""#);
+    }
+
+    #[test]
+    fn mysql_no_schema_is_bare_backtick() {
+        // MySQL has no schema namespace: even if a schema is passed, drop it.
+        let q = qualified_name(DatabaseType::Mysql, false, Some("ignored"), "orders");
+        assert_eq!(q, "`orders`");
+    }
+
+    #[test]
+    fn sqlserver_with_schema_uses_brackets() {
+        let q = qualified_name(DatabaseType::Sqlserver, true, Some("dbo"), "orders");
+        assert_eq!(q, "[dbo].[orders]");
+    }
+
+    #[test]
+    fn pg_empty_schema_falls_back_to_bare() {
+        let q = qualified_name(DatabaseType::Postgres, true, Some(""), "orders");
+        assert_eq!(q, r#""orders""#);
+    }
+}
