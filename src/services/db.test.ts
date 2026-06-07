@@ -22,4 +22,25 @@ describe('services/db', () => {
     expect(r.columns.length).toBeGreaterThan(0)
     expect(Array.isArray(r.rows)).toBe(true)
   })
+
+  it('previewDml forwards to db_preview_dml under Tauri and returns the SQL', async () => {
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+    invokeMock.mockResolvedValue('UPDATE public.orders SET status = $1 WHERE id = $2')
+    const { previewDml } = await import('./db')
+    const req = {
+      table: 'orders', schema: 'public', kind: 'update' as const,
+      pk: [['id', 11] as [string, unknown]],
+      cells: [['status', 'shipped'] as [string, unknown]],
+    }
+    const sql = await previewDml('conn-1', req)
+    expect(invokeMock).toHaveBeenCalledWith('db_preview_dml', { connId: 'conn-1', req })
+    expect(sql).toBe('UPDATE public.orders SET status = $1 WHERE id = $2')
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
+
+  it('queryPage falls back to mock outside Tauri', async () => {
+    const { queryPage } = await import('./db')
+    const r = await queryPage('any', 'SELECT 1', 50, 0)
+    expect(r.columns.length).toBeGreaterThan(0)
+  })
 })

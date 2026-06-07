@@ -104,7 +104,17 @@
     "sort": "排序",
     "refresh": "刷新",
     "export": "导出",
-    "cell": "cell"
+    "cell": "cell",
+    "previewTitle": "确认修改",
+    "previewSubtitle": "将在数据库执行 {{count}} 条语句。",
+    "previewReadOnly": "该引擎为只读 —— 编辑已禁用。",
+    "previewNoPk": "结果集无主键 —— 无法安全应用修改。",
+    "applyChanges": "应用",
+    "cancel": "取消",
+    "applying": "应用中…",
+    "rowsAffected": "影响 {{count}} 行",
+    "pageSize": "行数",
+    "truncated": "已截断"
   },
   "workbench": {
     "newTab": "新建标签",

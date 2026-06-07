@@ -104,7 +104,17 @@
     "sort": "Sort",
     "refresh": "Refresh",
     "export": "Export",
-    "cell": "cell"
+    "cell": "cell",
+    "previewTitle": "Review changes",
+    "previewSubtitle": "{{count}} statement(s) will run on the database.",
+    "previewReadOnly": "This engine is read-only — editing is disabled.",
+    "previewNoPk": "No primary key in the result — edits can't be safely applied.",
+    "applyChanges": "Apply",
+    "cancel": "Cancel",
+    "applying": "Applying…",
+    "rowsAffected": "{{count}} row(s) affected",
+    "pageSize": "Rows",
+    "truncated": "truncated"
   },
   "workbench": {
     "newTab": "New tab",

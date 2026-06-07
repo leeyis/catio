@@ -72,6 +72,45 @@ export async function runQuery(connId: string, sql: string): Promise<QueryResult
   return tauriInvoke<QueryResult>('db_query', { connId, sql })
 }
 
+// ---- Edits (DML preview / apply) ----
+
+/** A single row mutation. Mirrors the Rust `EditRequest` (camelCase via serde). */
+export interface EditRequest {
+  schema?: string
+  table: string
+  kind: 'update' | 'insert' | 'delete'
+  /** Primary-key columns → values, used to key the WHERE clause. */
+  pk: [string, unknown][]
+  /** Edited columns → new values (the SET / VALUES payload). */
+  cells: [string, unknown][]
+}
+
+/**
+ * Render (but do not run) the SQL for a single edit — the preview "gate" the UI
+ * shows before applying. Requires the Tauri runtime; outside Tauri returns a
+ * stub string so the editing UI stays demoable in the browser.
+ */
+export async function previewDml(connId: string, req: EditRequest): Promise<string> {
+  if (!isTauri()) return '-- preview requires the Tauri runtime'
+  return tauriInvoke<string>('db_preview_dml', { connId, req })
+}
+
+/**
+ * Apply a batch of edits in one shot, returning the number of rows affected.
+ * Requires the Tauri runtime; outside Tauri it is a no-op returning 0 so the
+ * mock/demo flow does not crash.
+ */
+export async function applyEdits(connId: string, reqs: EditRequest[]): Promise<number> {
+  if (!isTauri()) return 0
+  return tauriInvoke<number>('db_apply_edits', { connId, reqs })
+}
+
+/** Paginated query — same shape as runQuery but with limit/offset windowing. */
+export async function queryPage(connId: string, sql: string, limit: number, offset: number): Promise<QueryResult> {
+  if (!isTauri()) return mockQueryResult()
+  return tauriInvoke<QueryResult>('db_query_page', { connId, sql, limit, offset })
+}
+
 // ---- Schema introspection ----
 
 export async function getSchema(connId: string): Promise<Schema> {
