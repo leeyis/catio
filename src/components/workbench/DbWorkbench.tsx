@@ -6,7 +6,7 @@ import { Segmented } from '../atoms'
 import { DataGrid, StructureView, SqlConsole, ERDiagram } from '../dbviews'
 import { SchemaBrowser } from './SchemaBrowser'
 import { useData } from '../../state/DataContext'
-import type { Connection } from '../../services/types'
+import type { Connection, ResultColumn } from '../../services/types'
 
 export interface DbWorkbenchProps {
   conn: Connection
@@ -51,7 +51,10 @@ export function DbWorkbench({ conn: _conn, density }: DbWorkbenchProps) {
               ]} />
             </div>
             <div className="grow" style={{ minHeight: 0 }}>
-              {tableTab === 'data' && <DataGrid columns={D.ordersColumns} rows={D.ordersRows} statusTones={D.statusTones} density={density} key={obj.table} />}
+              {tableTab === 'data' && <DataGrid
+                columns={D.ordersColumns.map((c): ResultColumn => ({ name: c.name, type: c.type, pk: c.pk, fk: c.fk }))}
+                rows={D.ordersRows.map(r => D.ordersColumns.map(c => (r as unknown as Record<string, unknown>)[c.name]))}
+                statusTones={D.statusTones} density={density} key={obj.table} />}
               {tableTab === 'structure' && <StructureView table={obj.table} key={obj.table} />}
             </div>
           </>

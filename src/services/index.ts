@@ -1,20 +1,31 @@
 import { DATA } from './mockData'
 import type {
   Connection,
-  TableCol,
-  OrderRow,
   Schema,
   HistoryItem,
   Snippet,
+  QueryResult,
+  ResultColumn,
 } from './types'
 
-export interface QueryResult { columns: TableCol[]; rows: OrderRow[] }
+function mockQueryResult(): QueryResult {
+  const columns: ResultColumn[] = DATA.ordersColumns.map(c => ({
+    name: c.name, type: c.type, pk: c.pk, fk: c.fk,
+  }))
+  const keys = DATA.ordersColumns.map(c => c.name)
+  const rows: unknown[][] = DATA.ordersRows.map(
+    r => keys.map(k => (r as unknown as Record<string, unknown>)[k]),
+  )
+  return { columns, rows }
+}
 
 export async function listConnections(): Promise<Connection[]> { return DATA.connections }
 
 export async function runQuery(_connId: string, _sql: string): Promise<QueryResult> {
-  return { columns: DATA.ordersColumns, rows: DATA.ordersRows }
+  return mockQueryResult()
 }
+
+export type { QueryResult } from './types'
 
 export async function getSchema(_connId: string): Promise<Schema> { return DATA.schema }
 

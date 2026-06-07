@@ -87,6 +87,20 @@ export interface TableCol {
   icon: string
 }
 
+// ---- 查询结果（通用行）----
+export interface ResultColumn {
+  name: string
+  type: string
+  pk?: boolean
+  fk?: boolean
+}
+export interface QueryResult {
+  columns: ResultColumn[]
+  rows: unknown[][]
+  rowsAffected?: number
+  truncated?: boolean
+}
+
 export interface OrderRow {
   id: number
   customer_id: number

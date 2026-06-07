@@ -72,7 +72,10 @@ export function SqlConsole({ density, fresh, queryN }: SqlConsoleProps) {
               <span style={{ fontSize: 13 }}>{t('dbviews.runToSeeResults')}</span>
               <span style={{ fontSize: 11.5 }}>{t('dbviews.runHint')}</span>
             </div>
-          : <DataGrid columns={D.ordersColumns} rows={D.ordersRows} statusTones={D.statusTones} density={density} />}
+          : <DataGrid
+              columns={D.ordersColumns.map(c => ({ name: c.name, type: c.type, pk: c.pk, fk: c.fk }))}
+              rows={D.ordersRows.map(r => D.ordersColumns.map(c => (r as unknown as Record<string, unknown>)[c.name]))}
+              statusTones={D.statusTones} density={density} />}
       </div>
     </div>
   )

@@ -3,17 +3,28 @@ import { useState, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn } from '../atoms'
-import type { TableCol, OrderRow } from '../../services/types'
+import type { ResultColumn } from '../../services/types'
 
 export interface DataGridProps {
-  columns: TableCol[]
-  rows: OrderRow[]
+  columns: ResultColumn[]
+  rows: unknown[][]
   statusTones?: Record<string, string>
   density?: 'comfortable' | 'compact'
 }
 
 const thStyle: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 6, padding: '0 10px', height: 34, cursor: 'pointer', borderRight: '1px solid var(--border-hairline)', userSelect: 'none' }
 const tdStyle: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 6, padding: '0 10px', borderRight: '1px solid var(--border-hairline)', overflow: 'hidden', whiteSpace: 'nowrap' }
+
+/** Derive a column icon from its type/pk/fk flags (mirrors the mock ordersColumns icons). */
+function colIcon(col: ResultColumn): string {
+  if (col.pk) return 'hash'
+  if (col.fk) return 'link'
+  const t = col.type.toLowerCase()
+  if (t.includes('time') || t.includes('date') || t.includes('timestamp')) return 'calendar'
+  if (t === 'char' || t.startsWith('char(') || t.includes('varchar') || t.includes('text') || t.includes('string')) return 'type'
+  if (t.includes('int') || t.includes('numeric') || t.includes('decimal') || t.includes('float') || t.includes('double') || t.includes('real') || t.includes('serial')) return 'hash'
+  return 'type'
+}
 
 export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortable' }: DataGridProps) {
   const { t } = useTranslation()
@@ -27,17 +38,23 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   const rowH = density === 'compact' ? 30 : 36
   const PAGE = 100
 
+  // Find the index of sortCol in columns for indexed-value sort
+  const sortColIdx = useMemo(() => {
+    if (!sortCol) return -1
+    return columns.findIndex(c => c.name === sortCol)
+  }, [columns, sortCol])
+
   const sorted = useMemo(() => {
-    if (!sortCol) return rows
-    const col = sortCol
+    if (!sortCol || sortColIdx < 0) return rows
+    const idx = sortColIdx
     const arr = [...rows].sort((a, b) => {
-      const av = (a as unknown as Record<string, unknown>)[col]
-      const bv = (b as unknown as Record<string, unknown>)[col]
+      const av = a[idx]
+      const bv = b[idx]
       if (av === bv) return 0
       return ((av as string | number) > (bv as string | number) ? 1 : -1) * (sortDir === 'asc' ? 1 : -1)
     })
     return arr
-  }, [rows, sortCol, sortDir])
+  }, [rows, sortCol, sortColIdx, sortDir])
 
   const pageRows = sorted.slice((page - 1) * PAGE, page * PAGE)
   const pages = Math.ceil(rows.length / PAGE)
@@ -46,12 +63,12 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
     if (sortCol === name) { setSortDir(d => d === 'asc' ? 'desc' : 'asc') }
     else { setSortCol(name); setSortDir('asc') }
   }
-  function cellKey(rowId: number, col: string) { return `${rowId}-${col}` }
-  function startEdit(rIdx: number, cIdx: number, _rowId: number, _col: string, val: unknown) {
+  function cellKey(rowIdx: number, col: string) { return `${rowIdx}-${col}` }
+  function startEdit(rIdx: number, cIdx: number, _rowIdx: number, _col: string, val: unknown) {
     setEditing({ r: rIdx, c: cIdx }); setEditVal(String(val)); setSel({ r: rIdx, c: cIdx })
   }
-  function commitEdit(rowId: number, col: string) {
-    setEdits(e => ({ ...e, [cellKey(rowId, col)]: editVal }))
+  function commitEdit(rowIdx: number, col: string) {
+    setEdits(e => ({ ...e, [cellKey(rowIdx, col)]: editVal }))
     setEditing(null)
   }
 
@@ -91,7 +108,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
             <div style={{ ...thStyle, justifyContent: 'center', color: 'var(--text-faint)' }}>#</div>
             {columns.map((col) => (
               <div key={col.name} style={thStyle} onClick={() => toggleSort(col.name)} className="gridhead">
-                <Icon name={col.icon} size={12} style={{ color: col.pk ? 'var(--signal-amber)' : col.fk ? 'var(--signal-blue)' : 'var(--text-faint)' }} />
+                <Icon name={colIcon(col)} size={12} style={{ color: col.pk ? 'var(--signal-amber)' : col.fk ? 'var(--signal-blue)' : 'var(--text-faint)' }} />
                 <span className="ell" style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>{col.name}</span>
                 {col.pk && <span style={{ fontSize: 9, color: 'var(--signal-amber)', fontWeight: 700 }}>PK</span>}
                 {sortCol === col.name && <Icon name={sortDir === 'asc' ? 'chevron-up' : 'chevron-down'} size={12} style={{ color: 'var(--accent-primary)', marginLeft: 'auto' }} />}
@@ -102,18 +119,18 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
           {pageRows.map((row, ri) => {
             const globalIdx = (page - 1) * PAGE + ri
             return (
-              <div key={row.id} style={{ display: 'grid', gridTemplateColumns: gridTemplate, height: rowH, background: ri % 2 ? 'var(--surface-subtle)' : 'transparent' }}
+              <div key={globalIdx} style={{ display: 'grid', gridTemplateColumns: gridTemplate, height: rowH, background: ri % 2 ? 'var(--surface-subtle)' : 'transparent' }}
                 className="gridrow">
                 <div style={{ ...tdStyle, justifyContent: 'center', color: 'var(--text-faint)', fontSize: 11, background: 'var(--surface-sunken)', borderRight: '1px solid var(--border-hairline)' }}>{globalIdx + 1}</div>
                 {columns.map((col, ci) => {
-                  const k = cellKey(row.id, col.name)
+                  const k = cellKey(globalIdx, col.name)
                   const isEdited = edits[k] !== undefined
-                  const val = isEdited ? edits[k] : (row as unknown as Record<string, unknown>)[col.name]
+                  const val = isEdited ? edits[k] : row[ci]
                   const isSel = sel.r === globalIdx && sel.c === ci
                   const isEditing = editing && editing.r === globalIdx && editing.c === ci
                   return (
                     <div key={col.name} onClick={() => setSel({ r: globalIdx, c: ci })}
-                      onDoubleClick={() => startEdit(globalIdx, ci, row.id, col.name, val)}
+                      onDoubleClick={() => startEdit(globalIdx, ci, globalIdx, col.name, val)}
                       style={{
                         ...tdStyle,
                         cursor: 'cell',
@@ -123,8 +140,8 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
                       }}>
                       {isEditing ? (
                         <input autoFocus value={editVal} onChange={e => setEditVal(e.target.value)}
-                          onBlur={() => commitEdit(row.id, col.name)}
-                          onKeyDown={e => { if (e.key === 'Enter') commitEdit(row.id, col.name); if (e.key === 'Escape') setEditing(null) }}
+                          onBlur={() => commitEdit(globalIdx, col.name)}
+                          onKeyDown={e => { if (e.key === 'Enter') commitEdit(globalIdx, col.name); if (e.key === 'Escape') setEditing(null) }}
                           style={{ width: '100%', border: 'none', outline: 'none', background: 'transparent', font: 'inherit', color: 'var(--text-primary)' }} />
                       ) : col.name === 'status' ? (
                         <span className="row gap6" style={{ minWidth: 0 }}>
@@ -136,7 +153,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
                       ) : col.name === 'id' ? (
                         <span className="ell" style={{ color: 'var(--text-tertiary)' }}>{String(val)}</span>
                       ) : col.name === 'customer_id' ? (
-                        <span className="row gap6 ell"><span style={{ color: 'var(--signal-blue)' }}>{String(val)}</span><span style={{ color: 'var(--text-faint)' }}>· {row._customer}</span></span>
+                        <span className="ell" style={{ color: 'var(--signal-blue)' }}>{String(val)}</span>
                       ) : (
                         <span className="ell">{String(val)}</span>
                       )}
@@ -154,7 +171,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
         <div className="row gap10">
           <span>R{sel.r + 1} · C{sel.c + 1}</span>
           <span className="metadot" />
-          <span>{t('dbviews.cell')}: <span className="mono" style={{ color: 'var(--text-secondary)' }}>{(() => { const row = sorted[sel.r]; const col = columns[sel.c]; if (!row || !col) return '—'; const k = cellKey(row.id, col.name); return String(edits[k] !== undefined ? edits[k] : (row as unknown as Record<string, unknown>)[col.name]); })()}</span></span>
+          <span>{t('dbviews.cell')}: <span className="mono" style={{ color: 'var(--text-secondary)' }}>{(() => { const row = sorted[sel.r]; const col = columns[sel.c]; if (!row || !col) return '—'; const k = cellKey(sel.r, col.name); return String(edits[k] !== undefined ? edits[k] : row[sel.c]); })()}</span></span>
         </div>
         <div className="row gap8">
           <span className="mono" style={{ color: 'var(--signal-green)' }}>● 0 new</span>
