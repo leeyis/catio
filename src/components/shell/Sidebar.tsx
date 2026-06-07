@@ -74,33 +74,21 @@ export function buildSidebarTree(items: Connection[], filter: string): SidebarTr
 
 // ---- Tauri window helpers (guarded: no-op in plain browser / jsdom) ----
 
-const isTauri: boolean =
-  typeof window !== 'undefined' &&
-  ('__TAURI_INTERNALS__' in window || '__TAURI__' in window)
-
-async function onMin(): Promise<void> {
-  if (!isTauri) return
+// Window controls. We do NOT gate on a Tauri-detection flag — we just attempt the
+// call: under Tauri it succeeds, in a plain browser/jsdom the dynamic import or the
+// call throws and is caught + logged (never silently swallowed, so real failures are
+// visible in devtools). Errors are logged, not hidden.
+async function winAction(action: 'minimize' | 'toggleMaximize' | 'close'): Promise<void> {
   try {
     const { getCurrentWindow } = await import('@tauri-apps/api/window')
-    await getCurrentWindow().minimize()
-  } catch { /* ignore */ }
+    await getCurrentWindow()[action]()
+  } catch (e) {
+    console.error(`[titlebar] window ${action} failed:`, e)
+  }
 }
-
-async function onMax(): Promise<void> {
-  if (!isTauri) return
-  try {
-    const { getCurrentWindow } = await import('@tauri-apps/api/window')
-    await getCurrentWindow().toggleMaximize()
-  } catch { /* ignore */ }
-}
-
-async function onClose(): Promise<void> {
-  if (!isTauri) return
-  try {
-    const { getCurrentWindow } = await import('@tauri-apps/api/window')
-    await getCurrentWindow().close()
-  } catch { /* ignore */ }
-}
+const onMin = () => winAction('minimize')
+const onMax = () => winAction('toggleMaximize')
+const onClose = () => winAction('close')
 
 // ---- TitleBar ----
 
@@ -128,7 +116,9 @@ export function TitleBar({ theme, onToggleTheme, onOpenSettings, settingsActive 
         </div>
       </div>
       <div className="tb-spacer" />
-      <div className="row gap4">
+      {/* stopPropagation on mousedown so the titlebar's data-tauri-drag-region
+          never captures clicks meant for these controls */}
+      <div className="row gap4" onMouseDown={e => e.stopPropagation()}>
         <button className="tb-iconbtn" title={t('shell.toggleTheme')} onClick={onToggleTheme}>
           <Icon name={theme === 'dawn' ? 'moon' : 'sun'} size={17} />
         </button>
