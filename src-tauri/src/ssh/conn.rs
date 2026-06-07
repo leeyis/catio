@@ -3,11 +3,11 @@
 //! russh 0.61.2（ring 后端）已确认的客户端 API：
 //!   * `russh::client::connect(Arc<Config>, addrs, handler) -> Result<Handle<H>, H::Error>`
 //!   * `Handler::check_server_key(&mut self, &russh::keys::ssh_key::PublicKey)
-//!      -> impl Future<Output = Result<bool, Self::Error>> + Send`（默认拒绝所有 key）
+//!     -> impl Future<Output = Result<bool, Self::Error>> + Send`（默认拒绝所有 key）
 //!   * `handle.authenticate_password(user, pw) -> Result<AuthResult, russh::Error>`，
-//!      成功判定用 `AuthResult::success()`。
+//!     成功判定用 `AuthResult::success()`。
 //!   * `pubkey.fingerprint(HashAlg::default())` → `Fingerprint`，`Display` 形如
-//!      `SHA256:...`。
+//!     `SHA256:...`。
 //!   * `handle.disconnect(Disconnect::ByApplication, "", "en") -> Result<(), russh::Error>`。
 
 use std::collections::HashMap;
@@ -270,11 +270,22 @@ pub async fn ssh_connect(
 }
 
 /// 断开并移除一条会话。会话不存在时返回 NotFound。
+///
+/// 清理顺序：先中止并移除该会话的周期监控任务（若有；无则 no-op），
+/// 再从 manager 移除会话本身。移除 `Session` 会 drop 其 `terms` 中的所有
+/// mpsc 发送端——各终端 owner 任务在 channel 关闭时自行结束，故无需显式处理。
+///
+/// 已知限制：隧道（tunnels）以隧道 id 为键、不与会话生命周期绑定，故断开会话
+/// 时**不会**自动关闭其隧道。用户须经 `tunnel_close` 主动关闭。
 #[tauri::command]
 pub async fn ssh_disconnect(
     session_id: String,
     mgr: tauri::State<'_, SessionManager>,
 ) -> Result<(), SshError> {
+    // 先中止监控任务，避免它在已死的 handle 上继续 exec。无监控任务时为 no-op。
+    mgr.remove_monitor(&session_id).await;
+
+    // 再移除会话；不存在则 NotFound（监控已在上一步清理）。
     let sess = mgr
         .remove(&session_id)
         .await

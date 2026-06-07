@@ -125,7 +125,7 @@ pub fn parse_cpu_cores(stat: &str) -> usize {
             // Starts with "cpu" followed by at least one digit
             l.starts_with("cpu")
                 && l.len() > 3
-                && l.as_bytes().get(3).map_or(false, |b| b.is_ascii_digit())
+                && l.as_bytes().get(3).is_some_and(|b| b.is_ascii_digit())
         })
         .count()
 }
@@ -196,7 +196,7 @@ fn net_total_bytes(dev: &str) -> u64 {
             .filter_map(|s| s.parse().ok())
             .collect();
         // /proc/net/dev columns after iface: rx_bytes rx_packets ... (8 rx fields) tx_bytes tx_packets ...
-        let rx = fields.get(0).copied().unwrap_or(0);
+        let rx = fields.first().copied().unwrap_or(0);
         let tx = fields.get(8).copied().unwrap_or(0);
         total += rx + tx;
     }

@@ -29,6 +29,12 @@ russh 是快速演进的 crate。本计划的 Rust 代码基于 russh 当前 `ma
 4. `russh::server::run_stream(Arc<Config>, stream, handler) -> Result<RunningSession<H>, H::Error>`；`Auth::reject()` 无参；`Server::new_client(&mut self, Option<SocketAddr>)`。
 5. **client 端**（A7 实测修正）：`ChannelMsg::Data { data: bytes::Bytes }`、`ExtendedData { data: bytes::Bytes, ext: u32 }`、`Eof`、`Close`（data 是 **`bytes::Bytes`**，非 CryptoVec；`&data[..]` 取切片）。`channel.data<R: AsyncRead+Unpin>(&self, R)`——`&bytes[..]` 即可。`request_pty(&self, want_reply, term, col, row, pix_w, pix_h, &[(Pty,u32)])`、`request_shell(&self, want_reply)`、`window_change(&self, col,row,pix_w,pix_h)`、`eof(&self)`、`wait(&mut self) -> Option<ChannelMsg>`。owner-task 用 `tokio::select!` 同时 `wait()`(&mut) 与发指令(&self) 不冲突（单任务顺序求值）。
 
+**russh-sftp 2.3.0 API（B1 实测，B2/B3 照此）**：
+- **client**：`SftpSession::new(channel.into_stream()).await`（先 `channel.request_subsystem(true,"sftp")`）。`sftp.read_dir(path) -> ReadDir`（Iterator<DirEntry>，自动跳过 `.`/`..`）；`DirEntry::file_name()->String`、`metadata()->FileAttributes`（字段 `size: Option<u64>`、`mtime: Option<u32>`；方法 `is_dir()`/`len()`/`modified()`）。其它（B2/B3 用）：`open_with_flags(name, OpenFlags)->File`(AsyncRead/Write/Seek)、`create_dir`、`remove_dir`、`remove_file`、`rename`、`metadata`、`canonicalize`。
+- **server**（测试夹具用）：`russh_sftp::server::run(stream, handler).await`；trait `russh_sftp::server::Handler`，`type Error: Into<StatusReply>`（用 `protocol::StatusCode`）+ 必需 `unimplemented(&self)->Self::Error`，其余方法默认 Err(unimplemented)。返回类型：`opendir->Handle`、`readdir->Name`（EOF 用 `Err(StatusCode::Eof)`）、`realpath->Name`、`stat/lstat/fstat->Attrs`、`open->Handle`、`read->Data`、`write/mkdir/rmdir/remove/rename/setstat->Status`。client read_dir 线上流程：`opendir(path)`→反复 `readdir(handle)` 直到 Eof（不先 realpath）。`FileAttributes::from(&std::fs::Metadata)` 跨平台设置 dir mode 位。
+- 测试 server：`start()->SocketAddr`（throwaway sftp 根）与新增 `start_with_root(root)->SocketAddr`（已知内容列目录测试用）。
+- 后端 `SftpItem` serde：`kind`→`"type"`、`modified`→`"mod"`，对齐前端 `{name,type,size?,mod?}`；`up` 项前端加。
+
 **A7→A10 前端接线契约（已实现）**：`term_open(sessionId, cols, rows)` 返回裸 `chanId`（如 `chan-1`）；前端订阅事件名 `term://${chanId}`。数据帧 `{ bytesBase64: "<b64>" }`（解码喂 xterm）；关闭帧 `{ closed: true }`（无 bytesBase64，监听器按 key 分支）。`term_write(sessionId, chanId, dataBase64)`（键击 base64）、`term_resize(sessionId, chanId, cols, rows)`、`term_close(sessionId, chanId)`。**前端收到 `{closed:true}` 应调 `term_close` 清理 map**（否则 terms 里留一个悬空 sender——无害但应清）。
 
 **russh 0.61.2 client API（A4 实测）**：

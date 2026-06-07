@@ -312,12 +312,18 @@ impl Handler for TestHandler {
 ///
 /// The sftp subsystem (if requested) serves a throwaway per-process temp dir;
 /// for a LIST test with known contents use [`start_with_root`].
+///
+/// `#[allow(dead_code)]`: this shared fixture is compiled into every test
+/// binary, but each binary only uses the subset of helpers it needs, so the
+/// unused ones are (benignly) flagged as dead in the others.
+#[allow(dead_code)]
 pub async fn start() -> std::net::SocketAddr {
     start_inner(None).await
 }
 
 /// Like [`start`], but the sftp subsystem serves the given `root` directory.
 /// The caller pre-populates `root`; the list test passes that path to `read_dir`.
+#[allow(dead_code)]
 pub async fn start_with_root(root: PathBuf) -> std::net::SocketAddr {
     start_inner(Some(root)).await
 }
