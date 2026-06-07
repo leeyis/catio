@@ -32,7 +32,7 @@ pub enum AuthMethod {
 }
 
 /// 连接参数。`secret` 是密码或私钥口令——仅驻留内存，绝不持久化、绝不回传。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectArgs {
     pub host: String,
@@ -40,6 +40,19 @@ pub struct ConnectArgs {
     pub user: String,
     pub auth: AuthMethod,
     pub secret: Option<String>,
+}
+
+// 手写 Debug 以遮蔽 secret——避免密码经 panic/trace/崩溃上报泄露。
+impl std::fmt::Debug for ConnectArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectArgs")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("user", &self.user)
+            .field("auth", &self.auth)
+            .field("secret", &self.secret.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 /// 连接结果。不含任何 secret。
@@ -69,9 +82,9 @@ impl client::Handler for ClientHandler {
         let fp = server_public_key
             .fingerprint(ssh_key::HashAlg::default())
             .to_string();
-        if let Ok(mut slot) = self.fingerprint.lock() {
-            *slot = Some(fp);
-        }
+        // 可靠写入：本槽仅此一处写、单写者，poison 只可能源于他处 panic，
+        // 此时宁可显式 panic 也不要静默丢指纹（A5 的 TOFU 依赖它）。
+        *self.fingerprint.lock().expect("fingerprint mutex poisoned") = Some(fp);
         // TOFU 校验在 A5。当前一律接受。
         Ok(true)
     }

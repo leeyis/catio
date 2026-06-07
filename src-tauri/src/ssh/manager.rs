@@ -14,7 +14,7 @@ pub struct Session {
 /// 进程内会话表。以会话 id（"sess-N"）为键。
 #[derive(Default)]
 pub struct SessionManager {
-    pub sessions: Mutex<HashMap<String, Arc<Mutex<Session>>>>,
+    sessions: Mutex<HashMap<String, Arc<Mutex<Session>>>>,
 }
 
 impl SessionManager {
