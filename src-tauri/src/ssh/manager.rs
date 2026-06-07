@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::AbortHandle;
 
-use crate::ssh::conn::ClientHandler;
+use crate::ssh::conn::{ClientHandler, ForwardedRoutes};
 
 /// 一条已建立的 SSH 会话。`handle` 是 russh 客户端句柄。
 pub struct Session {
@@ -13,6 +13,10 @@ pub struct Session {
     pub user: String,
     /// 每个终端 channel 一个 owner 任务；此处仅存向其发指令的 mpsc 发送端。
     pub terms: HashMap<String, tokio::sync::mpsc::UnboundedSender<crate::ssh::term::TermCmd>>,
+    /// R（远程）转发路由表，与 ClientHandler 共享。R 隧道任务在此登记
+    /// `远端bind端口 → Sender`，使服务端发起的 forwarded-tcpip channel 能被
+    /// 路由到对应隧道任务。非 R 用途的会话此表保持空。
+    pub forwarded: ForwardedRoutes,
 }
 
 impl Session {

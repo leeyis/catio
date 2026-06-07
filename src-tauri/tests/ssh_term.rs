@@ -15,7 +15,7 @@ async fn pty_shell_echoes_input() {
         auth: AuthMethod::Password,
         secret: Some(test_server::TEST_PW.into()),
     };
-    let (handle, _) = connect_authenticated(&args).await.unwrap();
+    let (handle, _, _) = connect_authenticated(&args).await.unwrap();
     let mut ch = handle.channel_open_session().await.unwrap();
     ch.request_pty(false, "xterm-256color", 80, 24, 0, 0, &[])
         .await

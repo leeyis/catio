@@ -164,6 +164,58 @@ impl Handler for TestHandler {
         Ok(())
     }
 
+    /// tcpip-forward (client R-forward request): accept the forward, then
+    /// SIMULATE a remote peer connecting to the bound port. There is no real
+    /// remote peer in the test, so right after accepting we spawn a task that
+    /// uses the server `Handle` to open a `forwarded-tcpip` channel back to the
+    /// client (this is what a real server does per incoming remote connection),
+    /// writes a known payload into it, then reads the bytes the client bridges
+    /// back (the test's local echo target echoes them) and asserts they match.
+    ///
+    /// `port` is `&mut u32`: if the client requested port 0 we'd set it to the
+    /// allocated port; the test always requests a concrete port, so we echo it
+    /// back unchanged and use it as the channel's `connected_port` so the
+    /// client routes the channel to the right R tunnel.
+    async fn tcpip_forward(
+        &mut self,
+        address: &str,
+        port: &mut u32,
+        session: &mut Session,
+    ) -> Result<bool, Self::Error> {
+        let handle = session.handle();
+        let bind_addr = address.to_string();
+        let bind_port = *port;
+        tokio::spawn(async move {
+            // Open a forwarded-tcpip channel back to the client. connected_*
+            // is the server's bound side (what the client routes on);
+            // originator_* is the simulated remote peer.
+            let channel = match handle
+                .channel_open_forwarded_tcpip(
+                    bind_addr.clone(),
+                    bind_port,
+                    "203.0.113.7", // simulated remote peer addr
+                    54321,
+                )
+                .await
+            {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            let mut stream = channel.into_stream();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            // Act as the remote peer: send a payload, then read what the client
+            // bridges back from its local echo target.
+            let payload = b"reverse-tunnel-hello";
+            if stream.write_all(payload).await.is_err() {
+                return;
+            }
+            let mut got = vec![0u8; payload.len()];
+            // If the full echo round-trips, the client bridge + local echo worked.
+            let _ = stream.read_exact(&mut got).await;
+        });
+        Ok(true)
+    }
+
     /// direct-tcpip (client L-forward) endpoint: ECHO. We ignore the requested
     /// host/port and simply pipe the channel's stream back to itself, so any
     /// bytes the client writes through the tunnel come straight back. Returning

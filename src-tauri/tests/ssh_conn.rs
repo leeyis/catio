@@ -20,7 +20,7 @@ async fn connects_with_password() {
         auth: AuthMethod::Password,
         secret: Some(test_server::TEST_PW.into()),
     };
-    let (handle, fp) = connect_authenticated(&args).await.expect("should connect");
+    let (handle, fp, _) = connect_authenticated(&args).await.expect("should connect");
     assert!(!fp.is_empty(), "fingerprint captured");
     handle
         .disconnect(russh::Disconnect::ByApplication, "", "en")
@@ -71,7 +71,7 @@ async fn trusts_known_host() {
         auth: AuthMethod::Password,
         secret: Some(test_server::TEST_PW.into()),
     };
-    let (handle, fp, _) = connect_checked(&args, None).await.expect("first connect");
+    let (handle, fp, _, _) = connect_checked(&args, None).await.expect("first connect");
     handle
         .disconnect(russh::Disconnect::ByApplication, "", "en")
         .await
@@ -83,7 +83,7 @@ async fn trusts_known_host() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("known_hosts"), format!("{hp} {fp}\n")).unwrap();
 
-    let (handle2, fp2, trusted) = connect_checked(&args, Some(dir.as_path()))
+    let (handle2, fp2, _, trusted) = connect_checked(&args, Some(dir.as_path()))
         .await
         .expect("second connect should succeed");
     assert!(trusted, "host should be trusted");
@@ -107,6 +107,6 @@ async fn connects_with_key_file() {
         auth: AuthMethod::KeyFile { path: key_path.into() },
         secret: None,
     };
-    let (handle, _fp) = connect_authenticated(&args).await.expect("key auth");
+    let (handle, _fp, _) = connect_authenticated(&args).await.expect("key auth");
     handle.disconnect(russh::Disconnect::ByApplication, "", "en").await.ok();
 }

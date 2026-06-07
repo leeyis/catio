@@ -1,17 +1,30 @@
-//! 端口转发隧道。本任务（C1+C4）只实现本地转发（L）。
+//! 端口转发隧道。L（本地，C1）与 R（远程/反向，C2）。
 //!
 //! 本地 (L) 转发：在本地起一个 TCP 监听器，每个入站连接都通过 SSH
 //! `direct-tcpip` channel 桥接到远端目标；双向字节都被计数。
 //!
-//! russh 0.61.2（ring 后端）已确认的 direct-tcpip 客户端 API：
-//!   * `handle.channel_open_direct_tcpip(host_to_connect: impl Into<String>,
-//!      port_to_connect: u32, originator_address: impl Into<String>,
-//!      originator_port: u32).await -> Result<Channel<client::Msg>, russh::Error>`
+//! 远程 (R) 转发：请服务端在远端 bind 端口监听；远端有连接时服务端打开一个
+//! `forwarded-tcpip` channel 回到本客户端；隧道任务把该 channel 桥接到一个新
+//! 建的本地目标 TCP 连接。即 L 的反向。
+//!
+//! russh 0.61.2（ring 后端）已确认的客户端 API：
+//!   * direct-tcpip（L）：`handle.channel_open_direct_tcpip(host_to_connect:
+//!     impl Into<String>, port_to_connect: u32, originator_address:
+//!     impl Into<String>, originator_port: u32).await
+//!     -> Result<Channel<client::Msg>, russh::Error>`
+//!   * tcpip-forward（R 请求）：`handle.tcpip_forward(address: impl Into<String>,
+//!     port: u32).await -> Result<u32, russh::Error>`；当 port==0 时返回服务端
+//!     实际分配的端口，否则返回 0。
+//!   * forwarded-tcpip（R 接收）：服务端发起的 channel 经
+//!     `client::Handler::server_channel_open_forwarded_tcpip` 到达，由
+//!     `ClientHandler` 据 `connected_port` 路由（见 conn.rs / Session.forwarded）。
 //!   * `channel.into_stream()` → 实现 AsyncRead+AsyncWrite 的流，可与
 //!     tokio `TcpStream` 桥接。
 //!
-//! 桥接与计数：对每个连接把入站 TcpStream 与 channel 流各自 `split`，跑两个
-//! 手写复制循环（read→记账→write_all），分别累加 up / down 计数。
+//! 桥接与计数：对每个连接把 TcpStream 与 channel 流各自 `split`，跑两个手写
+//! 复制循环（read→记账→write_all）。方向约定：
+//!   * L：入站本地→channel 记 up；channel→入站本地 记 down。
+//!   * R：本地目标→channel（→远端）记 up；channel（远端→）→本地目标 记 down。
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -159,9 +172,129 @@ pub async fn open_local_forward(
     })
 }
 
+/// 可测试核心：开启一条远程（R/反向）转发。
+///
+/// - 在 `session.forwarded` 登记 `remote_port → Sender`，使服务端发起的
+///   forwarded-tcpip channel 能被路由到本任务（C2 的 ClientHandler 据 connected_port 投递）。
+/// - 调用 `handle.tcpip_forward(remote_bind, remote_port)` 请服务端在远端监听；
+///   `remote_port==0` 时捕获服务端实际分配的端口并改用它作为路由键。
+/// - spawn 一个任务：`rx.recv().await` 收到每个 forwarded `Channel` 后，新建一个
+///   到 `target`（本地 host:port）的 TCP 连接并双向桥接、计数。单连接错误仅忽略。
+///
+/// 返回 `(实际远端端口, accept 任务 AbortHandle)`。
+pub async fn open_remote_forward(
+    session: Arc<Mutex<Session>>,
+    remote_bind: &str,
+    remote_port: u32,
+    target: &str,
+    up: Arc<AtomicU64>,
+    down: Arc<AtomicU64>,
+) -> Result<(u32, AbortHandle), SshError> {
+    // 早校验 target 格式。
+    let _ = parse_target(target)?;
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<russh::Channel<russh::client::Msg>>();
+
+    // 仅在请求转发期间短暂锁住会话。
+    let actual_port = {
+        let s = session.lock().await;
+        // 先按请求端口登记路由——服务端可能在 tcpip_forward 返回前就推来
+        // forwarded channel；若那时尚未登记会被丢弃。对具体端口（!=0）这足够。
+        s.forwarded
+            .lock()
+            .expect("forwarded routes mutex poisoned")
+            .insert(remote_port, tx.clone());
+
+        let allocated = match s.handle.tcpip_forward(remote_bind, remote_port).await {
+            Ok(p) => p,
+            Err(e) => {
+                // 回滚预登记，避免悬挂路由。
+                s.forwarded
+                    .lock()
+                    .expect("forwarded routes mutex poisoned")
+                    .remove(&remote_port);
+                return Err(SshError::Tunnel(format!(
+                    "tcpip_forward {remote_bind}:{remote_port}: {e}"
+                )));
+            }
+        };
+        // port==0 → 服务端返回实际端口；否则沿用请求端口。
+        let actual = if remote_port == 0 { allocated } else { remote_port };
+        // 若实际端口与预登记键不同（仅 port==0 时），改用实际端口作键
+        // （forwarded channel 的 connected_port 会是它）。
+        if actual != remote_port {
+            let mut map = s.forwarded.lock().expect("forwarded routes mutex poisoned");
+            map.remove(&remote_port);
+            map.insert(actual, tx);
+        }
+        actual
+    };
+
+    let target = target.to_string();
+    let handle = tokio::spawn(async move {
+        // 每个 forwarded channel 一个桥接任务。
+        while let Some(channel) = rx.recv().await {
+            let target = target.clone();
+            let up = up.clone();
+            let down = down.clone();
+            tokio::spawn(async move {
+                // 新建到本地目标的连接；失败则丢弃此 channel。
+                let local = match tokio::net::TcpStream::connect(&target).await {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                let stream = channel.into_stream();
+                let (rc, wc) = tokio::io::split(stream);
+                let (rl, wl) = tokio::io::split(local);
+                // 本地目标→channel（→远端）记 up；channel（远端→）→本地目标 记 down。
+                let up_task = tokio::spawn(copy_counting(rl, wc, up));
+                let down_task = tokio::spawn(copy_counting(rc, wl, down));
+                let _ = tokio::join!(up_task, down_task);
+            });
+        }
+    });
+
+    Ok((actual_port, handle.abort_handle()))
+}
+
 // ─── Tauri 命令 ───────────────────────────────────────────────────────────────
 
-/// 打开一条隧道。L → 本地转发；R/D 暂未实现（C2/C3）。
+/// 把隧道的 `bind`（"host:port"）拆成 (host, port)。R 转发用以请求远端监听。
+fn parse_bind(bind: &str) -> Result<(String, u32), SshError> {
+    let (host, port) = bind
+        .rsplit_once(':')
+        .ok_or_else(|| SshError::Tunnel(format!("invalid bind (need host:port): {bind}")))?;
+    let port: u32 = port
+        .parse()
+        .map_err(|_| SshError::Tunnel(format!("invalid bind port: {bind}")))?;
+    Ok((host.to_string(), port))
+}
+
+/// 启动周期性 `tunnel://{id}` 发射器（约每 500ms 发一次累计字节），返回其 AbortHandle。
+fn spawn_byte_emitter(
+    app: tauri::AppHandle,
+    id: &str,
+    up: Arc<AtomicU64>,
+    down: Arc<AtomicU64>,
+) -> AbortHandle {
+    let evt = format!("tunnel://{id}");
+    let emitter = tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
+        loop {
+            tick.tick().await;
+            let _ = app.emit(
+                &evt,
+                serde_json::json!({
+                    "bytesUp": up.load(Ordering::Relaxed),
+                    "bytesDown": down.load(Ordering::Relaxed),
+                }),
+            );
+        }
+    });
+    emitter.abort_handle()
+}
+
+/// 打开一条隧道。L → 本地转发；R → 远程/反向转发；D 暂未实现（C3）。
 ///
 /// 成功后登记到 manager 隧道注册表，并启动一个周期发射器（约每 500ms）将
 /// up/down 计数经 `tunnel://{id}` 事件发出 `{ bytesUp, bytesDown }`。返回隧道 id。
@@ -172,56 +305,79 @@ pub async fn tunnel_open(
     app: tauri::AppHandle,
     mgr: tauri::State<'_, SessionManager>,
 ) -> Result<String, SshError> {
-    if spec.kind != 'L' {
-        return Err(SshError::Tunnel("not implemented (C2/C3)".into()));
-    }
-    let target = spec
-        .target
-        .clone()
-        .ok_or_else(|| SshError::Tunnel("L forward requires target host:port".into()))?;
-
     let session = mgr
         .get(&session_id)
         .await
         .ok_or_else(|| SshError::NotFound(session_id.clone()))?;
 
-    let fwd = open_local_forward(session, &spec.bind, &target).await?;
-    let id = fwd.id.clone();
+    match spec.kind {
+        'L' => {
+            let target = spec
+                .target
+                .clone()
+                .ok_or_else(|| SshError::Tunnel("L forward requires target host:port".into()))?;
 
-    // 周期性发射器：每 500ms 发一次累计字节。计数 Arc 仍被注册项持有，
-    // 隧道被移除时其 emitter_abort 句柄会中止本任务。
-    let evt = format!("tunnel://{id}");
-    let up_e = fwd.up.clone();
-    let down_e = fwd.down.clone();
-    let emitter = tokio::spawn(async move {
-        let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
-        loop {
-            tick.tick().await;
-            let _ = app.emit(
-                &evt,
-                serde_json::json!({
-                    "bytesUp": up_e.load(Ordering::Relaxed),
-                    "bytesDown": down_e.load(Ordering::Relaxed),
-                }),
-            );
+            let fwd = open_local_forward(session, &spec.bind, &target).await?;
+            let id = fwd.id.clone();
+            let emitter_abort =
+                spawn_byte_emitter(app, &id, fwd.up.clone(), fwd.down.clone());
+
+            mgr.insert_tunnel(
+                id.clone(),
+                TunnelEntry {
+                    kind: 'L',
+                    bind: fwd.bind_addr.to_string(),
+                    target: Some(target),
+                    up: fwd.up,
+                    down: fwd.down,
+                    abort: fwd.abort,
+                    emitter_abort: Some(emitter_abort),
+                },
+            )
+            .await;
+
+            Ok(id)
         }
-    });
+        'R' => {
+            let target = spec
+                .target
+                .clone()
+                .ok_or_else(|| SshError::Tunnel("R forward requires target host:port".into()))?;
+            let (remote_host, remote_port) = parse_bind(&spec.bind)?;
 
-    mgr.insert_tunnel(
-        id.clone(),
-        TunnelEntry {
-            kind: 'L',
-            bind: fwd.bind_addr.to_string(),
-            target: Some(target),
-            up: fwd.up,
-            down: fwd.down,
-            abort: fwd.abort,
-            emitter_abort: Some(emitter.abort_handle()),
-        },
-    )
-    .await;
+            let up = Arc::new(AtomicU64::new(0));
+            let down = Arc::new(AtomicU64::new(0));
+            let (actual_port, abort) = open_remote_forward(
+                session,
+                &remote_host,
+                remote_port,
+                &target,
+                up.clone(),
+                down.clone(),
+            )
+            .await?;
 
-    Ok(id)
+            let id = TUN_IDS.next();
+            let emitter_abort = spawn_byte_emitter(app, &id, up.clone(), down.clone());
+
+            mgr.insert_tunnel(
+                id.clone(),
+                TunnelEntry {
+                    kind: 'R',
+                    bind: format!("{remote_host}:{actual_port}"),
+                    target: Some(target),
+                    up,
+                    down,
+                    abort,
+                    emitter_abort: Some(emitter_abort),
+                },
+            )
+            .await;
+
+            Ok(id)
+        }
+        _ => Err(SshError::Tunnel("not implemented (C3)".into())),
+    }
 }
 
 /// 关闭一条隧道：从注册表移除（同时中止 accept 循环与发射器）。
