@@ -1,5 +1,5 @@
 /* ported from ref-ui/_extract/blob16.txt — verbatim per plan T1-T7 */
-import React, { useState, useMemo } from 'react'
+import React, { useState, useMemo, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { IconBtn, StatusDot, ConnGlyph, Segmented } from '../atoms'
@@ -72,13 +72,54 @@ export function buildSidebarTree(items: Connection[], filter: string): SidebarTr
   return out
 }
 
+// ---- Tauri window helpers (guarded: no-op in plain browser / jsdom) ----
+
+const isTauri: boolean =
+  typeof window !== 'undefined' &&
+  ('__TAURI_INTERNALS__' in window || '__TAURI__' in window)
+
+async function onMin(): Promise<void> {
+  if (!isTauri) return
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window')
+    await getCurrentWindow().minimize()
+  } catch { /* ignore */ }
+}
+
+async function onMax(): Promise<void> {
+  if (!isTauri) return
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window')
+    await getCurrentWindow().toggleMaximize()
+  } catch { /* ignore */ }
+}
+
+async function onClose(): Promise<void> {
+  if (!isTauri) return
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window')
+    await getCurrentWindow().close()
+  } catch { /* ignore */ }
+}
+
 // ---- TitleBar ----
 
 export function TitleBar({ theme, onToggleTheme, onOpenSettings, settingsActive }: TitleBarProps) {
   const { t } = useTranslation()
+
+  // Detect macOS — default false so plain-browser / jsdom always shows Windows-style buttons.
+  // Only set true when positively detected (navigator.platform contains 'Mac').
+  const [isMac, setIsMac] = useState(false)
+  useEffect(() => {
+    try {
+      const p: string = (navigator as Navigator).platform ?? ''
+      if (p.startsWith('Mac')) setIsMac(true)
+    } catch { /* ignore */ }
+  }, [])
+
   return (
     <div className="titlebar" data-tauri-drag-region>
-      <div className="brand">
+      <div className="brand" style={isMac ? { paddingLeft: 70 } : undefined}>
         <div className="logo-mark">
           <span className="mono" style={{ fontSize: 13, fontWeight: 700, transform: 'translateY(-0.5px)' }}>&gt;_</span>
         </div>
@@ -98,11 +139,13 @@ export function TitleBar({ theme, onToggleTheme, onOpenSettings, settingsActive 
           <Icon name="settings" size={17} />
         </button>
         <div className="tb-divider" />
-        <div className="win-controls">
-          <button className="win-btn" title={t('shell.minimize')} onClick={() => {}}>{/* TODO(Task16): wire Tauri window API */}<Icon name="minus" size={15} /></button>
-          <button className="win-btn" title={t('shell.maximize')} onClick={() => {}}>{/* TODO(Task16): wire Tauri window API */}<svg width="11" height="11" viewBox="0 0 11 11"><rect x="1.2" y="1.2" width="8.6" height="8.6" rx="1.6" fill="none" stroke="currentColor" strokeWidth="1.3"/></svg></button>
-          <button className="win-btn close" title={t('shell.close')} onClick={() => {}}>{/* TODO(Task16): wire Tauri window API */}<Icon name="x" size={16} /></button>
-        </div>
+        {!isMac && (
+          <div className="win-controls">
+            <button className="win-btn" title={t('shell.minimize')} onClick={() => { void onMin() }}><Icon name="minus" size={15} /></button>
+            <button className="win-btn" title={t('shell.maximize')} onClick={() => { void onMax() }}><svg width="11" height="11" viewBox="0 0 11 11"><rect x="1.2" y="1.2" width="8.6" height="8.6" rx="1.6" fill="none" stroke="currentColor" strokeWidth="1.3"/></svg></button>
+            <button className="win-btn close" title={t('shell.close')} onClick={() => { void onClose() }}><Icon name="x" size={16} /></button>
+          </div>
+        )}
       </div>
     </div>
   )
