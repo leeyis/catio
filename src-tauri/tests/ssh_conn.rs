@@ -95,3 +95,18 @@ async fn trusts_known_host() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn connects_with_key_file() {
+    let addr = test_server::start().await;
+    let key_path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/id_test");
+    let args = ConnectArgs {
+        host: addr.ip().to_string(),
+        port: addr.port(),
+        user: test_server::TEST_USER.into(),
+        auth: AuthMethod::KeyFile { path: key_path.into() },
+        secret: None,
+    };
+    let (handle, _fp) = connect_authenticated(&args).await.expect("key auth");
+    handle.disconnect(russh::Disconnect::ByApplication, "", "en").await.ok();
+}

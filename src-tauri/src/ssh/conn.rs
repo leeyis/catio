@@ -10,12 +10,14 @@
 //!      `SHA256:...`。
 //!   * `handle.disconnect(Disconnect::ByApplication, "", "en") -> Result<(), russh::Error>`。
 
+use std::path::Path;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 use russh::client::{self, Handle};
 use russh::keys::ssh_key;
+use russh::keys::PrivateKeyWithHashAlg;
 
 use crate::ssh::ids::IdGen;
 use crate::ssh::manager::{Session, SessionManager};
@@ -121,8 +123,16 @@ async fn connect_core(
                 .map_err(|e| SshError::Io(e.to_string()))?
                 .success()
         }
-        // 密钥文件认证在 A6 实现。
-        AuthMethod::KeyFile { .. } => false,
+        AuthMethod::KeyFile { path } => {
+            let key = russh::keys::load_secret_key(Path::new(path), args.secret.as_deref())
+                .map_err(|e| SshError::Io(e.to_string()))?;
+            let key_with_alg = PrivateKeyWithHashAlg::new(Arc::new(key), None);
+            handle
+                .authenticate_publickey(args.user.as_str(), key_with_alg)
+                .await
+                .map_err(|e| SshError::Io(e.to_string()))?
+                .success()
+        }
     };
 
     if !authed {
