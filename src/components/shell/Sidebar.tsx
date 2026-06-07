@@ -191,7 +191,7 @@ export function Sidebar({ activeId, onOpen, onDetail, onNew, collapsed, onToggle
       <div style={{ padding: '14px 12px 10px' }}>
         <div className="row" style={{ justifyContent: 'space-between', marginBottom: 10 }}>
           <div className="row gap8">
-            <span style={{ fontSize: 13, fontWeight: 700, letterSpacing: '0.4px', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>Vault</span>
+            <span style={{ fontSize: 13, fontWeight: 700, letterSpacing: '0.4px', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>{t('shell.vault')}</span>
             <span className="badge-accent">{allConns.length}</span>
           </div>
           <div className="row gap4">
