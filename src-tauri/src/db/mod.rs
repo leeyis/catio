@@ -9,6 +9,7 @@ pub mod driver;
 pub mod drivers;
 pub mod manager;
 pub mod commands;
+pub mod dml;
 
 use serde::{Deserialize, Serialize};
 
