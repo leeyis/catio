@@ -163,6 +163,27 @@ impl Handler for TestHandler {
         }
         Ok(())
     }
+
+    /// direct-tcpip (client L-forward) endpoint: ECHO. We ignore the requested
+    /// host/port and simply pipe the channel's stream back to itself, so any
+    /// bytes the client writes through the tunnel come straight back. Returning
+    /// Ok(true) accepts the channel.
+    async fn channel_open_direct_tcpip(
+        &mut self,
+        channel: Channel<Msg>,
+        _host_to_connect: &str,
+        _port_to_connect: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        _session: &mut Session,
+    ) -> Result<bool, Self::Error> {
+        tokio::spawn(async move {
+            let s = channel.into_stream();
+            let (mut r, mut w) = tokio::io::split(s);
+            let _ = tokio::io::copy(&mut r, &mut w).await;
+        });
+        Ok(true)
+    }
 }
 
 /// Start a test server bound to a random localhost port; accept connections in

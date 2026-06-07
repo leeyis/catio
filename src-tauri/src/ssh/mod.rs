@@ -6,6 +6,7 @@ pub mod manager;
 pub mod parse;
 pub mod sftp;
 pub mod term;
+pub mod tunnel;
 
 use serde::Serialize;
 
