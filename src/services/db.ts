@@ -1,5 +1,5 @@
 import { DATA } from './mockData'
-import type { QueryResult, ResultColumn, Schema } from './types'
+import type { HistoryItem, QueryResult, ResultColumn, Schema, Snippet } from './types'
 
 // ---- Tauri guard — function so tests can set window.__TAURI_INTERNALS__ dynamically ----
 const isTauri = (): boolean =>
@@ -109,6 +109,26 @@ export async function applyEdits(connId: string, reqs: EditRequest[]): Promise<n
 export async function queryPage(connId: string, sql: string, limit: number, offset: number): Promise<QueryResult> {
   if (!isTauri()) return mockQueryResult()
   return tauriInvoke<QueryResult>('db_query_page', { connId, sql, limit, offset })
+}
+
+// ---- History & saved snippets ----
+
+/** Execution history for a connection (most-recent first). Falls back to mock outside Tauri. */
+export async function getHistory(connId: string): Promise<HistoryItem[]> {
+  if (!isTauri()) return DATA.history
+  return tauriInvoke<HistoryItem[]>('db_history', { connId })
+}
+
+/** Saved SQL snippets. Falls back to mock outside Tauri. */
+export async function getSnippets(): Promise<Snippet[]> {
+  if (!isTauri()) return DATA.snippets
+  return tauriInvoke<Snippet[]>('db_snippets')
+}
+
+/** Persist a snippet (append, or update by id). No-op outside Tauri. */
+export async function saveSnippet(snippet: Snippet): Promise<void> {
+  if (!isTauri()) return
+  return tauriInvoke('db_save_snippet', { snippet })
 }
 
 // ---- Schema introspection ----

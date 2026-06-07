@@ -43,4 +43,22 @@ describe('services/db', () => {
     const r = await queryPage('any', 'SELECT 1', 50, 0)
     expect(r.columns.length).toBeGreaterThan(0)
   })
+
+  it('getHistory falls back to mock (DATA.history) outside Tauri', async () => {
+    const { getHistory } = await import('./db')
+    const { DATA } = await import('./mockData')
+    const r = await getHistory('any')
+    expect(r).toEqual(DATA.history)
+    expect(invokeMock).not.toHaveBeenCalled()
+  })
+
+  it('getHistory forwards to db_history under Tauri', async () => {
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+    invokeMock.mockResolvedValue([{ id: 'hist-1', kind: 'sql', target: 'conn-1', text: 'SELECT 1', when: '0', dur: '1ms' }])
+    const { getHistory } = await import('./db')
+    const r = await getHistory('conn-1')
+    expect(invokeMock).toHaveBeenCalledWith('db_history', { connId: 'conn-1' })
+    expect(r[0].id).toBe('hist-1')
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
 })

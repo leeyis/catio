@@ -4,9 +4,30 @@ use crate::db::manager::ConnManager;
 use crate::db::result::QueryResult;
 use crate::db::capabilities::Capabilities;
 use crate::db::dml::{self, CellEdit};
+use crate::db::history::{self, HistoryEntry, SnippetEntry};
 use serde::Serialize;
+use std::path::PathBuf;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 static CONN_IDS: IdGen = IdGen::new("conn");
+static HISTORY_IDS: IdGen = IdGen::new("hist");
+static SNIPPET_IDS: IdGen = IdGen::new("snip");
+
+/// Resolve (and create) the app data dir — mirrors `ssh_trust_host`.
+fn app_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, DbError> {
+    use tauri::Manager;
+    let dir = app.path().app_data_dir().map_err(|e| DbError::Io(e.to_string()))?;
+    std::fs::create_dir_all(&dir).map_err(|e| DbError::Io(e.to_string()))?;
+    Ok(dir)
+}
+
+/// Seconds since the Unix epoch as a string — best-effort `when` timestamp.
+fn now_stamp() -> String {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_default()
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,9 +56,59 @@ pub async fn db_disconnect(conn_id: String, mgr: tauri::State<'_, ConnManager>)
 
 #[tauri::command]
 pub async fn db_query(conn_id: String, sql: String, max_rows: Option<u32>,
-    mgr: tauri::State<'_, ConnManager>) -> Result<QueryResult, DbError> {
-    let drv = mgr.get(&conn_id).await.ok_or(DbError::NotFound(conn_id))?;
-    drv.query(&sql, max_rows.unwrap_or(1000)).await
+    mgr: tauri::State<'_, ConnManager>, app: tauri::AppHandle) -> Result<QueryResult, DbError> {
+    let drv = mgr.get(&conn_id).await.ok_or_else(|| DbError::NotFound(conn_id.clone()))?;
+    let started = Instant::now();
+    let result = drv.query(&sql, max_rows.unwrap_or(1000)).await?;
+    let dur = format!("{}ms", started.elapsed().as_millis());
+
+    // Best-effort: record a history entry on success. Never fail the query if
+    // history persistence has a problem.
+    if let Ok(dir) = app_data_dir(&app) {
+        let entry = HistoryEntry {
+            id: HISTORY_IDS.next(),
+            kind: "sql".into(),
+            target: conn_id,
+            text: sql,
+            when: now_stamp(),
+            dur,
+        };
+        let list = history::append_capped(history::load_history(&dir), entry, history::MAX_HISTORY);
+        let _ = history::save_history(&dir, &list);
+    }
+
+    Ok(result)
+}
+
+/// Read persisted execution history (most-recent first). `conn_id` is accepted
+/// for API symmetry with the frontend; history is currently global.
+#[tauri::command]
+pub async fn db_history(app: tauri::AppHandle) -> Result<Vec<HistoryEntry>, DbError> {
+    let dir = app_data_dir(&app)?;
+    Ok(history::load_history(&dir))
+}
+
+/// Read saved SQL snippets.
+#[tauri::command]
+pub async fn db_snippets(app: tauri::AppHandle) -> Result<Vec<SnippetEntry>, DbError> {
+    let dir = app_data_dir(&app)?;
+    Ok(history::load_snippets(&dir))
+}
+
+/// Append (or update by id) a saved snippet, then persist.
+#[tauri::command]
+pub async fn db_save_snippet(snippet: SnippetEntry, app: tauri::AppHandle) -> Result<(), DbError> {
+    let dir = app_data_dir(&app)?;
+    let mut list = history::load_snippets(&dir);
+    let mut snippet = snippet;
+    if snippet.id.is_empty() {
+        snippet.id = SNIPPET_IDS.next();
+    }
+    match list.iter_mut().find(|s| s.id == snippet.id) {
+        Some(existing) => *existing = snippet,
+        None => list.push(snippet),
+    }
+    history::save_snippets(&dir, &list).map_err(|e| DbError::Io(e.to_string()))
 }
 
 #[tauri::command]
