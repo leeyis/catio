@@ -5,7 +5,7 @@ export type Theme = 'dawn' | 'amber' | 'grove'
 export interface Tweaks {
   theme: Theme
   density: 'compact' | 'comfortable'
-  aiForm: 'side'
+  aiForm: 'side' | 'floating' | 'bar'
   panelW: number
   vaultMode: 'grid' | 'list' | 'tree'
 }

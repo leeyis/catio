@@ -376,5 +376,13 @@
     "themeDawnSub": "Dawn · 明亮通透",
     "themeAmberSub": "Amber · 暖笺香槟",
     "themeGroveSub": "Grove · 荧林静默"
+  },
+  "app": {
+    "noSessions": "没有打开的会话",
+    "noSessionsHint": "从左侧 Vault 选择一个主机或数据库开始",
+    "sqlAssistant": "SQL 助手",
+    "shellAssistant": "Shell 助手",
+    "cmdBarSqlPlaceholder": "生成 / 优化 / 解释 SQL · {{target}}…  ⌘J",
+    "cmdBarShellPlaceholder": "生成 shell 命令 · {{target}}…  ⌘J"
   }
 }

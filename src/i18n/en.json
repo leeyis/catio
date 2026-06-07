@@ -376,5 +376,13 @@
     "themeDawnSub": "Dawn · Clear & Bright",
     "themeAmberSub": "Amber · Warm Champagne",
     "themeGroveSub": "Grove · Silent Forest"
+  },
+  "app": {
+    "noSessions": "No open sessions",
+    "noSessionsHint": "Select a host or database from the Vault on the left to get started",
+    "sqlAssistant": "SQL assistant",
+    "shellAssistant": "Shell assistant",
+    "cmdBarSqlPlaceholder": "Generate / optimize / explain SQL · {{target}}…  ⌘J",
+    "cmdBarShellPlaceholder": "Generate shell command · {{target}}…  ⌘J"
   }
 }
