@@ -83,9 +83,11 @@ impl Driver for ElasticsearchDriver {
         }
 
         let path = format!("/{}/_search", index);
+        // Request one extra hit so we can detect truncation without counting == max_rows.
+        let fetch_size = (max_rows as u64) + 1;
         let body = serde_json::json!({
             "from": 0,
-            "size": max_rows,
+            "size": fetch_size,
             "sort": ["_doc"],
         });
         let resp = self.http
@@ -101,9 +103,16 @@ impl Driver for ElasticsearchDriver {
             .await
             .map_err(|e| DbError::QueryFailed(format!("Elasticsearch parse error: {e}")))?;
 
+        // Detect truncation via the extra hit, then clamp to max_rows.
+        let mut hits = result.hits.hits;
+        let truncated = hits.len() > max_rows as usize;
+        if truncated {
+            hits.truncate(max_rows as usize);
+        }
+
         // Build column union from all _source docs + always include _id first
         let mut all_keys: Vec<String> = vec!["_id".to_string()];
-        let docs: Vec<serde_json::Map<String, serde_json::Value>> = result.hits.hits
+        let docs: Vec<serde_json::Map<String, serde_json::Value>> = hits
             .into_iter()
             .map(|hit| {
                 let mut doc = serde_json::Map::new();
@@ -131,8 +140,6 @@ impl Driver for ElasticsearchDriver {
                 doc.get(k).cloned().unwrap_or(serde_json::Value::Null)
             }).collect()
         }).collect();
-
-        let truncated = rows.len() >= max_rows as usize;
 
         Ok(QueryResult { columns, rows, rows_affected: None, truncated })
     }
