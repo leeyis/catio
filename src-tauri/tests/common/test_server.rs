@@ -226,14 +226,19 @@ async fn start_inner(sftp_root: Option<PathBuf>) -> std::net::SocketAddr {
 // （跨平台，含 Windows），故客户端 is_dir()/len() 正确。
 
 use russh_sftp::protocol::{
-    Attrs as SftpStatAttrs, File as SftpFile, FileAttributes as SftpAttrs, Handle as SftpHandle,
-    Name as SftpName, Status as SftpStatus, StatusCode, Version as SftpVersion,
+    Attrs as SftpStatAttrs, Data as SftpData, File as SftpFile, FileAttributes as SftpAttrs,
+    Handle as SftpHandle, Name as SftpName, OpenFlags, Status as SftpStatus, StatusCode,
+    Version as SftpVersion,
 };
 
 struct SftpBackend {
     root: PathBuf,
     /// handle(绝对路径) → 是否已发送过该目录的条目。
     read_done: HashSet<String>,
+    /// 打开的文件句柄："f:<n>" → (真实路径, std::fs::File)。B2 上传/下载用。
+    files: HashMap<String, (PathBuf, std::fs::File)>,
+    /// 文件句柄自增计数。
+    next_file: u64,
 }
 
 impl SftpBackend {
@@ -241,16 +246,24 @@ impl SftpBackend {
         Self {
             root,
             read_done: HashSet::new(),
+            files: HashMap::new(),
+            next_file: 0,
         }
     }
 
     /// 把客户端给的路径解析为真实文件系统路径。"." / "/" / "" → root；
-    /// 其余按绝对路径原样使用（list 测试传 root 的绝对路径）。
+    /// 绝对路径原样使用（list 测试传 root 的绝对路径）；相对路径 join 到 root
+    /// （B2/B3 测试传 "uploaded.bin"、"newdir" 之类裸文件名）。
     fn resolve(&self, path: &str) -> PathBuf {
         if path.is_empty() || path == "." || path == "/" {
             self.root.clone()
         } else {
-            PathBuf::from(path)
+            let p = PathBuf::from(path);
+            if p.is_absolute() {
+                p
+            } else {
+                self.root.join(p)
+            }
         }
     }
 
@@ -330,7 +343,121 @@ impl russh_sftp::server::Handler for SftpBackend {
         self.stat(id, path).await
     }
 
-    async fn close(&mut self, id: u32, _handle: String) -> Result<SftpStatus, Self::Error> {
+    // ── B2: 文件读写（open/read/write/fstat）────────────────────────────────
+    async fn open(
+        &mut self,
+        id: u32,
+        filename: String,
+        pflags: OpenFlags,
+        _attrs: SftpAttrs,
+    ) -> Result<SftpHandle, Self::Error> {
+        let path = self.resolve(&filename);
+        let mut opts = std::fs::OpenOptions::new();
+        if pflags.contains(OpenFlags::READ) {
+            opts.read(true);
+        }
+        if pflags.contains(OpenFlags::WRITE) {
+            opts.write(true);
+        }
+        if pflags.contains(OpenFlags::CREATE) {
+            opts.create(true);
+        }
+        if pflags.contains(OpenFlags::TRUNCATE) {
+            opts.truncate(true);
+        }
+        if pflags.contains(OpenFlags::APPEND) {
+            opts.append(true);
+        }
+        // 纯读时未设置任何写位 → 确保至少能读。
+        if !pflags.contains(OpenFlags::READ) && !pflags.contains(OpenFlags::WRITE) {
+            opts.read(true);
+        }
+        let f = opts.open(&path).map_err(|_| StatusCode::Failure)?;
+        let handle = format!("f:{}", self.next_file);
+        self.next_file += 1;
+        self.files.insert(handle.clone(), (path, f));
+        Ok(SftpHandle { id, handle })
+    }
+
+    async fn read(
+        &mut self,
+        id: u32,
+        handle: String,
+        offset: u64,
+        len: u32,
+    ) -> Result<SftpData, Self::Error> {
+        use std::io::{Read, Seek, SeekFrom};
+        let (_, f) = self.files.get_mut(&handle).ok_or(StatusCode::Failure)?;
+        f.seek(SeekFrom::Start(offset))
+            .map_err(|_| StatusCode::Failure)?;
+        let mut buf = vec![0u8; len as usize];
+        let n = f.read(&mut buf).map_err(|_| StatusCode::Failure)?;
+        if n == 0 {
+            return Err(StatusCode::Eof);
+        }
+        buf.truncate(n);
+        Ok(SftpData { id, data: buf })
+    }
+
+    async fn write(
+        &mut self,
+        id: u32,
+        handle: String,
+        offset: u64,
+        data: Vec<u8>,
+    ) -> Result<SftpStatus, Self::Error> {
+        use std::io::{Seek, SeekFrom, Write};
+        let (_, f) = self.files.get_mut(&handle).ok_or(StatusCode::Failure)?;
+        f.seek(SeekFrom::Start(offset))
+            .map_err(|_| StatusCode::Failure)?;
+        f.write_all(&data).map_err(|_| StatusCode::Failure)?;
+        Ok(Self::ok_status(id))
+    }
+
+    async fn fstat(&mut self, id: u32, handle: String) -> Result<SftpStatAttrs, Self::Error> {
+        let (path, _) = self.files.get(&handle).ok_or(StatusCode::Failure)?;
+        let m = std::fs::metadata(path).map_err(|_| StatusCode::NoSuchFile)?;
+        Ok(SftpStatAttrs {
+            id,
+            attrs: SftpAttrs::from(&m),
+        })
+    }
+
+    // ── B3: mkdir / rmdir / remove / rename ─────────────────────────────────
+    async fn mkdir(
+        &mut self,
+        id: u32,
+        path: String,
+        _attrs: SftpAttrs,
+    ) -> Result<SftpStatus, Self::Error> {
+        std::fs::create_dir(self.resolve(&path)).map_err(|_| StatusCode::Failure)?;
+        Ok(Self::ok_status(id))
+    }
+
+    async fn rmdir(&mut self, id: u32, path: String) -> Result<SftpStatus, Self::Error> {
+        std::fs::remove_dir(self.resolve(&path)).map_err(|_| StatusCode::Failure)?;
+        Ok(Self::ok_status(id))
+    }
+
+    async fn remove(&mut self, id: u32, filename: String) -> Result<SftpStatus, Self::Error> {
+        std::fs::remove_file(self.resolve(&filename)).map_err(|_| StatusCode::Failure)?;
+        Ok(Self::ok_status(id))
+    }
+
+    async fn rename(
+        &mut self,
+        id: u32,
+        oldpath: String,
+        newpath: String,
+    ) -> Result<SftpStatus, Self::Error> {
+        std::fs::rename(self.resolve(&oldpath), self.resolve(&newpath))
+            .map_err(|_| StatusCode::Failure)?;
+        Ok(Self::ok_status(id))
+    }
+
+    async fn close(&mut self, id: u32, handle: String) -> Result<SftpStatus, Self::Error> {
+        // 释放已打开的文件句柄（目录句柄不在该表里，忽略即可）。
+        self.files.remove(&handle);
         Ok(Self::ok_status(id))
     }
 }
