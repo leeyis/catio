@@ -25,6 +25,8 @@ export interface DataGridProps {
   onRefresh?: () => void
   /** When true, `truncated` badge is shown (server reported a capped result). */
   truncated?: boolean
+  /** Error message from the parent's data fetch — surfaced inline in the status bar. */
+  loadError?: string
 }
 
 const thStyle: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 6, padding: '0 10px', height: 34, cursor: 'pointer', borderRight: '1px solid var(--border-hairline)', userSelect: 'none' }
@@ -41,7 +43,7 @@ function colIcon(col: ResultColumn): string {
   return 'type'
 }
 
-export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortable', writable = true, connId, table = 'orders', schema, sql, onRefresh, truncated }: DataGridProps) {
+export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortable', writable = true, connId, table = 'orders', schema, sql, onRefresh, truncated, loadError }: DataGridProps) {
   const { t } = useTranslation()
   const [sel, setSel] = useState({ r: 2, c: 3 })
   const [sortCol, setSortCol] = useState<string | null>(null)
@@ -58,6 +60,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   const [preview, setPreview] = useState<{ reqs: EditRequest[]; sql: string } | null>(null)
   const [applying, setApplying] = useState(false)
   const [applyMsg, setApplyMsg] = useState<string | null>(null)
+  const [applyErr, setApplyErr] = useState<string | null>(null)
   const rowH = density === 'compact' ? 30 : 36
   const PAGE = pageSize
 
@@ -158,12 +161,14 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
     // Render each statement; previewDml returns a stub outside Tauri.
     const stmts = await Promise.all(reqs.map(r => previewDml(connId ?? '', r)))
     setApplyMsg(null)
+    setApplyErr(null)
     setPreview({ reqs, sql: stmts.join(';\n') + ';' })
   }
 
   async function confirmApply() {
     if (!preview) return
     setApplying(true)
+    setApplyErr(null)
     try {
       const affected = await applyEdits(connId ?? '', preview.reqs)
       setApplyMsg(t('dbviews.rowsAffected', { count: affected }))
@@ -175,6 +180,9 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
         setServerTruncated(!!res.truncated)
       }
       onRefresh?.()
+    } catch (e) {
+      // Surface the failure inline in the preview gate instead of failing silently.
+      setApplyErr(t('dbviews.applyError', { message: e instanceof Error ? e.message : String(e) }))
     } finally {
       setApplying(false)
     }
@@ -282,6 +290,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
           <span>{t('dbviews.cell')}: <span className="mono" style={{ color: 'var(--text-secondary)' }}>{(() => { const entry = sorted.find(e => e.origIdx === sel.r); const col = columns[sel.c]; if (!entry || !col) return '—'; const k = cellKey(sel.r, col.name); return String(edits[k] !== undefined ? edits[k] : entry.row[sel.c]); })()}</span></span>
           {showTruncated && <span className="chip" style={{ background: 'color-mix(in srgb, var(--signal-amber) 14%, transparent)', color: 'var(--signal-amber)', fontWeight: 600 }}>{t('dbviews.truncated')}</span>}
           {applyMsg && <span style={{ color: 'var(--signal-green)' }}>{applyMsg}</span>}
+          {loadError && <span className="row gap6" style={{ color: 'var(--danger-fg)' }}><Icon name="alert-triangle" size={12} /> {t('dbviews.loadError', { message: loadError })}</span>}
         </div>
         <div className="row gap8">
           <span className="mono" style={{ color: 'var(--signal-green)' }}>● 0 new</span>
@@ -311,6 +320,12 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
             </div>
             <div className="col" style={{ gap: 10, padding: '16px 20px 20px' }}>
               <pre className="mono" style={{ margin: 0, padding: '12px 14px', borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', color: 'var(--text-primary)', fontSize: 12.5, lineHeight: 1.6, maxHeight: 260, overflow: 'auto', whiteSpace: 'pre-wrap' }}>{preview.sql}</pre>
+              {applyErr && (
+                <div className="row gap6" style={{ padding: '9px 12px', borderRadius: 10, border: '1px solid var(--danger-border)', background: 'var(--danger-soft)', color: 'var(--danger-fg)', fontSize: 12 }}>
+                  <Icon name="alert-triangle" size={14} style={{ flex: 'none' }} />
+                  <span>{applyErr}</span>
+                </div>
+              )}
               <div className="row gap8" style={{ justifyContent: 'flex-end', marginTop: 2 }}>
                 <Btn variant="ghost" onClick={() => setPreview(null)} disabled={applying}>{t('dbviews.cancel')}</Btn>
                 <Btn variant="primary" icon="check" onClick={confirmApply} disabled={applying}>{applying ? t('dbviews.applying') : t('dbviews.applyChanges')}</Btn>

@@ -114,7 +114,9 @@
     "applying": "应用中…",
     "rowsAffected": "影响 {{count}} 行",
     "pageSize": "行数",
-    "truncated": "已截断"
+    "truncated": "已截断",
+    "applyError": "应用失败：{{message}}",
+    "loadError": "加载数据失败：{{message}}"
   },
   "workbench": {
     "newTab": "新建标签",

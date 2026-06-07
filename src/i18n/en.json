@@ -114,7 +114,9 @@
     "applying": "Applying…",
     "rowsAffected": "{{count}} row(s) affected",
     "pageSize": "Rows",
-    "truncated": "truncated"
+    "truncated": "truncated",
+    "applyError": "Apply failed: {{message}}",
+    "loadError": "Failed to load rows: {{message}}"
   },
   "workbench": {
     "newTab": "New tab",

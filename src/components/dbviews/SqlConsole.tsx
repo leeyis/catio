@@ -1,9 +1,11 @@
-/* ported from ref-ui/_extract/blob5.txt — verbatim per plan T1-T7 */
+/* ported from ref-ui/_extract/blob5.txt — verbatim per plan T1-T7; E6 wires the live query path */
 import { useState, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn } from '../atoms'
 import { useData } from '../../state/DataContext'
+import { runQuery } from '../../services/db'
+import type { ResultColumn } from '../../services/types'
 import { SqlEditor } from './SqlEditor'
 import { DataGrid } from './DataGrid'
 
@@ -11,9 +13,13 @@ export interface SqlConsoleProps {
   density?: 'comfortable' | 'compact'
   fresh?: boolean
   queryN?: number
+  /** Capabilities of the active connection (writable gates the result grid's editing). */
+  writable?: boolean
+  /** When set, Run executes the typed SQL against the live backend instead of mock. */
+  connId?: string
 }
 
-export function SqlConsole({ density, fresh, queryN }: SqlConsoleProps) {
+export function SqlConsole({ density, fresh, queryN, writable = true, connId }: SqlConsoleProps) {
   const { t } = useTranslation()
   const D = useData()
   const [code, setCode] = useState(
@@ -22,8 +28,22 @@ export function SqlConsole({ density, fresh, queryN }: SqlConsoleProps) {
       : D.sampleSQL
   )
   const [phase, setPhase] = useState<'idle' | 'running' | 'done'>(fresh ? 'idle' : 'done')
+  // Live result of the last successful run (only used when connId is set).
+  const [result, setResult] = useState<{ columns: ResultColumn[]; rows: unknown[][]; sql: string } | null>(null)
+  const [runErr, setRunErr] = useState<string | null>(null)
 
   function run() {
+    setRunErr(null)
+    if (connId) {
+      // Live path: execute the typed SQL against the backend.
+      setPhase('running')
+      const sql = code
+      runQuery(connId, sql)
+        .then(res => { setResult({ columns: res.columns, rows: res.rows, sql }); setPhase('done') })
+        .catch(e => { setRunErr(e instanceof Error ? e.message : String(e)); setPhase('done') })
+      return
+    }
+    // Mock path: unchanged demo timing.
     setPhase('running')
     setTimeout(() => setPhase('done'), 450)
   }
@@ -72,10 +92,17 @@ export function SqlConsole({ density, fresh, queryN }: SqlConsoleProps) {
               <span style={{ fontSize: 13 }}>{t('dbviews.runToSeeResults')}</span>
               <span style={{ fontSize: 11.5 }}>{t('dbviews.runHint')}</span>
             </div>
-          : <DataGrid
-              columns={D.ordersColumns.map(c => ({ name: c.name, type: c.type, pk: c.pk, fk: c.fk, icon: c.icon }))}
-              rows={D.ordersRows.map(r => D.ordersColumns.map(c => (r as unknown as Record<string, unknown>)[c.name]))}
-              statusTones={D.statusTones} density={density} />}
+          : (connId
+              ? <DataGrid
+                  columns={result?.columns ?? []}
+                  rows={result?.rows ?? []}
+                  statusTones={D.statusTones} density={density}
+                  writable={writable} connId={connId} sql={result?.sql}
+                  loadError={runErr ?? undefined} />
+              : <DataGrid
+                  columns={D.ordersColumns.map(c => ({ name: c.name, type: c.type, pk: c.pk, fk: c.fk, icon: c.icon }))}
+                  rows={D.ordersRows.map(r => D.ordersColumns.map(c => (r as unknown as Record<string, unknown>)[c.name]))}
+                  statusTones={D.statusTones} density={density} />)}
       </div>
     </div>
   )

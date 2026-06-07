@@ -64,6 +64,31 @@ describe('DataGrid generic rows', () => {
     await waitFor(() => expect(applyEdits).toHaveBeenCalled())
   })
 
+  it('surfaces a failed apply in the preview modal instead of failing silently', async () => {
+    previewDml.mockResolvedValue('UPDATE orders SET name = $1 WHERE id = $2')
+    applyEdits.mockRejectedValue(new Error('permission denied for table orders'))
+    const columns: ResultColumn[] = [
+      { name: 'id', type: 'int', pk: true },
+      { name: 'name', type: 'text' },
+    ]
+    const rows: unknown[][] = [[1, 'alice'], [2, 'bob']]
+    wrap(<DataGrid columns={columns} rows={rows} writable connId="c1" table="orders" />)
+
+    const cell = screen.getByText('alice')
+    fireEvent.doubleClick(cell)
+    const input = screen.getByDisplayValue('alice')
+    fireEvent.change(input, { target: { value: 'ALICE' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+
+    fireEvent.click(screen.getByText(/Save edits/i))
+    await screen.findByText(/Review changes/i)
+    fireEvent.click(screen.getByText(/^Apply$/i))
+
+    // error message rendered; modal stays open (preview SQL still visible)
+    expect(await screen.findByText(/permission denied for table orders/i)).toBeInTheDocument()
+    expect(screen.getByText(/UPDATE orders SET name/i)).toBeInTheDocument()
+  })
+
   it('read-only engines (writable=false) hide the Save affordance', () => {
     const columns: ResultColumn[] = [{ name: 'id', type: 'int', pk: true }]
     const rows: unknown[][] = [[1], [2]]
