@@ -77,8 +77,9 @@ impl Driver for SqliteDriver {
         let col_count = stmt.column_count();
 
         // Non-row-returning statement (DDL, INSERT, UPDATE, DELETE)
+        // Use the already-prepared statement to avoid recompiling the SQL.
         if col_count == 0 {
-            let affected = conn.execute(sql, [])
+            let affected = stmt.execute([])
                 .map_err(|e| DbError::QueryFailed(e.to_string()))?;
             return Ok(QueryResult {
                 columns: vec![],
@@ -176,6 +177,47 @@ impl Driver for SqliteDriver {
         let fk_cols: std::collections::HashSet<String> =
             fk_rows.iter().map(|(col, _, _, _, _)| col.clone()).collect();
 
+        // ---- indexes via PRAGMA index_list + index_info ----
+        // Collected before columns so we can build uni_cols for key annotation.
+        let idx_list_sql = format!("PRAGMA index_list(\"{}\")", safe_table);
+        let mut idx_stmt = conn.prepare(&idx_list_sql)
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+
+        let idx_list: Vec<(String, bool)> = idx_stmt
+            .query_map([], |row| {
+                let name: String = row.get("name")?;
+                let unique: i32 = row.get("unique")?;
+                Ok((name, unique != 0))
+            })
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+
+        let mut indexes: Vec<IndexDef> = Vec::new();
+        // Columns that belong to a single-column UNIQUE index (for "UNI" key annotation).
+        let mut uni_cols: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (idx_name, unique) in idx_list {
+            let safe_idx = idx_name.replace('"', "\"\"");
+            let col_info_sql = format!("PRAGMA index_info(\"{}\")", safe_idx);
+            let mut ci_stmt = conn.prepare(&col_info_sql)
+                .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+            let col_names: Vec<String> = ci_stmt
+                .query_map([], |row| row.get::<_, String>("name"))
+                .map_err(|e| DbError::QueryFailed(e.to_string()))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+            // A single-column unique index makes that column "UNI".
+            if unique && col_names.len() == 1 {
+                uni_cols.insert(col_names[0].clone());
+            }
+            indexes.push(IndexDef {
+                name: idx_name,
+                columns: col_names.join(", "),
+                unique,
+                method: "btree".into(),
+            });
+        }
+
         // ---- columns via PRAGMA table_info ----
         let col_sql = format!("PRAGMA table_info(\"{}\")", safe_table);
         let mut col_stmt = conn.prepare(&col_sql)
@@ -195,10 +237,13 @@ impl Driver for SqliteDriver {
             .map_err(|e| DbError::QueryFailed(e.to_string()))?
             .into_iter()
             .map(|(name, type_name, notnull, default, pk)| {
+                // Key precedence: PK > FK > UNI > ""
                 let key = if pk > 0 {
                     "PK"
                 } else if fk_cols.contains(&name) {
                     "FK"
+                } else if uni_cols.contains(&name) {
+                    "UNI"
                 } else {
                     ""
                 };
@@ -211,40 +256,6 @@ impl Driver for SqliteDriver {
                 }
             })
             .collect();
-
-        // ---- indexes via PRAGMA index_list + index_info ----
-        let idx_list_sql = format!("PRAGMA index_list(\"{}\")", safe_table);
-        let mut idx_stmt = conn.prepare(&idx_list_sql)
-            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
-
-        let idx_list: Vec<(String, bool)> = idx_stmt
-            .query_map([], |row| {
-                let name: String = row.get("name")?;
-                let unique: i32 = row.get("unique")?;
-                Ok((name, unique != 0))
-            })
-            .map_err(|e| DbError::QueryFailed(e.to_string()))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
-
-        let mut indexes: Vec<IndexDef> = Vec::new();
-        for (idx_name, unique) in idx_list {
-            let safe_idx = idx_name.replace('"', "\"\"");
-            let col_info_sql = format!("PRAGMA index_info(\"{}\")", safe_idx);
-            let mut ci_stmt = conn.prepare(&col_info_sql)
-                .map_err(|e| DbError::QueryFailed(e.to_string()))?;
-            let col_names: Vec<String> = ci_stmt
-                .query_map([], |row| row.get::<_, String>("name"))
-                .map_err(|e| DbError::QueryFailed(e.to_string()))?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| DbError::QueryFailed(e.to_string()))?;
-            indexes.push(IndexDef {
-                name: idx_name,
-                columns: col_names.join(", "),
-                unique,
-                method: "btree".into(),
-            });
-        }
 
         // ---- foreign keys ----
         let fks: Vec<ForeignKeyDef> = fk_rows.into_iter().map(|(col, ref_table, ref_col, on_delete, on_update)| {
