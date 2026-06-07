@@ -6,6 +6,7 @@ use serde_json::Value;
 #[serde(rename_all = "camelCase")]
 pub struct ColumnInfo {
     pub name: String,
+    #[serde(rename = "type")]
     pub type_name: String,
     pub pk: bool,
 }
