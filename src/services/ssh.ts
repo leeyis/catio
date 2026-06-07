@@ -152,8 +152,20 @@ export async function tunnelClose(tunnelId: string): Promise<void> {
   return tauriInvoke('tunnel_close', { tunnelId })
 }
 
-export async function getMonitor(_id: string): Promise<Monitor> {
+export async function getMonitor(_id?: string): Promise<Monitor> {
   return DATA.monitor
+}
+
+export async function monitorStart(sessionId: string, intervalMs = 2000): Promise<void> {
+  return tauriInvoke('monitor_start', { sessionId, intervalMs })
+}
+
+export async function monitorStop(sessionId: string): Promise<void> {
+  return tauriInvoke('monitor_stop', { sessionId })
+}
+
+export async function multiexecRun(sessionIds: string[], cmd: string): Promise<string> {
+  return tauriInvoke<string>('multiexec_run', { sessionIds, cmd })
 }
 
 export async function getTermBuffer(_id: string): Promise<TermLine[]> {

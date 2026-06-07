@@ -7,13 +7,20 @@ import '@xterm/xterm/css/xterm.css'
 import { Icon } from '../Icon'
 import { ConnGlyph, StatusDot } from '../atoms'
 import { useData } from '../../state/DataContext'
-import { termOpen, termWrite, termResize, termClose, listen, getTermBuffer } from '../../services/ssh'
-import type { Connection, TermLine as TermLineType } from '../../services/types'
+import { termOpen, termWrite, termResize, termClose, listen, getTermBuffer, multiexecRun } from '../../services/ssh'
+import type { Connection, TermLine as TermLineType, MultiExecTarget } from '../../services/types'
 
 export interface TerminalPaneProps {
   conn: Connection | null
   /** When set AND running under Tauri, the terminal is "live" (wired to term_* IPC). */
   sessionId?: string
+  /**
+   * ORCH seam: maps a connection id to its live session id.
+   * When provided, the Multi-Exec broadcast bar uses real multiexecRun IPC.
+   * When absent (pre-ORCH), broadcast stays UI-only (existing behavior).
+   * ORCH will pass this once the connection→session map is managed centrally.
+   */
+  resolveSessionId?: (connId: string) => string | undefined
 }
 
 // Tauri detection — mirror services/ssh.ts guard (not exported there).
@@ -58,7 +65,11 @@ function termLinesToText(lines: TermLineType[]): string {
     .join('\r\n')
 }
 
-export function TerminalPane({ conn, sessionId }: TerminalPaneProps) {
+// Per-target state for an active multiexec run (held but not yet rendered — ORCH will surface it).
+// Shape matches MultiExecTarget so the ORCH task can pass it directly to a results panel.
+type MxRunState = Record<string, MultiExecTarget>
+
+export function TerminalPane({ conn, sessionId, resolveSessionId }: TerminalPaneProps) {
   const { t } = useTranslation()
   const D = useData()
   const [broadcast, setBroadcast] = useState(false)
@@ -76,9 +87,77 @@ export function TerminalPane({ conn, sessionId }: TerminalPaneProps) {
   // prevent double-termClose and dead-channel keystroke writes.
   const chanIdRef = useRef<string | null>(null)
   const [selBar, setSelBar] = useState<{ left: number; top: number; text: string } | null>(null)
+  // Multiexec run state — per-target progress; held here for ORCH to consume via a future prop/callback.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const [_mxRunState, setMxRunState] = useState<MxRunState>({})
 
   const host = conn ? (conn.sub.split(' ')[0].replace('ssh ', '')) : 'jump@db-bastion'
   const live = !!sessionId && isTauri()
+
+  /**
+   * broadcastCommand — sends `cmd` to all selected broadcast hosts.
+   *
+   * When `resolveSessionId` is provided (ORCH seam), resolves connection ids to
+   * session ids and calls multiexecRun. Also includes the current session if live.
+   * When `resolveSessionId` is absent, falls back to UI-only broadcast (no IPC) —
+   * the terminal itself will send the command via the existing onData handler.
+   *
+   * ORCH: call this from the keystroke handler / send button once the session
+   * map is available. e.g.: broadcastCommand(currentLine) before termWrite.
+   */
+  // ORCH seam: call broadcastCommandRef.current(cmd) from the keystroke handler once
+  // resolveSessionId is wired. Stored in a ref so the caller always has the latest closure.
+  const broadcastCommandRef = useRef<(cmd: string) => Promise<void>>(async () => { /* pre-ORCH no-op */ })
+  broadcastCommandRef.current = async (cmd: string) => {
+    if (!resolveSessionId) {
+      // Pre-ORCH: broadcast is UI-only; the keystroke handler already writes to the
+      // current terminal. No multiexec IPC yet.
+      return
+    }
+    const targetIds: string[] = []
+    // Include the current session if live.
+    if (sessionId && live) targetIds.push(sessionId)
+    // Resolve selected broadcast hosts to session ids.
+    for (const connId of mxHosts) {
+      const sid = resolveSessionId(connId)
+      if (sid) targetIds.push(sid)
+    }
+    if (targetIds.length === 0) return
+
+    // Initialise run state for all targets.
+    const initial: MxRunState = {}
+    for (const connId of mxHosts) {
+      initial[connId] = { id: connId, name: D.byId[connId]?.name ?? connId, state: 'running', out: '' }
+    }
+    setMxRunState(initial)
+
+    try {
+      const runId = await multiexecRun(targetIds, cmd)
+      const unlisten = await listen<{ sessionId: string; state: 'running' | 'done' | 'error'; chunk?: string }>(
+        'multiexec://' + runId,
+        (ev) => {
+          setMxRunState(prev => {
+            // Find the connId that maps to this sessionId.
+            const connId = mxHosts.find(id => resolveSessionId(id) === ev.sessionId) ?? ev.sessionId
+            const existing = prev[connId] ?? { id: connId, name: connId, state: 'running', out: '' }
+            return {
+              ...prev,
+              [connId]: {
+                ...existing,
+                state: ev.state,
+                out: existing.out + (ev.chunk ?? ''),
+              },
+            }
+          })
+        },
+      )
+      // Unlisten once all targets have reported done or error.
+      // A 30-second timeout is a safe fallback; ORCH can replace this.
+      setTimeout(() => unlisten(), 30_000)
+    } catch {
+      // best-effort; ORCH will add proper error surfaces
+    }
+  }
 
   // ---- xterm lifecycle (once per session/chan) ----
   useEffect(() => {

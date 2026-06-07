@@ -1,13 +1,24 @@
 /* ported from ref-ui/_extract/blob9.txt — verbatim per plan T1-T7 */
+import { useState, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { IconBtn } from '../atoms'
 import { useData } from '../../state/DataContext'
-import type { Connection, Gpu } from '../../services/types'
+import type { Connection, Gpu, Monitor } from '../../services/types'
 import { PanelShell } from './PanelShell'
+import { monitorStart, monitorStop, listen } from '../../services/ssh'
+
+// Mirror the Tauri guard used in SftpPanel / TerminalPane.
+function isTauriEnv(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    ('__TAURI_INTERNALS__' in window || '__TAURI__' in window)
+  )
+}
 
 export interface MonitorPanelProps {
   onClose: () => void
-  conn?: Connection // reserved for future use; monitor data comes from useData()
+  conn?: Connection // reserved for future use
+  sessionId?: string
 }
 
 interface SparkProps {
@@ -16,9 +27,12 @@ interface SparkProps {
 }
 
 function Spark({ data, color }: SparkProps) {
-  const max = Math.max(...data, 100)
+  // Guard: need ≥1 point; with a single point treat it as a flat line at x=0..w.
+  const safeData = data.length > 0 ? data : [0]
+  const max = Math.max(...safeData, 100)
   const w = 100, h = 32
-  const pts = data.map((v, i) => `${(i / (data.length - 1)) * w},${h - (v / max) * h}`).join(' ')
+  const denom = safeData.length > 1 ? safeData.length - 1 : 1
+  const pts = safeData.map((v, i) => `${(i / denom) * w},${h - (v / max) * h}`).join(' ')
   return (
     <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" style={{ width: '100%', height: 36 }}>
       <polyline points={pts} fill="none" stroke={color} strokeWidth="1.6" vectorEffect="non-scaling-stroke" />
@@ -107,12 +121,47 @@ function GpuCard({ g }: GpuCardProps) {
   )
 }
 
-export function MonitorPanel({ onClose, conn: _conn }: MonitorPanelProps) {
+export function MonitorPanel({ onClose, conn: _conn, sessionId }: MonitorPanelProps) {
   const { t } = useTranslation()
   const D = useData()
-  const mon = D.monitor
+  const [mon, setMon] = useState<Monitor>(D.monitor)
+
+  useEffect(() => {
+    if (!sessionId || !isTauriEnv()) {
+      // Demo mode: leave D.monitor as-is (pixel-identical)
+      setMon(D.monitor)
+      return
+    }
+
+    let unlisten: (() => void) | null = null
+    let active = true
+
+    monitorStart(sessionId, 2000).catch(() => { /* ignore if already running */ })
+    listen<Monitor>('monitor://' + sessionId, (payload) => {
+      if (active) setMon(payload)
+    }).then(fn => {
+      if (!active) { fn(); return }
+      unlisten = fn
+    }).catch(() => { /* no-op outside Tauri */ })
+
+    return () => {
+      active = false
+      if (unlisten) unlisten()
+      monitorStop(sessionId).catch(() => { /* best-effort */ })
+    }
+    // Re-run when sessionId changes (new connection)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId])
+
+  // Refresh button: in live mode restart the polling interval; in demo mode no-op.
+  function handleRefresh() {
+    if (sessionId && isTauriEnv()) {
+      monitorStart(sessionId, 2000).catch(() => {})
+    }
+  }
+
   return (
-    <PanelShell icon="gauge" title={t('panels.monitorTitle')} sub={mon.host + ' · ' + t('panels.monitorRealtime')} onClose={onClose} actions={<IconBtn name="refresh-cw" size={15} variant="bare" />}>
+    <PanelShell icon="gauge" title={t('panels.monitorTitle')} sub={mon.host + ' · ' + t('panels.monitorRealtime')} onClose={onClose} actions={<IconBtn name="refresh-cw" size={15} variant="bare" onClick={handleRefresh} />}>
       <div className="grow" style={{ overflowY: 'auto', padding: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
           <Stat label={t('panels.cpu')} val={mon.cpu[mon.cpu.length - 1]} unit="%" data={mon.cpu} color="var(--signal-blue)" />
