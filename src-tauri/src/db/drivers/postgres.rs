@@ -9,6 +9,8 @@ use crate::db::result::QueryResult;
 
 pub struct PostgresDriver {
     pool: Pool,
+    // reserved for family dialect dispatch (cockroachdb/redshift/etc.)
+    #[allow(dead_code)]
     profile: Option<String>,
 }
 
@@ -393,6 +395,7 @@ impl Driver for PostgresDriver {
                AND pk.ordinal_position  = fk.position_in_unique_constraint \
              WHERE tc.constraint_type = 'FOREIGN KEY' \
                AND fk.table_schema = $1 \
+               AND pk.table_schema = $1 \
              ORDER BY fk.table_name, fk.constraint_name, fk.ordinal_position",
             &[&schema],
         ).await.map_err(|e| DbError::QueryFailed(e.to_string()))?;

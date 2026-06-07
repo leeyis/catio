@@ -104,6 +104,21 @@ async fn pg_introspects_schema_and_structure() {
         "expected child->parent relation, got: {:?}", rels
     );
 
+    // table_structure: catio_it_child parent_id column must be FK, and fks must reference catio_it_parent
+    let child = driver.table_structure("public", "catio_it_child").await.unwrap();
+    assert!(
+        child.columns.iter().any(|c| c.name == "parent_id" && c.key == "FK"),
+        "expected parent_id FK, got: {:?}", child.columns
+    );
+    assert!(
+        !child.fks.is_empty(),
+        "expected non-empty fks for catio_it_child, got empty"
+    );
+    assert!(
+        child.fks.iter().any(|fk| fk.references.contains("catio_it_parent")),
+        "expected fks to reference catio_it_parent, got: {:?}", child.fks
+    );
+
     // Cleanup
     driver.query("DROP TABLE catio_it_child", 1).await.ok();
     driver.query("DROP TABLE catio_it_parent", 1).await.ok();
