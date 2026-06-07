@@ -1,6 +1,9 @@
 //! Catio database backend (sub-project 3). Multi-engine via Driver trait.
 //! Per-dialect logic adapted from dbx crates/dbx-core/src, Apache-2.0.
 
+pub mod ids;
+pub mod result;
+
 use serde::{Deserialize, Serialize};
 
 /// 序列化成前端可判别标签联合：{ kind: "ConnectFailed", message: "..." }
