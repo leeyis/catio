@@ -20,6 +20,53 @@ use russh::keys::ssh_key::PublicKey;
 pub const TEST_USER: &str = "tester";
 pub const TEST_PW: &str = "catio-test-pw";
 
+/// Canned, deterministic monitor-command output for the agentless monitor (D2).
+/// Returns `Some(stdout)` for exactly the known monitor commands; `None` for
+/// anything else (so the echo path is preserved for A7/D3). nvidia-smi is handled
+/// separately (no stdout + non-zero exit) to simulate a GPU-less host.
+///
+/// Fixed values that monitor tests assert on:
+///   * /proc/stat → aggregate `cpu` + `cpu0`/`cpu1` → 2 cores.
+///   * /proc/meminfo → MemTotal 16384000 kB, MemAvailable 8192000 kB → 50% used.
+///   * df -P / → `/` row at 42%.
+///   * ps → 3 rows, first = pid 1234 "firefox".
+fn canned_monitor_output(cmd: &str) -> Option<String> {
+    let out = match cmd {
+        "cat /proc/stat" => {
+            "cpu  100000 0 50000 800000 20000 0 5000 0 0 0\n\
+             cpu0 50000 0 25000 400000 10000 0 2500 0 0 0\n\
+             cpu1 50000 0 25000 400000 10000 0 2500 0 0 0\n\
+             intr 123456789\n\
+             ctxt 987654321\n"
+        }
+        "cat /proc/meminfo" => {
+            "MemTotal:       16384000 kB\n\
+             MemFree:         4096000 kB\n\
+             MemAvailable:    8192000 kB\n\
+             Buffers:          512000 kB\n"
+        }
+        "cat /proc/net/dev" => {
+            "Inter-|   Receive                                                |  Transmit\n\
+             face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n\
+                lo:    1000      10    0    0    0     0          0         0     1000      10    0    0    0     0       0          0\n\
+              eth0: 5000000    1000    0    0    0     0          0         0  3000000     900    0    0    0     0       0          0\n"
+        }
+        "df -P /" => {
+            "Filesystem      1024-blocks      Used Available Capacity Mounted on\n\
+             /dev/sda1          102400000  43008000  59392000      42% /\n"
+        }
+        // ps -eo pid,comm,%cpu,%mem --sort=-%cpu (match the exact command)
+        "ps -eo pid,comm,%cpu,%mem --sort=-%cpu" => {
+            "  PID COMMAND         %CPU %MEM\n\
+              1234 firefox         45.2  3.1\n\
+               567 code             8.5  2.0\n\
+                89 bash             0.1  0.1\n"
+        }
+        _ => return None,
+    };
+    Some(out.to_string())
+}
+
 #[derive(Clone)]
 pub struct TestServer {
     /// Root directory served by the sftp subsystem (None → no sftp root;
@@ -140,9 +187,31 @@ impl Handler for TestHandler {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         session.channel_success(channel)?;
-        // Echo the command back to stdout, then exit 0 and close.
+        let cmd = String::from_utf8_lossy(data);
+        let cmd = cmd.trim();
+
+        // ── Agentless monitor commands → canned realistic output (D2). ──
+        // Gated precisely on the exact monitor command strings so EVERY other
+        // command still hits the echo path below (A7's exec echo + D3 multiexec
+        // rely on echo). The canned values are fixed so monitor tests can assert
+        // exact parsed results (2 cores, disk 42%, known first proc, mem 50%).
+        if let Some(out) = canned_monitor_output(cmd) {
+            session.data(channel, out.into_bytes())?;
+            session.exit_status_request(channel, 0)?;
+            session.close(channel)?;
+            return Ok(());
+        }
+        // nvidia-smi: simulate "no GPU" — no stdout, NON-ZERO exit. run_cmd must
+        // still resolve to Ok("") (it collects stdout and ignores exit code).
+        if cmd.starts_with("nvidia-smi") {
+            session.exit_status_request(channel, 9)?;
+            session.close(channel)?;
+            return Ok(());
+        }
+
+        // ── Default: echo the command back to stdout, then exit 0 and close. ──
         // NOTE: a trailing "\n" is appended (not byte-exact to the input) — exec-based
-        // tests (A7/D) that assert on output must account for it.
+        // tests (A7/D3) that assert on output must account for it.
         let mut out = data.to_vec();
         out.extend_from_slice(b"\n");
         session.data(channel, out)?;

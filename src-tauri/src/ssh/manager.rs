@@ -74,6 +74,8 @@ pub struct TunnelStatus {
 pub struct SessionManager {
     sessions: Mutex<HashMap<String, Arc<Mutex<Session>>>>,
     tunnels: Mutex<HashMap<String, TunnelEntry>>,
+    /// 周期监控任务注册表：会话 id → 任务 AbortHandle。
+    monitors: Mutex<HashMap<String, AbortHandle>>,
 }
 
 impl SessionManager {
@@ -127,5 +129,22 @@ impl SessionManager {
             }
         }
         entry
+    }
+
+    // ─── 监控任务注册表 ──────────────────────────────────────────────────────
+
+    /// 登记一个会话的周期监控任务。若该会话已有监控任务，先中止旧的。
+    pub async fn insert_monitor(&self, session_id: String, abort: AbortHandle) {
+        let mut map = self.monitors.lock().await;
+        if let Some(old) = map.insert(session_id, abort) {
+            old.abort();
+        }
+    }
+
+    /// 中止并移除一个会话的周期监控任务。
+    pub async fn remove_monitor(&self, session_id: &str) {
+        if let Some(abort) = self.monitors.lock().await.remove(session_id) {
+            abort.abort();
+        }
     }
 }

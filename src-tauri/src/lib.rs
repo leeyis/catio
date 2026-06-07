@@ -24,7 +24,9 @@ pub fn run() {
             ssh::sftp::sftp_delete,
             ssh::tunnel::tunnel_open,
             ssh::tunnel::tunnel_close,
-            ssh::tunnel::tunnel_list
+            ssh::tunnel::tunnel_list,
+            ssh::monitor::monitor_start,
+            ssh::monitor::monitor_stop
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
