@@ -49,13 +49,19 @@ const connections: Connection[] = [
 ]
 
 const engineMeta: Record<string, EngineMeta> = {
-  postgres: { label: 'PostgreSQL', short: 'PG', color: 'var(--signal-blue)' },
-  mysql: { label: 'MySQL', short: 'SQL', color: 'var(--signal-amber)' },
-  clickhouse: { label: 'ClickHouse', short: 'CH', color: 'var(--signal-amber)' },
-  redis: { label: 'Redis', short: 'RDS', color: 'var(--signal-rose)' },
-  mongo: { label: 'MongoDB', short: 'MGO', color: 'var(--signal-green)' },
-  sqlite: { label: 'SQLite', short: 'LITE', color: 'var(--signal-cyan)' },
-  duckdb: { label: 'DuckDB', short: 'DUCK', color: 'var(--signal-amber)' },
+  postgres:      { label: 'PostgreSQL',    short: 'PG',    color: 'var(--signal-blue)' },
+  mysql:         { label: 'MySQL',          short: 'SQL',   color: 'var(--signal-amber)' },
+  clickhouse:    { label: 'ClickHouse',     short: 'CH',    color: 'var(--signal-amber)' },
+  redis:         { label: 'Redis',          short: 'RDS',   color: 'var(--signal-rose)' },
+  // 'mongo' key kept for backward-compat with existing mock connections (engine: 'mongo')
+  mongo:         { label: 'MongoDB',        short: 'MGO',   color: 'var(--signal-green)' },
+  // 'mongodb' key matches DbType / DB_ENGINES id — required for dropdown color/short
+  mongodb:       { label: 'MongoDB',        short: 'MGO',   color: 'var(--signal-green)' },
+  sqlite:        { label: 'SQLite',         short: 'LITE',  color: 'var(--signal-cyan)' },
+  duckdb:        { label: 'DuckDB',         short: 'DUCK',  color: 'var(--signal-amber)' },
+  sqlserver:     { label: 'SQL Server',     short: 'MSSQL', color: 'var(--signal-blue)' },
+  elasticsearch: { label: 'Elasticsearch',  short: 'ES',    color: 'var(--signal-amber)' },
+  rqlite:        { label: 'rqlite',         short: 'RQL',   color: 'var(--signal-cyan)' },
 }
 
 const osMeta: Record<string, OsMeta> = {

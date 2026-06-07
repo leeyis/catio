@@ -7,7 +7,7 @@ import { useData } from '../../state/DataContext'
 import type { AuthMethod } from '../../services/ssh'
 import type { DbType } from '../../services/db'
 import { dbConnect } from '../../services/db'
-import { saveDbConnection } from '../../state/dbConnections'
+import { saveDbConnection, setActiveDbConnection, generateProfileId } from '../../state/dbConnections'
 
 // ---- Prop types ----
 
@@ -95,7 +95,7 @@ export function NewConnectionModal({ onClose }: NewConnectionModalProps) {
   const handleDbSaveAndConnect = async () => {
     setDbError(null)
     setDbConnecting(true)
-    const id = `db-${Date.now()}`
+    const id = generateProfileId()
     const profile = {
       id,
       name: dbName,
@@ -109,7 +109,9 @@ export function NewConnectionModal({ onClose }: NewConnectionModalProps) {
     saveDbConnection(profile)
     // Attempt live connection (only works in Tauri runtime; throws outside)
     try {
-      await dbConnect({ ...profile, secret: dbSecret || undefined })
+      const result = await dbConnect({ ...profile, secret: dbSecret || undefined })
+      // Store connId + capabilities for D3 (capabilities-gated UI) to consume
+      setActiveDbConnection(result, profile)
     } catch (err) {
       // Outside Tauri: expected "requires the Tauri runtime" — treat as non-fatal in dev
       const msg = err instanceof Error ? err.message : String(err)

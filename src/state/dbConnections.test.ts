@@ -1,8 +1,19 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { listDbConnections, saveDbConnection, removeDbConnection } from './dbConnections'
+import {
+  listDbConnections, saveDbConnection, removeDbConnection,
+  setActiveDbConnection, getActiveDbConnection, listActiveDbConnections, removeActiveDbConnection,
+  generateProfileId,
+} from './dbConnections'
 import type { DbProfile } from './dbConnections'
+import type { DbConnectResult } from '../services/db'
 
-beforeEach(() => localStorage.clear())
+beforeEach(() => {
+  localStorage.clear()
+  // Reset in-memory active store between tests by removing all entries
+  for (const c of listActiveDbConnections()) {
+    removeActiveDbConnection(c.connId)
+  }
+})
 
 describe('DB connection profiles', () => {
   it('save/list round-trip persists to localStorage without secret', () => {
@@ -62,5 +73,79 @@ describe('DB connection profiles', () => {
     const list = listDbConnections()
     expect(list).toHaveLength(2)
     expect(list.map(p => p.id).sort()).toEqual(['a', 'b'])
+  })
+})
+
+describe('active DB connection store (in-memory)', () => {
+  const mockResult: DbConnectResult = {
+    connId: 'conn-abc-123',
+    version: '16.2',
+    capabilities: {
+      writable: true,
+      transactions: true,
+      schemas: true,
+      sqlConsole: true,
+      er: true,
+      structureEdit: true,
+    },
+  }
+  const mockProfile = { id: 'db-profile-1', name: 'prod-orders', dbType: 'postgres' as const }
+
+  it('set → get round-trip stores connId and capabilities', () => {
+    setActiveDbConnection(mockResult, mockProfile)
+    const stored = getActiveDbConnection('conn-abc-123')
+    expect(stored).toBeDefined()
+    expect(stored!.connId).toBe('conn-abc-123')
+    expect(stored!.capabilities.writable).toBe(true)
+    expect(stored!.capabilities.sqlConsole).toBe(true)
+  })
+
+  it('set → list includes the connection', () => {
+    setActiveDbConnection(mockResult, mockProfile)
+    const list = listActiveDbConnections()
+    expect(list).toHaveLength(1)
+    expect(list[0].connId).toBe('conn-abc-123')
+    expect(list[0].profileId).toBe('db-profile-1')
+    expect(list[0].dbType).toBe('postgres')
+    expect(list[0].name).toBe('prod-orders')
+  })
+
+  it('stored entry contains no secret field', () => {
+    setActiveDbConnection(mockResult, mockProfile)
+    const stored = getActiveDbConnection('conn-abc-123')
+    expect(stored).toBeDefined()
+    expect('secret' in stored!).toBe(false)
+    expect(JSON.stringify(stored)).not.toContain('secret')
+  })
+
+  it('removeActiveDbConnection deletes by connId', () => {
+    setActiveDbConnection(mockResult, mockProfile)
+    expect(listActiveDbConnections()).toHaveLength(1)
+    removeActiveDbConnection('conn-abc-123')
+    expect(listActiveDbConnections()).toHaveLength(0)
+    expect(getActiveDbConnection('conn-abc-123')).toBeUndefined()
+  })
+
+  it('multiple connections stored independently', () => {
+    const result2: DbConnectResult = { connId: 'conn-xyz-999', version: '8.0', capabilities: { ...mockResult.capabilities, writable: false } }
+    const profile2 = { id: 'db-profile-2', name: 'catalog-stg', dbType: 'mysql' as const }
+    setActiveDbConnection(mockResult, mockProfile)
+    setActiveDbConnection(result2, profile2)
+    const list = listActiveDbConnections()
+    expect(list).toHaveLength(2)
+    expect(list.map(c => c.connId).sort()).toEqual(['conn-abc-123', 'conn-xyz-999'])
+  })
+})
+
+describe('generateProfileId', () => {
+  it('returns a string starting with db-', () => {
+    const id = generateProfileId()
+    expect(typeof id).toBe('string')
+    expect(id.startsWith('db-')).toBe(true)
+  })
+
+  it('generates unique ids on repeated calls', () => {
+    const ids = new Set(Array.from({ length: 20 }, () => generateProfileId()))
+    expect(ids.size).toBe(20)
   })
 })
