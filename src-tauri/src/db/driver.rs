@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use crate::db::{DbError, DatabaseType, result::QueryResult, capabilities::Capabilities};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectArgs {
     pub db_type: DatabaseType,
@@ -15,6 +15,22 @@ pub struct ConnectArgs {
     pub driver_profile: Option<String>,
     /// 密码；仅内存，不落盘、不回前端。
     pub secret: Option<String>,
+}
+
+// Hand-written Debug that redacts the secret (mirrors ssh/conn.rs ConnectArgs),
+// so a password can never leak via {:?} / trace / panic payloads.
+impl std::fmt::Debug for ConnectArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectArgs")
+            .field("db_type", &self.db_type)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("user", &self.user)
+            .field("database", &self.database)
+            .field("driver_profile", &self.driver_profile)
+            .field("secret", &self.secret.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 /// schema 浏览：一张表的轻量信息。
