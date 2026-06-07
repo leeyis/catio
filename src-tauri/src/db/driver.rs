@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use crate::db::{DbError, DatabaseType, result::QueryResult, capabilities::Capabilities};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -89,4 +90,13 @@ pub trait Driver: Send + Sync {
     async fn table_structure(&self, schema: &str, table: &str) -> Result<TableStructure, DbError>;
     /// ER：该 schema 下所有 FK 关系。不支持的引擎返回 Unsupported。
     async fn er_relations(&self, schema: &str) -> Result<Vec<ErRelation>, DbError>;
+}
+
+/// 按 db_type 建立驱动。后续每加一个引擎在此加一臂。
+pub async fn connect(args: &ConnectArgs) -> Result<Arc<dyn Driver>, DbError> {
+    match args.db_type {
+        DatabaseType::Postgres =>
+            Ok(Arc::new(crate::db::drivers::postgres::PostgresDriver::connect(args).await?)),
+        other => Err(DbError::Unsupported(format!("{:?} (later phase)", other))),
+    }
 }
