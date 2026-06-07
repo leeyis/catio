@@ -73,6 +73,17 @@ pub struct ErRelation {
     pub to_col: String,
 }
 
+/// 前端传来的单行编辑请求。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditRequest {
+    pub schema: Option<String>,
+    pub table: String,
+    pub kind: String, // "update" | "insert" | "delete"
+    pub pk: Vec<(String, serde_json::Value)>,
+    pub cells: Vec<(String, serde_json::Value)>,
+}
+
 /// 所有引擎统一抽象。把 dbx 各模块自由函数的函数体搬进这些方法。
 #[async_trait]
 pub trait Driver: Send + Sync {
@@ -84,6 +95,11 @@ pub trait Driver: Send + Sync {
     async fn test(&self) -> Result<String, DbError>;
     /// 执行任意 SQL（读+写）。max_rows 触达即 truncated。
     async fn query(&self, sql: &str, max_rows: u32) -> Result<QueryResult, DbError>;
+    /// 分页查询：用方言 paginate 包裹 SQL 后调 query。
+    async fn paginated_query(&self, sql: &str, limit: u32, offset: u32) -> Result<QueryResult, DbError> {
+        let paged = crate::db::dialect::paginate(self.db_type(), sql, limit, offset);
+        self.query(&paged, limit).await
+    }
     /// schema 浏览：库下的 schema 名（无 schema 概念的引擎返回单元素如 ["default"]）。
     async fn list_schemas(&self) -> Result<Vec<String>, DbError>;
     async fn list_tables(&self, schema: &str) -> Result<Vec<TableInfo>, DbError>;

@@ -24,7 +24,10 @@ pub fn run() {
             db::commands::db_query,
             db::commands::db_schema,
             db::commands::db_table_structure,
-            db::commands::db_er_model
+            db::commands::db_er_model,
+            db::commands::db_preview_dml,
+            db::commands::db_apply_edits,
+            db::commands::db_query_page
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

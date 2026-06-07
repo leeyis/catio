@@ -1,8 +1,9 @@
 use crate::db::{DbError, ids::IdGen};
-use crate::db::driver::{self, ConnectArgs, TableInfo, TableStructure, ErRelation};
+use crate::db::driver::{self, ConnectArgs, EditRequest, TableInfo, TableStructure, ErRelation};
 use crate::db::manager::ConnManager;
 use crate::db::result::QueryResult;
 use crate::db::capabilities::Capabilities;
+use crate::db::dml::{self, CellEdit};
 use serde::Serialize;
 
 static CONN_IDS: IdGen = IdGen::new("conn");
@@ -63,4 +64,67 @@ pub async fn db_er_model(conn_id: String, schema: String,
     mgr: tauri::State<'_, ConnManager>) -> Result<Vec<ErRelation>, DbError> {
     let drv = mgr.get(&conn_id).await.ok_or(DbError::NotFound(conn_id))?;
     drv.er_relations(&schema).await
+}
+
+/// Translate an EditRequest into a SQL string, with guards against degenerate inputs.
+fn build_sql(db: crate::db::DatabaseType, req: &EditRequest) -> Result<String, DbError> {
+    let cells: Vec<CellEdit> = req.cells.iter()
+        .map(|(c, v)| CellEdit { column: c.clone(), new_value: v.clone() }).collect();
+    Ok(match req.kind.as_str() {
+        "update" => {
+            if req.cells.is_empty() || req.pk.is_empty() {
+                return Err(DbError::Unsupported(
+                    "update requires changed cells and a primary key".into()));
+            }
+            dml::build_update(db, req.schema.as_deref(), &req.table, &req.pk, &cells)
+        }
+        "insert" => {
+            if req.cells.is_empty() {
+                return Err(DbError::Unsupported(
+                    "insert requires at least one cell".into()));
+            }
+            dml::build_insert(db, req.schema.as_deref(), &req.table, &cells)
+        }
+        "delete" => {
+            if req.pk.is_empty() {
+                return Err(DbError::Unsupported(
+                    "delete requires a primary key".into()));
+            }
+            dml::build_delete(db, req.schema.as_deref(), &req.table, &req.pk)
+        }
+        other => return Err(DbError::Unsupported(format!("edit kind {other}"))),
+    })
+}
+
+#[tauri::command]
+pub async fn db_preview_dml(conn_id: String, req: EditRequest,
+    mgr: tauri::State<'_, ConnManager>) -> Result<String, DbError> {
+    let drv = mgr.get(&conn_id).await.ok_or(DbError::NotFound(conn_id))?;
+    if !drv.capabilities().writable {
+        return Err(DbError::Unsupported("read-only engine".into()));
+    }
+    build_sql(drv.db_type(), &req)
+}
+
+#[tauri::command]
+pub async fn db_apply_edits(conn_id: String, reqs: Vec<EditRequest>,
+    mgr: tauri::State<'_, ConnManager>) -> Result<u64, DbError> {
+    let drv = mgr.get(&conn_id).await.ok_or(DbError::NotFound(conn_id))?;
+    if !drv.capabilities().writable {
+        return Err(DbError::Unsupported("read-only engine".into()));
+    }
+    let mut affected = 0u64;
+    for req in &reqs {
+        let sql = build_sql(drv.db_type(), req)?;
+        let r = drv.query(&sql, 0).await?;
+        affected += r.rows_affected.unwrap_or(0);
+    }
+    Ok(affected)
+}
+
+#[tauri::command]
+pub async fn db_query_page(conn_id: String, sql: String, limit: u32, offset: u32,
+    mgr: tauri::State<'_, ConnManager>) -> Result<QueryResult, DbError> {
+    let drv = mgr.get(&conn_id).await.ok_or(DbError::NotFound(conn_id))?;
+    drv.paginated_query(&sql, limit, offset).await
 }
