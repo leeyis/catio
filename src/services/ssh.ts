@@ -13,7 +13,7 @@ export interface TunnelStatusWire {
 }
 
 // ---- Tauri guard — function so tests can set window.__TAURI_INTERNALS__ dynamically ----
-const isTauri = (): boolean =>
+export const isTauri = (): boolean =>
   typeof window !== 'undefined' &&
   ('__TAURI_INTERNALS__' in window || '__TAURI__' in window)
 

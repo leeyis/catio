@@ -347,6 +347,8 @@ export interface Tab {
   kind: 'terminal' | 'sql'
   connId: string
   title: string
+  /** Live SSH session id (ORCH). Omitted for demo/mock tabs. */
+  sessionId?: string
 }
 
 // ---- Top-level DATA shape ----

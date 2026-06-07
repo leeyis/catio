@@ -271,7 +271,13 @@
     "secretPromptPassword": "输入密码",
     "secretPromptPassphrase": "输入密钥口令",
     "secretPromptSubmit": "确认",
-    "secretPromptCancel": "取消"
+    "secretPromptCancel": "取消",
+    "hostKeyTitle": "验证主机密钥",
+    "hostKeySub": "主机 {{host}} 尚未受信任。连接前请核对其密钥指纹：",
+    "hostKeyTrust": "信任并连接",
+    "hostKeyCancel": "取消",
+    "connectErrorMismatch": "主机密钥不匹配 —— 服务器密钥已变更。为安全起见已中止连接。",
+    "connectErrorGeneric": "连接失败：{{message}}"
   },
   "auth": {
     "initTitle": "初始化工作区",

@@ -45,3 +45,18 @@ it('theme toggle changes data-theme attribute', () => {
   const after = document.documentElement.getAttribute('data-theme')
   expect(after).not.toBe(before)
 })
+
+// ORCH: in jsdom (no Tauri) the modal's "Save & connect" for a HOST opens a
+// demo terminal tab via the onConnect→connectProfile demo path (no IPC, no crash).
+it('new host connection opens a demo terminal tab without Tauri', () => {
+  wrap()
+  // open the New Connection modal (home view has a "新建连接" CTA)
+  fireEvent.click(screen.getAllByText('新建连接')[0])
+  // switch to the host/terminal kind so the SSH connect path is active
+  fireEvent.click(screen.getByText('主机 / 终端'))
+  // submit — "保存并连接" lives in the modal footer
+  fireEvent.click(screen.getByText('保存并连接'))
+  // a terminal tab should now exist; the default host name field is "prod-web-01".
+  // It appears as the workbench tab title (and possibly elsewhere) — assert presence.
+  expect(screen.getAllByText(/prod-web-01/).length).toBeGreaterThan(0)
+})

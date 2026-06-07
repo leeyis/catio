@@ -4,12 +4,15 @@ import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn, IconBtn, Segmented, Toggle, ConnGlyph } from '../atoms'
 import { useData } from '../../state/DataContext'
-import type { AuthMethod } from '../../services/ssh'
+import { saveProfile } from '../../state/connections'
+import type { AuthMethod, SshConnectArgs } from '../../services/ssh'
 
 // ---- Prop types ----
 
 export interface NewConnectionModalProps {
   onClose: () => void
+  /** ORCH: emit a live connect request for a HOST/SSH connection. */
+  onConnect?: (args: SshConnectArgs, display: { name: string }) => void
 }
 
 interface FieldProps {
@@ -18,6 +21,7 @@ interface FieldProps {
   placeholder?: string
   w?: number
   mono?: boolean
+  inputRef?: React.Ref<HTMLInputElement>
 }
 
 // ---- Constants ----
@@ -34,9 +38,13 @@ const DB_ENGINES = [
 
 // ---- Component ----
 
-export function NewConnectionModal({ onClose }: NewConnectionModalProps) {
+export function NewConnectionModal({ onClose, onConnect }: NewConnectionModalProps) {
   const D = useData()
   const { t } = useTranslation()
+  const nameRef = useRef<HTMLInputElement>(null)
+  const hostRef = useRef<HTMLInputElement>(null)
+  const portRef = useRef<HTMLInputElement>(null)
+  const userRef = useRef<HTMLInputElement>(null)
   const PROTOS = [
     { id: 'ssh', label: 'SSH' }, { id: 'mosh', label: 'Mosh' },
     { id: 'telnet', label: 'Telnet' }, { id: 'serial', label: 'Serial' },
@@ -55,6 +63,27 @@ export function NewConnectionModal({ onClose }: NewConnectionModalProps) {
   const [color, setColor] = useState('var(--signal-rose)')
   const hosts = D.connections.filter(c => c.kind === 'host' && c.proto !== 'local')
 
+  function handleSave() {
+    // SSH/host connections drive the live connect flow (ORCH).
+    // DB connections (sub-project 3) keep the prototype's close-only behavior.
+    if (kind === 'host' && proto === 'ssh' && onConnect) {
+      const host = (hostRef.current?.value || '').trim()
+      const user = (userRef.current?.value || '').trim()
+      const port = Number(portRef.current?.value) || 22
+      const name = (nameRef.current?.value || '').trim() || host
+      const auth: AuthMethod = authMethod === 'keyFile'
+        ? { method: 'keyFile', path: keyPath.trim() }
+        : { method: 'password' }
+      const args: SshConnectArgs = { host, port, user, auth }
+      // Persist the non-secret profile (best-effort).
+      try {
+        saveProfile({ id: `live-${host}:${port}-${user}`, name, host, port, user, auth })
+      } catch { /* localStorage unavailable — ignore */ }
+      onConnect(args, { name })
+    }
+    onClose()
+  }
+
   useEffect(() => {
     if (!engineOpen) return
     function handleClickOutside(e: MouseEvent) {
@@ -66,10 +95,10 @@ export function NewConnectionModal({ onClose }: NewConnectionModalProps) {
     return () => window.removeEventListener('mousedown', handleClickOutside)
   }, [engineOpen])
 
-  const Field = ({ label, value, placeholder, w, mono }: FieldProps) => (
+  const Field = ({ label, value, placeholder, w, mono, inputRef }: FieldProps) => (
     <label className="col" style={{ gap: 5, flex: w || 1 }}>
       <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{label}</span>
-      <input defaultValue={value} placeholder={placeholder} className={mono ? 'mono' : ''}
+      <input ref={inputRef} defaultValue={value} placeholder={placeholder} className={mono ? 'mono' : ''}
         style={{ height: 36, padding: '0 12px', borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }} />
     </label>
   )
@@ -161,7 +190,7 @@ export function NewConnectionModal({ onClose }: NewConnectionModalProps) {
           {/* base fields */}
           <div className="col gap10" style={{ marginBottom: 14 }}>
             <div className="row gap10">
-              <Field label={t('modals.fieldName')} value={kind === 'db' ? 'prod-orders' : 'prod-web-01'} w={1.4} />
+              <Field label={t('modals.fieldName')} value={kind === 'db' ? 'prod-orders' : 'prod-web-01'} w={1.4} inputRef={nameRef} />
               <label className="col" style={{ gap: 5, flex: 1 }}>
                 <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.fieldGroup')}</span>
                 <div className="row gap6" style={{ height: 36 }}>
@@ -170,11 +199,11 @@ export function NewConnectionModal({ onClose }: NewConnectionModalProps) {
               </label>
             </div>
             <div className="row gap10">
-              <Field label={t('modals.fieldHost')} value={kind === 'db' ? '10.0.4.2' : '10.0.1.21'} mono w={2} />
-              <Field label={t('modals.fieldPort')} value={kind === 'db' ? (engine === 'postgres' ? '5432' : engine === 'redis' ? '6379' : '3306') : '22'} mono w={0.8} />
+              <Field label={t('modals.fieldHost')} value={kind === 'db' ? '10.0.4.2' : '10.0.1.21'} mono w={2} inputRef={hostRef} />
+              <Field label={t('modals.fieldPort')} value={kind === 'db' ? (engine === 'postgres' ? '5432' : engine === 'redis' ? '6379' : '3306') : '22'} mono w={0.8} inputRef={portRef} />
             </div>
             <div className="row gap10">
-              <Field label={kind === 'db' ? t('modals.fieldUser') : t('modals.fieldUsername')} value={kind === 'db' ? 'app_ro' : 'deploy'} mono />
+              <Field label={kind === 'db' ? t('modals.fieldUser') : t('modals.fieldUsername')} value={kind === 'db' ? 'app_ro' : 'deploy'} mono inputRef={userRef} />
               <label className="col" style={{ gap: 5, flex: 1 }}>
                 <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.fieldPasswordKey')}</span>
                 <div className="row" style={{ height: 36, borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', paddingLeft: 10, paddingRight: 12, gap: 6, alignItems: 'center' }}>
@@ -262,7 +291,7 @@ export function NewConnectionModal({ onClose }: NewConnectionModalProps) {
           </button>
           <div className="row gap8">
             <Btn variant="ghost" onClick={onClose}>{t('modals.cancel')}</Btn>
-            <Btn variant="primary" icon="check">{t('modals.saveAndConnect')}</Btn>
+            <Btn variant="primary" icon="check" onClick={handleSave}>{t('modals.saveAndConnect')}</Btn>
           </div>
         </div>
       </div>

@@ -15,18 +15,23 @@ import { SnippetsPanel } from './components/panels/SnippetsPanel'
 import { HistoryPanel } from './components/panels/HistoryPanel'
 import { DetailsPanel } from './components/panels/DetailsPanel'
 import { NewConnectionModal } from './components/modals/NewConnectionModal'
+import { ConnectSecretPrompt } from './components/modals/ConnectSecretPrompt'
+import { HostKeyPrompt } from './components/modals/HostKeyPrompt'
 import { AuthGate } from './components/auth/AuthGate'
 import { Icon } from './components/Icon'
 import { Btn } from './components/atoms'
 import { useTweaks, TWEAK_DEFAULTS } from './state/useTweaks'
 import { nextTheme, useApplyTheme } from './state/ThemeContext'
 import { useData } from './state/DataContext'
+import { sshConnect, sshDisconnect, sshTrustHost, isTauri } from './services/ssh'
+import type { SshConnectArgs } from './services/ssh'
 import type { Tab, Connection, Snippet } from './services/types'
 import type { AuthUser } from './components/auth/AuthGate'
 import type { Attachment } from './components/panels/AIPanel'
 
 export default function App() {
   const D = useData()
+  const { t } = useTranslation()
   const hash = (location.hash || '').replace('#', '')
   const initTheme = hash.includes('amber') ? 'amber' : hash.includes('grove') ? 'grove' : ((localStorage.getItem('catio-theme') || 'dawn') as 'dawn' | 'amber' | 'grove')
   const initView = (['home', 'workbench', 'settings'] as const).find(v => hash.includes(v)) || 'home'
@@ -45,6 +50,16 @@ export default function App() {
   const [showNew, setShowNew] = useState<boolean>(false)
   const [aiAttachment, setAiAttachment] = useState<Attachment | null>(null)
   const [snippets, setSnippets] = useState<Snippet[]>(() => D.snippets)
+
+  // ---- ORCH: live SSH session orchestration ----
+  // connId -> sessionId for live (Tauri) connections.
+  const [sessionMap, setSessionMap] = useState<Record<string, string>>({})
+  // Display Connection objects for live conns (not present in mock D.byId).
+  const [liveConns, setLiveConns] = useState<Record<string, Connection>>({})
+  // Connect-flow state machine: collect secret, then (maybe) trust host key.
+  const [pendingConnect, setPendingConnect] = useState<{ args: SshConnectArgs; name: string } | null>(null)
+  const [pendingTrust, setPendingTrust] = useState<{ args: SshConnectArgs; name: string; secret: string; sessionId: string; fingerprint: string } | null>(null)
+  const resolveSessionId = (connId: string) => sessionMap[connId]
 
   function addSnippet(s: Snippet) {
     setSnippets(prev => [{ ...s, id: 's' + Date.now() }, ...prev])
@@ -118,10 +133,79 @@ export default function App() {
 
   const setThemeBoth = (x: string) => setTweak('theme', x as 'dawn' | 'amber' | 'grove')
 
+  // Build a display Connection for a live SSH session and open its terminal tab.
+  function openLiveTab(args: SshConnectArgs, name: string, sessionId?: string) {
+    const connId = `live-${args.host}:${args.port}-${args.user}`
+    const conn: Connection = {
+      id: connId,
+      group: '',
+      kind: 'host',
+      name,
+      sub: `${args.user}@${args.host}:${args.port}`,
+      icon: 'server',
+      status: 'up',
+      proto: 'ssh',
+    }
+    setLiveConns(prev => ({ ...prev, [connId]: conn }))
+    if (sessionId) setSessionMap(prev => ({ ...prev, [connId]: sessionId }))
+    const tabId = 'tab-' + connId
+    setTabs(prev => prev.some(tb => tb.id === tabId)
+      ? prev.map(tb => tb.id === tabId ? { ...tb, sessionId } : tb)
+      : [...prev, { id: tabId, kind: 'terminal', connId, title: name, sessionId }])
+    setActiveTab(tabId)
+    setView('workbench')
+  }
+
+  // ORCH connect entrypoint — invoked by NewConnectionModal's onConnect.
+  function connectProfile(args: SshConnectArgs, display: { name: string }) {
+    if (!isTauri()) {
+      // Demo path: no IPC, just open a demo terminal tab (no sessionId).
+      openLiveTab(args, display.name)
+      return
+    }
+    // Live path: collect the secret first via the secret prompt.
+    setPendingConnect({ args, name: display.name })
+  }
+
+  // Secret collected → call sshConnect; route to trust prompt / success / error.
+  async function performConnect(args: SshConnectArgs, name: string, secret: string) {
+    try {
+      const result = await sshConnect({ ...args, secret })
+      if (result.hostKeyTrusted === false) {
+        setPendingTrust({ args, name, secret, sessionId: result.sessionId, fingerprint: result.hostKeyFingerprint })
+        return
+      }
+      openLiveTab(args, name, result.sessionId)
+    } catch (err) {
+      const kind = (err as { kind?: string } | null)?.kind
+      if (kind === 'HostKeyMismatch') {
+        window.alert(t('modals.connectErrorMismatch'))
+      } else {
+        const message = (err as { message?: string } | null)?.message ?? String(err)
+        window.alert(t('modals.connectErrorGeneric', { message }))
+      }
+    }
+  }
+
+  // Trust accepted → record host key, then open the (already-established) session.
+  async function trustAndOpen(p: NonNullable<typeof pendingTrust>) {
+    try {
+      await sshTrustHost(`${p.args.host}:${p.args.port}`, p.fingerprint)
+    } catch { /* best-effort — proceed even if recording fails */ }
+    openLiveTab(p.args, p.name, p.sessionId)
+    setPendingTrust(null)
+  }
+
+  // Trust rejected → tear down the untrusted session.
+  function rejectTrust(p: NonNullable<typeof pendingTrust>) {
+    sshDisconnect(p.sessionId).catch(() => { /* best-effort */ })
+    setPendingTrust(null)
+  }
+
   function openConn(conn: Connection) {
     const isHost = conn.kind === 'host'
     const tabId = (isHost ? 'tab-' : 'tab-') + conn.id
-    setTabs(prev => prev.some(t => t.id === tabId) ? prev : [...prev, {
+    setTabs(prev => prev.some(tb => tb.id === tabId) ? prev : [...prev, {
       id: tabId,
       kind: isHost ? 'terminal' : 'sql',
       connId: conn.id,
@@ -130,9 +214,29 @@ export default function App() {
     setActiveTab(tabId)
     setView('workbench')
   }
+  // If a closing tab held a live session that no remaining tab shares, drop it.
+  function reapSession(closing: Tab | undefined, remaining: Tab[]) {
+    if (!closing?.sessionId) return
+    const sid = closing.sessionId
+    const stillUsed = remaining.some(tb => tb.sessionId === sid)
+    if (stillUsed) return
+    sshDisconnect(sid).catch(() => { /* best-effort */ })
+    setSessionMap(prev => {
+      const next = { ...prev }
+      delete next[closing.connId]
+      return next
+    })
+    setLiveConns(prev => {
+      const next = { ...prev }
+      delete next[closing.connId]
+      return next
+    })
+  }
   function closeTab(id: string) {
     setTabs(prev => {
-      const next = prev.filter(t => t.id !== id)
+      const closing = prev.find(tb => tb.id === id)
+      const next = prev.filter(tb => tb.id !== id)
+      reapSession(closing, next)
       if (next.length === 0) {
         setView('home') // no sessions left → back to home automatically
       } else if (activeTab === id) {
@@ -143,7 +247,8 @@ export default function App() {
   }
   function closeOthers(id: string) {
     setTabs(prev => {
-      const next = prev.filter(t => t.id === id)
+      const next = prev.filter(tb => tb.id === id)
+      prev.filter(tb => tb.id !== id).forEach(tb => reapSession(tb, next))
       if (next.length === 0) {
         setView('home')
       } else {
@@ -153,7 +258,10 @@ export default function App() {
     })
   }
   function closeAll() {
-    setTabs([])
+    setTabs(prev => {
+      prev.forEach(tb => reapSession(tb, []))
+      return []
+    })
     setView('home')
   }
   function openDetail(conn: Connection) {
@@ -170,8 +278,8 @@ export default function App() {
     setView(view === 'settings' ? prevView : 'settings')
   }
 
-  const cur = tabs.find(t => t.id === activeTab)
-  const curConn = cur ? D.byId[cur.connId] : null
+  const cur = tabs.find(tb => tb.id === activeTab)
+  const curConn = cur ? (D.byId[cur.connId] ?? liveConns[cur.connId] ?? null) : null
   const aiMode = cur && cur.kind === 'terminal' ? 'shell' : 'sql'
 
   return (
@@ -203,7 +311,7 @@ export default function App() {
                   <>
                     <WorkbenchTabs tabs={tabs} activeTab={activeTab} onActivate={setActiveTab} onClose={closeTab} onCloseOthers={closeOthers} onCloseAll={closeAll} onNew={() => setShowNew(true)} />
                     <div className="grow" style={{ minHeight: 0 }}>
-                      {cur && cur.kind === 'terminal' && <TerminalPane conn={curConn} key={cur.id} />}
+                      {cur && cur.kind === 'terminal' && <TerminalPane conn={curConn} sessionId={cur.sessionId} resolveSessionId={resolveSessionId} key={cur.id} />}
                       {cur && cur.kind === 'sql' && curConn && <DbWorkbench conn={curConn} density={density} key={cur.id} />}
                     </div>
                   </>
@@ -220,9 +328,9 @@ export default function App() {
           {panelOpen && (aiForm === 'side' || activePanel !== 'ai') && (
             <div className="fade-in" style={{ display: 'flex' }}>
               {activePanel === 'ai' && <AIPanel onClose={() => setPanelOpen(false)} mode={aiMode} conn={curConn ?? undefined} attachment={aiAttachment} onClearAttachment={() => setAiAttachment(null)} />}
-              {activePanel === 'sftp' && <SftpPanel onClose={() => setPanelOpen(false)} />}
-              {activePanel === 'monitor' && <MonitorPanel onClose={() => setPanelOpen(false)} />}
-              {activePanel === 'tunnels' && <TunnelsPanel onClose={() => setPanelOpen(false)} />}
+              {activePanel === 'sftp' && <SftpPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} />}
+              {activePanel === 'monitor' && <MonitorPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} />}
+              {activePanel === 'tunnels' && <TunnelsPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} />}
               {activePanel === 'snippets' && <SnippetsPanel onClose={() => setPanelOpen(false)} snippets={snippets} />}
               {activePanel === 'history' && <HistoryPanel onClose={() => setPanelOpen(false)} onAddSnippet={addSnippet} />}
               {activePanel === 'details' && <DetailsPanel conn={detailConn ?? undefined} onClose={() => setPanelOpen(false)} />}
@@ -234,7 +342,28 @@ export default function App() {
         </div>
       )}
 
-      {showNew && <NewConnectionModal onClose={() => setShowNew(false)} />}
+      {showNew && <NewConnectionModal onClose={() => setShowNew(false)} onConnect={connectProfile} />}
+
+      {pendingConnect && (
+        <ConnectSecretPrompt
+          label={pendingConnect.args.auth.method === 'keyFile' ? t('modals.secretPromptPassphrase') : t('modals.secretPromptPassword')}
+          onSubmit={secret => {
+            const p = pendingConnect
+            setPendingConnect(null)
+            void performConnect(p.args, p.name, secret)
+          }}
+          onCancel={() => setPendingConnect(null)}
+        />
+      )}
+
+      {pendingTrust && (
+        <HostKeyPrompt
+          host={`${pendingTrust.args.host}:${pendingTrust.args.port}`}
+          fingerprint={pendingTrust.fingerprint}
+          onTrust={() => { void trustAndOpen(pendingTrust) }}
+          onCancel={() => rejectTrust(pendingTrust)}
+        />
+      )}
 
       {locked && <AuthGate users={users} onLogin={loginUser} onCreate={createUser} />}
     </div>

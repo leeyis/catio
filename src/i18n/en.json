@@ -271,7 +271,13 @@
     "secretPromptPassword": "Enter password",
     "secretPromptPassphrase": "Enter key passphrase",
     "secretPromptSubmit": "Confirm",
-    "secretPromptCancel": "Cancel"
+    "secretPromptCancel": "Cancel",
+    "hostKeyTitle": "Verify host key",
+    "hostKeySub": "The host {{host}} is not yet trusted. Verify its key fingerprint before connecting:",
+    "hostKeyTrust": "Trust & connect",
+    "hostKeyCancel": "Cancel",
+    "connectErrorMismatch": "Host key mismatch — the server's key has changed. Connection aborted for safety.",
+    "connectErrorGeneric": "Connection failed: {{message}}"
   },
   "auth": {
     "initTitle": "Initialize workspace",
