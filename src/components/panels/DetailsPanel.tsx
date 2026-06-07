@@ -1,6 +1,8 @@
 /* ported from ref-ui/_extract/blob9.txt — verbatim per plan T1-T7 */
+import type { ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { IconBtn, ConnGlyph, Btn } from '../atoms'
+import { Icon } from '../Icon'
 import { useData } from '../../state/DataContext'
 import type { Connection } from '../../services/types'
 import { PanelShell } from './PanelShell'
@@ -12,7 +14,7 @@ export interface DetailsPanelProps {
 
 interface RowProps {
   k: string
-  v: string
+  v: ReactNode
   mono?: boolean
 }
 
@@ -50,7 +52,7 @@ export function DetailsPanel({ conn, onClose }: DetailsPanelProps) {
           {c.stats && <Row k={t('panels.detailCpuMem')} v={`${c.stats.cpu}% · ${c.stats.mem}%`} mono />}
           {c.stats && <Row k={t('panels.detailUptime')} v={c.stats.up} mono />}
           <Row k={t('panels.detailLastUsed')} v={t('panels.lastUsedAgo', { time: c.lastUsed })} />
-          <Row k={t('panels.detailCredentials')} v="🔒 keychain · XChaCha20" />
+          <Row k={t('panels.detailCredentials')} v={<span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}><Icon name="lock" size={12} style={{ color: 'var(--text-faint)' }} />keychain · XChaCha20</span>} />
         </div>
         <div className="row gap8" style={{ marginTop: 16 }}>
           <Btn variant="cta" icon="play" style={{ flex: 1 }}>{t('panels.connect')}</Btn>
