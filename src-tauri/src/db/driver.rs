@@ -113,6 +113,7 @@ pub async fn connect(args: &ConnectArgs) -> Result<Arc<dyn Driver>, DbError> {
             Ok(Arc::new(crate::db::drivers::elasticsearch::ElasticsearchDriver::connect(args).await?)),
         DatabaseType::Mongodb =>
             Ok(Arc::new(crate::db::drivers::mongo::MongoDriver::connect(args).await?)),
-        other => Err(DbError::Unsupported(format!("{:?} (later phase)", other))),
+        DatabaseType::Redis =>
+            Ok(Arc::new(crate::db::drivers::redis::RedisDriver::connect(args).await?)),
     }
 }
