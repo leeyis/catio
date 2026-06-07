@@ -1,0 +1,8 @@
+export { WorkbenchTabs } from './WorkbenchTabs'
+export type { WorkbenchTabsProps } from './WorkbenchTabs'
+export { TerminalPane } from './TerminalPane'
+export type { TerminalPaneProps } from './TerminalPane'
+export { DbWorkbench } from './DbWorkbench'
+export type { DbWorkbenchProps } from './DbWorkbench'
+export { SchemaBrowser } from './SchemaBrowser'
+export type { SchemaBrowserProps } from './SchemaBrowser'
