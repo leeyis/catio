@@ -58,7 +58,7 @@ export default function App() {
   const [liveConns, setLiveConns] = useState<Record<string, Connection>>({})
   // Connect-flow state machine: collect secret, then (maybe) trust host key.
   const [pendingConnect, setPendingConnect] = useState<{ args: SshConnectArgs; name: string } | null>(null)
-  const [pendingTrust, setPendingTrust] = useState<{ args: SshConnectArgs; name: string; secret: string; sessionId: string; fingerprint: string } | null>(null)
+  const [pendingTrust, setPendingTrust] = useState<{ args: SshConnectArgs; name: string; sessionId: string; fingerprint: string } | null>(null)
   const resolveSessionId = (connId: string) => sessionMap[connId]
 
   function addSnippet(s: Snippet) {
@@ -172,7 +172,7 @@ export default function App() {
     try {
       const result = await sshConnect({ ...args, secret })
       if (result.hostKeyTrusted === false) {
-        setPendingTrust({ args, name, secret, sessionId: result.sessionId, fingerprint: result.hostKeyFingerprint })
+        setPendingTrust({ args, name, sessionId: result.sessionId, fingerprint: result.hostKeyFingerprint })
         return
       }
       openLiveTab(args, name, result.sessionId)
