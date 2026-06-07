@@ -1,20 +1,66 @@
-/* ported from ref-ui/_extract/blob7.txt — verbatim per plan T1-T7 */
+/* ported from ref-ui/_extract/blob7.txt — chrome verbatim; middle surface swapped to xterm.js (A10) */
 import { useState, useMemo, useRef, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
+import { Terminal } from '@xterm/xterm'
+import { FitAddon } from '@xterm/addon-fit'
+import '@xterm/xterm/css/xterm.css'
 import { Icon } from '../Icon'
 import { ConnGlyph, StatusDot } from '../atoms'
 import { useData } from '../../state/DataContext'
+import { termOpen, termWrite, termResize, termClose, listen, getTermBuffer } from '../../services/ssh'
 import type { Connection, TermLine as TermLineType } from '../../services/types'
 
 export interface TerminalPaneProps {
   conn: Connection | null
+  /** When set AND running under Tauri, the terminal is "live" (wired to term_* IPC). */
+  sessionId?: string
 }
 
-export function TerminalPane({ conn }: TerminalPaneProps) {
+// Tauri detection — mirror services/ssh.ts guard (not exported there).
+const isTauri = (): boolean =>
+  typeof window !== 'undefined' &&
+  ('__TAURI_INTERNALS__' in window || '__TAURI__' in window)
+
+// term:// event payload shape (A7 contract): data frame OR close notice.
+interface TermEvent { bytesBase64?: string; closed?: boolean }
+
+// UTF-8 string -> base64 (keystrokes out)
+function bytesToBase64(s: string): string {
+  const bytes = new TextEncoder().encode(s)
+  let bin = ''
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i])
+  return btoa(bin)
+}
+// base64 -> Uint8Array (data frames in)
+function base64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64)
+  const out = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
+  return out
+}
+
+function cssVar(name: string, fallback: string): string {
+  if (typeof document === 'undefined') return fallback
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim()
+  return v || fallback
+}
+
+// Render a mock TermLine[] to plain text for the read-only demo surface.
+function termLinesToText(lines: TermLineType[]): string {
+  return lines
+    .filter(l => !l.cursor)
+    .map(l => {
+      if (l.t === 'prompt') return `\x1b[32m${l.host ?? ''}\x1b[0m:\x1b[34m${l.path ?? '~'}\x1b[0m$ ${l.cmd ?? ''}`
+      if (l.t === 'sys') return `\x1b[2m＊ ${l.s ?? ''}\x1b[0m`
+      if (l.t === 'err') return `\x1b[31m${l.s ?? ''}\x1b[0m`
+      return l.s ?? ''
+    })
+    .join('\r\n')
+}
+
+export function TerminalPane({ conn, sessionId }: TerminalPaneProps) {
   const { t } = useTranslation()
   const D = useData()
-  const [lines, setLines] = useState<TermLineType[]>(D.termLines)
-  const [input, setInput] = useState('')
   const [broadcast, setBroadcast] = useState(false)
   const [mxOpen, setMxOpen] = useState(false)
   const selfId = conn ? conn.id : 'h-bastion'
@@ -23,32 +69,95 @@ export function TerminalPane({ conn }: TerminalPaneProps) {
   // you can't broadcast a shell command to a database node or a different transport.
   const allHosts = useMemo(() => D.connections.filter(c => c.kind === 'host' && (c.proto || 'ssh') === selfProto && c.status !== 'down'), [D.connections, selfProto])
   const [mxHosts, setMxHosts] = useState(() => allHosts.filter(h => h.id !== selfId).slice(0, 2).map(h => h.id))
-  const scrollRef = useRef<HTMLDivElement>(null)
   const rootRef = useRef<HTMLDivElement>(null)
+  const xtermHost = useRef<HTMLDivElement>(null)
+  const termRef = useRef<Terminal | null>(null)
   const [selBar, setSelBar] = useState<{ left: number; top: number; text: string } | null>(null)
-  useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [lines])
-  useEffect(() => {
-    const h = (e: Event) => {
-      const ce = e as CustomEvent
-      if (ce.detail && ce.detail.kind === 'shell') setInput(ce.detail.text)
-    }
-    window.addEventListener('catio-insert', h)
-    return () => window.removeEventListener('catio-insert', h)
-  }, [])
 
-  function onTermSelect() {
-    const selection = window.getSelection()
-    const text = selection && selection.toString()
-    if (!text || !text.trim() || !scrollRef.current || !rootRef.current) { setSelBar(null); return; }
-    if (selection.anchorNode && !scrollRef.current.contains(selection.anchorNode)) { setSelBar(null); return; }
-    const rRect = selection.getRangeAt(0).getBoundingClientRect()
-    const root = rootRef.current
-    const rootRect = root.getBoundingClientRect()
-    const scale = (rootRect.width / root.offsetWidth) || 1
-    const left = (rRect.left + rRect.width / 2 - rootRect.left) / scale
-    const top = (rRect.top - rootRect.top) / scale
-    setSelBar({ left, top, text: text.trim() })
-  }
+  const host = conn ? (conn.sub.split(' ')[0].replace('ssh ', '')) : 'jump@db-bastion'
+  const live = !!sessionId && isTauri()
+
+  // ---- xterm lifecycle (once per session/chan) ----
+  useEffect(() => {
+    const hostEl = xtermHost.current
+    if (!hostEl) return
+    let disposed = false
+    let unlisten: (() => void) | null = null
+    let chanId: string | null = null
+    let ro: ResizeObserver | null = null
+
+    const term = new Terminal({
+      theme: { background: cssVar('--term-bg', '#0B1020'), foreground: cssVar('--term-fg', '#E2E8F0') },
+      fontFamily: "'Geist Mono', monospace",
+      fontSize: 12.5,
+      cursorBlink: true,
+    })
+    termRef.current = term
+    const fitAddon = new FitAddon()
+    term.loadAddon(fitAddon)
+    term.open(hostEl)
+    try { fitAddon.fit() } catch { /* jsdom has no layout */ }
+
+    // Selection toolbar (copy / ask AI) — driven by xterm's own selection.
+    term.onSelectionChange(() => {
+      const text = term.getSelection()
+      if (!text || !text.trim() || !rootRef.current || !hostEl) { setSelBar(null); return }
+      const root = rootRef.current
+      const rootRect = root.getBoundingClientRect()
+      const hostRect = hostEl.getBoundingClientRect()
+      const scale = (rootRect.width / root.offsetWidth) || 1
+      const left = (hostRect.left + hostRect.width / 2 - rootRect.left) / scale
+      const top = (hostRect.top + 24 - rootRect.top) / scale
+      setSelBar({ left, top, text: text.trim() })
+    })
+
+    if (live && sessionId) {
+      // ---- LIVE: wire to term_* IPC ----
+      ;(async () => {
+        chanId = await termOpen(sessionId, term.cols, term.rows)
+        if (disposed) { termClose(sessionId, chanId); return }
+        unlisten = await listen<TermEvent>(`term://${chanId}`, (p) => {
+          if (typeof p.bytesBase64 === 'string') {
+            term.write(base64ToBytes(p.bytesBase64))
+          } else if (p.closed) {
+            term.write('\r\n\x1b[2m[connection closed]\x1b[0m\r\n')
+            if (chanId) termClose(sessionId, chanId)
+          }
+        })
+        if (disposed) { unlisten(); termClose(sessionId, chanId); return }
+        term.onData(d => { if (chanId) termWrite(sessionId, chanId, bytesToBase64(d)) })
+        if (typeof ResizeObserver !== 'undefined') {
+          ro = new ResizeObserver(() => {
+            try { fitAddon.fit() } catch { /* no layout */ }
+            if (chanId) termResize(sessionId, chanId, term.cols, term.rows)
+          })
+          ro.observe(hostEl)
+        }
+      })()
+    } else {
+      // ---- DEMO: read-only mock buffer, no IPC wiring ----
+      ;(async () => {
+        const buf = await getTermBuffer(conn ? conn.id : 'h-bastion')
+        if (disposed) return
+        term.write(termLinesToText(buf))
+      })()
+      if (typeof ResizeObserver !== 'undefined') {
+        ro = new ResizeObserver(() => { try { fitAddon.fit() } catch { /* no layout */ } })
+        ro.observe(hostEl)
+      }
+    }
+
+    return () => {
+      disposed = true
+      if (ro) ro.disconnect()
+      if (unlisten) unlisten()
+      if (live && sessionId && chanId) termClose(sessionId, chanId)
+      term.dispose()
+      termRef.current = null
+    }
+    // re-init when the session/chan identity changes
+  }, [sessionId, live, conn])
+
   function copySel() {
     if (selBar && navigator.clipboard) navigator.clipboard.writeText(selBar.text).catch(() => {})
     setSelBar(null)
@@ -56,26 +165,7 @@ export function TerminalPane({ conn }: TerminalPaneProps) {
   function askSelAI() {
     if (selBar) window.dispatchEvent(new CustomEvent('catio-ask-ai', { detail: { text: selBar.text, target: conn ? conn.name : 'db-bastion', kind: 'shell' } }))
     setSelBar(null)
-    const s = window.getSelection(); if (s) s.removeAllRanges()
-  }
-
-  const host = conn ? (conn.sub.split(' ')[0].replace('ssh ', '')) : 'jump@db-bastion'
-  function run(cmd: string) {
-    if (!cmd.trim()) return
-    const base = lines.filter(l => !l.cursor)
-    const reply = canned(cmd)
-    const next = [...base, { t: 'prompt' as const, host, path: '~', cmd }, ...reply, { t: 'prompt' as const, host, path: '~', cmd: '', cursor: true }]
-    setLines(next); setInput('')
-  }
-  function canned(cmd: string): TermLineType[] {
-    const c = cmd.trim()
-    if (/^ls/.test(c)) return [{ t: 'out', s: 'releases  shared  public  .env.production  access.log  error.log' }]
-    if (/uptime/.test(c)) return [{ t: 'out', s: ' 14:22:51 up 142 days,  3:09,  2 users,  load average: 0.34, 0.41, 0.39' }]
-    if (/free/.test(c)) return [{ t: 'out', s: '              total        used        free\nMem:          16039        9624        2104' }]
-    if (/redis-cli/.test(c)) return [{ t: 'out', s: '(integer) 1291' }]
-    if (/whoami/.test(c)) return [{ t: 'out', s: host.split('@')[0] }]
-    if (/clear/.test(c)) { setTimeout(() => setLines([{ t: 'prompt', host, path: '~', cmd: '', cursor: true }]), 0); return [] }
-    return [{ t: 'out', s: `${c}: command simulated · Catio demo terminal` }]
+    if (termRef.current) termRef.current.clearSelection()
   }
 
   const displayConn = conn || D.byId['h-bastion']
@@ -159,15 +249,13 @@ export function TerminalPane({ conn }: TerminalPaneProps) {
             )}
           </div>
           <button className="icon-btn bare" title={t('workbench.searchBuffer')}><Icon name="search" size={15} /></button>
-          <button className="icon-btn bare" title={t('workbench.clearScreen')} onClick={() => setLines([{ t: 'prompt', host, path: '~', cmd: '', cursor: true }])}><Icon name="trash-2" size={15} /></button>
+          <button className="icon-btn bare" title={t('workbench.clearScreen')} onClick={() => { if (termRef.current) termRef.current.clear() }}><Icon name="trash-2" size={15} /></button>
         </div>
       </div>
 
-      {/* terminal surface */}
-      <div ref={scrollRef} className="grow" onMouseUp={onTermSelect} onMouseDown={() => setSelBar(null)} onScroll={() => setSelBar(null)}
-        style={{ overflow: 'auto', background: 'var(--term-bg)', padding: '12px 14px', fontFamily: "'Geist Mono', monospace", fontSize: 12.5, lineHeight: 1.65 }}>
-        {lines.map((l, i) => <TermLine key={i} l={l} onInput={input} setInput={setInput} run={run} />)}
-      </div>
+      {/* terminal surface — xterm.js host */}
+      <div ref={xtermHost} className="grow" onMouseDown={() => setSelBar(null)}
+        style={{ overflow: 'hidden', background: 'var(--term-bg)', padding: '12px 14px', fontFamily: "'Geist Mono', monospace", fontSize: 12.5, lineHeight: 1.65, minHeight: 0 }} />
 
       {/* selection toolbar — copy / ask AI */}
       {selBar && (
@@ -194,32 +282,6 @@ export function TerminalPane({ conn }: TerminalPaneProps) {
           {mxHosts.map(id => <span key={id} className="chip" style={{ height: 19, fontSize: 10, background: 'var(--surface-card)', color: 'var(--text-secondary)' }}>{D.byId[id].name}</span>)}
         </div>
       )}
-    </div>
-  )
-}
-
-interface TermLineProps {
-  l: TermLineType
-  onInput: string
-  setInput: (v: string) => void
-  run: (cmd: string) => void
-}
-
-function TermLine({ l, onInput, setInput, run }: TermLineProps) {
-  if (l.t === 'sys') return <div style={{ color: 'var(--term-dim)', marginBottom: 6 }}>＊ {l.s}</div>
-  if (l.t === 'out') return <div style={{ color: 'var(--term-fg)', whiteSpace: 'pre-wrap' }}>{l.s}</div>
-  if (l.t === 'err') return <div style={{ color: '#F87171', whiteSpace: 'pre-wrap' }}>{l.s}</div>
-  // prompt
-  return (
-    <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
-      <span><span style={{ color: '#4ADE80' }}>{l.host}</span><span style={{ color: 'var(--term-dim)' }}>:</span><span style={{ color: '#60A5FA' }}>{l.path}</span><span style={{ color: 'var(--term-dim)' }}>$</span></span>
-      {l.cursor ? (
-        <span className="row grow" style={{ minWidth: 80 }}>
-          <input autoFocus value={onInput} onChange={e => setInput(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') run(onInput) }}
-            style={{ flex: 1, border: 'none', outline: 'none', background: 'transparent', color: 'var(--term-fg)', font: 'inherit' }} />
-        </span>
-      ) : <span style={{ color: 'var(--term-fg)' }}>{l.cmd}</span>}
     </div>
   )
 }
