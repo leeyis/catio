@@ -3,6 +3,8 @@
 
 pub mod ids;
 pub mod result;
+pub mod capabilities;
+pub mod dialect;
 
 use serde::{Deserialize, Serialize};
 
