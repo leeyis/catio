@@ -1,4 +1,4 @@
-mod common;
+﻿mod common;
 use common::test_server;
 
 use std::sync::atomic::Ordering;
@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use catio_lib::ssh::conn::{connect_authenticated, AuthMethod, ConnectArgs};
 use catio_lib::ssh::manager::{Session, SessionManager, TunnelEntry};
-use catio_lib::ssh::tunnel::{open_local_forward, open_remote_forward};
+use catio_lib::ssh::tunnel::{open_dynamic_forward, open_local_forward, open_remote_forward};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -109,9 +109,94 @@ async fn tunnel_registry_insert_list_remove() {
     assert!(mgr.tunnel_status_list().await.is_empty());
 }
 
+/// C3：动态（D/SOCKS5）转发端到端。
+///
+/// 验证完整的 SOCKS5 握手 + direct-tcpip + echo 往返：
+///   1. 作为 SOCKS5 客户端，连接本地代理监听器。
+///   2. 发 greeting `[0x05,0x01,0x00]`，读回 `[0x05,0x00]`（无认证确认）。
+///   3. 发 CONNECT 请求（域名 "echo" 端口 9），读回 10 字节成功回复（首两字节 `[0x05,0x00]`）。
+///   4. 写 payload，通过 direct-tcpip 到达测试 server 的 echo handler，读回相同字节。
+///   5. 断言 up/down 计数 > 0。
+#[tokio::test]
+async fn dynamic_socks5_round_trips() {
+    let (mgr, session_id) = connect_into_manager().await;
+    let session = mgr.get(&session_id).await.unwrap();
+
+    let up = Arc::new(AtomicU64::new(0));
+    let down = Arc::new(AtomicU64::new(0));
+    let (proxy_addr, abort) =
+        open_dynamic_forward(session, "127.0.0.1:0", up.clone(), down.clone())
+            .await
+            .unwrap();
+
+    // ── 连接到 SOCKS5 代理 ────────────────────────────────────────────────────
+    let mut sock = tokio::net::TcpStream::connect(proxy_addr).await.unwrap();
+
+    // ── 阶段 1：问候 ──────────────────────────────────────────────────────────
+    // 发：VER=5, NMETHODS=1, METHOD=NO_AUTH(0x00)
+    sock.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
+    let mut greet_reply = [0u8; 2];
+    sock.read_exact(&mut greet_reply).await.unwrap();
+    assert_eq!(
+        greet_reply,
+        [0x05, 0x00],
+        "greeting reply must select NO-AUTH"
+    );
+
+    // ── 阶段 2：CONNECT 请求（域名 "echo" 端口 9）────────────────────────────
+    // [VER][CMD=CONNECT][RSV][ATYP=0x03 domain][LEN=4][e][c][h][o][PORT_HI][PORT_LO]
+    let domain = b"echo";
+    let mut req = vec![0x05u8, 0x01, 0x00, 0x03, domain.len() as u8];
+    req.extend_from_slice(domain);
+    req.extend_from_slice(&9u16.to_be_bytes()); // port 9
+    sock.write_all(&req).await.unwrap();
+
+    // 读取 10 字节回复（IPv4 BND 格式）。
+    let mut connect_reply = [0u8; 10];
+    sock.read_exact(&mut connect_reply).await.unwrap();
+    assert_eq!(
+        connect_reply[0],
+        0x05,
+        "connect reply VER must be 5"
+    );
+    assert_eq!(
+        connect_reply[1],
+        0x00,
+        "connect reply REP must be 0x00 (success)"
+    );
+
+    // ── 阶段 3：透明字节往返 ──────────────────────────────────────────────────
+    let payload = b"socks-payload";
+    sock.write_all(payload).await.unwrap();
+
+    let mut got = vec![0u8; payload.len()];
+    sock.read_exact(&mut got).await.unwrap();
+    assert_eq!(&got, payload, "bytes must round-trip through SOCKS5 tunnel");
+
+    sock.shutdown().await.ok();
+
+    // 轮询计数器（避免固定 sleep）。
+    let mut counted = false;
+    for _ in 0..50 {
+        if up.load(Ordering::Relaxed) > 0 && down.load(Ordering::Relaxed) > 0 {
+            counted = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        counted,
+        "byte counters must be > 0 after round-trip (up={}, down={})",
+        up.load(Ordering::Relaxed),
+        down.load(Ordering::Relaxed)
+    );
+
+    abort.abort();
+}
+
 /// C2：远程（R/反向）转发端到端。
 ///
-/// 数据流：测试 server 在 `tcpip_forward` 被请求后模拟“远端有人连进来”——用服务端
+/// 数据流：测试 server 在 `tcpip_forward` 被请求后模拟"远端有人连进来"——用服务端
 /// Handle 打开一个 forwarded-tcpip channel 回到客户端，并往里写一个 payload。客户端
 /// `ClientHandler::server_channel_open_forwarded_tcpip` 据 `connected_port` 把该 channel
 /// 路由给我们刚开的 R 隧道任务；该任务新建一个到本测试内 LOCAL ECHO 目标的 TCP 连接并

@@ -1,4 +1,4 @@
-//! 端口转发隧道。L（本地，C1）与 R（远程/反向，C2）。
+﻿//! 端口转发隧道。L（本地，C1）、R（远程/反向，C2）与 D（动态 SOCKS5，C3）。
 //!
 //! 本地 (L) 转发：在本地起一个 TCP 监听器，每个入站连接都通过 SSH
 //! `direct-tcpip` channel 桥接到远端目标；双向字节都被计数。
@@ -7,8 +7,12 @@
 //! `forwarded-tcpip` channel 回到本客户端；隧道任务把该 channel 桥接到一个新
 //! 建的本地目标 TCP 连接。即 L 的反向。
 //!
+//! 动态 (D) 转发：在本地起一个 SOCKS5 代理监听器。每个入站连接先执行 SOCKS5
+//! 握手（无认证 CONNECT，RFC 1928 最小子集）获取目标 host:port，再通过
+//! `direct-tcpip` channel 桥接到该目标；双向字节计数与 L 相同。
+//!
 //! russh 0.61.2（ring 后端）已确认的客户端 API：
-//!   * direct-tcpip（L）：`handle.channel_open_direct_tcpip(host_to_connect:
+//!   * direct-tcpip（L/D）：`handle.channel_open_direct_tcpip(host_to_connect:
 //!     impl Into<String>, port_to_connect: u32, originator_address:
 //!     impl Into<String>, originator_port: u32).await
 //!     -> Result<Channel<client::Msg>, russh::Error>`
@@ -23,14 +27,15 @@
 //!
 //! 桥接与计数：对每个连接把 TcpStream 与 channel 流各自 `split`，跑两个手写
 //! 复制循环（read→记账→write_all）。方向约定：
-//!   * L：入站本地→channel 记 up；channel→入站本地 记 down。
+//!   * L/D：入站本地→channel 记 up；channel→入站本地 记 down。
 //!   * R：本地目标→channel（→远端）记 up；channel（远端→）→本地目标 记 down。
 
+use std::io;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio::task::AbortHandle;
@@ -257,6 +262,210 @@ pub async fn open_remote_forward(
     Ok((actual_port, handle.abort_handle()))
 }
 
+// ─── SOCKS5 动态转发（D，C3）────────────────────────────────────────────────
+
+/// SOCKS5 握手（RFC 1928 最小子集：无认证 CONNECT）。
+///
+/// 执行 greeting 与 request 两阶段，返回 CONNECT 请求的目标 `(host, port)`。
+/// 成功后 greeting 的 `[0x05][0x00]` 已发出；CONNECT reply 由调用方负责发送
+/// （需先尝试打开 channel，再按成功/失败发不同回复）。
+///
+/// 出错时返回 `io::Error`，调用方丢弃此连接。
+async fn socks5_handshake<S>(stream: &mut S) -> Result<(String, u16), io::Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    // ── 阶段 1：问候 ─────────────────────────────────────────────────────────
+    // client → [VER=0x05][NMETHODS][METHODS...]
+    let mut hdr = [0u8; 2];
+    stream.read_exact(&mut hdr).await?;
+    let ver = hdr[0];
+    let nmethods = hdr[1] as usize;
+    if ver != 5 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "SOCKS: expected VER=5",
+        ));
+    }
+    if nmethods == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "SOCKS: NMETHODS=0",
+        ));
+    }
+    let mut methods = vec![0u8; nmethods];
+    stream.read_exact(&mut methods).await?;
+    if !methods.contains(&0x00) {
+        // 不提供无认证方式 → 告知 FF（无可接受方法）并拒绝。
+        stream.write_all(&[0x05, 0xFF]).await?;
+        stream.shutdown().await?;
+        return Err(io::Error::new(
+            io::ErrorKind::ConnectionRefused,
+            "SOCKS: no acceptable auth method",
+        ));
+    }
+    // 选择无认证（0x00）。
+    stream.write_all(&[0x05, 0x00]).await?;
+
+    // ── 阶段 2：请求 ─────────────────────────────────────────────────────────
+    // client → [VER=0x05][CMD][RSV=0x00][ATYP][DST.ADDR][DST.PORT(2BE)]
+    let mut req_hdr = [0u8; 4];
+    stream.read_exact(&mut req_hdr).await?;
+    if req_hdr[0] != 5 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "SOCKS: request VER != 5",
+        ));
+    }
+    let cmd = req_hdr[1];
+    let atyp = req_hdr[3];
+
+    if cmd != 0x01 {
+        // 只支持 CONNECT(0x01)；其他命令回复 0x07（command not supported）。
+        // BND.ADDR/PORT 填零（10 字节总计）。
+        stream
+            .write_all(&[0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+            .await?;
+        stream.shutdown().await?;
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "SOCKS: CMD not supported",
+        ));
+    }
+
+    // 解析目标地址。
+    let host: String = match atyp {
+        0x01 => {
+            // IPv4：4 字节。
+            let mut addr = [0u8; 4];
+            stream.read_exact(&mut addr).await?;
+            format!("{}.{}.{}.{}", addr[0], addr[1], addr[2], addr[3])
+        }
+        0x03 => {
+            // 域名：1 字节长度 + n 字节 UTF-8。
+            let mut len_buf = [0u8; 1];
+            stream.read_exact(&mut len_buf).await?;
+            let len = len_buf[0] as usize;
+            if len == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "SOCKS: domain length=0",
+                ));
+            }
+            let mut name = vec![0u8; len];
+            stream.read_exact(&mut name).await?;
+            String::from_utf8(name).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "SOCKS: domain not UTF-8")
+            })?
+        }
+        0x04 => {
+            // IPv6：16 字节。
+            let mut addr = [0u8; 16];
+            stream.read_exact(&mut addr).await?;
+            let v6 = std::net::Ipv6Addr::from(addr);
+            format!("{v6}")
+        }
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "SOCKS: unknown ATYP",
+            ));
+        }
+    };
+
+    // 目标端口：2 字节大端。
+    let mut port_buf = [0u8; 2];
+    stream.read_exact(&mut port_buf).await?;
+    let port = u16::from_be_bytes(port_buf);
+
+    Ok((host, port))
+}
+
+/// 可测试核心：开启一条动态（D/SOCKS5）转发。
+///
+/// - 在 `bind` 上绑定一个 TCP 监听器（支持 ":0" 或 "127.0.0.1:0" → 返回真实地址）。
+/// - spawn 一个 accept 循环：每个入站连接先执行 SOCKS5 握手获取 `(host, port)`，
+///   再锁住会话调用 `channel_open_direct_tcpip`，成功后发 SOCKS5 成功回复并双向
+///   桥接计数；失败则发 SOCKS5 失败回复并丢弃连接。单连接错误不杀死 accept 循环。
+///
+/// 返回 `(实际绑定地址, accept 循环 AbortHandle)`。
+pub async fn open_dynamic_forward(
+    session: Arc<Mutex<Session>>,
+    bind: &str,
+    up: Arc<AtomicU64>,
+    down: Arc<AtomicU64>,
+) -> Result<(SocketAddr, AbortHandle), SshError> {
+    let listener = TcpListener::bind(bind)
+        .await
+        .map_err(|e| SshError::Tunnel(format!("D bind {bind}: {e}")))?;
+    let bind_addr = listener
+        .local_addr()
+        .map_err(|e| SshError::Tunnel(e.to_string()))?;
+
+    let up_loop = up.clone();
+    let down_loop = down.clone();
+    let handle = tokio::spawn(async move {
+        loop {
+            let (mut inbound, _peer) = match listener.accept().await {
+                Ok(v) => v,
+                Err(_) => break,
+            };
+            let session = session.clone();
+            let up = up_loop.clone();
+            let down = down_loop.clone();
+            tokio::spawn(async move {
+                // SOCKS5 握手：得到目标 host:port。
+                let (host, port) = match socks5_handshake(&mut inbound).await {
+                    Ok(v) => v,
+                    Err(_) => return, // 握手失败：丢弃连接。
+                };
+
+                // 打开 direct-tcpip channel（仅在打开期间短暂持锁）。
+                let channel_result = {
+                    let s = session.lock().await;
+                    s.handle
+                        .channel_open_direct_tcpip(
+                            host.clone(),
+                            port as u32,
+                            "127.0.0.1",
+                            0,
+                        )
+                        .await
+                };
+
+                match channel_result {
+                    Ok(channel) => {
+                        // 发 SOCKS5 成功回复，然后透明桥接。
+                        // [VER][REP=0][RSV][ATYP=IPv4][BND.ADDR=0.0.0.0][BND.PORT=0]
+                        if inbound
+                            .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                        let stream = channel.into_stream();
+                        let (ri, wi) = tokio::io::split(inbound);
+                        let (rc, wc) = tokio::io::split(stream);
+                        // 客户端→远端记 up；远端→客户端记 down。
+                        let up_task = tokio::spawn(copy_counting(ri, wc, up));
+                        let down_task = tokio::spawn(copy_counting(rc, wi, down));
+                        let _ = tokio::join!(up_task, down_task);
+                    }
+                    Err(_) => {
+                        // 发 SOCKS5 一般失败回复（0x01）并丢弃。
+                        let _ = inbound
+                            .write_all(&[0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                            .await;
+                    }
+                }
+            });
+        }
+    });
+
+    Ok((bind_addr, handle.abort_handle()))
+}
+
 // ─── Tauri 命令 ───────────────────────────────────────────────────────────────
 
 /// 把隧道的 `bind`（"host:port"）拆成 (host, port)。R 转发用以请求远端监听。
@@ -376,7 +585,35 @@ pub async fn tunnel_open(
 
             Ok(id)
         }
-        _ => Err(SshError::Tunnel("not implemented (C3)".into())),
+        'D' => {
+            let up = Arc::new(AtomicU64::new(0));
+            let down = Arc::new(AtomicU64::new(0));
+            let (bind_addr, abort) =
+                open_dynamic_forward(session, &spec.bind, up.clone(), down.clone()).await?;
+
+            let id = TUN_IDS.next();
+            let emitter_abort = spawn_byte_emitter(app, &id, up.clone(), down.clone());
+
+            mgr.insert_tunnel(
+                id.clone(),
+                TunnelEntry {
+                    kind: 'D',
+                    bind: bind_addr.to_string(),
+                    target: None,
+                    up,
+                    down,
+                    abort,
+                    emitter_abort: Some(emitter_abort),
+                },
+            )
+            .await;
+
+            Ok(id)
+        }
+        _ => Err(SshError::Tunnel(format!(
+            "unknown tunnel kind '{}'",
+            spec.kind
+        ))),
     }
 }
 
