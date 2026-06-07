@@ -32,6 +32,7 @@ mysql_async = { version = "0.37.0", default-features = false, features = ["defau
 futures-util = "0.3.32"
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 rust_decimal = "1.42.0"
+rusqlite = { version = "0.32", features = ["bundled", "load_extension", "column_decltype"] }
 
 [profile.release]
 panic = "abort"
