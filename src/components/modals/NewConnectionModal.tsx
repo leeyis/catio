@@ -5,6 +5,9 @@ import { Icon } from '../Icon'
 import { Btn, IconBtn, Segmented, Toggle, ConnGlyph } from '../atoms'
 import { useData } from '../../state/DataContext'
 import type { AuthMethod } from '../../services/ssh'
+import type { DbType } from '../../services/db'
+import { dbConnect } from '../../services/db'
+import { saveDbConnection } from '../../state/dbConnections'
 
 // ---- Prop types ----
 
@@ -14,22 +17,27 @@ export interface NewConnectionModalProps {
 
 interface FieldProps {
   label: string
-  value?: string
+  value: string
+  onChange: (v: string) => void
   placeholder?: string
   w?: number
   mono?: boolean
+  type?: string
 }
 
 // ---- Constants ----
 
-const DB_ENGINES = [
-  { id: 'postgres', label: 'PostgreSQL', short: 'PG' },
-  { id: 'mysql', label: 'MySQL', short: 'SQL' },
-  { id: 'redis', label: 'Redis', short: 'RDS' },
-  { id: 'mongo', label: 'MongoDB', short: 'MGO' },
-  { id: 'clickhouse', label: 'ClickHouse', short: 'CH' },
-  { id: 'sqlite', label: 'SQLite', short: 'LITE' },
-  { id: 'duckdb', label: 'DuckDB', short: 'DUCK' },
+const DB_ENGINES: { id: DbType; label: string; short: string; defaultPort: number }[] = [
+  { id: 'postgres',      label: 'PostgreSQL',    short: 'PG',   defaultPort: 5432  },
+  { id: 'mysql',         label: 'MySQL',          short: 'SQL',  defaultPort: 3306  },
+  { id: 'redis',         label: 'Redis',          short: 'RDS',  defaultPort: 6379  },
+  { id: 'mongodb',       label: 'MongoDB',        short: 'MGO',  defaultPort: 27017 },
+  { id: 'clickhouse',    label: 'ClickHouse',     short: 'CH',   defaultPort: 8123  },
+  { id: 'sqlite',        label: 'SQLite',         short: 'LITE', defaultPort: 0     },
+  { id: 'duckdb',        label: 'DuckDB',         short: 'DUCK', defaultPort: 0     },
+  { id: 'sqlserver',     label: 'SQL Server',     short: 'MSSQL',defaultPort: 1433  },
+  { id: 'elasticsearch', label: 'Elasticsearch',  short: 'ES',   defaultPort: 9200  },
+  { id: 'rqlite',        label: 'rqlite',         short: 'RQL',  defaultPort: 4001  },
 ]
 
 // ---- Component ----
@@ -43,7 +51,7 @@ export function NewConnectionModal({ onClose }: NewConnectionModalProps) {
     { id: 'local', label: t('modals.protoLocal') },
   ]
   const [kind, setKind] = useState('db')
-  const [engine, setEngine] = useState('postgres')
+  const [engine, setEngine] = useState<DbType>('postgres')
   const [engineOpen, setEngineOpen] = useState(false)
   const engineRef = useRef<HTMLDivElement>(null)
   const [proto, setProto] = useState('ssh')
@@ -54,6 +62,24 @@ export function NewConnectionModal({ onClose }: NewConnectionModalProps) {
   const [tested, setTested] = useState(false)
   const [color, setColor] = useState('var(--signal-rose)')
   const hosts = D.connections.filter(c => c.kind === 'host' && c.proto !== 'local')
+
+  // DB-specific controlled state
+  const [dbName, setDbName] = useState('prod-orders')
+  const [dbHost, setDbHost] = useState('10.0.4.2')
+  const [dbPort, setDbPort] = useState('5432')
+  const [dbUser, setDbUser] = useState('app_ro')
+  const [dbDatabase, setDbDatabase] = useState('')
+  const [dbSecret, setDbSecret] = useState('')
+  const [dbConnecting, setDbConnecting] = useState(false)
+  const [dbError, setDbError] = useState<string | null>(null)
+
+  // Reset port when engine changes
+  const handleEngineChange = (id: DbType) => {
+    setEngine(id)
+    setEngineOpen(false)
+    const eng = DB_ENGINES.find(e => e.id === id)
+    if (eng && eng.defaultPort > 0) setDbPort(String(eng.defaultPort))
+  }
 
   useEffect(() => {
     if (!engineOpen) return
@@ -66,10 +92,44 @@ export function NewConnectionModal({ onClose }: NewConnectionModalProps) {
     return () => window.removeEventListener('mousedown', handleClickOutside)
   }, [engineOpen])
 
-  const Field = ({ label, value, placeholder, w, mono }: FieldProps) => (
+  const handleDbSaveAndConnect = async () => {
+    setDbError(null)
+    setDbConnecting(true)
+    const id = `db-${Date.now()}`
+    const profile = {
+      id,
+      name: dbName,
+      dbType: engine,
+      host: dbHost,
+      port: Number(dbPort),
+      user: dbUser,
+      ...(dbDatabase ? { database: dbDatabase } : {}),
+    }
+    // Persist profile WITHOUT secret
+    saveDbConnection(profile)
+    // Attempt live connection (only works in Tauri runtime; throws outside)
+    try {
+      await dbConnect({ ...profile, secret: dbSecret || undefined })
+    } catch (err) {
+      // Outside Tauri: expected "requires the Tauri runtime" — treat as non-fatal in dev
+      const msg = err instanceof Error ? err.message : String(err)
+      if (!msg.includes('Tauri runtime')) {
+        setDbError(msg)
+        setDbConnecting(false)
+        return
+      }
+    }
+    setDbSecret('') // discard secret from memory
+    setDbConnecting(false)
+    onClose()
+  }
+
+  const Field = ({ label, value, onChange, placeholder, w, mono, type }: FieldProps) => (
     <label className="col" style={{ gap: 5, flex: w || 1 }}>
       <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{label}</span>
-      <input defaultValue={value} placeholder={placeholder} className={mono ? 'mono' : ''}
+      <input value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
+        type={type ?? 'text'}
+        className={mono ? 'mono' : ''}
         style={{ height: 36, padding: '0 12px', borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }} />
     </label>
   )
@@ -139,7 +199,7 @@ export function NewConnectionModal({ onClose }: NewConnectionModalProps) {
                       const m = D.engineMeta[e.id] || {}
                       return (
                         <button key={e.id}
-                          onClick={() => { setEngine(e.id); setEngineOpen(false) }}
+                          onClick={() => handleEngineChange(e.id)}
                           style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', border: 'none', background: active ? 'var(--accent-soft)' : 'transparent', cursor: 'pointer', textAlign: 'left' }}>
                           <span className="mono" style={{ fontSize: 10, fontWeight: 700, color: m.color, minWidth: 28 }}>{e.short}</span>
                           <span style={{ flex: 1, fontSize: 13, fontWeight: active ? 600 : 400, color: active ? 'var(--accent-primary)' : 'var(--text-primary)' }}>{e.label}</span>
@@ -161,7 +221,9 @@ export function NewConnectionModal({ onClose }: NewConnectionModalProps) {
           {/* base fields */}
           <div className="col gap10" style={{ marginBottom: 14 }}>
             <div className="row gap10">
-              <Field label={t('modals.fieldName')} value={kind === 'db' ? 'prod-orders' : 'prod-web-01'} w={1.4} />
+              {kind === 'db'
+                ? <Field label={t('modals.fieldName')} value={dbName} onChange={setDbName} w={1.4} />
+                : <Field label={t('modals.fieldName')} value="prod-web-01" onChange={() => undefined} w={1.4} />}
               <label className="col" style={{ gap: 5, flex: 1 }}>
                 <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.fieldGroup')}</span>
                 <div className="row gap6" style={{ height: 36 }}>
@@ -170,20 +232,46 @@ export function NewConnectionModal({ onClose }: NewConnectionModalProps) {
               </label>
             </div>
             <div className="row gap10">
-              <Field label={t('modals.fieldHost')} value={kind === 'db' ? '10.0.4.2' : '10.0.1.21'} mono w={2} />
-              <Field label={t('modals.fieldPort')} value={kind === 'db' ? (engine === 'postgres' ? '5432' : engine === 'redis' ? '6379' : '3306') : '22'} mono w={0.8} />
+              {kind === 'db'
+                ? <Field label={t('modals.fieldHost')} value={dbHost} onChange={setDbHost} mono w={2} />
+                : <Field label={t('modals.fieldHost')} value="10.0.1.21" onChange={() => undefined} mono w={2} />}
+              {kind === 'db'
+                ? <Field label={t('modals.fieldPort')} value={dbPort} onChange={setDbPort} mono w={0.8} />
+                : <Field label={t('modals.fieldPort')} value="22" onChange={() => undefined} mono w={0.8} />}
             </div>
             <div className="row gap10">
-              <Field label={kind === 'db' ? t('modals.fieldUser') : t('modals.fieldUsername')} value={kind === 'db' ? 'app_ro' : 'deploy'} mono />
-              <label className="col" style={{ gap: 5, flex: 1 }}>
-                <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.fieldPasswordKey')}</span>
-                <div className="row" style={{ height: 36, borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', paddingLeft: 10, paddingRight: 12, gap: 6, alignItems: 'center' }}>
-                  <Icon name="lock" size={12} style={{ color: 'var(--text-faint)', flex: 'none' }} />
-                  <input defaultValue="" placeholder={t('modals.fieldPasswordPlaceholder')} className="mono"
-                    style={{ flex: 1, height: '100%', border: 'none', background: 'transparent', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }} />
-                </div>
-              </label>
+              {kind === 'db'
+                ? <Field label={t('modals.fieldUser')} value={dbUser} onChange={setDbUser} mono />
+                : <Field label={t('modals.fieldUsername')} value="deploy" onChange={() => undefined} mono />}
+              {kind === 'db' ? (
+                <label className="col" style={{ gap: 5, flex: 1 }}>
+                  <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.fieldPasswordKey')}</span>
+                  <div className="row" style={{ height: 36, borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', paddingLeft: 10, paddingRight: 12, gap: 6, alignItems: 'center' }}>
+                    <Icon name="lock" size={12} style={{ color: 'var(--text-faint)', flex: 'none' }} />
+                    <input value={dbSecret} onChange={e => setDbSecret(e.target.value)}
+                      type="password" placeholder={t('modals.fieldPasswordPlaceholder')} className="mono"
+                      style={{ flex: 1, height: '100%', border: 'none', background: 'transparent', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }} />
+                  </div>
+                </label>
+              ) : (
+                <label className="col" style={{ gap: 5, flex: 1 }}>
+                  <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.fieldPasswordKey')}</span>
+                  <div className="row" style={{ height: 36, borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', paddingLeft: 10, paddingRight: 12, gap: 6, alignItems: 'center' }}>
+                    <Icon name="lock" size={12} style={{ color: 'var(--text-faint)', flex: 'none' }} />
+                    <input defaultValue="" placeholder={t('modals.fieldPasswordPlaceholder')} className="mono"
+                      style={{ flex: 1, height: '100%', border: 'none', background: 'transparent', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }} />
+                  </div>
+                </label>
+              )}
             </div>
+            {/* Database name field — DB kind only */}
+            {kind === 'db' && (
+              <Field label={t('modals.fieldDatabase') ?? 'Database (optional)'} value={dbDatabase} onChange={setDbDatabase} placeholder="e.g. orders" />
+            )}
+            {/* Error message */}
+            {kind === 'db' && dbError && (
+              <span style={{ fontSize: 12, color: 'var(--danger-fg)' }}>{dbError}</span>
+            )}
           </div>
 
           {/* auth method — host/SSH only */}
@@ -262,7 +350,11 @@ export function NewConnectionModal({ onClose }: NewConnectionModalProps) {
           </button>
           <div className="row gap8">
             <Btn variant="ghost" onClick={onClose}>{t('modals.cancel')}</Btn>
-            <Btn variant="primary" icon="check">{t('modals.saveAndConnect')}</Btn>
+            {kind === 'db'
+              ? <Btn variant="primary" icon="check" onClick={handleDbSaveAndConnect} disabled={dbConnecting}>
+                  {dbConnecting ? t('modals.connecting') ?? 'Connecting…' : t('modals.saveAndConnect')}
+                </Btn>
+              : <Btn variant="primary" icon="check">{t('modals.saveAndConnect')}</Btn>}
           </div>
         </div>
       </div>

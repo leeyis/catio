@@ -6,7 +6,7 @@ const isTauri = (): boolean =>
   typeof window !== 'undefined' &&
   ('__TAURI_INTERNALS__' in window || '__TAURI__' in window)
 
-async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const { invoke } = await import('@tauri-apps/api/core')
   return invoke<T>(cmd, args)
 }
@@ -45,18 +45,20 @@ export interface DbConnectResult {
 // ---- Connection lifecycle ----
 
 export async function dbConnect(args: DbConnectArgs): Promise<DbConnectResult> {
-  return invoke<DbConnectResult>('db_connect', { args })
+  if (!isTauri()) throw new Error('dbConnect requires the Tauri runtime')
+  return tauriInvoke<DbConnectResult>('db_connect', { args })
 }
 
 export async function dbDisconnect(connId: string): Promise<void> {
-  return invoke('db_disconnect', { connId })
+  if (!isTauri()) throw new Error('dbDisconnect requires the Tauri runtime')
+  return tauriInvoke('db_disconnect', { connId })
 }
 
 // ---- Query ----
 
 function mockQueryResult(): QueryResult {
   const columns: ResultColumn[] = DATA.ordersColumns.map(c => ({
-    name: c.name, type: c.type, pk: c.pk, fk: c.fk,
+    name: c.name, type: c.type, pk: c.pk, fk: c.fk, icon: c.icon,
   }))
   const keys = DATA.ordersColumns.map(c => c.name)
   const rows: unknown[][] = DATA.ordersRows.map(
@@ -67,7 +69,7 @@ function mockQueryResult(): QueryResult {
 
 export async function runQuery(connId: string, sql: string): Promise<QueryResult> {
   if (!isTauri()) return mockQueryResult()
-  return invoke<QueryResult>('db_query', { connId, sql })
+  return tauriInvoke<QueryResult>('db_query', { connId, sql })
 }
 
 // ---- Schema introspection ----
@@ -75,7 +77,7 @@ export async function runQuery(connId: string, sql: string): Promise<QueryResult
 export async function getSchema(connId: string): Promise<Schema> {
   if (!isTauri()) return DATA.schema
   // Backend returns [schemaName, tables][] — adapt to frontend Schema shape
-  const raw = await invoke<Array<[string, Array<{ name: string; kind: string }>]>>('db_schema', { connId })
+  const raw = await tauriInvoke<Array<[string, Array<{ name: string; kind: string }>]>>('db_schema', { connId })
   return {
     db: connId,
     schemas: raw.map(([name, tables]) => ({
