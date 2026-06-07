@@ -98,6 +98,8 @@ impl Handler for TestHandler {
     ) -> Result<(), Self::Error> {
         session.channel_success(channel)?;
         // Echo the command back to stdout, then exit 0 and close.
+        // NOTE: a trailing "\n" is appended (not byte-exact to the input) — exec-based
+        // tests (A7/D) that assert on output must account for it.
         let mut out = data.to_vec();
         out.extend_from_slice(b"\n");
         session.data(channel, out)?;
@@ -140,7 +142,12 @@ pub async fn start() -> std::net::SocketAddr {
         loop {
             let (socket, peer) = match listener.accept().await {
                 Ok(v) => v,
-                Err(_) => break,
+                // Surface accept errors so a dead accept loop is diagnosable in
+                // `cargo test` output instead of producing cryptic connect refusals.
+                Err(e) => {
+                    eprintln!("[test_server] accept error: {e}");
+                    break;
+                }
             };
             let handler = server.new_client(Some(peer));
             let cfg = config.clone();
