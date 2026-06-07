@@ -218,6 +218,7 @@ pub async fn ssh_connect(
             handle,
             host: args.host.clone(),
             user: args.user.clone(),
+            terms: std::collections::HashMap::new(),
         },
     )
     .await;

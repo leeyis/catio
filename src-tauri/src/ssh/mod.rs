@@ -3,6 +3,7 @@ pub mod conn;
 pub mod ids;
 pub mod knownhosts;
 pub mod manager;
+pub mod term;
 
 use serde::Serialize;
 

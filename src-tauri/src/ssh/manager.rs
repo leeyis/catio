@@ -9,6 +9,32 @@ pub struct Session {
     pub handle: russh::client::Handle<ClientHandler>,
     pub host: String,
     pub user: String,
+    /// 每个终端 channel 一个 owner 任务；此处仅存向其发指令的 mpsc 发送端。
+    pub terms: HashMap<String, tokio::sync::mpsc::UnboundedSender<crate::ssh::term::TermCmd>>,
+}
+
+impl Session {
+    pub fn insert_term(
+        &mut self,
+        id: String,
+        tx: tokio::sync::mpsc::UnboundedSender<crate::ssh::term::TermCmd>,
+    ) {
+        self.terms.insert(id, tx);
+    }
+
+    pub fn get_term(
+        &self,
+        id: &str,
+    ) -> Option<tokio::sync::mpsc::UnboundedSender<crate::ssh::term::TermCmd>> {
+        self.terms.get(id).cloned()
+    }
+
+    pub fn remove_term(
+        &mut self,
+        id: &str,
+    ) -> Option<tokio::sync::mpsc::UnboundedSender<crate::ssh::term::TermCmd>> {
+        self.terms.remove(id)
+    }
 }
 
 /// 进程内会话表。以会话 id（"sess-N"）为键。
