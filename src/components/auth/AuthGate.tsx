@@ -110,7 +110,7 @@ export function AuthGate({ users, onLogin, onCreate }: AuthGateProps) {
                   onKeyDown={e => { if (e.key === 'Enter') submitInit() }} placeholder={t('auth.fieldConfirmPasswordPlaceholder')} style={field} />
               </label>
               <label className="col gap5">
-                <Label>{t('auth.fieldHint')} <span style={{ color: 'var(--text-faint)', fontWeight: 400 }}>({t('auth.fieldHintOptional')})</span></Label>
+                <Label>{t('auth.fieldHint')} <span style={{ color: 'var(--text-faint)', fontWeight: 400 }}>{t('auth.fieldHintOptional')}</span></Label>
                 <input value={hint} onChange={e => setHint(e.target.value)} placeholder={t('auth.fieldHintPlaceholder')} style={field} />
               </label>
             </>

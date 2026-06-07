@@ -31,16 +31,16 @@ const DB_ENGINES = [
   { id: 'duckdb', label: 'DuckDB', short: 'DUCK' },
 ]
 
-const PROTOS = [
-  { id: 'ssh', label: 'SSH' }, { id: 'mosh', label: 'Mosh' },
-  { id: 'telnet', label: 'Telnet' }, { id: 'serial', label: 'Serial' }, { id: 'local', label: 'Local' },
-]
-
 // ---- Component ----
 
 export function NewConnectionModal({ onClose }: NewConnectionModalProps) {
   const D = useData()
   const { t } = useTranslation()
+  const PROTOS = [
+    { id: 'ssh', label: 'SSH' }, { id: 'mosh', label: 'Mosh' },
+    { id: 'telnet', label: 'Telnet' }, { id: 'serial', label: 'Serial' },
+    { id: 'local', label: t('modals.protoLocal') },
+  ]
   const [kind, setKind] = useState('db')
   const [engine, setEngine] = useState('postgres')
   const [proto, setProto] = useState('ssh')
