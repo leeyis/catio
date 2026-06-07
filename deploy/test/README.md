@@ -56,12 +56,28 @@ The URL format parsed by each test is `host:port:user:password:dbname` (colons a
 
 ## Run the full test suite
 
+> **Important — do not use a bare `cargo test`.** This is a Tauri library crate
+> (`crate-type = ["staticlib", "cdylib", "rlib"]`). Building the integration tests
+> *together with* the `[[bin]]` target — which a bare `cargo test` does — forces a
+> Windows dependency (`winapi`, pulled in transitively by `tiberius`) into a
+> non-`rlib` format, and the integration test targets then fail to link with
+> `error: crate 'winapi' required to be available in rlib format`. Run the library
+> unit tests and the integration test targets explicitly instead (this excludes the
+> bin and links cleanly):
+
 ```bash
 cd src-tauri
-cargo test
+cargo test --lib \
+  --test db_postgres --test db_mysql --test db_sqlite --test db_duckdb \
+  --test db_sqlserver --test db_clickhouse --test db_rqlite --test db_elasticsearch \
+  --test db_mongo --test db_redis \
+  --test ssh_conn --test ssh_term --test ssh_sftp
 ```
 
-All engine integration tests + pure-function tests + embedded-engine tests (SQLite / DuckDB) will run. Server-engine tests skip gracefully if the matching env var is absent.
+All engine integration tests + pure-function unit tests + embedded-engine tests
+(SQLite / DuckDB) will run. Server-engine tests skip gracefully if the matching env
+var is absent; `cargo test --lib` alone runs the pure-function + embedded coverage
+with no docker required.
 
 ### Space-constrained machines — redirect the Cargo target directory
 
