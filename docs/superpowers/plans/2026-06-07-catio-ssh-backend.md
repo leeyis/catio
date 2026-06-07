@@ -20,6 +20,24 @@ russh 是快速演进的 crate。本计划的 Rust 代码基于 russh 当前 `ma
 
 参考实现：Reach（github.com/alexandrosnt/Reach，MIT）的 `src-tauri` russh 代码。逐段拷贝时在文件头注明 `// adapted from Reach src-tauri/<file>, MIT`。
 
+**已锁定版本与 crypto 后端（A1 实测）**：russh **0.61.2**、russh-sftp **2.3.0**、thiserror 2、base64 0.22、tokio 1。russh 默认 `aws-lc-rs` 后端需 NASM（本 Windows 机无），故 Cargo.toml 用 **ring 后端**：`russh = { version = "0.61.2", default-features = false, features = ["ring", "flate2", "rsa"] }`。**后续任务不要改回 aws-lc-rs**。注意 0.61 的 API 以 docs.rs/0.61.2 为准（可能与本计划基于 main 写的片段有细微差异，按编译器修正）。
+
+**russh 0.61.2 已确认的 API 事实（A3 实测，所有后续 Rust 任务照此）**：
+1. **server 端发数据** `Session::data(channel, data: impl Into<bytes::Bytes>)` —— 传 `Vec<u8>`，**不是 `CryptoVec`**（CryptoVec 不实现 Into<Bytes>）。
+2. **生成密钥** `PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519)`；dev-dep 用 **`rand`**（rand 0.10 → rand_core 0.10），**不要用 `rand_core::OsRng`**（ssh-key 0.7 的 rand_core 0.10 已无 OsRng）。
+3. **server 端请求回执**：`pty_request`/`shell_request`/`exec_request` 处理后必须 `session.channel_success(channel)?`，否则 client 端的 request future 会挂起。
+4. `russh::server::run_stream(Arc<Config>, stream, handler) -> Result<RunningSession<H>, H::Error>`；`Auth::reject()` 无参；`Server::new_client(&mut self, Option<SocketAddr>)`。
+5. **client 端**（A7 实测修正）：`ChannelMsg::Data { data: bytes::Bytes }`、`ExtendedData { data: bytes::Bytes, ext: u32 }`、`Eof`、`Close`（data 是 **`bytes::Bytes`**，非 CryptoVec；`&data[..]` 取切片）。`channel.data<R: AsyncRead+Unpin>(&self, R)`——`&bytes[..]` 即可。`request_pty(&self, want_reply, term, col, row, pix_w, pix_h, &[(Pty,u32)])`、`request_shell(&self, want_reply)`、`window_change(&self, col,row,pix_w,pix_h)`、`eof(&self)`、`wait(&mut self) -> Option<ChannelMsg>`。owner-task 用 `tokio::select!` 同时 `wait()`(&mut) 与发指令(&self) 不冲突（单任务顺序求值）。
+
+**A7→A10 前端接线契约（已实现）**：`term_open(sessionId, cols, rows)` 返回裸 `chanId`（如 `chan-1`）；前端订阅事件名 `term://${chanId}`。数据帧 `{ bytesBase64: "<b64>" }`（解码喂 xterm）；关闭帧 `{ closed: true }`（无 bytesBase64，监听器按 key 分支）。`term_write(sessionId, chanId, dataBase64)`（键击 base64）、`term_resize(sessionId, chanId, cols, rows)`、`term_close(sessionId, chanId)`。**前端收到 `{closed:true}` 应调 `term_close` 清理 map**（否则 terms 里留一个悬空 sender——无害但应清）。
+
+**russh 0.61.2 client API（A4 实测）**：
+- `check_server_key(&mut self, &russh::keys::ssh_key::PublicKey)` 返回 `impl Future<Output=Result<bool, Self::Error>> + Send`（trait 里非 async fn，但 impl 写 `async fn` 可）；**默认实现拒绝所有 key，必须 override**。`Handler::Error` 用 `russh::Error`。
+- `handle.authenticate_password(user, pw).await? -> AuthResult`（`russh::client::AuthResult` = `Success | Failure{...}`）；成功判定用 `.success()`。
+- 指纹：`pubkey.fingerprint(ssh_key::HashAlg::default()).to_string()` → `"SHA256:..."`。
+- **`Handle` 无 `get_handler()`**（handler 被 move 进 `connect`）。要取握手期捕获的指纹：把 `Arc<std::sync::Mutex<Option<String>>>` 在 connect 前 clone 一份留在外面，握手后读该 slot。A5 TOFU 沿用此 shared-slot。
+- `connect(Arc<Config>, addrs, handler) -> Result<Handle<H>, H::Error>`、`handle.disconnect(Disconnect::ByApplication, "", "en")` 均确认。
+
 ---
 
 ## 文件结构
@@ -1691,6 +1709,7 @@ git commit -m "feat(ssh/fe): MonitorPanel + Multi-Exec wired to real backend"
 
 ## Task E1: 最终评审 + 文档
 
+- [ ] **Step 0（健壮性，A7 review 建议）：** `ssh_disconnect` 时清理该 session 的 `terms`（向各 owner 任务发 `TermCmd::Close` 或直接 drop sender），避免前端不调 `term_close` 时残留悬空 sender；隧道/监控任务同理在 disconnect 时一并 abort。
 - [ ] **Step 1:** 跑全量：`cd src-tauri && cargo test && cargo clippy` ；根目录 `npm test && npx tsc --noEmit && npm run build`。全绿。
 - [ ] **Step 2:** 更新 spec 顶部状态为「已实现」，在 README/docs 记录：SSH 后端命令清单、known_hosts 位置、连接档案存储位置、秘密不落盘说明。
 - [ ] **Step 3:** 手动 QA 全清单走一遍（终端/SFTP/隧道/监控/多机），结果记录。
