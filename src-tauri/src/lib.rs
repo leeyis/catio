@@ -9,7 +9,8 @@ pub fn run() {
         .manage(SessionManager::default())
         .invoke_handler(tauri::generate_handler![
             ssh::conn::ssh_connect,
-            ssh::conn::ssh_disconnect
+            ssh::conn::ssh_disconnect,
+            ssh::conn::ssh_trust_host
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

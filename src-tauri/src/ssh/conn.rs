@@ -65,7 +65,6 @@ pub struct ConnectResult {
 }
 
 /// 客户端 Handler：在 `check_server_key` 中捕获服务端主机密钥指纹。
-/// A5 会在此基础上加入 TOFU / known_hosts 校验。
 #[derive(Clone, Default)]
 pub struct ClientHandler {
     pub fingerprint: Arc<std::sync::Mutex<Option<String>>>,
@@ -83,16 +82,18 @@ impl client::Handler for ClientHandler {
             .fingerprint(ssh_key::HashAlg::default())
             .to_string();
         // 可靠写入：本槽仅此一处写、单写者，poison 只可能源于他处 panic，
-        // 此时宁可显式 panic 也不要静默丢指纹（A5 的 TOFU 依赖它）。
+        // 此时宁可显式 panic 也不要静默丢指纹。
         *self.fingerprint.lock().expect("fingerprint mutex poisoned") = Some(fp);
-        // TOFU 校验在 A5。当前一律接受。
+        // 一律接受（TOFU 校验在 connect_checked 层完成）。
         Ok(true)
     }
 }
 
-/// 可测试核心：建立 TCP+SSH 连接、完成认证，成功后返回 (handle, fingerprint)。
-/// 命令与集成测试共用此函数（DRY）。
-pub async fn connect_authenticated(
+// ─── 私有共享核心：只做 TCP 握手 + 认证 ─────────────────────────────────────
+
+/// 建立 TCP+SSH 连接、完成认证，成功后返回 (handle, fingerprint)。
+/// 不含 TOFU / known_hosts 逻辑——由 connect_checked 上层处理。
+async fn connect_core(
     args: &ConnectArgs,
 ) -> Result<(Handle<ClientHandler>, String), SshError> {
     let config = Arc::new(client::Config::default());
@@ -131,13 +132,74 @@ pub async fn connect_authenticated(
     Ok((handle, fingerprint))
 }
 
+// ─── 公开 API ─────────────────────────────────────────────────────────────────
+
+/// 可测试核心：建立 TCP+SSH 连接、完成认证，成功后返回 (handle, fingerprint)。
+/// 命令与集成测试共用此函数（DRY）。
+/// 包装 `connect_checked(args, None)` 并丢弃 trusted 布尔。
+pub async fn connect_authenticated(
+    args: &ConnectArgs,
+) -> Result<(Handle<ClientHandler>, String), SshError> {
+    let (handle, fp, _trusted) = connect_checked(args, None).await?;
+    Ok((handle, fp))
+}
+
+/// 带 TOFU 校验的连接函数。
+///
+/// - `known_hosts_dir = None` → accept-any（等同 A4 行为，保留向后兼容）。
+/// - `known_hosts_dir = Some(dir)` → 读取 `dir/known_hosts`，执行 verify：
+///   - `Trusted`  → `Ok((handle, fp, true))`
+///   - `Unknown`  → `Ok((handle, fp, false))`（前端将提示用户信任）
+///   - `Mismatch` → 断开连接，返回 `Err(SshError::HostKeyMismatch)`
+pub async fn connect_checked(
+    args: &ConnectArgs,
+    known_hosts_dir: Option<&std::path::Path>,
+) -> Result<(Handle<ClientHandler>, String, bool), SshError> {
+    let (handle, fingerprint) = connect_core(args).await?;
+
+    let trusted = match known_hosts_dir {
+        None => true,
+        Some(dir) => {
+            let host_port = format!("{}:{}", args.host, args.port);
+            let path = dir.join("known_hosts");
+            let map = std::fs::read_to_string(&path)
+                .map(|s| crate::ssh::knownhosts::parse(&s))
+                .unwrap_or_default();
+            match crate::ssh::knownhosts::verify(&map, &host_port, &fingerprint) {
+                crate::ssh::knownhosts::Verdict::Trusted => true,
+                crate::ssh::knownhosts::Verdict::Unknown => false,
+                crate::ssh::knownhosts::Verdict::Mismatch => {
+                    handle
+                        .disconnect(russh::Disconnect::ByApplication, "", "en")
+                        .await
+                        .ok();
+                    return Err(SshError::HostKeyMismatch);
+                }
+            }
+        }
+    };
+
+    Ok((handle, fingerprint, trusted))
+}
+
+// ─── Tauri 命令 ───────────────────────────────────────────────────────────────
+
 /// 建立 SSH 连接（密码认证）。成功后存入 SessionManager 并返回会话信息。
 #[tauri::command]
 pub async fn ssh_connect(
     args: ConnectArgs,
     mgr: tauri::State<'_, SessionManager>,
+    app: tauri::AppHandle,
 ) -> Result<ConnectResult, SshError> {
-    let (handle, fingerprint) = connect_authenticated(&args).await?;
+    use tauri::Manager;
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| SshError::Io(e.to_string()))?;
+    std::fs::create_dir_all(&dir).map_err(|e| SshError::Io(e.to_string()))?;
+
+    let (handle, fingerprint, host_key_trusted) =
+        connect_checked(&args, Some(dir.as_path())).await?;
 
     let session_id = SESS_IDS.next();
     mgr.insert(
@@ -153,7 +215,7 @@ pub async fn ssh_connect(
     Ok(ConnectResult {
         session_id,
         host_key_fingerprint: fingerprint,
-        host_key_trusted: true,
+        host_key_trusted,
     })
 }
 
@@ -173,5 +235,28 @@ pub async fn ssh_disconnect(
         .disconnect(russh::Disconnect::ByApplication, "", "en")
         .await
         .ok();
+    Ok(())
+}
+
+/// 将主机密钥指纹写入 known_hosts（TOFU 信任操作）。
+#[tauri::command]
+pub async fn ssh_trust_host(
+    host_port: String,
+    fingerprint: String,
+    app: tauri::AppHandle,
+) -> Result<(), SshError> {
+    use tauri::Manager;
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| SshError::Io(e.to_string()))?;
+    std::fs::create_dir_all(&dir).map_err(|e| SshError::Io(e.to_string()))?;
+    let path = dir.join("known_hosts");
+    let mut map = std::fs::read_to_string(&path)
+        .map(|s| crate::ssh::knownhosts::parse(&s))
+        .unwrap_or_default();
+    map.insert(host_port, fingerprint);
+    std::fs::write(&path, crate::ssh::knownhosts::serialize(&map))
+        .map_err(|e| SshError::Io(e.to_string()))?;
     Ok(())
 }
