@@ -72,6 +72,9 @@ export function TerminalPane({ conn, sessionId }: TerminalPaneProps) {
   const rootRef = useRef<HTMLDivElement>(null)
   const xtermHost = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
+  // Mutable ref tracking the active channel id; nulled on server-initiated close to
+  // prevent double-termClose and dead-channel keystroke writes.
+  const chanIdRef = useRef<string | null>(null)
   const [selBar, setSelBar] = useState<{ left: number; top: number; text: string } | null>(null)
 
   const host = conn ? (conn.sub.split(' ')[0].replace('ssh ', '')) : 'jump@db-bastion'
@@ -83,7 +86,7 @@ export function TerminalPane({ conn, sessionId }: TerminalPaneProps) {
     if (!hostEl) return
     let disposed = false
     let unlisten: (() => void) | null = null
-    let chanId: string | null = null
+    chanIdRef.current = null
     let ro: ResizeObserver | null = null
 
     const term = new Terminal({
@@ -107,6 +110,8 @@ export function TerminalPane({ conn, sessionId }: TerminalPaneProps) {
       const hostRect = hostEl.getBoundingClientRect()
       const scale = (rootRect.width / root.offsetWidth) || 1
       const left = (hostRect.left + hostRect.width / 2 - rootRect.left) / scale
+      // xterm.js exposes no selection pixel coords; toolbar is anchored near the top of
+      // the surface rather than at the selection. Known limitation vs the old DOM renderer.
       const top = (hostRect.top + 24 - rootRect.top) / scale
       setSelBar({ left, top, text: text.trim() })
     })
@@ -114,22 +119,29 @@ export function TerminalPane({ conn, sessionId }: TerminalPaneProps) {
     if (live && sessionId) {
       // ---- LIVE: wire to term_* IPC ----
       ;(async () => {
-        chanId = await termOpen(sessionId, term.cols, term.rows)
-        if (disposed) { termClose(sessionId, chanId); return }
-        unlisten = await listen<TermEvent>(`term://${chanId}`, (p) => {
+        const openedChanId = await termOpen(sessionId, term.cols, term.rows)
+        chanIdRef.current = openedChanId
+        if (disposed) { termClose(sessionId, openedChanId); chanIdRef.current = null; return }
+        unlisten = await listen<TermEvent>(`term://${openedChanId}`, (p) => {
           if (typeof p.bytesBase64 === 'string') {
             term.write(base64ToBytes(p.bytesBase64))
           } else if (p.closed) {
+            // Server-initiated close: write notice, close channel, then mark it dead so
+            // keystrokes and unmount cleanup don't call termClose on a dead channel.
             term.write('\r\n\x1b[2m[connection closed]\x1b[0m\r\n')
-            if (chanId) termClose(sessionId, chanId)
+            if (chanIdRef.current) { termClose(sessionId, chanIdRef.current); chanIdRef.current = null }
           }
         })
-        if (disposed) { unlisten(); termClose(sessionId, chanId); return }
-        term.onData(d => { if (chanId) termWrite(sessionId, chanId, bytesToBase64(d)) })
+        if (disposed) { unlisten(); if (chanIdRef.current) { termClose(sessionId, chanIdRef.current); chanIdRef.current = null } return }
+        term.onData(d => {
+          // Drop keystrokes after a server-initiated close (channel already torn down).
+          if (!chanIdRef.current) return
+          termWrite(sessionId, chanIdRef.current, bytesToBase64(d))
+        })
         if (typeof ResizeObserver !== 'undefined') {
           ro = new ResizeObserver(() => {
             try { fitAddon.fit() } catch { /* no layout */ }
-            if (chanId) termResize(sessionId, chanId, term.cols, term.rows)
+            if (chanIdRef.current) termResize(sessionId, chanIdRef.current, term.cols, term.rows)
           })
           ro.observe(hostEl)
         }
@@ -151,7 +163,8 @@ export function TerminalPane({ conn, sessionId }: TerminalPaneProps) {
       disposed = true
       if (ro) ro.disconnect()
       if (unlisten) unlisten()
-      if (live && sessionId && chanId) termClose(sessionId, chanId)
+      // Only call termClose if the channel is still live (not already closed by server).
+      if (live && sessionId && chanIdRef.current) { termClose(sessionId, chanIdRef.current); chanIdRef.current = null }
       term.dispose()
       termRef.current = null
     }

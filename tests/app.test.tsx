@@ -1,7 +1,32 @@
 import { render, screen, fireEvent } from '@testing-library/react'
+import { vi } from 'vitest'
 import { LanguageProvider } from '../src/state/LanguageContext'
 import { DataProvider } from '../src/state/DataContext'
 import App from '../src/App'
+
+// Mock xterm so the real library doesn't run in jsdom (avoids HTMLCanvasElement.getContext errors).
+vi.mock('@xterm/xterm', () => ({
+  Terminal: class {
+    cols = 80
+    rows = 24
+    open() {}
+    write() {}
+    onData() {}
+    onSelectionChange() {}
+    clearSelection() {}
+    clear() {}
+    getSelection() { return '' }
+    loadAddon() {}
+    dispose() {}
+    focus() {}
+    onResize() {}
+  },
+}))
+vi.mock('@xterm/addon-fit', () => ({
+  FitAddon: class { fit() {} activate() {} dispose() {} },
+}))
+// xterm.css import — stub so the bundler/test doesn't choke
+vi.mock('@xterm/xterm/css/xterm.css', () => ({}))
 
 const wrap = () => render(<LanguageProvider><DataProvider><App /></DataProvider></LanguageProvider>)
 
