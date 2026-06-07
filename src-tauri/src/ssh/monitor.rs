@@ -191,10 +191,52 @@ fn push_window<T: Clone>(win: &mut VecDeque<T>, v: T, cap: usize) -> Vec<T> {
 // 5. Tauri 命令：monitor_start / monitor_stop
 // ────────────────────────────────────────────────
 
-/// 启动一个会话的周期监控任务。每 `interval_ms` 调一次 `sample`，把新值压入
+/// 在会话锁内仅做一次 `run_cmd`，立即释放锁。
+/// 这样监控任务可以在 sleep 和各 exec 之间自由释放锁，
+/// 不会阻塞同会话的 term/sftp/tunnel 操作。
+async fn run_cmd_locked(
+    sess: &tokio::sync::Mutex<crate::ssh::manager::Session>,
+    cmd: &str,
+) -> Result<String, SshError> {
+    let s = sess.lock().await;
+    run_cmd(&s.handle, cmd).await
+}
+
+/// 通过会话锁（每条命令单独加锁）采集一次监控快照。
+/// `sleep(interval)` 在任何锁之外执行，不阻塞同会话其他操作。
+async fn sample_locked(
+    sess: &tokio::sync::Mutex<crate::ssh::manager::Session>,
+    host: &str,
+    interval: Duration,
+) -> Result<Monitor, SshError> {
+    let stat_prev = run_cmd_locked(sess, CMD_STAT).await?;
+    let net_prev = run_cmd_locked(sess, CMD_NETDEV).await?;
+
+    // sleep 在锁外——其他操作（term/sftp/tunnel）可在此期间自由获取会话锁。
+    tokio::time::sleep(interval).await;
+
+    let stat_now = run_cmd_locked(sess, CMD_STAT).await?;
+    let net_now = run_cmd_locked(sess, CMD_NETDEV).await?;
+    let meminfo = run_cmd_locked(sess, CMD_MEMINFO).await?;
+    let df = run_cmd_locked(sess, CMD_DF).await?;
+    let ps = run_cmd_locked(sess, CMD_PS).await?;
+    let nvidia = run_cmd_locked(sess, CMD_NVIDIA)
+        .await
+        .unwrap_or_default();
+
+    let secs = interval.as_secs_f64();
+    Ok(assemble_monitor(
+        host, &stat_prev, &stat_now, &meminfo, &net_prev, &net_now, secs, &df, &ps, &nvidia,
+    ))
+}
+
+/// 启动一个会话的周期监控任务。每 `interval_ms` 调一次 `sample_locked`，把新值压入
 /// cpu/mem/net（及每个 gpu idx 的 util）滚动窗口（容量 60），用完整窗口构建
 /// `Monitor` 后经 `monitor://{session_id}` 发出。任务的 AbortHandle 存入 manager。
 /// 同一会话再次启动会先停掉旧任务。
+///
+/// 修复并发 bug：会话锁仅在每条 `run_cmd` 调用期间持有（微秒级），
+/// `sleep(interval)` 在锁外执行，不再阻塞 term/sftp/tunnel 的锁等待。
 #[tauri::command]
 pub async fn monitor_start(
     session_id: String,
@@ -221,13 +263,9 @@ pub async fn monitor_start(
         let mut gpu_wins: HashMap<u32, VecDeque<u32>> = HashMap::new();
 
         loop {
-            // sample 自身会 sleep(interval)（含先后两次快照）。`russh::client::Handle`
-            // 不是 Clone，故借出会话锁跨整个 sample 调用；监控间隔很短，且每次
-            // run_cmd 都新开 exec channel，不会与 term/tunnel 的 channel 冲突。
-            let snap = {
-                let s = sess.lock().await;
-                sample(&s.handle, &host, interval).await
-            };
+            // 使用 sample_locked：每条命令单独短暂加锁，sleep 在锁外，
+            // 不阻塞同会话的 term_write/term_resize/sftp_*/tunnel 操作。
+            let snap = sample_locked(&sess, &host, interval).await;
             let snap = match snap {
                 Ok(m) => m,
                 // 采样失败（会话断开等）：结束监控任务。
