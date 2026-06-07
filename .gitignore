@@ -9,3 +9,6 @@ diff.png
 *-actual.png
 *-diff.png
 .gstack/
+
+# git worktrees
+.worktrees/
