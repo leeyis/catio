@@ -241,7 +241,7 @@ impl Driver for SqlServerDriver {
             .map_err(|e| DbError::QueryFailed(e.to_string()))?;
         Ok(rows
             .iter()
-            .map(|r| r.get::<&str, _>(0).unwrap_or("").to_string())
+            .map(|r| r.try_get::<&str, _>(0).ok().flatten().unwrap_or("").to_string())
             .collect())
     }
 
@@ -265,10 +265,10 @@ impl Driver for SqlServerDriver {
         Ok(rows
             .iter()
             .map(|r| {
-                let table_type = r.get::<&str, _>(1).unwrap_or("BASE TABLE");
+                let table_type = r.try_get::<&str, _>(1).ok().flatten().unwrap_or("BASE TABLE");
                 let kind = if table_type == "VIEW" { "view" } else { "table" };
                 TableInfo {
-                    name: r.get::<&str, _>(0).unwrap_or("").to_string(),
+                    name: r.try_get::<&str, _>(0).ok().flatten().unwrap_or("").to_string(),
                     kind: kind.into(),
                     rows_estimate: None,
                 }
@@ -361,9 +361,9 @@ impl Driver for SqlServerDriver {
         let columns: Vec<ColumnDef> = col_rows
             .iter()
             .map(|r| {
-                let name = r.get::<&str, _>(0).unwrap_or("").to_string();
-                let type_name = r.get::<&str, _>(1).unwrap_or("").to_string();
-                let is_nullable = r.get::<&str, _>(2).unwrap_or("NO") == "YES";
+                let name = r.try_get::<&str, _>(0).ok().flatten().unwrap_or("").to_string();
+                let type_name = r.try_get::<&str, _>(1).ok().flatten().unwrap_or("").to_string();
+                let is_nullable = r.try_get::<&str, _>(2).ok().flatten().unwrap_or("NO") == "YES";
                 let default = r.try_get::<&str, _>(3).ok().flatten().map(|s| s.to_string());
                 let is_pk = r.try_get::<i32, _>(4).ok().flatten().unwrap_or(0) == 1;
                 let is_fk = fk_cols.contains(&name);
@@ -414,12 +414,12 @@ impl Driver for SqlServerDriver {
         let indexes: Vec<IndexDef> = idx_rows
             .iter()
             .map(|r| {
-                let cols_str = r.get::<&str, _>(1).unwrap_or("");
+                let cols_str = r.try_get::<&str, _>(1).ok().flatten().unwrap_or("");
                 IndexDef {
-                    name: r.get::<&str, _>(0).unwrap_or("").to_string(),
+                    name: r.try_get::<&str, _>(0).ok().flatten().unwrap_or("").to_string(),
                     columns: cols_str.to_string(),
-                    unique: r.get::<bool, _>(2).unwrap_or(false),
-                    method: r.get::<&str, _>(4).unwrap_or("").to_string(),
+                    unique: r.try_get::<bool, _>(2).ok().flatten().unwrap_or(false),
+                    method: r.try_get::<&str, _>(4).ok().flatten().unwrap_or("").to_string(),
                 }
             })
             .collect();
@@ -449,18 +449,22 @@ impl Driver for SqlServerDriver {
         let fks: Vec<ForeignKeyDef> = fk_rows
             .iter()
             .map(|r| {
-                let ref_schema = r.get::<&str, _>(2).unwrap_or("").to_string();
-                let ref_table = r.get::<&str, _>(3).unwrap_or("").to_string();
-                let ref_col = r.get::<&str, _>(4).unwrap_or("").to_string();
+                let ref_schema = r.try_get::<&str, _>(2).ok().flatten().unwrap_or("").to_string();
+                let ref_table = r.try_get::<&str, _>(3).ok().flatten().unwrap_or("").to_string();
+                let ref_col = r.try_get::<&str, _>(4).ok().flatten().unwrap_or("").to_string();
                 ForeignKeyDef {
-                    column: r.get::<&str, _>(1).unwrap_or("").to_string(),
+                    column: r.try_get::<&str, _>(1).ok().flatten().unwrap_or("").to_string(),
                     references: format!("{}.{}.{}", ref_schema, ref_table, ref_col),
                     on_delete: r
-                        .get::<&str, _>(5)
+                        .try_get::<&str, _>(5)
+                        .ok()
+                        .flatten()
                         .unwrap_or("NO_ACTION")
                         .to_string(),
                     on_update: r
-                        .get::<&str, _>(6)
+                        .try_get::<&str, _>(6)
+                        .ok()
+                        .flatten()
                         .unwrap_or("NO_ACTION")
                         .to_string(),
                 }
@@ -505,10 +509,10 @@ impl Driver for SqlServerDriver {
         Ok(rows
             .iter()
             .map(|r| ErRelation {
-                from: r.get::<&str, _>(0).unwrap_or("").to_string(),
-                from_col: r.get::<&str, _>(1).unwrap_or("").to_string(),
-                to: r.get::<&str, _>(3).unwrap_or("").to_string(),
-                to_col: r.get::<&str, _>(4).unwrap_or("").to_string(),
+                from: r.try_get::<&str, _>(0).ok().flatten().unwrap_or("").to_string(),
+                from_col: r.try_get::<&str, _>(1).ok().flatten().unwrap_or("").to_string(),
+                to: r.try_get::<&str, _>(3).ok().flatten().unwrap_or("").to_string(),
+                to_col: r.try_get::<&str, _>(4).ok().flatten().unwrap_or("").to_string(),
             })
             .collect())
     }
