@@ -85,6 +85,8 @@ export interface SegmentedOption {
   value: string
   label?: string
   icon?: string
+  disabled?: boolean
+  testId?: string
 }
 
 export interface SegmentedProps {
@@ -190,7 +192,8 @@ export function Segmented({ options, value, onChange, size = 'md' }: SegmentedPr
       {options.map(o => {
         const active = o.value === value
         return (
-          <button key={o.value} onClick={() => onChange(o.value)} title={o.label}
+          <button key={o.value} onClick={() => !o.disabled && onChange(o.value)} title={o.label}
+            disabled={o.disabled} data-testid={o.testId}
             style={{
               display: 'inline-flex', alignItems: 'center', gap: 6,
               height: size === 'sm' ? 24 : 28, padding: o.icon && !o.label ? '0 7px' : '0 11px',

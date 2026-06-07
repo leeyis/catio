@@ -13,9 +13,11 @@ export interface SchemaBrowserProps {
   onOpenER: () => void
   erActive: boolean
   sqlActive: boolean
+  disabledSql?: boolean
+  disabledEr?: boolean
 }
 
-export function SchemaBrowser({ onPick, active, onNewQuery, onOpenER, erActive, sqlActive }: SchemaBrowserProps) {
+export function SchemaBrowser({ onPick, active, onNewQuery, onOpenER, erActive, sqlActive, disabledSql, disabledEr }: SchemaBrowserProps) {
   const { t } = useTranslation()
   const D = useData()
   const s = D.schema.schemas[0]
@@ -41,11 +43,11 @@ export function SchemaBrowser({ onPick, active, onNewQuery, onOpenER, erActive, 
       </div>
       {/* database-level actions */}
       <div className="row gap6" style={{ padding: '0 10px 8px' }}>
-        <button onClick={onNewQuery} className="row gap6" style={{ flex: 1, justifyContent: 'center', height: 30, borderRadius: 9, fontSize: 12, fontWeight: 600,
+        <button onClick={onNewQuery} disabled={disabledSql} data-testid="btn-sql-console" className="row gap6" style={{ flex: 1, justifyContent: 'center', height: 30, borderRadius: 9, fontSize: 12, fontWeight: 600,
           color: sqlActive ? 'var(--accent-primary)' : 'var(--text-secondary)', background: sqlActive ? 'var(--accent-soft)' : 'var(--surface-sunken)', border: sqlActive ? '1px solid var(--accent-border)' : '1px solid transparent' }}>
           <Icon name="terminal" size={13} /> {t('workbench.newQuery')}
         </button>
-        <button onClick={onOpenER} className="row gap6" style={{ flex: 1, justifyContent: 'center', height: 30, borderRadius: 9, fontSize: 12, fontWeight: 600,
+        <button onClick={onOpenER} disabled={disabledEr} data-testid="btn-er-diagram" className="row gap6" style={{ flex: 1, justifyContent: 'center', height: 30, borderRadius: 9, fontSize: 12, fontWeight: 600,
           color: erActive ? 'var(--accent-primary)' : 'var(--text-secondary)', background: erActive ? 'var(--accent-soft)' : 'var(--surface-sunken)', border: erActive ? '1px solid var(--accent-border)' : '1px solid transparent' }}>
           <Icon name="network" size={13} /> {t('workbench.erDiagram')}
         </button>
