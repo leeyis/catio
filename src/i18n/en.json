@@ -390,7 +390,12 @@
     "agentFetching": "Fetching...",
     "agentFetchError": "Fetch failed — check endpoint, key, and service availability",
     "agentNoModels": "No models",
-    "agentSelectModel": "Select model..."
+    "agentSelectModel": "Select model...",
+    "agentTestModel": "Test",
+    "agentTesting": "Testing…",
+    "agentTestOk": "Available · {{ms}}ms",
+    "agentTestFail": "Test failed",
+    "agentSelectModelFirst": "Select a model first"
   },
   "app": {
     "noSessions": "No open sessions",

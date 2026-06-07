@@ -5,7 +5,8 @@ import { Icon } from '../Icon'
 import { Btn, IconBtn, Toggle, Segmented } from '../atoms'
 import { useLang } from '../../state/LanguageContext'
 import { useAgentConfig } from '../../state/agentConfig'
-import { fetchModels } from '../../services'
+import { fetchModels, testModel } from '../../services'
+import type { ModelTestResult } from '../../services'
 
 // ---- Prop types ----
 
@@ -235,6 +236,8 @@ function AgentConfigBlock() {
   const [loading, setLoading] = useState(false)
   const [fetchError, setFetchError] = useState('')
   const [modelOpen, setModelOpen] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [testResult, setTestResult] = useState<ModelTestResult | null>(null)
   const modelRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -262,6 +265,14 @@ function AgentConfigBlock() {
     } finally {
       setLoading(false)
     }
+  }
+
+  async function handleTest() {
+    setTesting(true)
+    setTestResult(null)
+    const result = await testModel(config)
+    setTestResult(result)
+    setTesting(false)
   }
 
   const inputStyle: React.CSSProperties = {
@@ -401,11 +412,44 @@ function AgentConfigBlock() {
           >
             {loading ? t('settings.agentFetching') : t('settings.agentFetchModels')}
           </Btn>
+          {/* Test button */}
+          <Btn
+            variant="secondary"
+            size="sm"
+            icon={testing ? 'loader' : 'zap'}
+            disabled={testing}
+            onClick={() => { void handleTest() }}
+          >
+            {testing ? t('settings.agentTesting') : t('settings.agentTestModel')}
+          </Btn>
         </div>
-        {/* Inline error */}
+        {/* Inline fetch error */}
         {fetchError && (
           <div style={{ marginTop: 8, fontSize: 11.5, color: 'var(--danger-fg)' }}>
             {fetchError}
+          </div>
+        )}
+        {/* Test result */}
+        {testResult !== null && (
+          <div style={{ marginTop: 8, fontSize: 11.5, display: 'flex', alignItems: 'center', gap: 5, color: testResult.ok ? 'var(--signal-green)' : 'var(--danger-fg)' }}>
+            {testResult.ok ? (
+              <>
+                <Icon name="check" size={12} />
+                <span>
+                  {t('settings.agentTestOk', { ms: testResult.latencyMs })}
+                  {testResult.reply ? ` · "${testResult.reply.slice(0, 40)}"` : ''}
+                </span>
+              </>
+            ) : (
+              <>
+                <Icon name="zap" size={12} />
+                <span>
+                  {testResult.error === 'no-model'
+                    ? t('settings.agentSelectModelFirst')
+                    : `${t('settings.agentTestFail')}: ${testResult.error ?? ''}`}
+                </span>
+              </>
+            )}
           </div>
         )}
       </div>

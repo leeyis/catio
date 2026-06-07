@@ -36,4 +36,5 @@ export async function getSnippets(): Promise<Snippet[]> { return DATA.snippets }
 
 export { DATA }
 
-export { fetchModels } from './models'
+export { fetchModels, testModel } from './models'
+export type { ModelTestResult } from './models'

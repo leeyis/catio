@@ -51,6 +51,112 @@ async function resolveFetch(): Promise<typeof globalThis.fetch> {
   return globalThis.fetch.bind(globalThis)
 }
 
+// ---- testModel ----
+
+export interface ModelTestResult {
+  ok: boolean
+  latencyMs: number
+  reply?: string
+  error?: string
+}
+
+interface OllamaChatResponse {
+  message: { content: string }
+}
+
+interface OpenAIChatResponse {
+  choices: Array<{ message: { content: string } }>
+}
+
+function isOllamaChatResponse(v: unknown): v is OllamaChatResponse {
+  return (
+    typeof v === 'object' &&
+    v !== null &&
+    'message' in v &&
+    typeof (v as OllamaChatResponse).message?.content === 'string'
+  )
+}
+
+function isOpenAIChatResponse(v: unknown): v is OpenAIChatResponse {
+  return (
+    typeof v === 'object' &&
+    v !== null &&
+    'choices' in v &&
+    Array.isArray((v as OpenAIChatResponse).choices) &&
+    typeof (v as OpenAIChatResponse).choices[0]?.message?.content === 'string'
+  )
+}
+
+export async function testModel(cfg: AgentConfig): Promise<ModelTestResult> {
+  if (!cfg.model) {
+    return { ok: false, latencyMs: 0, error: 'no-model' }
+  }
+
+  const fetcher = await resolveFetch()
+  const start = Date.now()
+
+  try {
+    if (cfg.provider === 'ollama') {
+      const base = trimSlash(cfg.ollamaBaseUrl)
+      const url = `${base}/api/chat`
+      const body = JSON.stringify({
+        model: cfg.model,
+        messages: [{ role: 'user', content: 'ping' }],
+        stream: false,
+      })
+      const resp = await fetcher(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+      })
+      const latencyMs = Date.now() - start
+      if (!resp.ok) {
+        let detail = ''
+        try {
+          const text = await resp.text()
+          detail = text.slice(0, 140)
+        } catch { /* ignore */ }
+        return { ok: false, latencyMs, error: `HTTP ${resp.status}${detail ? ': ' + detail : ''}` }
+      }
+      const json: unknown = await resp.json()
+      const reply = isOllamaChatResponse(json) ? json.message.content : undefined
+      return { ok: true, latencyMs, reply }
+    }
+
+    // OpenAI-compatible
+    const base = trimSlash(cfg.openaiBaseUrl)
+    const url = `${base}/v1/chat/completions`
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (cfg.openaiKey) {
+      headers['Authorization'] = `Bearer ${cfg.openaiKey}`
+    }
+    const body = JSON.stringify({
+      model: cfg.model,
+      messages: [{ role: 'user', content: 'ping' }],
+      max_tokens: 16,
+      temperature: 0,
+      stream: false,
+    })
+    const resp = await fetcher(url, { method: 'POST', headers, body })
+    const latencyMs = Date.now() - start
+    if (!resp.ok) {
+      let detail = ''
+      try {
+        const text = await resp.text()
+        detail = text.slice(0, 140)
+      } catch { /* ignore */ }
+      return { ok: false, latencyMs, error: `HTTP ${resp.status}${detail ? ': ' + detail : ''}` }
+    }
+    const json: unknown = await resp.json()
+    const reply = isOpenAIChatResponse(json) ? json.choices[0].message.content : undefined
+    return { ok: true, latencyMs, reply }
+  } catch (err) {
+    const latencyMs = Date.now() - start
+    const message = err instanceof Error ? err.message : String(err)
+    return { ok: false, latencyMs, error: message }
+  }
+}
+
 export async function fetchModels(cfg: AgentConfig): Promise<string[]> {
   const fetcher = await resolveFetch()
 

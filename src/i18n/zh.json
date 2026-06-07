@@ -390,7 +390,12 @@
     "agentFetching": "拉取中...",
     "agentFetchError": "拉取失败，请检查端点 / 密钥 / 服务是否可用",
     "agentNoModels": "暂无模型",
-    "agentSelectModel": "选择模型..."
+    "agentSelectModel": "选择模型...",
+    "agentTestModel": "测试",
+    "agentTesting": "测试中…",
+    "agentTestOk": "可用 · {{ms}}ms",
+    "agentTestFail": "测试失败",
+    "agentSelectModelFirst": "请先选择模型"
   },
   "app": {
     "noSessions": "没有打开的会话",
