@@ -44,17 +44,19 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
     return columns.findIndex(c => c.name === sortCol)
   }, [columns, sortCol])
 
+  // Tag each row with its original (unsorted) index so keys and edits are stable under sort.
+  const tagged = useMemo(() => rows.map((row, i) => ({ row, origIdx: i })), [rows])
+
   const sorted = useMemo(() => {
-    if (!sortCol || sortColIdx < 0) return rows
+    if (!sortCol || sortColIdx < 0) return tagged
     const idx = sortColIdx
-    const arr = [...rows].sort((a, b) => {
-      const av = a[idx]
-      const bv = b[idx]
+    return [...tagged].sort((a, b) => {
+      const av = a.row[idx]
+      const bv = b.row[idx]
       if (av === bv) return 0
       return ((av as string | number) > (bv as string | number) ? 1 : -1) * (sortDir === 'asc' ? 1 : -1)
     })
-    return arr
-  }, [rows, sortCol, sortColIdx, sortDir])
+  }, [tagged, sortCol, sortColIdx, sortDir])
 
   const pageRows = sorted.slice((page - 1) * PAGE, page * PAGE)
   const pages = Math.ceil(rows.length / PAGE)
@@ -108,7 +110,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
             <div style={{ ...thStyle, justifyContent: 'center', color: 'var(--text-faint)' }}>#</div>
             {columns.map((col) => (
               <div key={col.name} style={thStyle} onClick={() => toggleSort(col.name)} className="gridhead">
-                <Icon name={colIcon(col)} size={12} style={{ color: col.pk ? 'var(--signal-amber)' : col.fk ? 'var(--signal-blue)' : 'var(--text-faint)' }} />
+                <Icon name={col.icon ?? colIcon(col)} size={12} style={{ color: col.pk ? 'var(--signal-amber)' : col.fk ? 'var(--signal-blue)' : 'var(--text-faint)' }} />
                 <span className="ell" style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>{col.name}</span>
                 {col.pk && <span style={{ fontSize: 9, color: 'var(--signal-amber)', fontWeight: 700 }}>PK</span>}
                 {sortCol === col.name && <Icon name={sortDir === 'asc' ? 'chevron-up' : 'chevron-down'} size={12} style={{ color: 'var(--accent-primary)', marginLeft: 'auto' }} />}
@@ -116,21 +118,21 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
             ))}
           </div>
           {/* body */}
-          {pageRows.map((row, ri) => {
+          {pageRows.map(({ row, origIdx }, ri) => {
             const globalIdx = (page - 1) * PAGE + ri
             return (
-              <div key={globalIdx} style={{ display: 'grid', gridTemplateColumns: gridTemplate, height: rowH, background: ri % 2 ? 'var(--surface-subtle)' : 'transparent' }}
+              <div key={origIdx} style={{ display: 'grid', gridTemplateColumns: gridTemplate, height: rowH, background: ri % 2 ? 'var(--surface-subtle)' : 'transparent' }}
                 className="gridrow">
                 <div style={{ ...tdStyle, justifyContent: 'center', color: 'var(--text-faint)', fontSize: 11, background: 'var(--surface-sunken)', borderRight: '1px solid var(--border-hairline)' }}>{globalIdx + 1}</div>
                 {columns.map((col, ci) => {
-                  const k = cellKey(globalIdx, col.name)
+                  const k = cellKey(origIdx, col.name)
                   const isEdited = edits[k] !== undefined
                   const val = isEdited ? edits[k] : row[ci]
-                  const isSel = sel.r === globalIdx && sel.c === ci
-                  const isEditing = editing && editing.r === globalIdx && editing.c === ci
+                  const isSel = sel.r === origIdx && sel.c === ci
+                  const isEditing = editing && editing.r === origIdx && editing.c === ci
                   return (
-                    <div key={col.name} onClick={() => setSel({ r: globalIdx, c: ci })}
-                      onDoubleClick={() => startEdit(globalIdx, ci, globalIdx, col.name, val)}
+                    <div key={col.name} onClick={() => setSel({ r: origIdx, c: ci })}
+                      onDoubleClick={() => startEdit(origIdx, ci, origIdx, col.name, val)}
                       style={{
                         ...tdStyle,
                         cursor: 'cell',
@@ -140,8 +142,8 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
                       }}>
                       {isEditing ? (
                         <input autoFocus value={editVal} onChange={e => setEditVal(e.target.value)}
-                          onBlur={() => commitEdit(globalIdx, col.name)}
-                          onKeyDown={e => { if (e.key === 'Enter') commitEdit(globalIdx, col.name); if (e.key === 'Escape') setEditing(null) }}
+                          onBlur={() => commitEdit(origIdx, col.name)}
+                          onKeyDown={e => { if (e.key === 'Enter') commitEdit(origIdx, col.name); if (e.key === 'Escape') setEditing(null) }}
                           style={{ width: '100%', border: 'none', outline: 'none', background: 'transparent', font: 'inherit', color: 'var(--text-primary)' }} />
                       ) : col.name === 'status' ? (
                         <span className="row gap6" style={{ minWidth: 0 }}>
@@ -171,7 +173,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
         <div className="row gap10">
           <span>R{sel.r + 1} · C{sel.c + 1}</span>
           <span className="metadot" />
-          <span>{t('dbviews.cell')}: <span className="mono" style={{ color: 'var(--text-secondary)' }}>{(() => { const row = sorted[sel.r]; const col = columns[sel.c]; if (!row || !col) return '—'; const k = cellKey(sel.r, col.name); return String(edits[k] !== undefined ? edits[k] : row[sel.c]); })()}</span></span>
+          <span>{t('dbviews.cell')}: <span className="mono" style={{ color: 'var(--text-secondary)' }}>{(() => { const entry = sorted.find(e => e.origIdx === sel.r); const col = columns[sel.c]; if (!entry || !col) return '—'; const k = cellKey(sel.r, col.name); return String(edits[k] !== undefined ? edits[k] : entry.row[sel.c]); })()}</span></span>
         </div>
         <div className="row gap8">
           <span className="mono" style={{ color: 'var(--signal-green)' }}>● 0 new</span>

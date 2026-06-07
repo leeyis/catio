@@ -10,7 +10,7 @@ import type {
 
 function mockQueryResult(): QueryResult {
   const columns: ResultColumn[] = DATA.ordersColumns.map(c => ({
-    name: c.name, type: c.type, pk: c.pk, fk: c.fk,
+    name: c.name, type: c.type, pk: c.pk, fk: c.fk, icon: c.icon,
   }))
   const keys = DATA.ordersColumns.map(c => c.name)
   const rows: unknown[][] = DATA.ordersRows.map(

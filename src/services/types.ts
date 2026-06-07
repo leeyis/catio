@@ -93,6 +93,8 @@ export interface ResultColumn {
   type: string
   pk?: boolean
   fk?: boolean
+  /** Explicit icon name; overrides type-derived icon in DataGrid. Set from mock data; absent for real DB columns. */
+  icon?: string
 }
 export interface QueryResult {
   columns: ResultColumn[]
