@@ -23,7 +23,7 @@ import type { Connection } from '../services/types'
 // ---- Prop types ----
 
 export interface BtnProps {
-  variant?: 'primary' | 'secondary' | 'danger' | 'ghost'
+  variant?: 'primary' | 'secondary' | 'danger' | 'ghost' | 'cta'
   size?: 'sm' | 'md' | 'lg'
   icon?: string
   iconR?: string
