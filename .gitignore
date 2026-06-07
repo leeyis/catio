@@ -4,3 +4,7 @@ src-tauri/target/
 .DS_Store
 # decoded reference scratch (regenerable from ref-ui HTML)
 ref-ui/_extract/
+# pixel-diff artifacts
+diff.png
+*-actual.png
+*-diff.png
