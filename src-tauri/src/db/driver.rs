@@ -97,6 +97,8 @@ pub async fn connect(args: &ConnectArgs) -> Result<Arc<dyn Driver>, DbError> {
     match args.db_type {
         DatabaseType::Postgres =>
             Ok(Arc::new(crate::db::drivers::postgres::PostgresDriver::connect(args).await?)),
+        DatabaseType::Mysql =>
+            Ok(Arc::new(crate::db::drivers::mysql::MySqlDriver::connect(args).await?)),
         other => Err(DbError::Unsupported(format!("{:?} (later phase)", other))),
     }
 }

@@ -28,6 +28,10 @@ async-trait = "0.1.89"
 tokio-postgres = { version = "0.7.17", features = ["with-chrono-0_4", "with-uuid-1", "with-serde_json-1"] }
 deadpool-postgres = { version = "0.14.1", features = ["rt_tokio_1"] }
 tokio-postgres-rustls = "0.14.0"
+mysql_async = { version = "0.37.0", default-features = false, features = ["default-rustls-ring", "chrono", "rust_decimal"] }
+futures-util = "0.3.32"
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
+rust_decimal = "1.42.0"
 
 [profile.release]
 panic = "abort"
