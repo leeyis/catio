@@ -108,6 +108,9 @@
   },
   "workbench": {
     "newTab": "New tab",
+    "closeCurrent": "Close current",
+    "closeOthers": "Close others",
+    "closeAll": "Close all",
     "broadcastTargetHosts": "Broadcast target hosts",
     "machines": "hosts",
     "sameProtoOnly": "Same protocol hosts only",
@@ -243,7 +246,7 @@
     "fieldUser": "User",
     "fieldUsername": "Username",
     "fieldPasswordKey": "Password / Key",
-    "fieldPasswordPlaceholder": "🔒 Store in keychain",
+    "fieldPasswordPlaceholder": "Store in keychain",
     "tunnelSshTitle": "Connect via SSH tunnel",
     "tunnelSshSub": "Database is behind a private network / bastion",
     "tunnelProxyTitle": "ProxyJump bastion",

@@ -108,6 +108,9 @@
   },
   "workbench": {
     "newTab": "新建标签",
+    "closeCurrent": "关闭当前",
+    "closeOthers": "关闭其他",
+    "closeAll": "关闭所有",
     "broadcastTargetHosts": "广播目标主机",
     "machines": "台",
     "sameProtoOnly": "仅显示同协议主机",
@@ -243,7 +246,7 @@
     "fieldUser": "用户",
     "fieldUsername": "用户名",
     "fieldPasswordKey": "密码 / 密钥",
-    "fieldPasswordPlaceholder": "🔒 存入钥匙串",
+    "fieldPasswordPlaceholder": "存入钥匙串",
     "tunnelSshTitle": "经 SSH 隧道连接",
     "tunnelSshSub": "数据库在私网 / 堡垒机之后",
     "tunnelProxyTitle": "ProxyJump 跳板",

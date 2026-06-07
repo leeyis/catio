@@ -141,6 +141,21 @@ export default function App() {
       return next
     })
   }
+  function closeOthers(id: string) {
+    setTabs(prev => {
+      const next = prev.filter(t => t.id === id)
+      if (next.length === 0) {
+        setView('home')
+      } else {
+        setActiveTab(id)
+      }
+      return next
+    })
+  }
+  function closeAll() {
+    setTabs([])
+    setView('home')
+  }
   function openDetail(conn: Connection) {
     setDetailConn(conn)
     setActivePanel('details')
@@ -186,7 +201,7 @@ export default function App() {
               {view === 'workbench' && (
                 tabs.length ? (
                   <>
-                    <WorkbenchTabs tabs={tabs} activeTab={activeTab} onActivate={setActiveTab} onClose={closeTab} onNew={() => setShowNew(true)} />
+                    <WorkbenchTabs tabs={tabs} activeTab={activeTab} onActivate={setActiveTab} onClose={closeTab} onCloseOthers={closeOthers} onCloseAll={closeAll} onNew={() => setShowNew(true)} />
                     <div className="grow" style={{ minHeight: 0 }}>
                       {cur && cur.kind === 'terminal' && <TerminalPane conn={curConn} key={cur.id} />}
                       {cur && cur.kind === 'sql' && curConn && <DbWorkbench conn={curConn} density={density} key={cur.id} />}

@@ -1,4 +1,5 @@
 /* ported from ref-ui/_extract/blob7.txt — verbatim per plan T1-T7 */
+import { useState, useEffect, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { useData } from '../../state/DataContext'
@@ -9,12 +10,42 @@ export interface WorkbenchTabsProps {
   activeTab: string
   onActivate: (id: string) => void
   onClose: (id: string) => void
+  onCloseOthers: (id: string) => void
+  onCloseAll: () => void
   onNew: () => void
 }
 
-export function WorkbenchTabs({ tabs, activeTab, onActivate, onClose, onNew }: WorkbenchTabsProps) {
+interface ContextMenu {
+  tabId: string
+  x: number
+  y: number
+}
+
+export function WorkbenchTabs({ tabs, activeTab, onActivate, onClose, onCloseOthers, onCloseAll, onNew }: WorkbenchTabsProps) {
   const { t } = useTranslation()
   const D = useData()
+  const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null)
+
+  const closeMenu = useCallback(() => setContextMenu(null), [])
+
+  useEffect(() => {
+    if (!contextMenu) return
+    function onClickOutside() { setContextMenu(null) }
+    function onKeyDown(e: KeyboardEvent) { if (e.key === 'Escape') setContextMenu(null) }
+    window.addEventListener('click', onClickOutside)
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      window.removeEventListener('click', onClickOutside)
+      window.removeEventListener('keydown', onKeyDown)
+    }
+  }, [contextMenu])
+
+  function handleContextMenu(e: React.MouseEvent, tabId: string) {
+    e.preventDefault()
+    e.stopPropagation()
+    setContextMenu({ tabId, x: e.clientX, y: e.clientY })
+  }
+
   return (
     <div className="row" style={{ height: 40, flex: 'none', gap: 4, padding: '0 8px', borderBottom: '1px solid var(--border-hairline)', background: 'var(--surface-card)', overflowX: 'auto' }}>
       {tabs.map(tab => {
@@ -22,6 +53,7 @@ export function WorkbenchTabs({ tabs, activeTab, onActivate, onClose, onNew }: W
         const active = tab.id === activeTab;
         return (
           <div key={tab.id} onClick={() => onActivate(tab.id)}
+            onContextMenu={e => handleContextMenu(e, tab.id)}
             style={{
               display: 'flex', alignItems: 'center', gap: 8, height: 30, padding: '0 10px', borderRadius: 9, cursor: 'pointer', flex: 'none',
               background: active ? 'var(--accent-soft)' : 'transparent',
@@ -37,6 +69,44 @@ export function WorkbenchTabs({ tabs, activeTab, onActivate, onClose, onNew }: W
       })}
       <button className="icon-btn bare" style={{ width: 28, height: 28, marginLeft: 2 }} onClick={onNew} title={t('workbench.newTab')}><Icon name="plus" size={16} /></button>
       <div className="grow" />
+
+      {/* context menu */}
+      {contextMenu && (
+        <div
+          onClick={e => e.stopPropagation()}
+          style={{
+            position: 'fixed',
+            left: contextMenu.x,
+            top: contextMenu.y,
+            zIndex: 200,
+            background: 'var(--surface-card)',
+            border: '1px solid var(--border-hairline)',
+            borderRadius: 10,
+            boxShadow: 'var(--shadow-dropdown)',
+            padding: '4px 0',
+            minWidth: 160,
+          }}>
+          {[
+            { label: t('workbench.closeCurrent'), action: () => { onClose(contextMenu.tabId); closeMenu() } },
+            { label: t('workbench.closeOthers'), action: () => { onCloseOthers(contextMenu.tabId); closeMenu() } },
+            { label: t('workbench.closeAll'), action: () => { onCloseAll(); closeMenu() } },
+          ].map(item => (
+            <button
+              key={item.label}
+              onClick={item.action}
+              style={{
+                display: 'block', width: '100%', textAlign: 'left', padding: '7px 14px',
+                border: 'none', background: 'transparent', fontSize: 13, color: 'var(--text-primary)',
+                cursor: 'pointer',
+              }}
+              onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = 'var(--accent-soft)' }}
+              onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

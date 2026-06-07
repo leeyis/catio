@@ -1,5 +1,5 @@
 /* ported from ref-ui/_extract/blob11.txt — verbatim per plan T1-T7 */
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn, IconBtn, Segmented, Toggle, ConnGlyph } from '../atoms'
@@ -43,12 +43,25 @@ export function NewConnectionModal({ onClose }: NewConnectionModalProps) {
   ]
   const [kind, setKind] = useState('db')
   const [engine, setEngine] = useState('postgres')
+  const [engineOpen, setEngineOpen] = useState(false)
+  const engineRef = useRef<HTMLDivElement>(null)
   const [proto, setProto] = useState('ssh')
   const [tunnel, setTunnel] = useState(true)
   const [via, setVia] = useState('h-bastion')
   const [tested, setTested] = useState(false)
   const [color, setColor] = useState('var(--signal-rose)')
   const hosts = D.connections.filter(c => c.kind === 'host' && c.proto !== 'local')
+
+  useEffect(() => {
+    if (!engineOpen) return
+    function handleClickOutside(e: MouseEvent) {
+      if (engineRef.current && !engineRef.current.contains(e.target as Node)) {
+        setEngineOpen(false)
+      }
+    }
+    window.addEventListener('mousedown', handleClickOutside)
+    return () => window.removeEventListener('mousedown', handleClickOutside)
+  }, [engineOpen])
 
   const Field = ({ label, value, placeholder, w, mono }: FieldProps) => (
     <label className="col" style={{ gap: 5, flex: w || 1 }}>
@@ -98,18 +111,41 @@ export function NewConnectionModal({ onClose }: NewConnectionModalProps) {
           {kind === 'db' ? (
             <div className="col" style={{ gap: 6, marginBottom: 16 }}>
               <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.engine')}</span>
-              <div className="row gap8" style={{ flexWrap: 'wrap' }}>
-                {DB_ENGINES.map(e => {
-                  const active = engine === e.id
-                  const m = D.engineMeta[e.id] || {}
-                  return (
-                    <button key={e.id} onClick={() => setEngine(e.id)}
-                      style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '7px 11px', borderRadius: 10, border: active ? `1.5px solid ${m.color}` : '1px solid var(--border-hairline)', background: active ? `color-mix(in srgb, ${m.color} 12%, transparent)` : 'var(--surface-card)' }}>
-                      <span className="mono" style={{ fontSize: 10, fontWeight: 700, color: m.color }}>{e.short}</span>
-                      <span style={{ fontSize: 12.5, fontWeight: active ? 600 : 500, color: active ? 'var(--text-primary)' : 'var(--text-secondary)' }}>{e.label}</span>
-                    </button>
-                  )
-                })}
+              <div ref={engineRef} style={{ position: 'relative' }}>
+                {/* closed trigger */}
+                <button
+                  onClick={() => setEngineOpen(o => !o)}
+                  style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8, height: 36, padding: '0 12px', borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', cursor: 'pointer', textAlign: 'left' }}>
+                  {(() => {
+                    const sel = DB_ENGINES.find(e => e.id === engine) || DB_ENGINES[0]
+                    const m = D.engineMeta[sel.id] || {}
+                    return (
+                      <>
+                        <span className="mono" style={{ fontSize: 10, fontWeight: 700, color: m.color, minWidth: 28 }}>{sel.short}</span>
+                        <span style={{ flex: 1, fontSize: 13, color: 'var(--text-primary)' }}>{sel.label}</span>
+                        <Icon name="chevron-down" size={14} style={{ color: 'var(--text-faint)', transform: engineOpen ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform .14s' }} />
+                      </>
+                    )
+                  })()}
+                </button>
+                {/* dropdown menu */}
+                {engineOpen && (
+                  <div style={{ position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0, zIndex: 80, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', borderRadius: 10, boxShadow: 'var(--shadow-dropdown)', maxHeight: 260, overflowY: 'auto' }}>
+                    {DB_ENGINES.map(e => {
+                      const active = engine === e.id
+                      const m = D.engineMeta[e.id] || {}
+                      return (
+                        <button key={e.id}
+                          onClick={() => { setEngine(e.id); setEngineOpen(false) }}
+                          style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', border: 'none', background: active ? 'var(--accent-soft)' : 'transparent', cursor: 'pointer', textAlign: 'left' }}>
+                          <span className="mono" style={{ fontSize: 10, fontWeight: 700, color: m.color, minWidth: 28 }}>{e.short}</span>
+                          <span style={{ flex: 1, fontSize: 13, fontWeight: active ? 600 : 400, color: active ? 'var(--accent-primary)' : 'var(--text-primary)' }}>{e.label}</span>
+                          {active && <Icon name="check" size={13} style={{ color: 'var(--accent-primary)' }} />}
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
               </div>
             </div>
           ) : (
@@ -136,7 +172,14 @@ export function NewConnectionModal({ onClose }: NewConnectionModalProps) {
             </div>
             <div className="row gap10">
               <Field label={kind === 'db' ? t('modals.fieldUser') : t('modals.fieldUsername')} value={kind === 'db' ? 'app_ro' : 'deploy'} mono />
-              <Field label={t('modals.fieldPasswordKey')} value="" placeholder={t('modals.fieldPasswordPlaceholder')} mono />
+              <label className="col" style={{ gap: 5, flex: 1 }}>
+                <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.fieldPasswordKey')}</span>
+                <div className="row" style={{ height: 36, borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', paddingLeft: 10, paddingRight: 12, gap: 6, alignItems: 'center' }}>
+                  <Icon name="lock" size={12} style={{ color: 'var(--text-faint)', flex: 'none' }} />
+                  <input defaultValue="" placeholder={t('modals.fieldPasswordPlaceholder')} className="mono"
+                    style={{ flex: 1, height: '100%', border: 'none', background: 'transparent', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }} />
+                </div>
+              </label>
             </div>
           </div>
 
