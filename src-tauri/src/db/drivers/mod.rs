@@ -3,3 +3,7 @@ pub mod mysql;
 pub mod sqlite;
 pub mod duckdb;
 pub mod sqlserver;
+pub mod http;
+pub mod clickhouse;
+pub mod rqlite;
+pub mod elasticsearch;

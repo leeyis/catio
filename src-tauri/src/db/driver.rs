@@ -105,6 +105,12 @@ pub async fn connect(args: &ConnectArgs) -> Result<Arc<dyn Driver>, DbError> {
             Ok(Arc::new(crate::db::drivers::duckdb::DuckDbDriver::connect(args).await?)),
         DatabaseType::Sqlserver =>
             Ok(Arc::new(crate::db::drivers::sqlserver::SqlServerDriver::connect(args).await?)),
+        DatabaseType::Clickhouse =>
+            Ok(Arc::new(crate::db::drivers::clickhouse::ClickhouseDriver::connect(args).await?)),
+        DatabaseType::Rqlite =>
+            Ok(Arc::new(crate::db::drivers::rqlite::RqliteDriver::connect(args).await?)),
+        DatabaseType::Elasticsearch =>
+            Ok(Arc::new(crate::db::drivers::elasticsearch::ElasticsearchDriver::connect(args).await?)),
         other => Err(DbError::Unsupported(format!("{:?} (later phase)", other))),
     }
 }

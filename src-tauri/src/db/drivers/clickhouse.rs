@@ -1,0 +1,195 @@
+// adapted from dbx crates/dbx-core/src/db/clickhouse_driver.rs, Apache-2.0
+use async_trait::async_trait;
+use serde::Deserialize;
+
+use crate::db::{DbError, DatabaseType};
+use crate::db::driver::{ConnectArgs, Driver, TableInfo, TableStructure, ColumnDef, IndexDef, ForeignKeyDef, ErRelation};
+use crate::db::result::{ColumnInfo, QueryResult};
+use crate::db::drivers::http::{HttpClient, check_response_connect, check_response_query};
+
+/// ClickHouse driver — HTTP API with JSONCompact format.
+/// sql_console = true, er = false (no FK concept).
+pub struct ClickhouseDriver {
+    http: HttpClient,
+}
+
+impl ClickhouseDriver {
+    pub async fn connect(args: &ConnectArgs) -> Result<Self, DbError> {
+        let base_url = format!("http://{}:{}", args.host, args.port);
+        let user = if args.user.is_empty() { None } else { Some(args.user.as_str()) };
+        let pass = args.secret.as_deref();
+        let http = HttpClient::new(&base_url, user, pass);
+        let driver = Self { http };
+        // validate connection
+        driver.test().await?;
+        Ok(driver)
+    }
+}
+
+/// JSONCompact response from ClickHouse.
+#[derive(Deserialize)]
+struct ChJsonCompact {
+    meta: Vec<ChMeta>,
+    data: Vec<Vec<serde_json::Value>>,
+}
+
+#[derive(Deserialize)]
+struct ChMeta {
+    name: String,
+    #[serde(rename = "type")]
+    type_name: String,
+}
+
+/// POST SQL to ClickHouse `/?default_format=JSONCompact`.
+async fn ch_query(http: &HttpClient, sql: &str) -> Result<ChJsonCompact, DbError> {
+    let url = "/?default_format=JSONCompact";
+    let resp = http
+        .post(url)
+        .body(sql.to_string())
+        .send()
+        .await
+        .map_err(|e| DbError::QueryFailed(format!("ClickHouse request failed: {e}")))?;
+    let resp = check_response_query(resp).await?;
+    let result: ChJsonCompact = resp
+        .json()
+        .await
+        .map_err(|e| DbError::QueryFailed(format!("ClickHouse parse error: {e}")))?;
+    Ok(result)
+}
+
+fn is_nullable(type_name: &str) -> bool {
+    type_name.starts_with("Nullable(")
+}
+
+#[async_trait]
+impl Driver for ClickhouseDriver {
+    fn db_type(&self) -> DatabaseType { DatabaseType::Clickhouse }
+
+    async fn test(&self) -> Result<String, DbError> {
+        let url = "/?query=SELECT+version()";
+        let resp = self.http
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| DbError::ConnectFailed(format!("ClickHouse request failed: {e}")))?;
+        let resp = check_response_connect(resp).await?;
+        let version = resp
+            .text()
+            .await
+            .map_err(|e| DbError::ConnectFailed(format!("ClickHouse read failed: {e}")))?;
+        Ok(version.trim().to_string())
+    }
+
+    async fn query(&self, sql: &str, max_rows: u32) -> Result<QueryResult, DbError> {
+        let sql_upper = sql.trim_start().to_uppercase();
+
+        // For read statements use JSONCompact and parse result set
+        if sql_upper.starts_with("SELECT")
+            || sql_upper.starts_with("SHOW")
+            || sql_upper.starts_with("DESCRIBE")
+            || sql_upper.starts_with("EXPLAIN")
+            || sql_upper.starts_with("WITH")
+        {
+            let result = ch_query(&self.http, sql).await?;
+            let columns: Vec<ColumnInfo> = result.meta.iter().map(|m| ColumnInfo {
+                name: m.name.clone(),
+                type_name: m.type_name.clone(),
+                pk: false,
+            }).collect();
+
+            let mut rows = result.data;
+            let truncated = rows.len() > max_rows as usize;
+            if truncated {
+                rows.truncate(max_rows as usize);
+            }
+            Ok(QueryResult { columns, rows, rows_affected: None, truncated })
+        } else {
+            // DDL/DML — POST plain text, ClickHouse returns empty body on success
+            let url = "/?default_format=JSONCompact";
+            let resp = self.http
+                .post(url)
+                .body(sql.to_string())
+                .send()
+                .await
+                .map_err(|e| DbError::QueryFailed(format!("ClickHouse request failed: {e}")))?;
+            let _ = check_response_query(resp).await?;
+            Ok(QueryResult {
+                columns: vec![],
+                rows: vec![],
+                rows_affected: None, // ClickHouse HTTP doesn't return affected-row count
+                truncated: false,
+            })
+        }
+    }
+
+    async fn list_schemas(&self) -> Result<Vec<String>, DbError> {
+        let result = ch_query(
+            &self.http,
+            "SELECT name FROM system.databases \
+             WHERE name NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema') \
+             ORDER BY name",
+        ).await?;
+        let schemas: Vec<String> = result.data.iter()
+            .filter_map(|row| row.first().and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .collect();
+        Ok(schemas)
+    }
+
+    async fn list_tables(&self, schema: &str) -> Result<Vec<TableInfo>, DbError> {
+        let sql = format!(
+            "SELECT name, engine FROM system.tables WHERE database = '{}' ORDER BY name",
+            schema.replace('\'', "\\'")
+        );
+        let result = ch_query(&self.http, &sql).await?;
+        let tables: Vec<TableInfo> = result.data.iter().map(|row| {
+            let name = row.first().and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let engine = row.get(1).and_then(|v| v.as_str()).unwrap_or("");
+            let kind = if engine.contains("View") { "view" } else { "table" };
+            TableInfo { name, kind: kind.into(), rows_estimate: None }
+        }).collect();
+        Ok(tables)
+    }
+
+    async fn table_structure(&self, schema: &str, table: &str) -> Result<TableStructure, DbError> {
+        let sql = format!(
+            "SELECT name, type, default_kind, default_expression, is_in_primary_key \
+             FROM system.columns \
+             WHERE database = '{}' AND table = '{}' \
+             ORDER BY position",
+            schema.replace('\'', "\\'"),
+            table.replace('\'', "\\'")
+        );
+        let result = ch_query(&self.http, &sql).await?;
+
+        let columns: Vec<ColumnDef> = result.data.iter().map(|row| {
+            let name = row.first().and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let type_name = row.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let nullable = is_nullable(&type_name);
+            let default_kind = row.get(2).and_then(|v| v.as_str()).unwrap_or("");
+            let default_expr = row.get(3).and_then(|v| v.as_str()).unwrap_or("");
+            let default = if default_kind.is_empty() { None } else { Some(default_expr.to_string()) };
+            let is_pk = row.get(4)
+                .map(|v| match v {
+                    serde_json::Value::Number(n) => n.as_u64().unwrap_or(0) == 1,
+                    serde_json::Value::Bool(b) => *b,
+                    serde_json::Value::String(s) => s == "1" || s.eq_ignore_ascii_case("true"),
+                    _ => false,
+                })
+                .unwrap_or(false);
+            let key = if is_pk { "PK" } else { "" };
+            ColumnDef { name, type_name, nullable, default, key: key.into() }
+        }).collect();
+
+        // ClickHouse has no foreign keys
+        Ok(TableStructure {
+            columns,
+            indexes: Vec::<IndexDef>::new(),
+            fks: Vec::<ForeignKeyDef>::new(),
+        })
+    }
+
+    async fn er_relations(&self, _schema: &str) -> Result<Vec<ErRelation>, DbError> {
+        // ClickHouse has no FK concept; er=false per capabilities
+        Ok(vec![])
+    }
+}
