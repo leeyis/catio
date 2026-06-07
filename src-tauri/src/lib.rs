@@ -1,4 +1,5 @@
 pub mod ssh;
+pub mod db;
 
 use ssh::manager::SessionManager;
 
