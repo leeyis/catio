@@ -7,6 +7,7 @@ import { useData } from '../../state/DataContext'
 import { runQuery, getSchema, schemaColumns, dbErrMsg } from '../../services/db'
 import type { ResultColumn, Schema } from '../../services/types'
 import { SqlEditor } from './SqlEditor'
+import type { SQLNamespace } from '@codemirror/lang-sql'
 import { DataGrid } from './DataGrid'
 
 export interface SqlConsoleProps {
@@ -74,8 +75,20 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
   }, [connId, namespaceKey])
 
   /**
-   * Completion schema map for the SQL editor: `table → [columns]`, with both a
-   * bare and `schema.table`-qualified key so lang-sql matches either form.
+   * Nested completion schema for the SQL editor, in @codemirror/lang-sql's
+   * `SQLNamespace` shape so schemas, tables, and columns render with DISTINCT
+   * autocomplete icons:
+   *   - schema  → `{ self: { type: 'class' }, children: { …tables } }`
+   *   - table   → `{ self: { type: 'type' }, children: [ …columns ] }`
+   *   - column  → string entries, which lang-sql completes with type `'property'`
+   *
+   * Without explicit `self` completions lang-sql gives every nested key the same
+   * `'type'` icon (schemas and tables become indistinguishable); the `self` tag
+   * overrides that per level so the icons differ.
+   *
+   * Tables are exposed both schema-qualified (under their schema's `children`, so
+   * `ads.orders` → its columns) and bare at the top level (so `orders` completes
+   * unqualified). Schema names stay top-level keys, now with the `class` icon.
    *
    * Connected (live) path: columns come from the REAL backend via
    * `schemaColumns` (stored in `liveColumns`), merged across namespaces. A table
@@ -84,23 +97,29 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
    *
    * Mock path: columns come from `tableStructures` when known (best-effort).
    */
-  const editorSchema = useMemo<Record<string, string[]>>(() => {
-    const map: Record<string, string[]> = {}
+  const editorSchema = useMemo<SQLNamespace>(() => {
+    const top: Record<string, SQLNamespace> = {}
     const mockColsFor = (table: string): string[] =>
       D.tableStructures[table]?.columns.map(c => c.name) ?? []
+    const tableNode = (label: string, cols: readonly string[]): SQLNamespace => ({
+      self: { label, type: 'type' },
+      children: cols,
+    })
     const namespaces = (liveSchema ?? D.schema).schemas
     for (const ns of namespaces) {
-      // Offer the schema name itself as a completion (so users can type
-      // `schema.table` — important while unqualified queries can fail).
-      if (!(ns.name in map)) map[ns.name] = []
       const realCols = connId ? liveColumns[ns.name] : undefined
+      const tables: Record<string, SQLNamespace> = {}
       for (const tbl of [...ns.tables, ...ns.views]) {
         const cols = connId ? (realCols?.[tbl.name] ?? []) : mockColsFor(tbl.name)
-        map[tbl.name] = cols
-        map[`${ns.name}.${tbl.name}`] = cols
+        const node = tableNode(tbl.name, cols)
+        // Schema-qualified (ads.orders → columns) and bare (orders → columns).
+        tables[tbl.name] = node
+        if (!(tbl.name in top)) top[tbl.name] = node
       }
+      // Schema name itself: a `class`-typed completion whose children are tables.
+      top[ns.name] = { self: { label: ns.name, type: 'class' }, children: tables }
     }
-    return map
+    return top
   }, [connId, liveSchema, liveColumns, D.schema, D.tableStructures])
 
   function run(sqlOverride?: string) {

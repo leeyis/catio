@@ -80,10 +80,14 @@ export function CreateObjectModal({ kind, schema, engine, onClose, onCreate }: C
   const title = kind === 'table' ? t('dbviews.createTableTitle') : t('dbviews.createViewTitle')
 
   const inputStyle: React.CSSProperties = {
-    flex: 1, height: 34, border: '1px solid var(--border-hairline-alt)', borderRadius: 9,
+    flex: 1, minWidth: 0, height: 34, boxSizing: 'border-box',
+    border: '1px solid var(--border-hairline-alt)', borderRadius: 9,
     background: 'var(--surface-sunken)', color: 'var(--text-primary)', font: 'inherit',
     fontSize: 12.5, padding: '0 10px', outline: 'none',
   }
+  // Name inputs sit in a vertical (col) layout where flex:1 would stretch them
+  // tall — pin the height and use full width instead.
+  const nameInputStyle: React.CSSProperties = { ...inputStyle, flex: 'none', width: '100%' }
   const labelStyle: React.CSSProperties = { fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }
 
   return (
@@ -106,7 +110,7 @@ export function CreateObjectModal({ kind, schema, engine, onClose, onCreate }: C
             <>
               <label className="col" style={{ gap: 5 }}>
                 <span style={labelStyle}>{t('dbviews.tableName')}</span>
-                <input autoFocus value={tableName} onChange={e => setTableName(e.target.value)} placeholder="new_table" style={inputStyle} />
+                <input autoFocus value={tableName} onChange={e => setTableName(e.target.value)} placeholder="new_table" style={nameInputStyle} />
               </label>
 
               <div className="col" style={{ gap: 6 }}>
@@ -146,7 +150,7 @@ export function CreateObjectModal({ kind, schema, engine, onClose, onCreate }: C
             <>
               <label className="col" style={{ gap: 5 }}>
                 <span style={labelStyle}>{t('dbviews.viewName')}</span>
-                <input autoFocus value={viewName} onChange={e => setViewName(e.target.value)} placeholder="new_view" style={inputStyle} />
+                <input autoFocus value={viewName} onChange={e => setViewName(e.target.value)} placeholder="new_view" style={nameInputStyle} />
               </label>
               <label className="col" style={{ gap: 5 }}>
                 <span style={labelStyle}>{t('dbviews.selectStatement')}</span>

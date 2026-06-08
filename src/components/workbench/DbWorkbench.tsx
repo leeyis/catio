@@ -135,10 +135,14 @@ export function DbWorkbench({ conn, density }: DbWorkbenchProps) {
   // `live` holds the real QueryResult for the selected table; null means "use the mock path".
   const [live, setLive] = useState<{ columns: ResultColumn[]; rows: unknown[][] } | null>(null)
   const [liveErr, setLiveErr] = useState<string | null>(null)
+  // For PK-less Postgres tables: the per-row `ctid` value (aligned to `live.rows`),
+  // used as a stable row key for in-grid UPDATE/DELETE. Null when the table has a
+  // PK or the engine doesn't expose `__ctid`.
+  const [rowKeys, setRowKeys] = useState<string[] | null>(null)
 
   useEffect(() => {
     // Only fetch when connected to a real backend AND viewing a table.
-    if (!connId || !selectedTable) { setLive(null); setLiveErr(null); return }
+    if (!connId || !selectedTable) { setLive(null); setLiveErr(null); setRowKeys(null); return }
     let cancelled = false
     setLiveErr(null)
     // Dialect-correct, identifier-quoted, paginated preview (works for all engines,
@@ -156,12 +160,26 @@ export function DbWorkbench({ conn, density }: DbWorkbenchProps) {
       .then(([res, struct]) => {
         if (cancelled) return
         const pkNames = new Set((struct?.columns ?? []).filter(c => c.key === 'PK').map(c => c.name))
+        // The Postgres preview prepends a leading `__ctid` system column. Always
+        // strip it from the displayed columns/rows so it's never shown or exported.
+        // When the table has NO primary key, keep its per-row values as `rowKeys`
+        // so the grid can still key UPDATE/DELETE on `ctid`.
+        const ctidIdx = res.columns.findIndex(c => c.name === '__ctid')
+        let cols = res.columns
+        let rws = res.rows
+        let keys: string[] | null = null
+        if (ctidIdx >= 0) {
+          if (pkNames.size === 0) keys = res.rows.map(r => String(r[ctidIdx]))
+          cols = res.columns.filter((_, i) => i !== ctidIdx)
+          rws = res.rows.map(r => r.filter((_, i) => i !== ctidIdx))
+        }
         const columns: ResultColumn[] = pkNames.size
-          ? res.columns.map(c => (pkNames.has(c.name) ? { ...c, pk: true } : c))
-          : res.columns
-        setLive({ columns, rows: res.rows })
+          ? cols.map(c => (pkNames.has(c.name) ? { ...c, pk: true } : c))
+          : cols
+        setLive({ columns, rows: rws })
+        setRowKeys(keys)
       })
-      .catch(e => { if (!cancelled) setLiveErr(dbErrMsg(e)) })
+      .catch(e => { if (!cancelled) { setLiveErr(dbErrMsg(e)); setRowKeys(null) } })
     return () => { cancelled = true }
   }, [connId, selectedTable, selectedSchema])
 
@@ -250,6 +268,7 @@ export function DbWorkbench({ conn, density }: DbWorkbenchProps) {
                     rows={(live?.rows ?? [])}
                     statusTones={D.statusTones} density={density} key={`${selectedSchema ?? ''}.${obj.table}`}
                     writable={caps.writable} connId={connId} table={obj.table} schema={selectedSchema}
+                    rowKeys={rowKeys ?? undefined} keyColumn={rowKeys ? 'ctid' : undefined}
                     livePreview loadError={liveErr ?? undefined} />
                 : <DataGrid
                     columns={D.ordersColumns.map((c): ResultColumn => ({ name: c.name, type: c.type, pk: c.pk, fk: c.fk, icon: c.icon }))}

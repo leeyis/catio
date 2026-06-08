@@ -30,6 +30,19 @@ export interface DataGridProps {
    * table-data path so identifier quoting/qualification lives in one place.
    */
   livePreview?: boolean
+  /**
+   * Per-row stable key values aligned to `rows` (one entry per row, same order).
+   * Used to key UPDATE/DELETE when the table has NO primary key — e.g. Postgres
+   * `ctid`. The parent strips the `__ctid` column out of `columns`/`rows` and
+   * passes its values here. Only meaningful together with `keyColumn`.
+   */
+  rowKeys?: string[]
+  /**
+   * The column name to key edits on when there's no primary key (e.g. 'ctid').
+   * When set together with `rowKeys`, editing is enabled and UPDATE/DELETE WHERE
+   * clauses are built as `<keyColumn> = <rowKeys[origIdx]>`.
+   */
+  keyColumn?: string
   /** Called after a successful apply so the parent can re-fetch. */
   onRefresh?: () => void
   /** When true, `truncated` badge is shown (server reported a capped result). */
@@ -52,7 +65,7 @@ function colIcon(col: ResultColumn): string {
   return 'type'
 }
 
-export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortable', writable = true, connId, table = 'orders', schema, sql, livePreview, onRefresh, truncated, loadError, resultLabel }: DataGridProps) {
+export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortable', writable = true, connId, table = 'orders', schema, sql, livePreview, onRefresh, truncated, loadError, resultLabel, rowKeys, keyColumn }: DataGridProps) {
   const { t } = useTranslation()
   const [sel, setSel] = useState({ r: 2, c: 3 })
   const [sortCol, setSortCol] = useState<string | null>(null)
@@ -72,6 +85,9 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   // server-side page rows (when connId set); null → use client-side slice of `rows`
   const [serverRows, setServerRows] = useState<unknown[][] | null>(null)
   const [serverTruncated, setServerTruncated] = useState(false)
+  // server-side per-row keys for the ctid path (aligned to serverRows), when the
+  // grid paginates a PK-less Postgres table itself. Null → use the prop `rowKeys`.
+  const [serverRowKeys, setServerRowKeys] = useState<string[] | null>(null)
   // toolbar: refresh / filter / sort / export UI state
   const [refreshing, setRefreshing] = useState(false)
   const [filterOpen, setFilterOpen] = useState(false)
@@ -90,7 +106,11 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
 
   // The pk column(s) of the result — needed to safely key UPDATEs. Empty → not editable per-row.
   const pkCols = useMemo(() => columns.filter(c => c.pk).map(c => c.name), [columns])
-  const canEdit = writable && pkCols.length > 0
+  // Active per-row keys for the no-PK (ctid) path: server page keys take precedence
+  // over the parent-provided first-page keys, mirroring serverRows ?? rows.
+  const activeRowKeys = serverRowKeys ?? rowKeys ?? null
+  // Editable when there's a PK, OR a key column + per-row keys (ctid fallback).
+  const canEdit = writable && (pkCols.length > 0 || !!(keyColumn && activeRowKeys))
 
   // Find the index of sortCol in columns for indexed-value sort
   const sortColIdx = useMemo(() => {
@@ -145,12 +165,26 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
     return null
   }, [connId, livePreview, sql, schema, table])
 
+  // Apply a freshly-fetched server page. On the ctid path the live preview still
+  // returns a leading `__ctid` system column; strip it from the displayed rows and
+  // capture its values as the server-side per-row keys (aligned to the page). On
+  // the PK path there is no `__ctid` column and rowKeys stay null.
+  function applyServerPage(res: { rows: unknown[][]; truncated?: boolean }) {
+    if (keyColumn) {
+      const k = res.rows.map(r => String(r[0]))
+      setServerRows(res.rows.map(r => r.slice(1)))
+      setServerRowKeys(k)
+    } else {
+      setServerRows(res.rows)
+    }
+    setServerTruncated(!!res.truncated)
+  }
+
   async function gotoPage(next: number) {
     if (next < 1) return
     if (fetchPage) {
       const res = await fetchPage(PAGE, (next - 1) * PAGE)
-      setServerRows(res.rows)
-      setServerTruncated(!!res.truncated)
+      applyServerPage(res)
       setPage(next)
     } else {
       setPage(Math.min(pages, Math.max(1, next)))
@@ -162,7 +196,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
     setPageSize(n)
     setPage(1)
     if (fetchPage) {
-      fetchPage(n, 0).then(res => { setServerRows(res.rows); setServerTruncated(!!res.truncated) })
+      fetchPage(n, 0).then(applyServerPage)
     }
   }
 
@@ -179,8 +213,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
       setRefreshing(true)
       try {
         const res = await fetchPage(PAGE, (page - 1) * PAGE)
-        setServerRows(res.rows)
-        setServerTruncated(!!res.truncated)
+        applyServerPage(res)
       } finally {
         setRefreshing(false)
       }
@@ -307,10 +340,8 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
       if (deleted.has(origIdx)) continue
       const entry = tagged.find(e => e.origIdx === origIdx)
       if (!entry) continue
-      const pk: [string, unknown][] = pkCols.map(name => {
-        const ci = columns.findIndex(c => c.name === name)
-        return [name, entry.row[ci]] as [string, unknown]
-      })
+      const pk = rowPk(origIdx, entry.row)
+      if (pk.length === 0) continue
       reqs.push({ schema, table, kind: 'update', pk, cells })
     }
 
@@ -325,14 +356,30 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
     for (const origIdx of deleted) {
       const entry = tagged.find(e => e.origIdx === origIdx)
       if (!entry) continue
-      const pk: [string, unknown][] = pkCols.map(name => {
-        const ci = columns.findIndex(c => c.name === name)
-        return [name, entry.row[ci]] as [string, unknown]
-      })
+      const pk = rowPk(origIdx, entry.row)
+      if (pk.length === 0) continue
       reqs.push({ schema, table, kind: 'delete', pk, cells: [] })
     }
 
     return reqs
+  }
+
+  /**
+   * Build the WHERE-clause key pairs for an existing row. Prefer the table's real
+   * primary key column(s). With no PK, fall back to the ctid-style row key:
+   * `[[keyColumn, activeRowKeys[origIdx]]]`. Returns [] when no usable key exists.
+   */
+  function rowPk(origIdx: number, row: unknown[]): [string, unknown][] {
+    if (pkCols.length > 0) {
+      return pkCols.map(name => {
+        const ci = columns.findIndex(c => c.name === name)
+        return [name, row[ci]] as [string, unknown]
+      })
+    }
+    if (keyColumn && activeRowKeys && activeRowKeys[origIdx] != null) {
+      return [[keyColumn, activeRowKeys[origIdx]]]
+    }
+    return []
   }
 
   async function openPreview() {
@@ -358,8 +405,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
       setPreview(null)
       if (fetchPage) {
         const res = await fetchPage(PAGE, (page - 1) * PAGE)
-        setServerRows(res.rows)
-        setServerTruncated(!!res.truncated)
+        applyServerPage(res)
       }
       onRefresh?.()
     } catch (e) {

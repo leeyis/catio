@@ -276,7 +276,16 @@ pub async fn db_table_preview(conn_id: String, schema: Option<String>, table: St
     let drv = mgr.get(&conn_id).await.ok_or(DbError::NotFound(conn_id))?;
     let has_schemas = drv.capabilities().schemas;
     let qualified = qualified_name(drv.db_type(), has_schemas, schema.as_deref(), &table);
-    drv.paginated_query(&format!("SELECT * FROM {}", qualified), limit, offset).await
+    // On Postgres, prepend the `ctid` system column (aliased to `__ctid`) so each
+    // row carries a stable physical identity. This lets the grid edit/delete rows
+    // in tables that have NO primary key (the frontend strips `__ctid` from the
+    // display and uses it as the row key). Other engines are unchanged.
+    let select = if drv.db_type() == crate::db::DatabaseType::Postgres {
+        format!("SELECT ctid AS __ctid, * FROM {}", qualified)
+    } else {
+        format!("SELECT * FROM {}", qualified)
+    };
+    drv.paginated_query(&select, limit, offset).await
 }
 
 /// Write `contents` to `path` on disk. Used by the grid's CSV/JSON export, which

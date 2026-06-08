@@ -11,7 +11,7 @@ import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirro
 import { autocompletion, completionKeymap, closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete'
 import { syntaxHighlighting, HighlightStyle, bracketMatching, indentOnInput } from '@codemirror/language'
 import { tags as t } from '@lezer/highlight'
-import { sql, PostgreSQL, MySQL, SQLite, MSSQL, type SQLDialect } from '@codemirror/lang-sql'
+import { sql, PostgreSQL, MySQL, SQLite, MSSQL, type SQLDialect, type SQLNamespace } from '@codemirror/lang-sql'
 import { Icon } from '../Icon'
 
 export interface SqlEditorProps {
@@ -19,9 +19,10 @@ export interface SqlEditorProps {
   onChange: (value: string) => void
   minHeight?: number
   target?: string
-  /** table name → column names, for schema-aware completion. Keys may be bare
-   * (`orders`) or qualified (`public.orders`); lang-sql matches both. */
-  schema?: Record<string, string[]>
+  /** Nested completion data in lang-sql's `SQLNamespace` shape (schemas →
+   * tables → columns). The nesting lets lang-sql assign distinct completion
+   * types/icons to schemas, tables, and columns. */
+  schema?: SQLNamespace
   /** Invoked on Cmd/Ctrl+Enter (the "run query" shortcut). */
   onRun?: () => void
   /** Run just the currently-selected SQL (from the selection toolbar's Run action). */
