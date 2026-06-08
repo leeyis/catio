@@ -1,9 +1,13 @@
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { vi, beforeEach } from 'vitest'
 import { LanguageProvider } from '../src/state/LanguageContext'
 import { DataProvider } from '../src/state/DataContext'
 import { saveProfile } from '../src/state/connections'
 import App from '../src/App'
+
+// Mock the agent so chat() streams deterministic tokens through onToken.
+const agentMock = vi.hoisted(() => ({ chat: vi.fn() }))
+vi.mock('../src/services/agent', () => ({ chat: agentMock.chat }))
 
 beforeEach(() => localStorage.clear())
 
@@ -135,4 +139,50 @@ it('persists the terminal pane across a view switch (settings overlay, body stay
   // switch back to the workbench — same tab/pane is still there (never remounted)
   fireEvent.click(screen.getByTitle('设置'))
   expect(screen.getAllByText(/edge-01/).length).toBeGreaterThan(0)
+})
+
+// REGRESSION: a streamed agent reply must be PERSISTED in full (not just the
+// conversation title). Previously patchConversation relied on the setState
+// updater's return value, which React 18 doesn't run synchronously under
+// streaming bursts, so assistant tokens never reached localStorage.
+it('persists the full streamed assistant reply, not just the conversation title', async () => {
+  // a model must be configured for the composer to allow sending
+  localStorage.setItem('catio-agent-config', JSON.stringify({
+    provider: 'ollama', ollamaBaseUrl: 'http://localhost:11434',
+    openaiBaseUrl: 'https://api.openai.com', openaiKey: '', model: 'llama3',
+  }))
+  agentMock.chat.mockImplementation(async (_msgs: unknown, _cfg: unknown, opts: { onToken: (t: string) => void }) => {
+    opts.onToken('Hello')
+    opts.onToken(', ')
+    opts.onToken('world!')
+  })
+
+  wrap()
+  // open a demo terminal tab so there's an active host context for the Agent
+  fireEvent.click(screen.getAllByText('新建连接')[0])
+  fireEvent.click(screen.getByText('主机 / 终端'))
+  const hostLabel = screen.getAllByText('主机').map(el => el.parentElement)
+    .find(p => p?.querySelector('input')) as HTMLElement
+  const host = hostLabel.querySelector('input') as HTMLInputElement
+  fireEvent.input(host, { target: { value: 'edge-01' } })
+  fireEvent.click(screen.getByText('保存并连接'))
+
+  // open the Agent panel via the icon rail
+  fireEvent.click(screen.getByTitle('Catio Agent · 跨终端与数据库'))
+
+  // type a prompt + send
+  const composer = screen.getByPlaceholderText(/生成 shell 命令/) as HTMLTextAreaElement
+  fireEvent.change(composer, { target: { value: 'list files' } })
+  fireEvent.click(screen.getByTitle('发送'))
+
+  // the conversation in localStorage must contain the FULL assistant reply
+  await waitFor(() => {
+    const raw = localStorage.getItem('catio-conversations') ?? '[]'
+    const convs = JSON.parse(raw) as Array<{ messages: Array<{ role: string; content: string }> }>
+    const assistant = convs.flatMap(c => c.messages).find(m => m.role === 'assistant')
+    expect(assistant?.content).toBe('Hello, world!')
+  })
+  // and the user message is persisted too
+  const raw = localStorage.getItem('catio-conversations') ?? '[]'
+  expect(raw).toContain('list files')
 })

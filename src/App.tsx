@@ -74,6 +74,11 @@ export default function App() {
   // ---- Catio Agent conversations (P2): per-host persisted, per-tab current ----
   const { config: agentCfg } = useAgentConfig()
   const [conversations, setConversations] = useState<Conversation[]>(() => loadConversations())
+  // Authoritative mirror of `conversations` for mutations/persistence. React 18
+  // does not guarantee a setState updater runs synchronously during streaming,
+  // so we never rely on the updater's return value to persist — we mutate this
+  // ref synchronously, persist from it, then push it into state for rendering.
+  const conversationsRef = useRef<Conversation[]>(conversations)
   // tabId -> the conversation id currently shown for that tab.
   const [currentConvByTab, setCurrentConvByTab] = useState<Record<string, string>>({})
   // tabId -> AbortController for the in-flight send (so streaming survives view/tab switches).
@@ -83,12 +88,11 @@ export default function App() {
   // sessionId -> cached sysinfo string (fetched once per session on first agent send).
   const sysinfoCache = useRef<Record<string, string>>({})
 
-  // Upsert into both local state (live render) and localStorage (persistence).
+  // Upsert into the ref (source of truth), localStorage, and render state.
   function upsertConversation(conv: Conversation) {
-    setConversations(prev => {
-      const rest = prev.filter(c => c.id !== conv.id)
-      return [...rest, conv]
-    })
+    const next = [...conversationsRef.current.filter(c => c.id !== conv.id), conv]
+    conversationsRef.current = next
+    setConversations(next)
     saveConversation(conv)
   }
 
@@ -513,15 +517,20 @@ export default function App() {
     return conv.id
   }
 
-  // Mutate a conversation by id in state + localStorage via an updater.
+  // Mutate a conversation by id in the ref (source of truth) + localStorage +
+  // render state. Persistence reads from the freshly-computed value, never from
+  // a setState updater return (which is unreliable under streaming bursts).
   function patchConversation(convId: string, fn: (c: Conversation) => Conversation) {
     let updated: Conversation | undefined
-    setConversations(prev => prev.map(c => {
+    const next = conversationsRef.current.map(c => {
       if (c.id !== convId) return c
       updated = fn(c)
       return updated
-    }))
-    if (updated) saveConversation(updated)
+    })
+    if (!updated) return
+    conversationsRef.current = next
+    setConversations(next)
+    saveConversation(updated)
   }
 
   // Fetch sysinfo for a session once and cache it; subsequent calls return the
@@ -549,7 +558,7 @@ export default function App() {
     const hostName = tabConn?.name ?? tab.title
 
     // Snapshot the prior messages for the outgoing payload BEFORE appending.
-    const prior = conversations.find(c => c.id === convId)?.messages ?? []
+    const prior = conversationsRef.current.find(c => c.id === convId)?.messages ?? []
 
     // Append the user message + an empty assistant placeholder; persist.
     patchConversation(convId, c => ({
@@ -622,7 +631,9 @@ export default function App() {
 
   function deleteAgentConversation(tabId: string, convId: string) {
     deleteConversationStore(convId)
-    setConversations(prev => prev.filter(c => c.id !== convId))
+    const next = conversationsRef.current.filter(c => c.id !== convId)
+    conversationsRef.current = next
+    setConversations(next)
     // If the deleted conv was current for this tab, drop the mapping so a fresh
     // one is created lazily on next render/send.
     setCurrentConvByTab(prev => {
