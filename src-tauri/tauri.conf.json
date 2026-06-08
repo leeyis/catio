@@ -11,7 +11,7 @@
   },
   "app": {
     "windows": [{
-      "title": "Catio", "width": 1280, "height": 820, "minWidth": 980, "minHeight": 640,
+      "title": "Catio", "width": 1440, "height": 900, "minWidth": 1100, "minHeight": 640, "center": true,
       "decorations": false, "titleBarStyle": "Overlay", "transparent": false
     }],
     "security": { "csp": null }

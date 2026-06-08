@@ -740,7 +740,11 @@ input, textarea { font-family: inherit; }
 
 /* Body grid (workbench §5.3) */
 .body {
-  flex: 1; min-height: 0;
+  flex: 1; min-height: 0; min-width: 0;
+  /* overflow:hidden keeps the fixed-width Sidebar + IconRail from being pushed
+     off-screen (clipped) on narrower windows: the only flexible child (the main
+     .card-surface.grow column, which carries min-width:0) shrinks instead. */
+  overflow: hidden;
   display: flex; gap: 12px;
   padding: 12px;
 }
@@ -751,6 +755,9 @@ input, textarea { font-family: inherit; }
   border: 1px solid var(--border-hairline);
   border-radius: 16px;
   box-shadow: var(--shadow-card);
+  /* allow a flex-child card-surface (e.g. the main grow column) to shrink below
+     its content size instead of forcing the row to overflow / clip the rail. */
+  min-width: 0;
 }
 
 /* ============================================================

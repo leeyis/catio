@@ -30,6 +30,20 @@ static HIST_IDS: IdGen = IdGen::new("hist");
 /// How long to keep the terminal "muted" if no shell-integration marker arrives
 /// (e.g. a shell without bash/zsh hooks). After this, output is shown unfiltered.
 const MUTE_FALLBACK_MS: u64 = 3000;
+/// Window within which an identical, consecutive command is treated as a
+/// duplicate backend emission (shell emitting extra markers for one command) and
+/// suppressed. A human cannot retype the exact same command this fast.
+const DEDUP_WINDOW_MS: u64 = 800;
+
+/// Returns true if `cmd` matches the last-emitted command within `DEDUP_WINDOW_MS`,
+/// i.e. it is a spurious duplicate that should be skipped.
+fn is_duplicate_emit(last_emit: &Option<(String, std::time::Instant)>, cmd: &str) -> bool {
+    matches!(
+        last_emit,
+        Some((c, t))
+            if c == cmd && t.elapsed() < std::time::Duration::from_millis(DEDUP_WINDOW_MS)
+    )
+}
 
 /// 发给「拥有 channel 的 owner 任务」的指令。
 pub enum TermCmd {
@@ -100,6 +114,11 @@ pub async fn term_open(
         // the injected bootstrap. A 3s fallback unmutes shells WITHOUT integration
         // (no markers ever arrive) so they aren't blank forever.
         let mut muted = true;
+        // Backend dedup: the last command we actually emitted + when. If the shell
+        // spews extra command/exit markers for ONE user command (duplicate ids),
+        // we collapse identical consecutive commands within a short window. A human
+        // cannot retype the exact same command within 800ms, so this is safe.
+        let mut last_emit: Option<(String, std::time::Instant)> = None;
         let started = std::time::Instant::now();
         loop {
             tokio::select! {
@@ -108,14 +127,14 @@ pub async fn term_open(
                         emit_scanned(
                             &app, &evt, &history_evt, &host, &mut scanner, data,
                             &mut cur_cmd, &mut cur_cwd, &mut cur_start,
-                            &mut muted, &started,
+                            &mut muted, &started, &mut last_emit,
                         );
                     }
                     Some(ChannelMsg::ExtendedData { ref data, .. }) => {
                         emit_scanned(
                             &app, &evt, &history_evt, &host, &mut scanner, data,
                             &mut cur_cmd, &mut cur_cwd, &mut cur_start,
-                            &mut muted, &started,
+                            &mut muted, &started, &mut last_emit,
                         );
                     }
                     Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
@@ -153,6 +172,7 @@ fn emit_scanned(
     cur_start: &mut std::time::Instant,
     muted: &mut bool,
     started: &std::time::Instant,
+    last_emit: &mut Option<(String, std::time::Instant)>,
 ) {
     let (visible, events) = scanner.feed(data);
     // Decide whether to show this batch's visible bytes.
@@ -182,6 +202,12 @@ fn emit_scanned(
             osc::OscEvent::ExecStart => {}
             osc::OscEvent::ExecEnd(code) => {
                 if let Some(cmd) = cur_cmd.take() {
+                    // Definitive dedup: skip emitting if this is the same command we
+                    // just emitted within the dedup window (the shell emitted extra
+                    // markers for one user command). Still clears cur_cmd above.
+                    if is_duplicate_emit(last_emit, &cmd) {
+                        continue;
+                    }
                     let dur = cur_start.elapsed().as_millis() as u64;
                     let _ = app.emit(
                         history_evt,
@@ -194,6 +220,7 @@ fn emit_scanned(
                             "host": host,
                         }),
                     );
+                    *last_emit = Some((cmd, std::time::Instant::now()));
                 }
             }
         }
@@ -261,4 +288,29 @@ pub async fn term_close(
         let _ = tx.send(TermCmd::Close);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn dedup_skips_identical_command_in_window() {
+        let last = Some(("ls -la".to_string(), Instant::now()));
+        // Same command, just emitted → duplicate.
+        assert!(is_duplicate_emit(&last, "ls -la"));
+        // Different command → not a duplicate.
+        assert!(!is_duplicate_emit(&last, "pwd"));
+        // Nothing emitted yet → not a duplicate.
+        assert!(!is_duplicate_emit(&None, "ls -la"));
+    }
+
+    #[test]
+    fn dedup_allows_identical_command_after_window() {
+        // An emission older than the dedup window must NOT be treated as a dup.
+        let stale = Instant::now() - Duration::from_millis(DEDUP_WINDOW_MS + 50);
+        let last = Some(("ls -la".to_string(), stale));
+        assert!(!is_duplicate_emit(&last, "ls -la"));
+    }
 }

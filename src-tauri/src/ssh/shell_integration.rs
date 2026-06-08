@@ -25,8 +25,8 @@ elif [ -n "${BASH_VERSION:-}" ]; then
   __catio_n='__CATIO_NONCE__'
   __catio_esc(){ local s=${1//\\/\\\\}; s=${s//;/\\x3b}; s=${s//$'\n'/\\x0a}; printf '%s' "$s"; }
   __catio_in=0
-  __catio_pe(){ if [ "$__catio_in" = 0 ]; then __catio_in=1; local c; c=$(builtin history 1 | sed 's/ *[0-9][0-9]* *//'); printf '\e]633;E;%s;%s\a\e]633;C\a' "$(__catio_esc "$c")" "$__catio_n"; fi; }
-  __catio_pc(){ local e=$?; printf '\e]633;D;%s\a\e]633;P;Cwd=%s\a' "$e" "$(__catio_esc "$PWD")"; __catio_in=0; }
+  __catio_pe(){ case "$BASH_COMMAND" in __catio_*) return;; esac; if [ "$__catio_in" = 0 ]; then __catio_in=1; local c; c=$(builtin history 1 | sed 's/ *[0-9][0-9]* *//'); printf '\e]633;E;%s;%s\a\e]633;C\a' "$(__catio_esc "$c")" "$__catio_n"; fi; }
+  __catio_pc(){ local e=$?; __catio_in=0; printf '\e]633;D;%s\a\e]633;P;Cwd=%s\a' "$e" "$(__catio_esc "$PWD")"; }
   trap '__catio_pe' DEBUG
   case "${PROMPT_COMMAND:-}" in *__catio_pc*) ;; *) PROMPT_COMMAND="__catio_pc${PROMPT_COMMAND:+;$PROMPT_COMMAND}";; esac
 fi"#;
@@ -65,5 +65,21 @@ mod tests {
         // The nonce must round-trip into the encoded body.
         let decoded = String::from_utf8(B64.decode(b64.as_bytes()).unwrap()).unwrap();
         assert!(decoded.contains("ABC"), "nonce not embedded in body");
+    }
+
+    #[test]
+    fn bash_debug_trap_skips_own_functions() {
+        // The DEBUG trap must ignore our own prompt machinery so a single user
+        // command isn't recorded multiple times (mirrors VS Code's __vsc_prompt guard).
+        let body = INTEGRATION_TEMPLATE.replace("__CATIO_NONCE__", "N");
+        assert!(
+            body.contains(r#"case "$BASH_COMMAND" in __catio_*) return;; esac"#),
+            "bash __catio_pe must skip __catio_* commands: {body}"
+        );
+        // __catio_pc must reset the in-flight guard at its start (after capturing $?).
+        assert!(
+            body.contains(r#"local e=$?; __catio_in=0;"#),
+            "__catio_pc must reset __catio_in before its printfs: {body}"
+        );
     }
 }
