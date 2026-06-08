@@ -256,6 +256,7 @@
     "fieldHost": "Host",
     "fieldPort": "Port",
     "fieldUser": "User",
+    "fieldDatabase": "Database (optional)",
     "fieldUsername": "Username",
     "fieldPasswordKey": "Password / Key",
     "fieldPasswordPlaceholder": "Store in keychain",

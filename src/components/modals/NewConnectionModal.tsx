@@ -25,6 +25,21 @@ interface FieldProps {
   type?: string
 }
 
+// Defined at module scope (NOT inside the component) so its identity is stable
+// across renders — otherwise React remounts the <input> on every keystroke and
+// the field loses focus mid-typing.
+function Field({ label, value, onChange, placeholder, w, mono, type }: FieldProps) {
+  return (
+    <label className="col" style={{ gap: 5, flex: w || 1 }}>
+      <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{label}</span>
+      <input value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
+        type={type ?? 'text'}
+        className={mono ? 'mono' : ''}
+        style={{ height: 36, padding: '0 12px', borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }} />
+    </label>
+  )
+}
+
 // ---- Constants ----
 
 const DB_ENGINES: { id: DbType; label: string; short: string; defaultPort: number }[] = [
@@ -126,19 +141,9 @@ export function NewConnectionModal({ onClose }: NewConnectionModalProps) {
     onClose()
   }
 
-  const Field = ({ label, value, onChange, placeholder, w, mono, type }: FieldProps) => (
-    <label className="col" style={{ gap: 5, flex: w || 1 }}>
-      <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{label}</span>
-      <input value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
-        type={type ?? 'text'}
-        className={mono ? 'mono' : ''}
-        style={{ height: 36, padding: '0 12px', borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }} />
-    </label>
-  )
-
   return (
-    <div onClick={onClose} style={{ position: 'absolute', inset: 0, zIndex: 60, background: 'color-mix(in srgb, var(--cta-bg) 42%, transparent)', backdropFilter: 'blur(3px)', display: 'grid', placeItems: 'center' }}>
-      <div onClick={e => e.stopPropagation()} className="pop-in" style={{ width: 620, maxHeight: '86%', background: 'var(--surface-card)', borderRadius: 18, border: '1px solid var(--border-hairline)', boxShadow: 'var(--shadow-window)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+    <div style={{ position: 'absolute', inset: 0, zIndex: 60, background: 'color-mix(in srgb, var(--cta-bg) 42%, transparent)', backdropFilter: 'blur(3px)', display: 'grid', placeItems: 'center' }}>
+      <div className="pop-in" style={{ width: 620, maxHeight: '86%', background: 'var(--surface-card)', borderRadius: 18, border: '1px solid var(--border-hairline)', boxShadow: 'var(--shadow-window)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
         {/* header */}
         <div className="row" style={{ justifyContent: 'space-between', padding: '18px 20px 14px', borderBottom: '1px solid var(--border-hairline)' }}>
           <div className="col" style={{ gap: 2 }}>
@@ -268,7 +273,7 @@ export function NewConnectionModal({ onClose }: NewConnectionModalProps) {
             </div>
             {/* Database name field — DB kind only */}
             {kind === 'db' && (
-              <Field label={t('modals.fieldDatabase') ?? 'Database (optional)'} value={dbDatabase} onChange={setDbDatabase} placeholder="e.g. orders" />
+              <Field label={t('modals.fieldDatabase')} value={dbDatabase} onChange={setDbDatabase} placeholder="e.g. orders" />
             )}
             {/* Error message */}
             {kind === 'db' && dbError && (
