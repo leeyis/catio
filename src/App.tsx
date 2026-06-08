@@ -29,6 +29,7 @@ import type { SshConnectArgs } from './services/ssh'
 import { appendHistory, loadHistory, clearHistory } from './state/history'
 import type { HistoryItem } from './services/types'
 import { loadProfiles, saveProfile, deleteProfile } from './state/connections'
+import { loadSnippets, saveSnippet, newSnippetId } from './state/snippets'
 import type { ConnectionProfile } from './state/connections'
 import type { Tab, Connection, Snippet } from './services/types'
 import type { AuthUser } from './components/auth/AuthGate'
@@ -55,7 +56,7 @@ export default function App() {
   // Pending delete confirmation (styled ConfirmModal).
   const [pendingDelete, setPendingDelete] = useState<Connection | null>(null)
   const [aiAttachment, setAiAttachment] = useState<Attachment | null>(null)
-  const [snippets, setSnippets] = useState<Snippet[]>(() => D.snippets)
+  const [snippets, setSnippets] = useState<Snippet[]>(() => loadSnippets())
 
   // Real saved connection profiles (localStorage) — these seed the Vault & Home.
   const [profiles, setProfiles] = useState<ConnectionProfile[]>(() => loadProfiles())
@@ -66,6 +67,9 @@ export default function App() {
   const [sessionMap, setSessionMap] = useState<Record<string, string>>({})
   // Display Connection objects for live conns (not present in mock D.byId).
   const [liveConns, setLiveConns] = useState<Record<string, Connection>>({})
+  // sessionId -> live PTY channel id (surfaced by TerminalPane.onChannel). Used to
+  // write snippet/history "insert" payloads into the active terminal.
+  const [chanMap, setChanMap] = useState<Record<string, string>>({})
   // History items loaded from localStorage; updated on each new audit event.
   const [history, setHistory] = useState<HistoryItem[]>(() => loadHistory())
   // sessionId -> unlisten fn for history:// subscriptions; avoids re-render on update.
@@ -76,7 +80,8 @@ export default function App() {
   const resolveSessionId = (connId: string) => sessionMap[connId]
 
   function addSnippet(s: Snippet) {
-    setSnippets(prev => [{ ...s, id: 's' + Date.now() }, ...prev])
+    saveSnippet({ ...s, id: newSnippetId() })
+    setSnippets(loadSnippets())
     setActivePanel('snippets')
     setPanelOpen(true)
   }
@@ -299,6 +304,11 @@ export default function App() {
       delete next[closing.connId]
       return next
     })
+    setChanMap(prev => {
+      const next = { ...prev }
+      delete next[sid]
+      return next
+    })
   }
   function closeTab(id: string) {
     setTabs(prev => {
@@ -377,6 +387,7 @@ export default function App() {
     if (sid) sshDisconnect(sid).catch(() => { /* best-effort */ })
     setSessionMap(prev => { const next = { ...prev }; delete next[connId]; return next })
     setLiveConns(prev => { const next = { ...prev }; delete next[connId]; return next })
+    if (sid) setChanMap(prev => { const next = { ...prev }; delete next[sid]; return next })
     closeTab('tab-' + connId)
   }
 
@@ -405,6 +416,16 @@ export default function App() {
   const cur = tabs.find(tb => tb.id === activeTab)
   const curConn = cur ? (D.byId[cur.connId] ?? liveConns[cur.connId] ?? null) : null
   const aiMode = cur && cur.kind === 'terminal' ? 'shell' : 'sql'
+
+  // Write text into the active terminal's live PTY channel (no trailing newline).
+  async function insertToTerminal(code: string) {
+    const sid = cur?.sessionId
+    const chan = sid ? chanMap[sid] : undefined
+    if (!sid || !chan) return
+    const { termWrite } = await import('./services/ssh')
+    await termWrite(sid, chan, btoa(unescape(encodeURIComponent(code))))
+  }
+  const canInsert = !!(cur?.sessionId && chanMap[cur.sessionId])
 
   return (
     <div className="win">
@@ -435,7 +456,7 @@ export default function App() {
                   <>
                     <WorkbenchTabs tabs={tabs} activeTab={activeTab} onActivate={setActiveTab} onClose={closeTab} onCloseOthers={closeOthers} onCloseAll={closeAll} onNew={() => setShowNew(true)} />
                     <div className="grow" style={{ minHeight: 0 }}>
-                      {cur && cur.kind === 'terminal' && <TerminalPane conn={curConn} sessionId={cur.sessionId} resolveSessionId={resolveSessionId} key={cur.id} />}
+                      {cur && cur.kind === 'terminal' && <TerminalPane conn={curConn} sessionId={cur.sessionId} resolveSessionId={resolveSessionId} onChannel={(sid, chan) => setChanMap(m => { const n = { ...m }; if (chan) n[sid] = chan; else delete n[sid]; return n })} key={cur.id} />}
                       {cur && cur.kind === 'sql' && curConn && <DbWorkbench conn={curConn} density={density} key={cur.id} />}
                     </div>
                   </>
@@ -455,8 +476,8 @@ export default function App() {
               {activePanel === 'sftp' && <SftpPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} />}
               {activePanel === 'monitor' && <MonitorPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} />}
               {activePanel === 'tunnels' && <TunnelsPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} />}
-              {activePanel === 'snippets' && <SnippetsPanel onClose={() => setPanelOpen(false)} snippets={snippets} />}
-              {activePanel === 'history' && <HistoryPanel onClose={() => setPanelOpen(false)} onAddSnippet={addSnippet} items={history} onClear={() => { clearHistory(); setHistory([]) }} />}
+              {activePanel === 'snippets' && <SnippetsPanel onClose={() => setPanelOpen(false)} snippets={snippets} onChange={() => setSnippets(loadSnippets())} onInsert={insertToTerminal} canInsert={canInsert} />}
+              {activePanel === 'history' && <HistoryPanel onClose={() => setPanelOpen(false)} onAddSnippet={addSnippet} items={history} onClear={() => { clearHistory(); setHistory([]) }} onInsert={insertToTerminal} canInsert={canInsert} />}
               {activePanel === 'details' && (
                 <DetailsPanel
                   conn={detailConn ?? undefined}

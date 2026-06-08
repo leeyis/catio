@@ -21,6 +21,12 @@ export interface TerminalPaneProps {
    * ORCH will pass this once the connection→session map is managed centrally.
    */
   resolveSessionId?: (connId: string) => string | undefined
+  /**
+   * Surfaces the live PTY channel id to App so it can write into the active
+   * terminal (e.g. snippet/history "insert"). Called with the chanId once
+   * termOpen resolves, and with null on close/unmount.
+   */
+  onChannel?: (sessionId: string, chanId: string | null) => void
 }
 
 // Tauri detection — mirror services/ssh.ts guard (not exported there).
@@ -69,7 +75,7 @@ function termLinesToText(lines: TermLineType[]): string {
 // Shape matches MultiExecTarget so the ORCH task can pass it directly to a results panel.
 type MxRunState = Record<string, MultiExecTarget>
 
-export function TerminalPane({ conn, sessionId, resolveSessionId }: TerminalPaneProps) {
+export function TerminalPane({ conn, sessionId, resolveSessionId, onChannel }: TerminalPaneProps) {
   const { t } = useTranslation()
   const D = useData()
   const [broadcast, setBroadcast] = useState(false)
@@ -86,6 +92,10 @@ export function TerminalPane({ conn, sessionId, resolveSessionId }: TerminalPane
   // Mutable ref tracking the active channel id; nulled on server-initiated close to
   // prevent double-termClose and dead-channel keystroke writes.
   const chanIdRef = useRef<string | null>(null)
+  // Keep the latest onChannel in a ref so the xterm lifecycle effect (which depends
+  // only on session identity) always calls the current closure without re-running.
+  const onChannelRef = useRef<TerminalPaneProps['onChannel']>(onChannel)
+  onChannelRef.current = onChannel
   const [selBar, setSelBar] = useState<{ left: number; top: number; text: string } | null>(null)
   // Multiexec run state — per-target progress; held here for ORCH to consume via a future prop/callback.
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -201,6 +211,7 @@ export function TerminalPane({ conn, sessionId, resolveSessionId }: TerminalPane
         const openedChanId = await termOpen(sessionId, term.cols, term.rows)
         chanIdRef.current = openedChanId
         if (disposed) { termClose(sessionId, openedChanId); chanIdRef.current = null; return }
+        onChannelRef.current?.(sessionId, openedChanId)
         unlisten = await listen<TermEvent>(`term://${openedChanId}`, (p) => {
           if (typeof p.bytesBase64 === 'string') {
             term.write(base64ToBytes(p.bytesBase64))
@@ -209,6 +220,7 @@ export function TerminalPane({ conn, sessionId, resolveSessionId }: TerminalPane
             // keystrokes and unmount cleanup don't call termClose on a dead channel.
             term.write('\r\n\x1b[2m[connection closed]\x1b[0m\r\n')
             if (chanIdRef.current) { termClose(sessionId, chanIdRef.current); chanIdRef.current = null }
+            onChannelRef.current?.(sessionId, null)
           }
         })
         if (disposed) { unlisten(); if (chanIdRef.current) { termClose(sessionId, chanIdRef.current); chanIdRef.current = null } return }
@@ -244,6 +256,7 @@ export function TerminalPane({ conn, sessionId, resolveSessionId }: TerminalPane
       if (unlisten) unlisten()
       // Only call termClose if the channel is still live (not already closed by server).
       if (live && sessionId && chanIdRef.current) { termClose(sessionId, chanIdRef.current); chanIdRef.current = null }
+      if (live && sessionId) onChannelRef.current?.(sessionId, null)
       term.dispose()
       termRef.current = null
     }
