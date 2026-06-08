@@ -611,7 +611,7 @@ export default function App() {
         />
       )}
 
-      {locked && <AuthGate users={users} onLogin={loginUser} onCreate={createUser} />}
+      {locked && <AuthGate users={users} onLogin={loginUser} onCreate={createUser} onCancel={disableAuth} />}
     </div>
   )
 }

@@ -338,6 +338,7 @@
     "btnCreate": "Create account & enter",
     "btnUnlock": "Unlock",
     "backToLogin": "Back to login",
+    "cancelSetup": "Cancel & exit",
     "createNewUser": "Create new user",
     "footerNote": "Local encryption · Hosts and databases isolated between users",
     "errUserNotFound": "User not found",

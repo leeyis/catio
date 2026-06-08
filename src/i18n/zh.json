@@ -338,6 +338,7 @@
     "btnCreate": "创建账户并进入",
     "btnUnlock": "解锁",
     "backToLogin": "返回登录",
+    "cancelSetup": "取消并退出",
     "createNewUser": "创建新用户",
     "footerNote": "本地加密 · 多用户的主机与数据库信息相互隔离",
     "errUserNotFound": "用户不存在",
