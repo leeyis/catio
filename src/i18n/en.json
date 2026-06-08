@@ -151,6 +151,8 @@
     "searchTablesViews": "Search tables / views…",
     "newQuery": "New query",
     "refresh": "Refresh",
+    "scrollLeft": "Scroll left",
+    "scrollRight": "Scroll right",
     "erDiagram": "ER diagram",
     "tables": "Tables",
     "views": "Views",

@@ -1,33 +1,54 @@
-/* ported from ref-ui/_extract/blob5.txt — verbatim per plan T1-T7 */
-import React, { useState } from 'react'
+/* ported from ref-ui/_extract/blob5.txt — verbatim per plan T1-T7; live structure wired in E-series */
+import React, { useState, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn, Segmented } from '../atoms'
 import { useData } from '../../state/DataContext'
+import { tableStructure, dbErrMsg } from '../../services/db'
+import type { TableStructure } from '../../services/types'
 import { highlightSQL } from './highlightSQL'
 
 export interface StructureViewProps {
   table: string
+  /** Live backend connection id; when undefined we render the mock structure (pixel-identical demo). */
+  connId?: string
+  /** Schema namespace qualifying the table (live path); used for the real structure fetch + DDL prefix. */
+  schema?: string
 }
 
 const tblStyle: React.CSSProperties = { width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }
 const thCell: React.CSSProperties = { textAlign: 'left', padding: '9px 12px', fontSize: 11, fontWeight: 700, letterSpacing: '0.3px', textTransform: 'uppercase', color: 'var(--text-faint)', borderBottom: '1px solid var(--border-hairline-alt)', position: 'sticky', top: 0, background: 'var(--surface-subtle)', zIndex: 1 }
 const tdCell: React.CSSProperties = { padding: '8px 12px', borderBottom: '1px solid var(--border-hairline)', color: 'var(--text-secondary)', verticalAlign: 'middle' }
 
-function buildDDL(table: string, st: ReturnType<typeof useData>['tableStructures'][string]) {
+function buildDDL(qualified: string, st: TableStructure) {
   const cols = st.columns.map(c => `  ${c.name.padEnd(16)} ${c.type}${c.nullable ? '' : ' not null'}${c.default ? ' default ' + c.default : ''}${c.key === 'PK' ? ' primary key' : ''}`).join(',\n')
   const fks = st.fks.map(fk => `  foreign key (${fk.col}) references ${fk.ref} on delete ${fk.onDelete}`).join(',\n')
-  return `create table public.${table} (\n${cols}${fks ? ',\n' + fks : ''}\n);\n\n${st.indexes.filter(i => !i.name.endsWith('pkey')).map(i => `create ${i.unique ? 'unique ' : ''}index ${i.name} on public.${table} using ${i.method} (${i.cols});`).join('\n')}`
+  return `create table ${qualified} (\n${cols}${fks ? ',\n' + fks : ''}\n);\n\n${st.indexes.filter(i => !i.name.endsWith('pkey')).map(i => `create ${i.unique ? 'unique ' : ''}index ${i.name} on ${qualified} using ${i.method} (${i.cols});`).join('\n')}`
 }
 
 function Empty({ icon, text }: { icon: string; text: string }) {
   return <div className="col" style={{ alignItems: 'center', justifyContent: 'center', height: '100%', gap: 8, color: 'var(--text-faint)' }}><Icon name={icon} size={26} /><span style={{ fontSize: 13 }}>{text}</span></div>
 }
 
-export function StructureView({ table }: StructureViewProps) {
+export function StructureView({ table, connId, schema }: StructureViewProps) {
   const { t } = useTranslation()
   const D = useData()
-  const st = D.tableStructures[table] || D.tableStructures['orders']
+  const mockSt = D.tableStructures[table] || D.tableStructures['orders']
+  // Live path: fetch the real structure from the backend; null until loaded.
+  const [liveSt, setLiveSt] = useState<TableStructure | null>(null)
+  const [structErr, setStructErr] = useState<string | null>(null)
+  useEffect(() => {
+    if (!connId) { setLiveSt(null); setStructErr(null); return }
+    let cancelled = false
+    setStructErr(null)
+    tableStructure(connId, schema ?? '', table)
+      .then(s => { if (!cancelled) setLiveSt(s) })
+      .catch(e => { if (!cancelled) { setLiveSt(null); setStructErr(dbErrMsg(e)) } })
+    return () => { cancelled = true }
+  }, [connId, schema, table])
+  // When connected, render real data once loaded; otherwise the mock structure.
+  const st: TableStructure = connId ? (liveSt ?? { comment: '', columns: [], indexes: [], fks: [] }) : mockSt
+  const ddlQualified = connId ? (schema ? `${schema}.${table}` : table) : `public.${table}`
   const [tab, setTab] = useState('columns')
   const keyTone: Record<string, string> = { PK: 'var(--signal-amber)', FK: 'var(--signal-blue)', UNI: 'var(--signal-violet)' }
 
@@ -45,7 +66,8 @@ export function StructureView({ table }: StructureViewProps) {
         <Btn size="sm" variant="secondary" icon="plus">{t('dbviews.addColumn')}</Btn>
       </div>
       <div className="grow" style={{ overflow: 'auto' }}>
-        {tab === 'columns' && (
+        {structErr && <Empty icon="alert-triangle" text={structErr} />}
+        {!structErr && tab === 'columns' && (
           <table style={tblStyle}>
             <thead><tr>
               {['', t('dbviews.colName'), t('dbviews.colType'), t('dbviews.colNullable'), t('dbviews.colDefault'), t('dbviews.colKey'), t('dbviews.colComment')].map((h, i) => (
@@ -67,7 +89,7 @@ export function StructureView({ table }: StructureViewProps) {
             </tbody>
           </table>
         )}
-        {tab === 'indexes' && (
+        {!structErr && tab === 'indexes' && (
           <table style={tblStyle}>
             <thead><tr>{['', t('dbviews.idxName'), t('dbviews.idxCols'), t('dbviews.idxUnique'), t('dbviews.idxMethod')].map((h, i) => <th key={i} style={thCell}>{h}</th>)}</tr></thead>
             <tbody>
@@ -83,7 +105,7 @@ export function StructureView({ table }: StructureViewProps) {
             </tbody>
           </table>
         )}
-        {tab === 'fks' && (
+        {!structErr && tab === 'fks' && (
           st.fks.length ? (
             <table style={tblStyle}>
               <thead><tr>{['', t('dbviews.fkCol'), t('dbviews.fkRef'), 'ON DELETE', 'ON UPDATE'].map((h, i) => <th key={i} style={thCell}>{h}</th>)}</tr></thead>
@@ -101,9 +123,9 @@ export function StructureView({ table }: StructureViewProps) {
             </table>
           ) : <Empty icon="link" text={t('dbviews.noFks')} />
         )}
-        {tab === 'ddl' && (
+        {!structErr && tab === 'ddl' && (
           <pre className="mono" style={{ margin: 0, padding: 16, fontSize: 12.5, lineHeight: 1.7, color: 'var(--text-secondary)', whiteSpace: 'pre-wrap' }}
-            dangerouslySetInnerHTML={{ __html: highlightSQL(buildDDL(table, st)) }} />
+            dangerouslySetInnerHTML={{ __html: highlightSQL(buildDDL(ddlQualified, st)) }} />
         )}
       </div>
     </div>

@@ -1,5 +1,5 @@
 import { DATA } from './mockData'
-import type { HistoryItem, QueryResult, ResultColumn, Schema, Snippet } from './types'
+import type { HistoryItem, QueryResult, ResultColumn, Schema, Snippet, TableStructure } from './types'
 
 // ---- Tauri guard — function so tests can set window.__TAURI_INTERNALS__ dynamically ----
 const isTauri = (): boolean =>
@@ -192,6 +192,33 @@ export async function getSchema(connId: string): Promise<Schema> {
       views: tables.filter(t => t.kind === 'view').map(t => ({ name: t.name })),
       functions: [],
     })),
+  }
+}
+
+/**
+ * Real structure of a single table: columns, indexes, foreign keys (and a
+ * comment) — used by the Structure tab. Mirrors the Rust `TableStructure`
+ * (camelCase via serde). Outside Tauri falls back to the seeded mock structure
+ * so the demo stays pixel-identical.
+ */
+export async function tableStructure(connId: string, schema: string, table: string): Promise<TableStructure> {
+  if (!isTauri()) return DATA.tableStructures[table] ?? DATA.tableStructures['orders']
+  // The Rust db_table_structure returns a slightly different shape (typeName, index
+  // `columns`, fk `column`/`references`, no comment) — map it onto the frontend
+  // TableStructure so StructureView renders the real data.
+  const raw = await tauriInvoke<{
+    columns: { name: string; typeName: string; nullable: boolean; default: string | null; key: string }[]
+    indexes: { name: string; columns: string; unique: boolean; method: string }[]
+    fks: { column: string; references: string; onDelete: string; onUpdate: string }[]
+  }>('db_table_structure', { connId, schema, table })
+  return {
+    comment: '',
+    columns: (raw.columns ?? []).map(c => ({
+      name: c.name, type: c.typeName, nullable: c.nullable, default: c.default ?? null,
+      key: (c.key === 'PK' || c.key === 'FK' || c.key === 'UNI' ? c.key : ''), extra: '',
+    })),
+    indexes: (raw.indexes ?? []).map(i => ({ name: i.name, cols: i.columns, unique: i.unique, method: i.method })),
+    fks: (raw.fks ?? []).map(f => ({ col: f.column, ref: f.references, onDelete: f.onDelete, onUpdate: f.onUpdate })),
   }
 }
 
