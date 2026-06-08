@@ -61,6 +61,7 @@ const catioTheme = EditorView.theme(
       color: 'var(--text-primary)',
       fontSize: '13px',
       height: '100%',
+      width: '100%',
     },
     '.cm-scroller': {
       fontFamily: "'Geist Mono', monospace",
@@ -151,7 +152,17 @@ export function SqlEditor({ code, onChange, minHeight, target = 'prod-orders', s
       parent: hostRef.current,
     })
     viewRef.current = view
+    // CodeMirror does not auto-re-measure when its container goes from hidden
+    // (display:none / zero width — e.g. an inactive query tab) to visible, which
+    // left the editor rendered at a collapsed width. Observe size changes and
+    // request a re-measure so it always fills the available width.
+    let ro: ResizeObserver | undefined
+    if (typeof ResizeObserver !== 'undefined' && rootRef.current) {
+      ro = new ResizeObserver(() => viewRef.current?.requestMeasure())
+      ro.observe(rootRef.current)
+    }
     return () => {
+      ro?.disconnect()
       view.destroy()
       viewRef.current = null
     }

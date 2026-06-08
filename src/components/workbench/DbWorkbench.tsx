@@ -7,7 +7,7 @@ import { DataGrid, StructureView, SqlConsole, ERDiagram } from '../dbviews'
 import { SchemaBrowser } from './SchemaBrowser'
 import { useData } from '../../state/DataContext'
 import { listActiveDbConnections } from '../../state/dbConnections'
-import { getSchema, tablePreview, type DbCapabilities } from '../../services/db'
+import { getSchema, tablePreview, dbErrMsg, type DbCapabilities } from '../../services/db'
 import type { Connection, ResultColumn, Schema, SchemaNamespace } from '../../services/types'
 
 /** Initial page size for the live table preview (matches DataGrid's default). */
@@ -52,6 +52,9 @@ export function DbWorkbench({ conn, density }: DbWorkbenchProps) {
   const [tableTab, setTableTab] = useState('data') // data | structure
   const effectiveTableTab = (!caps.structureEdit && tableTab === 'structure') ? 'data' : tableTab
   const [queryN, setQueryN] = useState(1)
+  // Open SQL query tabs (ids). Each click of 新建查询 appends one; consoles stay
+  // mounted so each tab's editor + results persist across switches.
+  const [openQueries, setOpenQueries] = useState<number[]>([])
 
   // ---- Real schema tree (only when connected) ----
   // `liveSchema` holds the backend-introspected schema; null means "use the mock schema".
@@ -99,14 +102,26 @@ export function DbWorkbench({ conn, density }: DbWorkbenchProps) {
     // not just Postgres). Schema qualification lives in the backend command.
     tablePreview(connId, selectedSchema, selectedTable, PREVIEW_PAGE, 0)
       .then(res => { if (!cancelled) setLive({ columns: res.columns, rows: res.rows }) })
-      .catch(e => { if (!cancelled) setLiveErr(e instanceof Error ? e.message : String(e)) })
+      .catch(e => { if (!cancelled) setLiveErr(dbErrMsg(e)) })
     return () => { cancelled = true }
   }, [connId, selectedTable, selectedSchema])
 
   function pickTable(name: string) { setObj({ type: 'table', table: name }) }
   function newQuery() {
     if (!caps.sqlConsole) return
-    setQueryN(n => n + 1); setObj({ type: 'sql', qid: queryN + 1 })
+    const id = queryN + 1
+    setQueryN(id)
+    setOpenQueries(q => [...q, id])
+    setObj({ type: 'sql', qid: id })
+  }
+  function closeQuery(id: number) {
+    const next = openQueries.filter(x => x !== id)
+    setOpenQueries(next)
+    if (obj.type === 'sql' && obj.qid === id) {
+      setObj(next.length
+        ? { type: 'sql', qid: next[next.length - 1] }
+        : { type: 'table', table: selectedTable ?? 'orders' })
+    }
   }
   function openER() {
     if (!caps.er) return
@@ -151,9 +166,34 @@ export function DbWorkbench({ conn, density }: DbWorkbenchProps) {
             </div>
           </>
         )}
-        {obj.type === 'sql' && <SqlConsole density={density} fresh queryN={obj.qid} key={'q' + obj.qid}
-          writable={caps.writable} connId={connId ?? undefined} />}
         {obj.type === 'er' && <ERDiagram onOpenTable={(tblName) => setObj({ type: 'table', table: tblName })} />}
+        {/* SQL query tabs — every open query stays mounted (display-toggled) so its
+            editor + results persist across tab/table switches. */}
+        {openQueries.length > 0 && (
+          <div className="col" style={{ height: '100%', minHeight: 0, display: obj.type === 'sql' ? 'flex' : 'none' }}>
+            <div className="row" style={{ gap: 6, padding: '6px 10px', borderBottom: '1px solid var(--border-hairline)', flex: 'none', overflowX: 'auto' }}>
+              {openQueries.map(id => {
+                const isActive = obj.type === 'sql' && obj.qid === id
+                return (
+                  <div key={id} onClick={() => setObj({ type: 'sql', qid: id })} className="row gap6"
+                    style={{ flex: 'none', alignItems: 'center', height: 26, padding: '0 6px 0 10px', borderRadius: 8, cursor: 'pointer', fontSize: 12,
+                      background: isActive ? 'var(--accent-soft)' : 'var(--surface-sunken)', color: isActive ? 'var(--accent-primary)' : 'var(--text-secondary)' }}>
+                    <Icon name="file-code" size={12} /> query-{id}.sql
+                    <button className="icon-btn bare" style={{ width: 18, height: 18 }} title={t('shell.close')} onClick={e => { e.stopPropagation(); closeQuery(id) }}><Icon name="x" size={11} /></button>
+                  </div>
+                )
+              })}
+              <button className="icon-btn bare" style={{ width: 24, height: 24, flex: 'none' }} title={t('workbench.newQuery')} onClick={newQuery}><Icon name="plus" size={14} /></button>
+            </div>
+            <div className="grow" style={{ minHeight: 0, position: 'relative' }}>
+              {openQueries.map(id => (
+                <div key={id} style={{ position: 'absolute', inset: 0, display: obj.type === 'sql' && obj.qid === id ? 'block' : 'none' }}>
+                  <SqlConsole density={density} fresh queryN={id} writable={caps.writable} connId={connId ?? undefined} />
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )

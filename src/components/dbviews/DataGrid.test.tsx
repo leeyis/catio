@@ -13,6 +13,7 @@ vi.mock('../../services/db', () => ({
   previewDml: (...a: unknown[]) => previewDml(...a),
   applyEdits: (...a: unknown[]) => applyEdits(...a),
   queryPage: (...a: unknown[]) => queryPage(...a),
+  dbErrMsg: (e: unknown) => (e instanceof Error ? e.message : String(e)),
 }))
 
 const wrap = (ui: React.ReactNode) => render(<LanguageProvider>{ui}</LanguageProvider>)

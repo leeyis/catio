@@ -455,6 +455,11 @@ export default function App() {
     setActivePanel('details')
     setPanelOpen(true)
   }
+  // Hide the connection-details panel (used after a successful connect).
+  function closeDetailPanel() {
+    setPanelOpen(false)
+    setDetailConn(null)
+  }
 
   // ---- DB details-panel actions (operate on the saved DbProfile) ----
   function editDbProfile(profile: DbProfile) {
@@ -478,6 +483,7 @@ export default function App() {
     if (existing) {
       openConn(dbProfileToConnection(profile, true))
       setView('workbench')
+      closeDetailPanel()
       return
     }
     // Real connect (Tauri). Throws outside Tauri / on failure — DetailsPanel surfaces it.
@@ -492,6 +498,8 @@ export default function App() {
     setActiveDbConnection(result, profile)
     openConn(dbProfileToConnection(profile, true))
     setView('workbench')
+    // Success → auto-hide the connection details panel.
+    closeDetailPanel()
   }
 
   // ---- SSH DetailsPanel actions (operate on the REAL saved SSH profile) ----
@@ -504,6 +512,8 @@ export default function App() {
       { host: profile.host, port: profile.port, user: profile.user, auth: profile.auth, jump: profile.jump },
       { name: profile.name },
     )
+    // Auto-hide the details panel once the connect is initiated.
+    closeDetailPanel()
   }
 
   // 编辑 — open NewConnectionModal in EDIT mode prefilled from the profile.

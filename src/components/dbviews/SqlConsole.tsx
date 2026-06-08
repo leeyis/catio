@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn } from '../atoms'
 import { useData } from '../../state/DataContext'
-import { runQuery, getSchema, schemaColumns } from '../../services/db'
+import { runQuery, getSchema, schemaColumns, dbErrMsg } from '../../services/db'
 import type { ResultColumn, Schema } from '../../services/types'
 import { SqlEditor } from './SqlEditor'
 import { DataGrid } from './DataGrid'
@@ -23,9 +23,9 @@ export function SqlConsole({ density, fresh, queryN, writable = true, connId }: 
   const { t } = useTranslation()
   const D = useData()
   const [code, setCode] = useState(
-    fresh
-      ? `-- ${t('dbviews.newQueryComment')} · ⌘↵ ${t('dbviews.run')}\nselect *\nfrom orders\nwhere status = 'pending'\nlimit 100;`
-      : D.sampleSQL
+    // A fresh query starts EMPTY (no hardcoded sample SQL). The editor shows its
+    // own placeholder hint instead.
+    fresh ? '' : D.sampleSQL
   )
   const [phase, setPhase] = useState<'idle' | 'running' | 'done'>(fresh ? 'idle' : 'done')
   // Live result of the last successful run (only used when connId is set).
@@ -106,7 +106,7 @@ export function SqlConsole({ density, fresh, queryN, writable = true, connId }: 
       const sql = code
       runQuery(connId, sql)
         .then(res => { setResult({ columns: res.columns, rows: res.rows, sql }); setPhase('done') })
-        .catch(e => { setRunErr(e instanceof Error ? e.message : String(e)); setPhase('done') })
+        .catch(e => { setRunErr(dbErrMsg(e)); setPhase('done') })
       return
     }
     // Mock path: unchanged demo timing.
@@ -130,7 +130,6 @@ export function SqlConsole({ density, fresh, queryN, writable = true, connId }: 
       <div className="row" style={{ justifyContent: 'space-between', padding: '7px 12px', borderBottom: '1px solid var(--border-hairline)', flex: 'none' }}>
         <div className="row gap8">
           <span className="chip" style={{ background: 'var(--surface-sunken)' }}><Icon name="file-code" size={12} /> query-{queryN || 1}.sql</span>
-          <span className="chip" style={{ background: 'var(--accent-soft-alt)', color: 'var(--accent-primary)' }}><Icon name="link" size={11} /> {t('dbviews.viaTunnel')}</span>
         </div>
         <div className="row gap6">
           <button className="icon-btn bare" title={t('dbviews.format')}><Icon name="wrench" size={15} /></button>

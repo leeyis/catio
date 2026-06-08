@@ -11,6 +11,22 @@ async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Prom
   return invoke<T>(cmd, args)
 }
 
+/**
+ * Extract a human-readable message from a thrown/rejected value. Tauri rejects a
+ * Rust `DbError` as a plain object `{ kind, message }`, so `String(e)` yields the
+ * useless "[object Object]" — pull `.message` (or stringify) instead.
+ */
+export function dbErrMsg(e: unknown): string {
+  if (e instanceof Error) return e.message
+  if (typeof e === 'string') return e
+  if (e && typeof e === 'object') {
+    const o = e as Record<string, unknown>
+    if (typeof o.message === 'string' && o.message) return o.message
+    try { return JSON.stringify(e) } catch { return String(e) }
+  }
+  return String(e)
+}
+
 // ---- DB engine types ----
 
 export type DbType =

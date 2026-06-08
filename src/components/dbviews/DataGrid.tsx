@@ -3,7 +3,7 @@ import { useState, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn, IconBtn, Segmented } from '../atoms'
-import { previewDml, applyEdits, queryPage, tablePreview, type EditRequest } from '../../services/db'
+import { previewDml, applyEdits, queryPage, tablePreview, dbErrMsg, type EditRequest } from '../../services/db'
 import type { ResultColumn } from '../../services/types'
 
 export interface DataGridProps {
@@ -54,7 +54,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   const [sel, setSel] = useState({ r: 2, c: 3 })
   const [sortCol, setSortCol] = useState<string | null>(null)
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
-  const [edits, setEdits] = useState<Record<string, string | number>>({ '5-total_cents': 4990, '11-status': 'shipped' })
+  const [edits, setEdits] = useState<Record<string, string | number>>({})
   const [editing, setEditing] = useState<{ r: number; c: number } | null>(null)
   const [editVal, setEditVal] = useState('')
   const [page, setPage] = useState(1)
@@ -200,7 +200,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
       onRefresh?.()
     } catch (e) {
       // Surface the failure inline in the preview gate instead of failing silently.
-      setApplyErr(t('dbviews.applyError', { message: e instanceof Error ? e.message : String(e) }))
+      setApplyErr(t('dbviews.applyError', { message: dbErrMsg(e) }))
     } finally {
       setApplying(false)
     }
