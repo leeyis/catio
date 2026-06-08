@@ -15,6 +15,13 @@ export interface TerminalPaneProps {
   /** When set AND running under Tauri, the terminal is "live" (wired to term_* IPC). */
   sessionId?: string
   /**
+   * True when this pane is the currently-shown workbench tab. Panes stay MOUNTED
+   * while hidden (display:none) so the live PTY + xterm buffer survive view/tab
+   * switches; a hidden container has zero size, so when this turns true we refit
+   * + resize the PTY + focus so xterm lays out and redraws correctly.
+   */
+  active?: boolean
+  /**
    * ORCH seam: maps a connection id to its live session id.
    * When provided, the Multi-Exec broadcast bar uses real multiexecRun IPC.
    * When absent (pre-ORCH), broadcast stays UI-only (existing behavior).
@@ -75,7 +82,7 @@ function termLinesToText(lines: TermLineType[]): string {
 // Shape matches MultiExecTarget so the ORCH task can pass it directly to a results panel.
 type MxRunState = Record<string, MultiExecTarget>
 
-export function TerminalPane({ conn, sessionId, resolveSessionId, onChannel }: TerminalPaneProps) {
+export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChannel }: TerminalPaneProps) {
   const { t } = useTranslation()
   const D = useData()
   const [broadcast, setBroadcast] = useState(false)
@@ -89,6 +96,9 @@ export function TerminalPane({ conn, sessionId, resolveSessionId, onChannel }: T
   const rootRef = useRef<HTMLDivElement>(null)
   const xtermHost = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
+  // FitAddon kept in a ref so the "became visible" effect can refit after this
+  // pane was hidden (display:none → zero size → xterm can't lay out).
+  const fitAddonRef = useRef<FitAddon | null>(null)
   // Mutable ref tracking the active channel id; nulled on server-initiated close to
   // prevent double-termClose and dead-channel keystroke writes.
   const chanIdRef = useRef<string | null>(null)
@@ -186,6 +196,7 @@ export function TerminalPane({ conn, sessionId, resolveSessionId, onChannel }: T
     })
     termRef.current = term
     const fitAddon = new FitAddon()
+    fitAddonRef.current = fitAddon
     term.loadAddon(fitAddon)
     term.open(hostEl)
     try { fitAddon.fit() } catch { /* jsdom has no layout */ }
@@ -276,9 +287,29 @@ export function TerminalPane({ conn, sessionId, resolveSessionId, onChannel }: T
       if (live && sessionId) onChannelRef.current?.(sessionId, null)
       term.dispose()
       termRef.current = null
+      fitAddonRef.current = null
     }
     // re-init when the session/chan identity changes
   }, [sessionId, live, conn])
+
+  // When this pane becomes the shown tab, its container regained a real size.
+  // Refit xterm to the now-laid-out container, push the new size to the live PTY,
+  // and focus so typing goes straight to the terminal.
+  useEffect(() => {
+    if (!active) return
+    const term = termRef.current
+    const fit = fitAddonRef.current
+    if (!term) return
+    // Defer to next frame so the display:none→flex layout has settled.
+    const id = requestAnimationFrame(() => {
+      try { fit?.fit() } catch { /* no layout (e.g. jsdom) */ }
+      if (live && sessionId && chanIdRef.current) {
+        try { termResize(sessionId, chanIdRef.current, term.cols, term.rows) } catch { /* best-effort */ }
+      }
+      try { term.focus() } catch { /* best-effort */ }
+    })
+    return () => cancelAnimationFrame(id)
+  }, [active, live, sessionId])
 
   function copySel() {
     if (selBar && navigator.clipboard) navigator.clipboard.writeText(selBar.text).catch(() => {})

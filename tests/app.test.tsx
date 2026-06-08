@@ -106,3 +106,33 @@ it('new host connection opens a demo terminal tab without Tauri', () => {
   // a terminal tab should now exist, titled by the host we typed.
   expect(screen.getAllByText(/edge-01/).length).toBeGreaterThan(0)
 })
+
+// PERSISTENCE: the workbench body (incl. the terminal pane) stays MOUNTED when
+// switching to Settings and back — the body is no longer torn down on view change,
+// so the live PTY + xterm buffer survive. We assert the pane container persists by
+// checking the tab/pane DOM nodes remain present across the view switch.
+it('persists the terminal pane across a view switch (settings overlay, body stays mounted)', () => {
+  wrap()
+  // open a demo terminal tab (no Tauri → demo path, no IPC)
+  fireEvent.click(screen.getAllByText('新建连接')[0])
+  fireEvent.click(screen.getByText('主机 / 终端'))
+  const hostLabel = screen.getAllByText('主机').map(el => el.parentElement)
+    .find(p => p?.querySelector('input')) as HTMLElement
+  const host = hostLabel.querySelector('input') as HTMLInputElement
+  fireEvent.input(host, { target: { value: 'edge-01' } })
+  fireEvent.click(screen.getByText('保存并连接'))
+  // tab + pane are present in workbench
+  const beforeCount = screen.getAllByText(/edge-01/).length
+  expect(beforeCount).toBeGreaterThan(0)
+
+  // switch to Settings (overlay on top — must NOT unmount the body/pane)
+  fireEvent.click(screen.getByTitle('设置'))
+  // Settings is showing (its title appears)…
+  expect(screen.getAllByText('设置').length).toBeGreaterThan(0)
+  // …and the terminal pane/tab is STILL in the DOM underneath the overlay.
+  expect(screen.getAllByText(/edge-01/).length).toBeGreaterThan(0)
+
+  // switch back to the workbench — same tab/pane is still there (never remounted)
+  fireEvent.click(screen.getByTitle('设置'))
+  expect(screen.getAllByText(/edge-01/).length).toBeGreaterThan(0)
+})

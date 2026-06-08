@@ -1,4 +1,4 @@
-import { render, waitFor } from '@testing-library/react'
+import { render, waitFor, act } from '@testing-library/react'
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { LanguageProvider } from '../../state/LanguageContext'
 import { DataProvider } from '../../state/DataContext'
@@ -82,6 +82,18 @@ describe('TerminalPane (xterm wiring)', () => {
     await waitFor(() => expect(h.dataCb.fn).not.toBeNull())
     h.dataCb.fn!('a')
     expect(termWrite).toHaveBeenCalledWith('sess-1', 'chan-1', btoa('a'))
+  })
+
+  it('refits + resizes the live PTY when the pane becomes active (shown after being hidden)', async () => {
+    const { rerender } = wrap(<TerminalPane conn={DATA.byId['h-bastion']} sessionId="sess-1" active={false} />)
+    // wait for the channel to open so chanIdRef is set
+    await waitFor(() => expect(termOpen).toHaveBeenCalled())
+    termResize.mockClear()
+    // flip to active → the effect fires fit() + termResize() on the next frame
+    rerender(<LanguageProvider><DataProvider><TerminalPane conn={DATA.byId['h-bastion']} sessionId="sess-1" active={true} /></DataProvider></LanguageProvider>)
+    // requestAnimationFrame is async in jsdom; flush it.
+    await act(async () => { await new Promise<void>(r => requestAnimationFrame(() => r())) })
+    expect(termResize).toHaveBeenCalledWith('sess-1', 'chan-1', expect.any(Number), expect.any(Number))
   })
 
   it('does not open a channel in demo mode (no sessionId)', async () => {

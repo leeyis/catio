@@ -457,16 +457,11 @@ export default function App() {
       <TitleBar theme={theme_} onToggleTheme={() => setThemeBoth(nextTheme(theme_))}
         onOpenSettings={goSettings} settingsActive={view === 'settings'} onSearch={() => {}} />
 
-      {view === 'settings' ? (
-        <SettingsView theme={theme_} onTheme={setThemeBoth} onClose={() => setView(prevView)}
-          authEnabled={authEnabled} users={users} currentUser={currentName} ownerUser={ownerUser}
-          onEnableAuth={enableAuth} onDisableAuth={disableAuth} onLock={lockApp} onRemoveUser={(name: string) => {
-            const next = users.filter(x => x.username !== name)
-            setUsers(next)
-            localStorage.setItem('catio-users', JSON.stringify(next))
-          }} />
-      ) : (
-        <div className="body">
+      {/* content region — body is ALWAYS mounted so terminals/workbench survive
+          view switches; Settings renders as an overlay on top (does NOT unmount
+          the body), mirroring the AuthGate overlay pattern. */}
+      <div style={{ flex: 1, minHeight: 0, minWidth: 0, position: 'relative', display: 'flex' }}>
+        <div className="body" style={{ flex: 1 }}>
           <Sidebar activeId={detailConn ? detailConn.id : (cur ? cur.connId : undefined)} onOpen={openDetail} onNew={() => setShowNew(true)}
             collapsed={sidebarCollapsed} onToggleCollapse={() => setSidebarCollapsed(c => !c)}
             conns={vaultConns} currentUser={currentName} authEnabled={authEnabled} onLock={lockApp} onEnableAuth={goSettings} />
@@ -476,16 +471,36 @@ export default function App() {
             {/* view body */}
             <div className="grow col" style={{ minHeight: 0 }}>
               {view === 'home' && <HomeView onOpen={openConn} onNew={() => setShowNew(true)} onVault={() => setView('workbench')} owned={ownsVault} userName={currentName} conns={vaultConns} />}
-              {view === 'workbench' && (
-                tabs.length ? (
-                  <>
-                    <WorkbenchTabs tabs={tabs} activeTab={activeTab} onActivate={setActiveTab} onClose={closeTab} onCloseOthers={closeOthers} onCloseAll={closeAll} onNew={() => setShowNew(true)} />
-                    <div className="grow" style={{ minHeight: 0 }}>
-                      {cur && cur.kind === 'terminal' && <TerminalPane conn={curConn} sessionId={cur.sessionId} resolveSessionId={resolveSessionId} onChannel={(sid, chan) => setChanMap(m => { const n = { ...m }; if (chan) n[sid] = chan; else delete n[sid]; return n })} key={cur.id} />}
-                      {cur && cur.kind === 'sql' && curConn && <DbWorkbench conn={curConn} density={density} key={cur.id} />}
-                    </div>
-                  </>
-                ) : <EmptyWorkbench onNew={() => setShowNew(true)} />
+
+              {/* tab bar — only in workbench when there are tabs */}
+              {view === 'workbench' && tabs.length > 0 && (
+                <WorkbenchTabs tabs={tabs} activeTab={activeTab} onActivate={setActiveTab} onClose={closeTab} onCloseOthers={closeOthers} onCloseAll={closeAll} onNew={() => setShowNew(true)} />
+              )}
+              {view === 'workbench' && tabs.length === 0 && <EmptyWorkbench onNew={() => setShowNew(true)} />}
+
+              {/* persistent panes container — ALWAYS mounted regardless of view.
+                  One pane per tab; visibility toggled via CSS display so the live
+                  PTY + xterm buffer survive home/settings/tab switches. A pane is
+                  shown only when this is the active workbench tab; otherwise it is
+                  display:none but stays mounted. term_close fires only when a tab
+                  is removed from `tabs` (real close) → React unmounts that pane. */}
+              {tabs.length > 0 && (
+                <div className="grow" style={{ minHeight: 0, position: 'relative', display: view === 'workbench' ? 'block' : 'none' }}>
+                  {tabs.map(tab => {
+                    const tabConn = D.byId[tab.connId] ?? liveConns[tab.connId] ?? null
+                    const isShown = view === 'workbench' && tab.id === activeTab
+                    return (
+                      <div key={tab.id} style={{ height: '100%', display: isShown ? 'flex' : 'none', position: 'absolute', inset: 0 }}>
+                        {tab.kind === 'terminal' && (
+                          <TerminalPane conn={tabConn} sessionId={tab.sessionId} active={isShown} resolveSessionId={resolveSessionId} onChannel={(sid, chan) => setChanMap(m => { const n = { ...m }; if (chan) n[sid] = chan; else delete n[sid]; return n })} />
+                        )}
+                        {tab.kind === 'sql' && tabConn && (
+                          <DbWorkbench conn={tabConn} density={density} />
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
               )}
             </div>
 
@@ -521,7 +536,21 @@ export default function App() {
           {/* icon rail */}
           <IconRail active={activePanel} onSelect={selectPanel} panelOpen={panelOpen} />
         </div>
-      )}
+
+        {/* Settings overlay — covers the body region (below the title bar) without
+            unmounting it. SettingsView keeps its identical markup/props/behavior. */}
+        {view === 'settings' && (
+          <div style={{ position: 'absolute', inset: 0, zIndex: 50, display: 'flex', background: 'var(--bg-canvas)' }}>
+            <SettingsView theme={theme_} onTheme={setThemeBoth} onClose={() => setView(prevView)}
+              authEnabled={authEnabled} users={users} currentUser={currentName} ownerUser={ownerUser}
+              onEnableAuth={enableAuth} onDisableAuth={disableAuth} onLock={lockApp} onRemoveUser={(name: string) => {
+                const next = users.filter(x => x.username !== name)
+                setUsers(next)
+                localStorage.setItem('catio-users', JSON.stringify(next))
+              }} />
+          </div>
+        )}
+      </div>
 
       {(showNew || editing) && (
         <NewConnectionModal
