@@ -8,10 +8,21 @@ import type { Tunnel } from '../../services/types'
 import { PanelShell } from './PanelShell'
 import { PanelEmpty } from './PanelEmpty'
 import { getTunnels, tunnelOpen, tunnelClose, listen } from '../../services/ssh'
+import type { ConnectionProfile } from '../../state/connections'
+
+export interface JumpChainItem {
+  name: string
+  kind: 'local' | 'jump' | 'target'
+  detail?: string
+}
 
 export interface TunnelsPanelProps {
   onClose: () => void
   sessionId?: string
+  /** connId of the active tab — used to look up the jump chain. */
+  activeConnId?: string
+  /** All saved profiles — used to derive the real jump chain. */
+  profiles?: ConnectionProfile[]
 }
 
 // ---- New-forward overlay form ----
@@ -91,10 +102,33 @@ function NewForwardForm({ onSubmit, onCancel }: NewForwardFormProps) {
 
 // ---- Main panel ----
 
-export function TunnelsPanel({ onClose, sessionId }: TunnelsPanelProps) {
+export function TunnelsPanel({ onClose, sessionId, activeConnId, profiles }: TunnelsPanelProps) {
   const { t } = useTranslation()
   const D = useData()
   const typeLabel: Record<string, string> = { L: 'Local', R: 'Remote', D: 'Dynamic' }
+
+  // Derive the real jump chain from the active profile (or fall back to mock D.jumpChain).
+  const activeProfile = profiles && activeConnId
+    ? profiles.find(p => p.id === activeConnId)
+    : undefined
+
+  const jumpChain: JumpChainItem[] = activeProfile
+    ? [
+        { name: '本地', kind: 'local' as const },
+        ...(activeProfile.jump
+          ? [{
+              name: activeProfile.jump.host,
+              kind: 'jump' as const,
+              detail: `${activeProfile.jump.user}@${activeProfile.jump.host}:${activeProfile.jump.port}`,
+            }]
+          : []),
+        {
+          name: activeProfile.name,
+          kind: 'target' as const,
+          detail: `${activeProfile.user}@${activeProfile.host}:${activeProfile.port}`,
+        },
+      ]
+    : D.jumpChain
 
   const [tunnels, setTunnels] = useState<Tunnel[]>([])
   const [showForm, setShowForm] = useState(false)
@@ -193,21 +227,24 @@ export function TunnelsPanel({ onClose, sessionId }: TunnelsPanelProps) {
         <PanelEmpty icon="link" text={t('panels.noSessionHint')} />
       ) : (
         <>
-          {/* jump chain */}
-          <div className="col" style={{ padding: '12px 12px', borderBottom: '1px solid var(--border-hairline)', gap: 8 }}>
-            <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.4px', textTransform: 'uppercase', color: 'var(--text-faint)' }}>{t('panels.proxyJump')}</span>
-            <div className="row" style={{ gap: 0, flexWrap: 'wrap' }}>
-              {D.jumpChain.map((h, i) => (
-                <React.Fragment key={i}>
-                  <div className="row gap6" style={{ padding: '5px 9px', borderRadius: 8, background: h.kind === 'target' ? 'var(--accent-soft)' : 'var(--surface-sunken)' }}>
-                    <Icon name={h.kind === 'local' ? 'monitor' : h.kind === 'jump' ? 'shield' : 'database'} size={13} style={{ color: h.kind === 'target' ? 'var(--accent-primary)' : 'var(--text-tertiary)' }} />
-                    <span className="mono" style={{ fontSize: 11.5, color: h.kind === 'target' ? 'var(--accent-primary)' : 'var(--text-secondary)', fontWeight: h.kind === 'target' ? 600 : 400 }}>{h.name}</span>
-                  </div>
-                  {i < D.jumpChain.length - 1 && <Icon name="arrow-right" size={13} style={{ color: 'var(--text-disabled)', margin: '0 4px' }} />}
-                </React.Fragment>
-              ))}
+          {/* jump chain — only shown when there is a jump hop or always for session context */}
+          {jumpChain.length > 0 && (
+            <div className="col" style={{ padding: '12px 12px', borderBottom: '1px solid var(--border-hairline)', gap: 8 }}>
+              <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.4px', textTransform: 'uppercase', color: 'var(--text-faint)' }}>ProxyJump</span>
+              <div className="row" style={{ gap: 0, flexWrap: 'wrap' }}>
+                {jumpChain.map((h, i) => (
+                  <React.Fragment key={i}>
+                    <div className="row gap6" style={{ padding: '5px 9px', borderRadius: 8, background: h.kind === 'target' ? 'var(--accent-soft)' : 'var(--surface-sunken)' }}
+                      title={h.detail}>
+                      <Icon name={h.kind === 'local' ? 'monitor' : h.kind === 'jump' ? 'shield' : 'server'} size={13} style={{ color: h.kind === 'target' ? 'var(--accent-primary)' : 'var(--text-tertiary)' }} />
+                      <span className="mono" style={{ fontSize: 11.5, color: h.kind === 'target' ? 'var(--accent-primary)' : 'var(--text-secondary)', fontWeight: h.kind === 'target' ? 600 : 400 }}>{h.name}</span>
+                    </div>
+                    {i < jumpChain.length - 1 && <Icon name="arrow-right" size={13} style={{ color: 'var(--text-disabled)', margin: '0 4px' }} />}
+                  </React.Fragment>
+                ))}
+              </div>
             </div>
-          </div>
+          )}
           <div className="grow" style={{ overflowY: 'auto', padding: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
             {tunnels.map(t2 => (
               <div key={t2.id} className="col" style={{ border: '1px solid var(--border-hairline)', borderRadius: 12, padding: 11, gap: 8, background: 'var(--surface-card)' }}>

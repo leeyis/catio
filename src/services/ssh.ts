@@ -26,12 +26,21 @@ async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Prom
 
 export type AuthMethod = { method: 'password' } | { method: 'keyFile'; path: string }
 
+export interface JumpConfig {
+  host: string
+  port: number
+  user: string
+  auth: AuthMethod
+  secret?: string
+}
+
 export interface SshConnectArgs {
   host: string
   port: number
   user: string
   auth: AuthMethod
   secret?: string
+  jump?: JumpConfig
 }
 
 export interface SshConnectResult {

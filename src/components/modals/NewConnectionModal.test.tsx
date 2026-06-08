@@ -23,6 +23,21 @@ const PROFILE: ConnectionProfile = {
   auth: { method: 'password' },
 }
 
+const PROFILE_WITH_JUMP: ConnectionProfile = {
+  id: 'live-1.2.3.4:22-deploy',
+  name: 'my-server',
+  host: '1.2.3.4',
+  port: 2222,
+  user: 'deploy',
+  auth: { method: 'password' },
+  jump: {
+    host: 'bastion.example.com',
+    port: 22,
+    user: 'ec2-user',
+    auth: { method: 'password' },
+  },
+}
+
 function wrap(ui: React.ReactNode) {
   return render(
     <LanguageProvider>
@@ -67,6 +82,65 @@ describe('NewConnectionModal — create mode', () => {
     expect(h.sshTest.mock.calls[0][0]).toMatchObject({ host: '1.2.3.4', user: 'root' })
     await waitFor(() => expect(screen.getByText(/测试通过 · 17ms/)).toBeTruthy())
   })
+
+  it('ProxyJump toggle is OFF by default and reveals jump fields when ON', () => {
+    wrap(<NewConnectionModal onClose={() => {}} onConnect={() => {}} />)
+    fireEvent.click(screen.getByText('主机 / 终端'))
+    // Jump fields not shown initially
+    expect(screen.queryByText('跳板主机')).toBeNull()
+    // Toggle ProxyJump ON
+    const toggleBtn = screen.getByRole('switch')
+    fireEvent.click(toggleBtn)
+    // Jump fields should now be visible
+    expect(screen.getByText('跳板主机')).toBeTruthy()
+    expect(screen.getByText('跳板用户')).toBeTruthy()
+    expect(screen.getByText('跳板密码/口令')).toBeTruthy()
+  })
+
+  it('Save&Connect includes jump in args (with secret) and saves profile WITHOUT jump secret', () => {
+    const onConnect = vi.fn()
+    wrap(<NewConnectionModal onClose={() => {}} onConnect={onConnect} />)
+    fireEvent.click(screen.getByText('主机 / 终端'))
+
+    // Fill target fields
+    const host = screen.getByText('主机').parentElement!.querySelector('input') as HTMLInputElement
+    const user = screen.getByText('用户名').parentElement!.querySelector('input') as HTMLInputElement
+    fireEvent.input(host, { target: { value: '10.0.0.5' } })
+    fireEvent.input(user, { target: { value: 'app' } })
+
+    // Enable ProxyJump
+    const toggleBtn = screen.getByRole('switch')
+    fireEvent.click(toggleBtn)
+
+    // Fill jump fields
+    const jumpHost = screen.getByText('跳板主机').parentElement!.querySelector('input') as HTMLInputElement
+    const jumpUser = screen.getByText('跳板用户').parentElement!.querySelector('input') as HTMLInputElement
+    fireEvent.input(jumpHost, { target: { value: 'bastion.example.com' } })
+    fireEvent.input(jumpUser, { target: { value: 'ec2-user' } })
+
+    // Fill jump secret (placeholder is the proxyJumpSecret i18n key: '跳板密码/口令')
+    const jumpSecretInput = screen.getByPlaceholderText('跳板密码/口令') as HTMLInputElement
+    fireEvent.change(jumpSecretInput, { target: { value: 'jump-pw-123' } })
+
+    // Click Save & Connect
+    fireEvent.click(screen.getByText('保存并连接'))
+
+    // onConnect args should carry jump with secret
+    expect(onConnect).toHaveBeenCalledTimes(1)
+    const [args] = onConnect.mock.calls[0] as [import('../../services/ssh').SshConnectArgs, unknown]
+    expect(args.jump).toBeDefined()
+    expect(args.jump?.host).toBe('bastion.example.com')
+    expect(args.jump?.user).toBe('ec2-user')
+    expect(args.jump?.secret).toBe('jump-pw-123')
+
+    // saveProfile should be called WITHOUT jump secret
+    expect(h.saveProfile).toHaveBeenCalledTimes(1)
+    const savedProfile = h.saveProfile.mock.calls[0][0] as ConnectionProfile
+    expect(savedProfile.jump?.host).toBe('bastion.example.com')
+    expect(JSON.stringify(savedProfile)).not.toContain('jump-pw-123')
+    // jump.secret should not be in the saved profile
+    expect(JSON.stringify(savedProfile)).not.toContain('"secret"')
+  })
 })
 
 describe('NewConnectionModal — edit mode', () => {
@@ -98,5 +172,32 @@ describe('NewConnectionModal — edit mode', () => {
     expect(onSaved).toHaveBeenCalledTimes(1)
     expect(onConnect).not.toHaveBeenCalled()
     expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('prefills jump fields from editProfile.jump (no secret)', () => {
+    wrap(<NewConnectionModal editProfile={PROFILE_WITH_JUMP} onClose={() => {}} />)
+    // Toggle should be ON because profile has jump
+    expect(screen.getByText('跳板主机')).toBeTruthy()
+    expect(screen.getByDisplayValue('bastion.example.com')).toBeTruthy()
+    expect(screen.getByDisplayValue('ec2-user')).toBeTruthy()
+    // Jump secret should be empty (never prefilled)
+    const jumpSecretInputs = document.querySelectorAll('input[type="password"]')
+    jumpSecretInputs.forEach(inp => {
+      expect((inp as HTMLInputElement).value).toBe('')
+    })
+  })
+
+  it('Save in edit mode persists jump profile WITHOUT secret', () => {
+    const onSaved = vi.fn()
+    const onClose = vi.fn()
+    wrap(<NewConnectionModal editProfile={PROFILE_WITH_JUMP} onSaved={onSaved} onClose={onClose} />)
+    fireEvent.click(screen.getByText('保存'))
+    expect(h.saveProfile).toHaveBeenCalledTimes(1)
+    const saved = h.saveProfile.mock.calls[0][0] as ConnectionProfile
+    expect(saved.jump?.host).toBe('bastion.example.com')
+    expect(saved.jump?.user).toBe('ec2-user')
+    // No secret in saved profile
+    expect(JSON.stringify(saved)).not.toContain('"secret"')
+    expect(onSaved).toHaveBeenCalledTimes(1)
   })
 })

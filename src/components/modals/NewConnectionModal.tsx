@@ -8,6 +8,7 @@ import { saveProfile } from '../../state/connections'
 import type { ConnectionProfile } from '../../state/connections'
 import type { AuthMethod, SshConnectArgs, SshTestResult } from '../../services/ssh'
 import { sshTest } from '../../services/ssh'
+import type { JumpProfile } from '../../state/connections'
 
 // ---- Prop types ----
 
@@ -82,9 +83,21 @@ export function NewConnectionModal({ onClose, onConnect, editProfile, onSaved }:
   // In-memory secret only: password (password auth) or key passphrase (key-file auth).
   // Never prefilled (secrets are not persisted) and never written to a profile.
   const [secret, setSecret] = useState('')
-  // ProxyJump / SSH-tunnel toggle — defaults OFF. Not wired to any backend behavior yet.
-  const [tunnel, setTunnel] = useState(false)
+  // ProxyJump / SSH-tunnel toggle — defaults OFF.
+  const [tunnel, setTunnel] = useState(isEdit ? !!editProfile?.jump : false)
   const [via, setVia] = useState('h-bastion')
+  // Jump host config fields
+  const jumpHostRef = useRef<HTMLInputElement>(null)
+  const jumpPortRef = useRef<HTMLInputElement>(null)
+  const jumpUserRef = useRef<HTMLInputElement>(null)
+  const [jumpAuthMethod, setJumpAuthMethod] = useState<AuthMethod['method']>(
+    editProfile?.jump?.auth.method ?? 'password'
+  )
+  const [jumpKeyPath, setJumpKeyPath] = useState(
+    editProfile?.jump?.auth.method === 'keyFile' ? editProfile.jump.auth.path : ''
+  )
+  // In-memory jump secret — never stored, cleared after use.
+  const [jumpSecret, setJumpSecret] = useState('')
   // Real connection-test state (replaces the old fake "tested" badge).
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<SshTestResult | null>(null)
@@ -103,6 +116,23 @@ export function NewConnectionModal({ onClose, onConnect, editProfile, onSaved }:
       : { method: 'password' }
   }
 
+  // Build the jump auth descriptor (non-secret).
+  function currentJumpAuth(): AuthMethod {
+    return jumpAuthMethod === 'keyFile'
+      ? { method: 'keyFile', path: jumpKeyPath.trim() }
+      : { method: 'password' }
+  }
+
+  // Build the non-secret jump profile for persistence.
+  function currentJumpProfile(): JumpProfile | undefined {
+    if (!tunnel) return undefined
+    const jHost = (jumpHostRef.current?.value || '').trim()
+    const jUser = (jumpUserRef.current?.value || '').trim()
+    const jPort = Number(jumpPortRef.current?.value) || 22
+    if (!jHost) return undefined
+    return { host: jHost, port: jPort, user: jUser, auth: currentJumpAuth() }
+  }
+
   // Build live connect/test args from the form, INCLUDING the in-memory secret.
   function currentArgs(): SshConnectArgs {
     const host = (hostRef.current?.value || '').trim()
@@ -110,7 +140,18 @@ export function NewConnectionModal({ onClose, onConnect, editProfile, onSaved }:
     const port = Number(portRef.current?.value) || 22
     // password auth → password; key-file auth → optional passphrase. Empty → undefined.
     const sec = secret.length > 0 ? secret : undefined
-    return { host, port, user, auth: currentAuth(), secret: sec }
+    // Jump config — include secret only when present.
+    let jump: SshConnectArgs['jump'] | undefined
+    if (tunnel) {
+      const jHost = (jumpHostRef.current?.value || '').trim()
+      const jUser = (jumpUserRef.current?.value || '').trim()
+      const jPort = Number(jumpPortRef.current?.value) || 22
+      if (jHost) {
+        const jSec = jumpSecret.length > 0 ? jumpSecret : undefined
+        jump = { host: jHost, port: jPort, user: jUser, auth: currentJumpAuth(), secret: jSec }
+      }
+    }
+    return { host, port, user, auth: currentAuth(), secret: sec, jump }
   }
 
   async function runTest() {
@@ -137,8 +178,10 @@ export function NewConnectionModal({ onClose, onConnect, editProfile, onSaved }:
       const port = Number(portRef.current?.value) || 22
       const name = (nameRef.current?.value || '').trim() || host
       const auth = currentAuth()
+      // Persist jump WITHOUT secret.
+      const jump = currentJumpProfile()
       try {
-        saveProfile({ id: editProfile.id, name, host, port, user, auth })
+        saveProfile({ id: editProfile.id, name, host, port, user, auth, jump })
       } catch { /* localStorage unavailable — ignore */ }
       onSaved?.()
       onClose()
@@ -153,11 +196,12 @@ export function NewConnectionModal({ onClose, onConnect, editProfile, onSaved }:
       const name = (nameRef.current?.value || '').trim() || host
       const auth = currentAuth()
       // args carries the in-memory secret so App can connect WITHOUT a 2nd prompt.
-      const sec = secret.length > 0 ? secret : undefined
-      const args: SshConnectArgs = { host, port, user, auth, secret: sec }
+      // jump.secret also rides in args (in-memory only, never persisted).
+      const args = currentArgs()
       // Persist the NON-secret profile only (best-effort). Secret never leaves memory.
+      const jump = currentJumpProfile()
       try {
-        saveProfile({ id: `live-${host}:${port}-${user}`, name, host, port, user, auth })
+        saveProfile({ id: `live-${host}:${port}-${user}`, name, host, port, user, auth, jump })
       } catch { /* localStorage unavailable — ignore */ }
       onConnect(args, { name })
     }
@@ -342,7 +386,85 @@ export function NewConnectionModal({ onClose, onConnect, editProfile, onSaved }:
               </div>
               <Toggle on={tunnel} onChange={setTunnel} accent />
             </div>
-            {tunnel && (
+            {tunnel && kind === 'host' && (
+              <div className="col gap10" style={{ padding: 14, borderTop: '1px solid var(--border-hairline)' }}>
+                {/* Jump host connection fields */}
+                <div className="row gap10">
+                  <Field
+                    label={t('modals.proxyJumpHost')}
+                    value={isEdit ? (editProfile?.jump?.host ?? '') : ''}
+                    placeholder="bastion.example.com"
+                    mono
+                    w={2}
+                    inputRef={jumpHostRef}
+                  />
+                  <Field
+                    label={t('modals.fieldPort')}
+                    value={isEdit ? String(editProfile?.jump?.port ?? 22) : '22'}
+                    mono
+                    w={0.8}
+                    inputRef={jumpPortRef}
+                  />
+                </div>
+                <div className="row gap10">
+                  <Field
+                    label={t('modals.proxyJumpUser')}
+                    value={isEdit ? (editProfile?.jump?.user ?? '') : ''}
+                    placeholder="ec2-user"
+                    mono
+                    inputRef={jumpUserRef}
+                  />
+                  {/* Jump secret — password or passphrase, never persisted */}
+                  <label className="col" style={{ gap: 5, flex: 1 }}>
+                    <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.proxyJumpSecret')}</span>
+                    <div className="row" style={{ height: 36, borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', paddingLeft: 10, paddingRight: 12, gap: 6, alignItems: 'center' }}>
+                      <Icon name="lock" size={12} style={{ color: 'var(--text-faint)', flex: 'none' }} />
+                      <input
+                        type="password"
+                        value={jumpSecret}
+                        onChange={e => setJumpSecret(e.target.value)}
+                        placeholder={t('modals.proxyJumpSecret')}
+                        aria-label={t('modals.proxyJumpSecret')}
+                        className="mono"
+                        style={{ flex: 1, height: '100%', border: 'none', background: 'transparent', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }}
+                      />
+                    </div>
+                  </label>
+                </div>
+                {/* Jump auth method */}
+                <div className="col" style={{ gap: 6 }}>
+                  <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.authMethod')}</span>
+                  <Segmented
+                    value={jumpAuthMethod}
+                    onChange={v => setJumpAuthMethod(v as AuthMethod['method'])}
+                    options={[
+                      { value: 'password', label: t('modals.authPassword') },
+                      { value: 'keyFile', label: t('modals.authKeyFile') },
+                    ]}
+                  />
+                </div>
+                {jumpAuthMethod === 'keyFile' && (
+                  <label className="col" style={{ gap: 5 }}>
+                    <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.keyPath')}</span>
+                    <input
+                      value={jumpKeyPath}
+                      onChange={e => setJumpKeyPath(e.target.value)}
+                      placeholder={t('modals.keyPathPlaceholder')}
+                      className="mono"
+                      style={{ height: 36, padding: '0 12px', borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }}
+                    />
+                  </label>
+                )}
+                {/* Jump chain preview */}
+                <div className="row gap8" style={{ padding: '8px 10px', background: 'var(--surface-sunken)', borderRadius: 10 }}>
+                  <Icon name="git-commit" size={13} style={{ color: 'var(--text-faint)' }} />
+                  <span className="mono" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+                    localhost → {(jumpHostRef.current?.value || '').trim() || 'bastion'} → {(hostRef.current?.value || '').trim() || 'target'}
+                  </span>
+                </div>
+              </div>
+            )}
+            {tunnel && kind === 'db' && (
               <div className="col gap10" style={{ padding: 14, borderTop: '1px solid var(--border-hairline)' }}>
                 <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.tunnelSelectHost')}</span>
                 <div className="col gap6">
@@ -363,7 +485,7 @@ export function NewConnectionModal({ onClose, onConnect, editProfile, onSaved }:
                 </div>
                 <div className="row gap8" style={{ padding: '8px 10px', background: 'var(--surface-sunken)', borderRadius: 10 }}>
                   <Icon name="git-commit" size={13} style={{ color: 'var(--text-faint)' }} />
-                  <span className="mono" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>localhost → {D.byId[via] ? D.byId[via].name : 'bastion'} → {kind === 'db' ? '10.0.4.2:5432' : 'target'}</span>
+                  <span className="mono" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>localhost → {D.byId[via] ? D.byId[via].name : 'bastion'} → 10.0.4.2:5432</span>
                 </div>
               </div>
             )}

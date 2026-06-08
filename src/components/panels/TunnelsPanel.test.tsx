@@ -2,6 +2,7 @@ import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { LanguageProvider } from '../../state/LanguageContext'
 import { DataProvider } from '../../state/DataContext'
+import type { ConnectionProfile } from '../../state/connections'
 
 // ---- ssh service mock ----
 const h = vi.hoisted(() => ({
@@ -40,6 +41,34 @@ const MOCK_TUNNELS = [
     remote: '(dynamic)',
     status: 'up' as const,
     bytes: '38 MB',
+  },
+]
+
+const PROFILES_WITH_JUMP: ConnectionProfile[] = [
+  {
+    id: 'conn-with-jump',
+    name: 'prod-web-01',
+    host: '10.0.0.5',
+    port: 22,
+    user: 'app',
+    auth: { method: 'password' },
+    jump: {
+      host: 'bastion.example.com',
+      port: 22,
+      user: 'ec2-user',
+      auth: { method: 'password' },
+    },
+  },
+]
+
+const PROFILES_WITHOUT_JUMP: ConnectionProfile[] = [
+  {
+    id: 'conn-direct',
+    name: 'direct-host',
+    host: '10.0.0.10',
+    port: 22,
+    user: 'deploy',
+    auth: { method: 'password' },
   },
 ]
 
@@ -107,5 +136,57 @@ describe('TunnelsPanel (tunnel wiring)', () => {
     // No tunnel rows — no toggles visible (empty state shown instead)
     expect(screen.queryByText('prod-orders')).toBeNull()
     expect(h.tunnelClose).not.toHaveBeenCalled()
+  })
+})
+
+describe('TunnelsPanel — jump chain', () => {
+  beforeEach(() => {
+    h.getTunnels.mockResolvedValue([])
+    h.listen.mockResolvedValue(() => {})
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+  })
+
+  afterEach(() => {
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+    h.getTunnels.mockClear()
+    h.listen.mockClear()
+  })
+
+  it('shows local → jump → target chain when profile has a jump', async () => {
+    wrap(
+      <TunnelsPanel
+        onClose={() => {}}
+        sessionId="sess-jump"
+        activeConnId="conn-with-jump"
+        profiles={PROFILES_WITH_JUMP}
+      />
+    )
+    await waitFor(() => {
+      // Local node
+      expect(screen.getByText('本地')).toBeTruthy()
+      // Jump node
+      expect(screen.getByText('bastion.example.com')).toBeTruthy()
+      // Target node
+      expect(screen.getByText('prod-web-01')).toBeTruthy()
+    })
+  })
+
+  it('shows local → target chain when profile has no jump', async () => {
+    wrap(
+      <TunnelsPanel
+        onClose={() => {}}
+        sessionId="sess-direct"
+        activeConnId="conn-direct"
+        profiles={PROFILES_WITHOUT_JUMP}
+      />
+    )
+    await waitFor(() => {
+      // Local node
+      expect(screen.getByText('本地')).toBeTruthy()
+      // Target node
+      expect(screen.getByText('direct-host')).toBeTruthy()
+    })
+    // No jump node
+    expect(screen.queryByText('bastion.example.com')).toBeNull()
   })
 })

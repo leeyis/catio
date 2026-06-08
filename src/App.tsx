@@ -75,6 +75,8 @@ export default function App() {
   // sessionId -> unlisten fn for history:// subscriptions; avoids re-render on update.
   const historyUnlisteners = useRef<Record<string, () => void>>({})
   // Connect-flow state machine: collect secret, then (maybe) trust host key.
+  // pendingJumpSecret: when a profile has a jump host, collect jump secret first.
+  const [pendingJumpSecret, setPendingJumpSecret] = useState<{ args: SshConnectArgs; name: string } | null>(null)
   const [pendingConnect, setPendingConnect] = useState<{ args: SshConnectArgs; name: string } | null>(null)
   const [pendingTrust, setPendingTrust] = useState<{ args: SshConnectArgs; name: string; sessionId: string; fingerprint: string } | null>(null)
   const resolveSessionId = (connId: string) => sessionMap[connId]
@@ -214,19 +216,27 @@ export default function App() {
       openLiveTab(args, display.name)
       return
     }
-    // If the modal already supplied a secret, connect directly (skip the prompt).
+    // If the modal already supplied a target secret, the jump secret (if any) also
+    // came from the form — connect directly (skip all prompts).
     if (args.secret && args.secret.length > 0) {
       void performConnect(args, display.name, args.secret)
       return
     }
-    // Otherwise (e.g. reconnect from DetailsPanel) collect the secret first.
+    // Reconnect path: collect secrets interactively.
+    // If a jump host is configured AND it has no secret yet, collect jump secret first.
+    if (args.jump && !args.jump.secret) {
+      setPendingJumpSecret({ args, name: display.name })
+      return
+    }
+    // Otherwise collect target secret.
     setPendingConnect({ args, name: display.name })
   }
 
   // Secret collected → call sshConnect; route to trust prompt / success / error.
+  // args.jump (with its secret) is forwarded intact to sshConnect.
   async function performConnect(args: SshConnectArgs, name: string, secret: string) {
     try {
-      const result = await sshConnect({ ...args, secret })
+      const result = await sshConnect({ ...args, secret, jump: args.jump })
       if (result.hostKeyTrusted === false) {
         setPendingTrust({ args, name, sessionId: result.sessionId, fingerprint: result.hostKeyFingerprint })
         return
@@ -264,7 +274,7 @@ export default function App() {
     const profile = profiles.find(p => p.id === conn.id)
     if (profile) {
       connectProfile(
-        { host: profile.host, port: profile.port, user: profile.user, auth: profile.auth },
+        { host: profile.host, port: profile.port, user: profile.user, auth: profile.auth, jump: profile.jump },
         { name: profile.name },
       )
       return
@@ -355,7 +365,7 @@ export default function App() {
     const profile = profiles.find(p => p.id === conn.id)
     if (!profile) return
     connectProfile(
-      { host: profile.host, port: profile.port, user: profile.user, auth: profile.auth },
+      { host: profile.host, port: profile.port, user: profile.user, auth: profile.auth, jump: profile.jump },
       { name: profile.name },
     )
   }
@@ -475,7 +485,7 @@ export default function App() {
               {activePanel === 'ai' && <AIPanel onClose={() => setPanelOpen(false)} mode={aiMode} conn={curConn ?? undefined} attachment={aiAttachment} onClearAttachment={() => setAiAttachment(null)} onInsert={insertToTerminal} canInsert={canInsert} onOpenSettings={goSettings} />}
               {activePanel === 'sftp' && <SftpPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} />}
               {activePanel === 'monitor' && <MonitorPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} />}
-              {activePanel === 'tunnels' && <TunnelsPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} />}
+              {activePanel === 'tunnels' && <TunnelsPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} activeConnId={cur?.connId} profiles={profiles} />}
               {activePanel === 'snippets' && <SnippetsPanel onClose={() => setPanelOpen(false)} snippets={snippets} onChange={() => setSnippets(loadSnippets())} onInsert={insertToTerminal} canInsert={canInsert} />}
               {activePanel === 'history' && <HistoryPanel onClose={() => setPanelOpen(false)} onAddSnippet={addSnippet} items={history} onClear={() => { clearHistory(); setHistory([]) }} onInsert={insertToTerminal} canInsert={canInsert} />}
               {activePanel === 'details' && (
@@ -516,6 +526,23 @@ export default function App() {
           danger
           onConfirm={() => { const c = pendingDelete; setPendingDelete(null); confirmDelete(c) }}
           onCancel={() => setPendingDelete(null)}
+        />
+      )}
+
+      {pendingJumpSecret && (
+        <ConnectSecretPrompt
+          label={t('panels.jumpSecretPrompt', { host: pendingJumpSecret.args.jump?.host ?? '' })}
+          onSubmit={jumpSec => {
+            const p = pendingJumpSecret
+            setPendingJumpSecret(null)
+            // Attach the jump secret (in-memory only) then collect target secret.
+            const argsWithJump: SshConnectArgs = {
+              ...p.args,
+              jump: p.args.jump ? { ...p.args.jump, secret: jumpSec } : undefined,
+            }
+            setPendingConnect({ args: argsWithJump, name: p.name })
+          }}
+          onCancel={() => setPendingJumpSecret(null)}
         />
       )}
 
