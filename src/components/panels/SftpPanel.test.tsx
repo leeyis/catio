@@ -10,6 +10,10 @@ const h = vi.hoisted(() => ({
   sftpRealpath: vi.fn(),
   sftpUpload: vi.fn(),
   sftpDownload: vi.fn(),
+  sftpMkdir: vi.fn(),
+  sftpTouch: vi.fn(),
+  sftpRename: vi.fn(),
+  sftpDelete: vi.fn(),
   listen: vi.fn().mockResolvedValue(() => {}),
 }))
 
@@ -18,6 +22,10 @@ vi.mock('../../services/ssh', () => ({
   sftpRealpath: h.sftpRealpath,
   sftpUpload: h.sftpUpload,
   sftpDownload: h.sftpDownload,
+  sftpMkdir: h.sftpMkdir,
+  sftpTouch: h.sftpTouch,
+  sftpRename: h.sftpRename,
+  sftpDelete: h.sftpDelete,
   listen: h.listen,
 }))
 
@@ -58,6 +66,10 @@ describe('SftpPanel (SFTP wiring)', () => {
     h.sftpList.mockImplementation((_sid: string, p: string) => Promise.resolve(p === '/srv/logs' ? LOGS_ITEMS : ROOT_ITEMS))
     h.sftpUpload.mockResolvedValue('xfer-1')
     h.sftpDownload.mockResolvedValue('xfer-1')
+    h.sftpMkdir.mockResolvedValue(undefined)
+    h.sftpTouch.mockResolvedValue(undefined)
+    h.sftpRename.mockResolvedValue(undefined)
+    h.sftpDelete.mockResolvedValue(undefined)
     h.listen.mockResolvedValue(() => {})
     ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
   })
@@ -108,5 +120,37 @@ describe('SftpPanel (SFTP wiring)', () => {
     fireEvent.change(input, { target: { value: '/srv/logs' } })
     fireEvent.keyDown(input, { key: 'Enter' })
     await waitFor(() => expect(h.sftpList).toHaveBeenCalledWith('sess-1', '/srv/logs'))
+  })
+
+  it('creates a new folder via the header button + inline input', async () => {
+    wrap(<SftpPanel onClose={() => {}} sessionId="sess-1" />)
+    await waitFor(() => expect(screen.getByText('a.txt')).toBeTruthy())
+    fireEvent.click(screen.getByTitle('新建文件夹'))
+    const input = screen.getByPlaceholderText('文件夹名称') as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'newdir' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await waitFor(() => expect(h.sftpMkdir).toHaveBeenCalledWith('sess-1', '/srv/newdir'))
+  })
+
+  it('renames an entry via the right-click context menu', async () => {
+    wrap(<SftpPanel onClose={() => {}} sessionId="sess-1" />)
+    await waitFor(() => expect(screen.getByText('a.txt')).toBeTruthy())
+    fireEvent.contextMenu(screen.getByText('a.txt'))
+    fireEvent.click(screen.getByText('重命名'))
+    const input = screen.getByDisplayValue('a.txt') as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'b.txt' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await waitFor(() => expect(h.sftpRename).toHaveBeenCalledWith('sess-1', '/srv/a.txt', '/srv/b.txt'))
+  })
+
+  it('deletes an entry via context menu + confirm', async () => {
+    wrap(<SftpPanel onClose={() => {}} sessionId="sess-1" />)
+    await waitFor(() => expect(screen.getByText('logs')).toBeTruthy())
+    fireEvent.contextMenu(screen.getByText('logs'))
+    fireEvent.click(screen.getByText('删除'))
+    // confirm bar shows a Delete button
+    const delButtons = screen.getAllByText('删除')
+    fireEvent.click(delButtons[delButtons.length - 1])
+    await waitFor(() => expect(h.sftpDelete).toHaveBeenCalledWith('sess-1', '/srv/logs', true))
   })
 })

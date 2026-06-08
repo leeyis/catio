@@ -5,7 +5,7 @@ import { IconBtn } from '../atoms'
 import type { Connection, SftpItem, TransferProgress } from '../../services/types'
 import { PanelShell } from './PanelShell'
 import { PanelEmpty } from './PanelEmpty'
-import { sftpList, sftpRealpath, sftpUpload, sftpDownload, listen } from '../../services/ssh'
+import { sftpList, sftpRealpath, sftpUpload, sftpDownload, sftpMkdir, sftpTouch, sftpRename, sftpDelete, listen } from '../../services/ssh'
 
 function isTauriEnv(): boolean {
   return (
@@ -81,6 +81,12 @@ export function SftpPanel({ onClose, conn, sessionId }: SftpPanelProps) {
   const [transfers, setTransfers] = useState<ActiveTransfer[]>([])
   const [dragging, setDragging] = useState(false)
   const [hover, setHover] = useState<HoverState | null>(null)
+  // file operations (create / rename / delete / context menu)
+  const [creating, setCreating] = useState<null | 'dir' | 'file'>(null)
+  const [createName, setCreateName] = useState('')
+  const [renaming, setRenaming] = useState<{ path: string; newName: string } | null>(null)
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; item: SftpItem } | null>(null)
+  const [deleteConfirm, setDeleteConfirm] = useState<SftpItem | null>(null)
 
   // refs so the once-mounted drag-drop listener always sees the latest values.
   const sessionRef = useRef(sessionId)
@@ -222,6 +228,52 @@ export function SftpPanel({ onClose, conn, sessionId }: SftpPanelProps) {
     load(p.startsWith('/') ? p : `/${p}`)
   }
 
+  // ---- create / rename / delete (ported from Reach's FileExplorer) ----
+  const startCreate = (kind: 'dir' | 'file') => {
+    if (!sessionId) return
+    setRenaming(null)
+    setCreating(kind)
+    setCreateName('')
+  }
+  const commitCreate = () => {
+    const kind = creating
+    const name = createName.trim()
+    setCreating(null)
+    setCreateName('')
+    if (!sessionId || !kind || !name) return
+    const target = joinPath(pathRef.current, name)
+    const op = kind === 'dir' ? sftpMkdir(sessionId, target) : sftpTouch(sessionId, target)
+    op.then(() => load(pathRef.current)).catch(e => setError(String(e)))
+  }
+  const startRename = (it: SftpItem) => {
+    setCtxMenu(null)
+    setRenaming({ path: it.path, newName: it.name })
+  }
+  const commitRename = () => {
+    const r = renaming
+    setRenaming(null)
+    if (!sessionId || !r) return
+    const trimmed = r.newName.trim()
+    if (!trimmed || trimmed === baseName(r.path)) return
+    const newPath = joinPath(parentPath(r.path), trimmed)
+    sftpRename(sessionId, r.path, newPath).then(() => load(pathRef.current)).catch(e => setError(String(e)))
+  }
+  const confirmDelete = () => {
+    const it = deleteConfirm
+    setDeleteConfirm(null)
+    if (!sessionId || !it) return
+    sftpDelete(sessionId, it.path, it.type === 'dir').then(() => load(pathRef.current)).catch(e => setError(String(e)))
+  }
+
+  // close the context menu on any outside click / escape
+  useEffect(() => {
+    if (!ctxMenu) return
+    const close = () => setCtxMenu(null)
+    window.addEventListener('click', close)
+    window.addEventListener('contextmenu', close)
+    return () => { window.removeEventListener('click', close); window.removeEventListener('contextmenu', close) }
+  }, [ctxMenu])
+
   const isRoot = path === '/' || path === ''
 
   return (
@@ -230,10 +282,12 @@ export function SftpPanel({ onClose, conn, sessionId }: SftpPanelProps) {
       title={`${t('panels.sftpTitle')} · ${conn ? conn.name : (path ? baseName(path) || '/' : t('panels.sftpTitle'))}`}
       sub={sessionId ? path : undefined}
       onClose={onClose}
-      actions={<>
+      actions={sessionId ? <>
+        <IconBtn name="folder" size={15} variant="bare" title={t('panels.sftpNewFolder')} onClick={() => startCreate('dir')} />
+        <IconBtn name="file" size={15} variant="bare" title={t('panels.sftpNewFile')} onClick={() => startCreate('file')} />
         <IconBtn name="upload" size={15} variant="bare" title={t('panels.upload')} onClick={handleUploadClick} />
         <IconBtn name="refresh-cw" size={15} variant="bare" title={t('panels.refresh')} onClick={() => load(path || '.')} />
-      </>}
+      </> : undefined}
     >
       {!sessionId ? (
         <PanelEmpty icon="folder" text={t('panels.noSessionHint')} />
@@ -284,6 +338,16 @@ export function SftpPanel({ onClose, conn, sessionId }: SftpPanelProps) {
             </div>
           )}
 
+          {deleteConfirm && (
+            <div className="col" style={{ padding: '8px 12px', gap: 8, borderBottom: '1px solid var(--border-hairline)', background: 'var(--surface-sunken)' }}>
+              <span style={{ fontSize: 11.5, color: 'var(--text-secondary)' }}>{t('panels.sftpDeleteConfirm', { name: deleteConfirm.name })}</span>
+              <div className="row gap6" style={{ justifyContent: 'flex-end' }}>
+                <button className="icon-btn bare" style={{ width: 'auto', padding: '4px 10px', fontSize: 11.5 }} onClick={() => setDeleteConfirm(null)}>{t('panels.sftpCancel')}</button>
+                <button className="icon-btn bare" style={{ width: 'auto', padding: '4px 10px', fontSize: 11.5, color: 'var(--signal-red, #e5484d)', fontWeight: 600 }} onClick={confirmDelete}>{t('panels.sftpDelete')}</button>
+              </div>
+            </div>
+          )}
+
           {/* file list */}
           <div className="grow" style={{ position: 'relative', overflowY: 'auto', padding: 6 }}>
             {dragging && (
@@ -298,27 +362,54 @@ export function SftpPanel({ onClose, conn, sessionId }: SftpPanelProps) {
               </div>
             )}
 
-            {items.length === 0 && !loading ? (
+            {/* inline new folder / new file row */}
+            {creating && (
+              <div className="row gap8" style={{ padding: '5px 8px' }}>
+                <Icon name={creating === 'dir' ? 'folder' : 'file'} size={15} style={{ color: creating === 'dir' ? 'var(--signal-amber)' : 'var(--text-tertiary)', flex: 'none' }} />
+                <input autoFocus className="mono" value={createName}
+                  onChange={e => setCreateName(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') commitCreate(); if (e.key === 'Escape') { setCreating(null); setCreateName('') } }}
+                  onBlur={commitCreate}
+                  placeholder={creating === 'dir' ? t('panels.sftpFolderName') : t('panels.sftpFileName')}
+                  spellCheck={false}
+                  style={{ flex: 1, minWidth: 0, height: 24, padding: '0 8px', fontSize: 12.5, color: 'var(--text-primary)', background: 'var(--surface-sunken)', border: '1px solid var(--accent-primary)', borderRadius: 6, outline: 'none' }} />
+              </div>
+            )}
+
+            {items.length === 0 && !loading && !creating ? (
               <div className="col" style={{ alignItems: 'center', justifyContent: 'center', padding: '32px 12px', color: 'var(--text-faint)', fontSize: 12 }}>
                 {t('panels.sftpEmptyDir')}
               </div>
             ) : (
               items.map((it, i) => (
-                <div key={`${it.path}-${i}`} className="row gap8"
-                  style={{ padding: '7px 8px', borderRadius: 8, cursor: 'pointer', background: selected === it.path ? 'var(--surface-sunken)' : 'transparent' }}
-                  onClick={() => setSelected(it.path)}
-                  onDoubleClick={() => openItem(it)}
-                  onMouseEnter={e => { setHover({ item: it, x: e.clientX, y: e.clientY }); (e.currentTarget as HTMLDivElement).style.background = 'var(--surface-sunken)' }}
-                  onMouseMove={e => setHover(h => (h && h.item.path === it.path ? { item: it, x: e.clientX, y: e.clientY } : h))}
-                  onMouseLeave={e => { setHover(null); (e.currentTarget as HTMLDivElement).style.background = selected === it.path ? 'var(--surface-sunken)' : 'transparent' }}
-                >
-                  <Icon name={it.type === 'dir' ? 'folder' : it.type === 'link' ? 'file-code' : 'file'}
-                    size={15} style={{ color: it.type === 'dir' ? 'var(--signal-amber)' : 'var(--text-tertiary)', flex: 'none' }} />
-                  <span className="ell mono" style={{ fontSize: 12.5, color: 'var(--text-secondary)', flex: 1 }}>{it.name}</span>
-                  {it.type === 'file' && (
-                    <IconBtn name="download" size={13} variant="bare" title={t('panels.sftpDownload')} onClick={e => { e.stopPropagation(); downloadItem(it) }} />
-                  )}
-                </div>
+                renaming && renaming.path === it.path ? (
+                  <div key={`${it.path}-${i}`} className="row gap8" style={{ padding: '5px 8px' }}>
+                    <Icon name={it.type === 'dir' ? 'folder' : it.type === 'link' ? 'file-code' : 'file'} size={15} style={{ color: it.type === 'dir' ? 'var(--signal-amber)' : 'var(--text-tertiary)', flex: 'none' }} />
+                    <input autoFocus className="mono" value={renaming.newName}
+                      onChange={e => setRenaming(r => (r ? { ...r, newName: e.target.value } : r))}
+                      onKeyDown={e => { if (e.key === 'Enter') commitRename(); if (e.key === 'Escape') setRenaming(null) }}
+                      onBlur={commitRename}
+                      spellCheck={false}
+                      style={{ flex: 1, minWidth: 0, height: 24, padding: '0 8px', fontSize: 12.5, color: 'var(--text-primary)', background: 'var(--surface-sunken)', border: '1px solid var(--accent-primary)', borderRadius: 6, outline: 'none' }} />
+                  </div>
+                ) : (
+                  <div key={`${it.path}-${i}`} className="row gap8"
+                    style={{ padding: '7px 8px', borderRadius: 8, cursor: 'pointer', background: selected === it.path ? 'var(--surface-sunken)' : 'transparent' }}
+                    onClick={() => setSelected(it.path)}
+                    onDoubleClick={() => openItem(it)}
+                    onContextMenu={e => { e.preventDefault(); e.stopPropagation(); setHover(null); setSelected(it.path); setCtxMenu({ x: e.clientX, y: e.clientY, item: it }) }}
+                    onMouseEnter={e => { setHover({ item: it, x: e.clientX, y: e.clientY }); (e.currentTarget as HTMLDivElement).style.background = 'var(--surface-sunken)' }}
+                    onMouseMove={e => setHover(h => (h && h.item.path === it.path ? { item: it, x: e.clientX, y: e.clientY } : h))}
+                    onMouseLeave={e => { setHover(null); (e.currentTarget as HTMLDivElement).style.background = selected === it.path ? 'var(--surface-sunken)' : 'transparent' }}
+                  >
+                    <Icon name={it.type === 'dir' ? 'folder' : it.type === 'link' ? 'file-code' : 'file'}
+                      size={15} style={{ color: it.type === 'dir' ? 'var(--signal-amber)' : 'var(--text-tertiary)', flex: 'none' }} />
+                    <span className="ell mono" style={{ fontSize: 12.5, color: 'var(--text-secondary)', flex: 1 }}>{it.name}</span>
+                    {it.type === 'file' && (
+                      <IconBtn name="download" size={13} variant="bare" title={t('panels.sftpDownload')} onClick={e => { e.stopPropagation(); downloadItem(it) }} />
+                    )}
+                  </div>
+                )
               ))
             )}
           </div>
@@ -341,12 +432,48 @@ export function SftpPanel({ onClose, conn, sessionId }: SftpPanelProps) {
             </div>
           )}
 
+          {/* right-click context menu */}
+          {ctxMenu && (
+            <div
+              onClick={e => e.stopPropagation()}
+              style={{
+                position: 'fixed', left: Math.min(ctxMenu.x, window.innerWidth - 160), top: ctxMenu.y,
+                zIndex: 70, minWidth: 144, padding: 4, borderRadius: 10,
+                background: 'var(--surface-overlay, var(--surface-card))',
+                border: '1px solid var(--border-hairline)', boxShadow: 'var(--shadow-card)',
+              }}>
+              {ctxMenu.item.type === 'file' && (
+                <CtxItem icon="download" label={t('panels.sftpDownload')} onClick={() => { const it = ctxMenu.item; setCtxMenu(null); downloadItem(it) }} />
+              )}
+              <CtxItem icon="pencil" label={t('panels.sftpRename')} onClick={() => startRename(ctxMenu.item)} />
+              <CtxItem icon="trash-2" label={t('panels.sftpDelete')} danger onClick={() => { const it = ctxMenu.item; setCtxMenu(null); setDeleteConfirm(it) }} />
+            </div>
+          )}
+
           <div className="row gap8" style={{ padding: '8px 12px', borderTop: '1px solid var(--border-hairline)', fontSize: 11, color: 'var(--text-faint)' }}>
             <Icon name="info" size={12} /> {t('panels.sftpDropHint')}
           </div>
         </>
       )}
     </PanelShell>
+  )
+}
+
+function CtxItem({ icon, label, onClick, danger }: { icon: string; label: string; onClick: () => void; danger?: boolean }) {
+  return (
+    <button
+      onClick={onClick}
+      className="row gap8"
+      style={{
+        width: '100%', padding: '7px 10px', border: 'none', borderRadius: 7, cursor: 'pointer',
+        background: 'transparent', fontSize: 12.5, textAlign: 'left',
+        color: danger ? 'var(--signal-red, #e5484d)' : 'var(--text-secondary)',
+      }}
+      onMouseEnter={e => (e.currentTarget.style.background = 'var(--surface-sunken)')}
+      onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+    >
+      <Icon name={icon} size={14} style={{ flex: 'none' }} /> {label}
+    </button>
   )
 }
 
