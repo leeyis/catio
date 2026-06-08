@@ -95,9 +95,14 @@ it('new host connection opens a demo terminal tab without Tauri', () => {
   fireEvent.click(screen.getAllByText('新建连接')[0])
   // switch to the host/terminal kind so the SSH connect path is active
   fireEvent.click(screen.getByText('主机 / 终端'))
+  // create defaults are empty now — fill in the host (the name falls back to it).
+  // "主机" appears as both a tab and a field label; pick the label with an input.
+  const hostLabel = screen.getAllByText('主机').map(el => el.parentElement)
+    .find(p => p?.querySelector('input')) as HTMLElement
+  const host = hostLabel.querySelector('input') as HTMLInputElement
+  fireEvent.input(host, { target: { value: 'edge-01' } })
   // submit — "保存并连接" lives in the modal footer
   fireEvent.click(screen.getByText('保存并连接'))
-  // a terminal tab should now exist; the default host name field is "prod-web-01".
-  // It appears as the workbench tab title (and possibly elsewhere) — assert presence.
-  expect(screen.getAllByText(/prod-web-01/).length).toBeGreaterThan(0)
+  // a terminal tab should now exist, titled by the host we typed.
+  expect(screen.getAllByText(/edge-01/).length).toBeGreaterThan(0)
 })
