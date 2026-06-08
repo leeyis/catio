@@ -4,8 +4,8 @@
 //! OSC 633 hooks for bash AND zsh (self-detecting). The hooks emit:
 //!   * pre-exec: `\e]633;E;<escapedCmd>;<nonce>\a\e]633;C\a`
 //!   * prompt:   `\e]633;D;<exit>\a\e]633;P;Cwd=<escapedPwd>\a`
-//! which `osc::Scanner` (gated by the same `nonce`) strips and turns into
-//! command-audit events.
+//!     which `osc::Scanner` (gated by the same `nonce`) strips and turns into
+//!     command-audit events.
 //!
 //! The integration body is adapted from VS Code's shellIntegration-bash.sh and
 //! shellIntegration-rc.zsh (Copyright (c) Microsoft Corporation, MIT License).

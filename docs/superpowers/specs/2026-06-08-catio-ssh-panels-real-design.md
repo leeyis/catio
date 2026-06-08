@@ -4,6 +4,43 @@
 - 目标：把 SSH 相关的侧边栏面板**全部接真实数据/功能，去除所有 mock**：Agent、SFTP、端口转发/ProxyJump、片段库、历史。数据库面板属子项目 3，不在此范围。
 - 用户决策（已确认）：Agent = 真实对话 + 生成命令一键插入终端；历史 = 真实执行过的 shell 命令（+ 将来 SQL）；ProxyJump 做真实跳板；删除连接需二次确认（已做）。
 
+## 实现状态
+
+**本增量已实现，分支 `catio-ui-shell`。** 全量校验通过：`cargo test` 全绿（58 个，含 `ssh_proxyjump`/`ssh_conn`/`ssh_term` 等）、`cargo clippy --all-targets` 零告警、`vitest` 128 个全绿、`tsc --noEmit` 干净、`npm run build` 成功。
+
+### 新增后端（`src-tauri/src/ssh`）
+- **命令审计**：`term_open` 在 PTY 打开后注入 shell 集成引导脚本（`shell_integration::bootstrap_line`，按 per-session `nonce` 门控），`osc::Scanner` 剥离 OSC 633/133 序列并驱动命令审计状态机；每条命令完成后发出 **新事件 `history://{sessionId}`**，载荷为 `{ command, exitCode, cwd, durationMs, host }`（不含任何 secret）。
+- **ProxyJump**：`ssh_connect` 接受 `args.jump`（单跳堡垒机），经跳板 direct-tcpip channel 连到最终目标。`ssh_test` 此前已存在，本增量复用。
+- `ConnectArgs` / 跳板配置均手写 `Debug` 以 `<redacted>` 遮蔽 `secret`，认证路径用 `.map_err(...)?` 而非 `unwrap()`，secret 仅驻留内存。
+
+### 新增前端 store（localStorage）
+- 新增键：`catio-snippets`（片段库）、`catio-history`（命令历史，封顶 1000 条）。
+- 既有键：`catio-connections`（连接档案，**绝不含 secret**：`ConnectionProfile`/`JumpProfile` 仅存非密文的 host/port/user/auth）、`catio-agent-config`（含 `openaiKey`，见隐私说明）。
+
+### Agent
+- 真实流式对话，按 Settings 配置的端点（Ollama NDJSON / OpenAI-兼容 SSE）走 `services/agent.ts`；API key 仅作 `Authorization: Bearer` 头使用、不落盘到连接档案、不打日志。
+- **仅插入、不自动执行**：回复中的命令通过按钮插入当前终端，由用户回车执行。
+
+### 空态
+- SFTP / 端口转发 / 监控面板在无活动会话时显示空态（不再回退 mock）。mock 数据仅保留给测试与非 Tauri 演示分支（终端 DEMO 只读缓冲、`services/index.ts` 数据库面板）。
+
+### 隐私
+- 命令历史以**明文**存于 localStorage（可能含敏感 CLI 参数，如内联密码/token——这是已记录的取舍），面板提供「清空」。
+- secret（目标主机口令/私钥口令、跳板 secret、Agent API key）**绝不写入连接档案**；API key 仅存于 `catio-agent-config`（UI-shell 阶段明文，OS keychain 加密为后续子项目）。
+
+### 已知限制
+- 命令审计依赖 bash/zsh shell 集成；其它 shell（fish/PowerShell/纯 sh 等）无审计事件。
+- ProxyJump 为**单跳**；跳板主机 TOFU（首次主机密钥确认）暂缓。
+- 真实审计 / ProxyJump 通过 **Docker sshd 手动 QA** 验证——进程内测试 SSH server 无法跑真实 shell，故这两条以集成测试 + 手动 QA 兜底。
+
+### 手动 QA 清单（Docker sshd）
+1. 终端执行命令 → History 面板出现该命令，带退出码 + cwd。
+2. 执行失败命令（`false`）→ History 中该条退出码非 0、显示为红色。
+3. Agent 真实对话有流式输出 → 点「插入」把命令送入终端。
+4. 片段库：新建 / 编辑 / 删除 / 插入到终端均生效，刷新后持久。
+5. ProxyJump：经堡垒机连接到内网目标主机成功，终端可用。
+6. 无活动会话时 SFTP / 端口转发 / 监控显示空态（无 mock）。
+
 ## 0. 调研结论（命令历史/执行审计）
 
 裸 PTY 字节流正则切分命令不可靠（ANSI、行编辑、历史调用、输出混杂、无退出码/cwd）。业界标准是 **shell 集成 + OSC 标记序列**：
