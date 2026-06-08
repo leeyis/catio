@@ -300,7 +300,7 @@ export function Sidebar({ activeId, onOpen, onNew, collapsed, onToggleCollapse, 
           <>
             <div className="col grow" style={{ lineHeight: 1.2, minWidth: 0 }}>
               <span className="ell" style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>{t('shell.authDisabled')}</span>
-              <button className="icon-btn bare" style={{ height: 'auto', padding: 0, fontSize: 10.5, color: 'var(--text-faint)', justifyContent: 'flex-start' }} onClick={() => onEnableAuth?.()}>{t('shell.enableAuth')}</button>
+              <button style={{ background: 'none', border: 'none', padding: 0, fontSize: 10.5, color: 'var(--accent-primary)', cursor: 'pointer', textAlign: 'left', whiteSpace: 'nowrap', alignSelf: 'flex-start' }} onClick={() => onEnableAuth?.()}>{t('shell.enableAuth')}</button>
             </div>
           </>
         )}
