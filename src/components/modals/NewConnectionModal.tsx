@@ -6,13 +6,15 @@ import { Btn, IconBtn, Segmented, Toggle, ConnGlyph } from '../atoms'
 import { useData } from '../../state/DataContext'
 import type { AuthMethod } from '../../services/ssh'
 import type { DbType } from '../../services/db'
-import { dbConnect } from '../../services/db'
+import { dbConnect, testConnection } from '../../services/db'
 import { saveDbConnection, setActiveDbConnection, generateProfileId } from '../../state/dbConnections'
 
 // ---- Prop types ----
 
 export interface NewConnectionModalProps {
   onClose: () => void
+  /** Default connection kind, derived from the sidebar's active filter tab. */
+  initialKind?: 'host' | 'db'
 }
 
 interface FieldProps {
@@ -23,16 +25,21 @@ interface FieldProps {
   w?: number
   mono?: boolean
   type?: string
+  /** When set, restrict input to digits only (e.g. port numbers). */
+  numeric?: boolean
 }
 
 // Defined at module scope (NOT inside the component) so its identity is stable
 // across renders — otherwise React remounts the <input> on every keystroke and
 // the field loses focus mid-typing.
-function Field({ label, value, onChange, placeholder, w, mono, type }: FieldProps) {
+function Field({ label, value, onChange, placeholder, w, mono, type, numeric }: FieldProps) {
   return (
     <label className="col" style={{ gap: 5, flex: w || 1 }}>
       <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{label}</span>
-      <input value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
+      <input value={value}
+        onChange={e => onChange(numeric ? e.target.value.replace(/\D/g, '') : e.target.value)}
+        placeholder={placeholder}
+        {...(numeric ? { inputMode: 'numeric' as const } : {})}
         type={type ?? 'text'}
         className={mono ? 'mono' : ''}
         style={{ height: 36, padding: '0 12px', borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }} />
@@ -55,9 +62,18 @@ const DB_ENGINES: { id: DbType; label: string; short: string; defaultPort: numbe
   { id: 'rqlite',        label: 'rqlite',         short: 'RQL',  defaultPort: 4001  },
 ]
 
+// Trim a verbose server version banner to a compact label for the test-passed
+// pill. e.g. "PostgreSQL 16.2 on x86_64-pc-linux-gnu, compiled by ..." → "PostgreSQL 16.2".
+function shortVersion(v: string): string {
+  if (!v) return ''
+  const firstLine = v.split('\n')[0].trim()
+  const m = firstLine.match(/^([A-Za-z][A-Za-z ]*?\s*v?[\d][\d.]*)/)
+  return (m ? m[1] : firstLine).trim()
+}
+
 // ---- Component ----
 
-export function NewConnectionModal({ onClose }: NewConnectionModalProps) {
+export function NewConnectionModal({ onClose, initialKind = 'db' }: NewConnectionModalProps) {
   const D = useData()
   const { t } = useTranslation()
   const PROTOS = [
@@ -65,36 +81,54 @@ export function NewConnectionModal({ onClose }: NewConnectionModalProps) {
     { id: 'telnet', label: 'Telnet' }, { id: 'serial', label: 'Serial' },
     { id: 'local', label: t('modals.protoLocal') },
   ]
-  const [kind, setKind] = useState('db')
+  const [kind, setKind] = useState<string>(initialKind)
   const [engine, setEngine] = useState<DbType>('postgres')
   const [engineOpen, setEngineOpen] = useState(false)
   const engineRef = useRef<HTMLDivElement>(null)
   const [proto, setProto] = useState('ssh')
   const [authMethod, setAuthMethod] = useState<AuthMethod['method']>('password')
   const [keyPath, setKeyPath] = useState('')
-  const [tunnel, setTunnel] = useState(true)
+  const [tunnel, setTunnel] = useState(false)
   const [via, setVia] = useState('h-bastion')
   const [tested, setTested] = useState(false)
+  const [testResult, setTestResult] = useState<{ version: string; latencyMs: number } | null>(null)
+  const [testing, setTesting] = useState(false)
+  const [testError, setTestError] = useState<string | null>(null)
   const [color, setColor] = useState('var(--signal-rose)')
   const hosts = D.connections.filter(c => c.kind === 'host' && c.proto !== 'local')
 
-  // DB-specific controlled state
-  const [dbName, setDbName] = useState('prod-orders')
-  const [dbHost, setDbHost] = useState('10.0.4.2')
+  // DB-specific controlled state — empty by default; placeholders guide the user.
+  const [dbName, setDbName] = useState('')
+  const [dbHost, setDbHost] = useState('')
   const [dbPort, setDbPort] = useState('5432')
-  const [dbUser, setDbUser] = useState('app_ro')
+  const [dbUser, setDbUser] = useState('')
   const [dbDatabase, setDbDatabase] = useState('')
   const [dbSecret, setDbSecret] = useState('')
   const [dbConnecting, setDbConnecting] = useState(false)
   const [dbError, setDbError] = useState<string | null>(null)
 
-  // Reset port when engine changes
+  // Reset port to the new engine's default whenever the engine changes, so the
+  // port field always reflects the selected engine (never a stale value from a
+  // previous engine). File-based engines (defaultPort 0) clear the field —
+  // their port is irrelevant.
   const handleEngineChange = (id: DbType) => {
     setEngine(id)
     setEngineOpen(false)
     const eng = DB_ENGINES.find(e => e.id === id)
-    if (eng && eng.defaultPort > 0) setDbPort(String(eng.defaultPort))
+    if (eng) setDbPort(eng.defaultPort > 0 ? String(eng.defaultPort) : '')
+    // Connection params changed — any prior test result is stale.
+    setTested(false)
+    setTestResult(null)
+    setTestError(null)
   }
+
+  // Any change to connection params invalidates a prior test result.
+  useEffect(() => {
+    setTested(false)
+    setTestResult(null)
+    setTestError(null)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dbHost, dbPort, dbUser, dbDatabase, dbSecret])
 
   useEffect(() => {
     if (!engineOpen) return
@@ -106,6 +140,31 @@ export function NewConnectionModal({ onClose }: NewConnectionModalProps) {
     window.addEventListener('mousedown', handleClickOutside)
     return () => window.removeEventListener('mousedown', handleClickOutside)
   }, [engineOpen])
+
+  // Real, ephemeral connection test (DB kind). Builds the same args as
+  // save-and-connect, pings the server, and surfaces version + latency.
+  const handleTestConnection = async () => {
+    setTested(false)
+    setTestResult(null)
+    setTestError(null)
+    setTesting(true)
+    try {
+      const result = await testConnection({
+        dbType: engine,
+        host: dbHost,
+        port: Number(dbPort),
+        user: dbUser,
+        ...(dbDatabase ? { database: dbDatabase } : {}),
+        secret: dbSecret || undefined,
+      })
+      setTestResult(result)
+      setTested(true)
+    } catch (err) {
+      setTestError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setTesting(false)
+    }
+  }
 
   const handleDbSaveAndConnect = async () => {
     setDbError(null)
@@ -229,7 +288,7 @@ export function NewConnectionModal({ onClose }: NewConnectionModalProps) {
           <div className="col gap10" style={{ marginBottom: 14 }}>
             <div className="row gap10">
               {kind === 'db'
-                ? <Field label={t('modals.fieldName')} value={dbName} onChange={setDbName} w={1.4} />
+                ? <Field label={t('modals.fieldName')} value={dbName} onChange={setDbName} placeholder="my-database" w={1.4} />
                 : <Field label={t('modals.fieldName')} value="prod-web-01" onChange={() => undefined} w={1.4} />}
               <label className="col" style={{ gap: 5, flex: 1 }}>
                 <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.fieldGroup')}</span>
@@ -240,15 +299,15 @@ export function NewConnectionModal({ onClose }: NewConnectionModalProps) {
             </div>
             <div className="row gap10">
               {kind === 'db'
-                ? <Field label={t('modals.fieldHost')} value={dbHost} onChange={setDbHost} mono w={2} />
+                ? <Field label={t('modals.fieldHost')} value={dbHost} onChange={setDbHost} placeholder="127.0.0.1" mono w={2} />
                 : <Field label={t('modals.fieldHost')} value="10.0.1.21" onChange={() => undefined} mono w={2} />}
               {kind === 'db'
-                ? <Field label={t('modals.fieldPort')} value={dbPort} onChange={setDbPort} mono w={0.8} />
+                ? <Field label={t('modals.fieldPort')} value={dbPort} onChange={setDbPort} numeric mono w={0.8} />
                 : <Field label={t('modals.fieldPort')} value="22" onChange={() => undefined} mono w={0.8} />}
             </div>
             <div className="row gap10">
               {kind === 'db'
-                ? <Field label={t('modals.fieldUser')} value={dbUser} onChange={setDbUser} mono />
+                ? <Field label={t('modals.fieldUser')} value={dbUser} onChange={setDbUser} placeholder="postgres" mono />
                 : <Field label={t('modals.fieldUsername')} value="deploy" onChange={() => undefined} mono />}
               {kind === 'db' ? (
                 <label className="col" style={{ gap: 5, flex: 1 }}>
@@ -278,6 +337,9 @@ export function NewConnectionModal({ onClose }: NewConnectionModalProps) {
             {/* Error message */}
             {kind === 'db' && dbError && (
               <span style={{ fontSize: 12, color: 'var(--danger-fg)' }}>{dbError}</span>
+            )}
+            {kind === 'db' && testError && (
+              <span style={{ fontSize: 12, color: 'var(--danger-fg)' }}>{testError}</span>
             )}
           </div>
 
@@ -352,9 +414,23 @@ export function NewConnectionModal({ onClose }: NewConnectionModalProps) {
 
         {/* footer */}
         <div className="row" style={{ justifyContent: 'space-between', padding: '14px 20px', borderTop: '1px solid var(--border-hairline)' }}>
-          <button className={`btn ${tested ? 'btn-secondary' : 'btn-secondary'}`} onClick={() => setTested(true)}>
-            {tested ? <><Icon name="circle-check" size={15} style={{ color: 'var(--signal-green)' }} /> {t('modals.testPassed')}</> : <><Icon name="zap" size={15} /> {t('modals.testConnection')}</>}
-          </button>
+          {kind === 'db' ? (
+            <button className="btn btn-secondary" onClick={handleTestConnection} disabled={testing}>
+              {testing ? (
+                <><Icon name="zap" size={15} /> {t('modals.testing')}</>
+              ) : tested && testResult ? (
+                <><Icon name="circle-check" size={15} style={{ color: 'var(--signal-green)' }} /> {t('modals.testPassed', { version: shortVersion(testResult.version), latency: testResult.latencyMs })}</>
+              ) : testError ? (
+                <><Icon name="alert-triangle" size={15} style={{ color: 'var(--danger-fg)' }} /> {t('modals.testFailed')}</>
+              ) : (
+                <><Icon name="zap" size={15} /> {t('modals.testConnection')}</>
+              )}
+            </button>
+          ) : (
+            <button className="btn btn-secondary" onClick={() => setTested(true)}>
+              {tested ? <><Icon name="circle-check" size={15} style={{ color: 'var(--signal-green)' }} /> {t('modals.testPassed', { version: '', latency: 28 })}</> : <><Icon name="zap" size={15} /> {t('modals.testConnection')}</>}
+            </button>
+          )}
           <div className="row gap8">
             <Btn variant="ghost" onClick={onClose}>{t('modals.cancel')}</Btn>
             {kind === 'db'

@@ -49,6 +49,22 @@ export async function dbConnect(args: DbConnectArgs): Promise<DbConnectResult> {
   return tauriInvoke<DbConnectResult>('db_connect', { args })
 }
 
+/** Result of an ephemeral connectivity test — mirrors Rust `TestConnResult` (camelCase). */
+export interface TestConnResult {
+  version: string
+  latencyMs: number
+}
+
+/**
+ * Run a real, ephemeral connection test against the given args. Builds a driver,
+ * pings the server for its version, and reports round-trip latency. Requires the
+ * Tauri runtime; throws outside it (there is no meaningful mock for a live test).
+ */
+export async function testConnection(args: DbConnectArgs): Promise<TestConnResult> {
+  if (!isTauri()) throw new Error('测试连接需要 Tauri 运行时')
+  return tauriInvoke<TestConnResult>('db_test_connection', { args })
+}
+
 export async function dbDisconnect(connId: string): Promise<void> {
   if (!isTauri()) throw new Error('dbDisconnect requires the Tauri runtime')
   return tauriInvoke('db_disconnect', { connId })

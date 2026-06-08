@@ -43,6 +43,7 @@ export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false)
   const [detailConn, setDetailConn] = useState<Connection | null>(null)
   const [showNew, setShowNew] = useState<boolean>(false)
+  const [sidebarFilter, setSidebarFilter] = useState<string>('all') // all | host | db
   const [aiAttachment, setAiAttachment] = useState<Attachment | null>(null)
   const [snippets, setSnippets] = useState<Snippet[]>(() => D.snippets)
 
@@ -191,7 +192,8 @@ export default function App() {
         <div className="body">
           <Sidebar activeId={cur ? cur.connId : undefined} onOpen={openConn} onDetail={openDetail} onNew={() => setShowNew(true)}
             collapsed={sidebarCollapsed} onToggleCollapse={() => setSidebarCollapsed(c => !c)}
-            conns={vaultConns} currentUser={currentName} authEnabled={authEnabled} onLock={lockApp} />
+            conns={vaultConns} currentUser={currentName} authEnabled={authEnabled} onLock={lockApp}
+            filter={sidebarFilter} onFilterChange={setSidebarFilter} />
 
           {/* main */}
           <div className="card-surface grow col" style={{ overflow: 'hidden', position: 'relative' }}>
@@ -234,7 +236,7 @@ export default function App() {
         </div>
       )}
 
-      {showNew && <NewConnectionModal onClose={() => setShowNew(false)} />}
+      {showNew && <NewConnectionModal onClose={() => setShowNew(false)} initialKind={sidebarFilter === 'host' ? 'host' : 'db'} />}
 
       {locked && <AuthGate users={users} onLogin={loginUser} onCreate={createUser} />}
     </div>

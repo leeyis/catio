@@ -20,6 +20,7 @@ pub fn run() {
             ssh::term::term_close,
             ssh::sftp::sftp_list,
             db::commands::db_connect,
+            db::commands::db_test_connection,
             db::commands::db_disconnect,
             db::commands::db_query,
             db::commands::db_schema,

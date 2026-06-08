@@ -16,6 +16,24 @@ describe('services/db', () => {
     delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
   })
 
+  it('testConnection forwards args to db_test_connection under Tauri', async () => {
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+    invokeMock.mockResolvedValue({ version: 'PostgreSQL 16.2', latencyMs: 12 })
+    const { testConnection } = await import('./db')
+    const r = await testConnection({ dbType: 'postgres', host: 'h', port: 5432, user: 'u', secret: 'p' })
+    expect(invokeMock).toHaveBeenCalledWith('db_test_connection', expect.objectContaining({ args: expect.any(Object) }))
+    expect(r.version).toBe('PostgreSQL 16.2')
+    expect(r.latencyMs).toBe(12)
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
+
+  it('testConnection throws outside Tauri', async () => {
+    const { testConnection } = await import('./db')
+    await expect(testConnection({ dbType: 'postgres', host: 'h', port: 5432, user: 'u' }))
+      .rejects.toThrow('Tauri')
+    expect(invokeMock).not.toHaveBeenCalled()
+  })
+
   it('runQuery falls back to mock outside Tauri', async () => {
     const { runQuery } = await import('./db')
     const r = await runQuery('any', 'SELECT 1')

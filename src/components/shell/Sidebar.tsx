@@ -29,6 +29,11 @@ export interface SidebarProps {
   currentUser?: string
   authEnabled?: boolean
   onLock?: React.MouseEventHandler<HTMLButtonElement>
+  /** Active kind filter ('all' | 'host' | 'db'). Controlled by the parent so the
+   *  New Connection modal can default its kind to match. Falls back to internal
+   *  state when not provided (preserves standalone usage). */
+  filter?: string
+  onFilterChange?: (filter: string) => void
 }
 
 export interface ConnRowProps {
@@ -143,13 +148,16 @@ export function TitleBar({ theme, onToggleTheme, onOpenSettings, settingsActive 
 
 // ---- Sidebar ----
 
-export function Sidebar({ activeId, onOpen, onDetail, onNew, collapsed, onToggleCollapse, conns: vaultConns, currentUser, authEnabled, onLock }: SidebarProps) {
+export function Sidebar({ activeId, onOpen, onDetail, onNew, collapsed, onToggleCollapse, conns: vaultConns, currentUser, authEnabled, onLock, filter: filterProp, onFilterChange }: SidebarProps) {
   const { t } = useTranslation()
   const D = useData()
   const allConns = vaultConns || D.connections
   const [query, setQuery] = useState('')
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({ prod: true, staging: true, local: true })
-  const [filter, setFilter] = useState('all') // all | host | db
+  // Controlled when the parent supplies `filter`; otherwise self-managed.
+  const [filterState, setFilterState] = useState('all') // all | host | db
+  const filter = filterProp ?? filterState
+  const setFilter = (v: string) => { setFilterState(v); onFilterChange?.(v) }
 
   const conns = useMemo(() => {
     return allConns.filter(c => {

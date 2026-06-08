@@ -48,6 +48,25 @@ pub async fn db_connect(args: ConnectArgs, mgr: tauri::State<'_, ConnManager>)
     Ok(ConnectResult { conn_id: id, version, capabilities: caps })
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestConnResult {
+    pub version: String,
+    pub latency_ms: u64,
+}
+
+/// Ephemeral connectivity test: build a driver, run `test()` (returns the server
+/// version string), and report the round-trip latency. The driver is dropped at
+/// the end of this fn — it is NOT inserted into the ConnManager.
+#[tauri::command]
+pub async fn db_test_connection(args: ConnectArgs) -> Result<TestConnResult, DbError> {
+    let started = Instant::now();
+    let drv = driver::connect(&args).await?;
+    let version = drv.test().await?;
+    let latency_ms = started.elapsed().as_millis() as u64;
+    Ok(TestConnResult { version, latency_ms })
+}
+
 #[tauri::command]
 pub async fn db_disconnect(conn_id: String, mgr: tauri::State<'_, ConnManager>)
     -> Result<(), DbError> {
