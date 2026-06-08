@@ -30,6 +30,17 @@ import { appendHistory, loadHistory, clearHistory } from './state/history'
 import type { HistoryItem } from './services/types'
 import { loadProfiles, saveProfile, deleteProfile } from './state/connections'
 import { loadSnippets, saveSnippet, newSnippetId } from './state/snippets'
+import {
+  loadConversations,
+  saveConversation,
+  deleteConversation as deleteConversationStore,
+  conversationsForHost,
+  newConversation as makeConversation,
+} from './state/conversations'
+import type { Conversation } from './state/conversations'
+import { chat } from './services/agent'
+import type { ChatMsg } from './services/agent'
+import { useAgentConfig } from './state/agentConfig'
 import type { ConnectionProfile } from './state/connections'
 import type { Tab, Connection, Snippet } from './services/types'
 import type { AuthUser } from './components/auth/AuthGate'
@@ -57,6 +68,25 @@ export default function App() {
   const [pendingDelete, setPendingDelete] = useState<Connection | null>(null)
   const [aiAttachment, setAiAttachment] = useState<Attachment | null>(null)
   const [snippets, setSnippets] = useState<Snippet[]>(() => loadSnippets())
+
+  // ---- Catio Agent conversations (P2): per-host persisted, per-tab current ----
+  const { config: agentCfg } = useAgentConfig()
+  const [conversations, setConversations] = useState<Conversation[]>(() => loadConversations())
+  // tabId -> the conversation id currently shown for that tab.
+  const [currentConvByTab, setCurrentConvByTab] = useState<Record<string, string>>({})
+  // tabId -> AbortController for the in-flight send (so streaming survives view/tab switches).
+  const agentAborts = useRef<Record<string, AbortController>>({})
+  // convIds with a live in-flight stream (drives the panel's busy state).
+  const [busyConvs, setBusyConvs] = useState<Record<string, boolean>>({})
+
+  // Upsert into both local state (live render) and localStorage (persistence).
+  function upsertConversation(conv: Conversation) {
+    setConversations(prev => {
+      const rest = prev.filter(c => c.id !== conv.id)
+      return [...rest, conv]
+    })
+    saveConversation(conv)
+  }
 
   // Real saved connection profiles (localStorage) — these seed the Vault & Home.
   const [profiles, setProfiles] = useState<ConnectionProfile[]>(() => loadProfiles())
@@ -308,6 +338,17 @@ export default function App() {
   }
   // If a closing tab held a live session that no remaining tab shares, drop it.
   function reapSession(closing: Tab | undefined, remaining: Tab[]) {
+    // Abort any in-flight agent stream + drop this tab's current-conversation map.
+    if (closing) {
+      agentAborts.current[closing.id]?.abort()
+      delete agentAborts.current[closing.id]
+      setCurrentConvByTab(prev => {
+        if (!(closing.id in prev)) return prev
+        const n = { ...prev }
+        delete n[closing.id]
+        return n
+      })
+    }
     if (!closing?.sessionId) return
     const sid = closing.sessionId
     const stillUsed = remaining.some(tb => tb.sessionId === sid)
@@ -452,6 +493,131 @@ export default function App() {
   }
   const canInsert = !!(cur?.sessionId && chanMap[cur.sessionId])
 
+  // ---- Agent conversation controller (P2) ----
+
+  // Resolve the conversation id for a tab, lazily creating + persisting a fresh
+  // one for the tab's host (connId) if none is mapped yet. Returns the id.
+  function ensureConvId(tab: Tab): string {
+    const existing = currentConvByTab[tab.id]
+    if (existing) return existing
+    const conv = makeConversation(tab.connId)
+    upsertConversation(conv)
+    setCurrentConvByTab(prev => ({ ...prev, [tab.id]: conv.id }))
+    return conv.id
+  }
+
+  // Mutate a conversation by id in state + localStorage via an updater.
+  function patchConversation(convId: string, fn: (c: Conversation) => Conversation) {
+    let updated: Conversation | undefined
+    setConversations(prev => prev.map(c => {
+      if (c.id !== convId) return c
+      updated = fn(c)
+      return updated
+    }))
+    if (updated) saveConversation(updated)
+  }
+
+  async function sendAgentMessage(tabId: string, text: string) {
+    const tab = tabs.find(tb => tb.id === tabId)
+    if (!tab) return
+    const convId = ensureConvId(tab)
+    const tabConn = D.byId[tab.connId] ?? liveConns[tab.connId] ?? null
+    const hostName = tabConn?.name ?? tab.title
+
+    // Snapshot the prior messages for the outgoing payload BEFORE appending.
+    const prior = conversations.find(c => c.id === convId)?.messages ?? []
+
+    // Append the user message + an empty assistant placeholder; persist.
+    patchConversation(convId, c => ({
+      ...c,
+      messages: [...c.messages, { role: 'user', content: text }, { role: 'assistant', content: '' }],
+    }))
+
+    // ---- P3 SEAM: enrich this system prompt with host sysinfo (OS/uptime/etc.).
+    // The active tab's `tabConn` (name/host) is already available here; P3 will
+    // inject collected system info into this message before sending. ----
+    const system: ChatMsg = {
+      role: 'system',
+      content: `You are a terminal/shell assistant for host "${hostName}". When you suggest a shell command, put it in a fenced code block.`,
+    }
+    const outgoing: ChatMsg[] = [
+      system,
+      ...prior.map(m => ({ role: m.role, content: m.content } as ChatMsg)),
+      { role: 'user', content: text },
+    ]
+
+    const controller = new AbortController()
+    agentAborts.current[tabId] = controller
+    setBusyConvs(prev => ({ ...prev, [convId]: true }))
+    try {
+      await chat(outgoing, agentCfg, {
+        signal: controller.signal,
+        onToken: tok => patchConversation(convId, c => {
+          const msgs = [...c.messages]
+          const last = msgs.length - 1
+          if (last >= 0 && msgs[last].role === 'assistant') {
+            msgs[last] = { ...msgs[last], content: msgs[last].content + tok }
+          }
+          return { ...c, messages: msgs }
+        }),
+      })
+    } catch (err) {
+      if (controller.signal.aborted) return
+      const message = (err as { message?: string } | null)?.message ?? String(err)
+      patchConversation(convId, c => {
+        const msgs = [...c.messages]
+        const last = msgs.length - 1
+        if (last >= 0 && msgs[last].role === 'assistant') {
+          msgs[last] = { ...msgs[last], content: t('panels.agentError', { message }) }
+        }
+        return { ...c, messages: msgs }
+      })
+    } finally {
+      delete agentAborts.current[tabId]
+      setBusyConvs(prev => { const n = { ...prev }; delete n[convId]; return n })
+    }
+  }
+
+  function newAgentConversation(tabId: string) {
+    const tab = tabs.find(tb => tb.id === tabId)
+    if (!tab) return
+    const conv = makeConversation(tab.connId)
+    upsertConversation(conv)
+    setCurrentConvByTab(prev => ({ ...prev, [tabId]: conv.id }))
+  }
+
+  function restoreConversation(tabId: string, convId: string) {
+    setCurrentConvByTab(prev => ({ ...prev, [tabId]: convId }))
+  }
+
+  function deleteAgentConversation(tabId: string, convId: string) {
+    deleteConversationStore(convId)
+    setConversations(prev => prev.filter(c => c.id !== convId))
+    // If the deleted conv was current for this tab, drop the mapping so a fresh
+    // one is created lazily on next render/send.
+    setCurrentConvByTab(prev => {
+      if (prev[tabId] !== convId) return prev
+      const n = { ...prev }
+      delete n[tabId]
+      return n
+    })
+  }
+
+  // The conversation object shown for the ACTIVE tab (created lazily on render so
+  // the panel always has something to render for the active tab's host).
+  const activeConvId = cur ? currentConvByTab[cur.id] : undefined
+  const activeConversation = activeConvId ? conversations.find(c => c.id === activeConvId) : undefined
+  const activeConvBusy = activeConvId ? !!busyConvs[activeConvId] : false
+  const agentHistory = cur ? conversationsForHost(cur.connId) : []
+
+  // Lazily create a conversation for the active tab so the panel has one to show.
+  useEffect(() => {
+    if (cur && !currentConvByTab[cur.id]) {
+      ensureConvId(cur)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cur?.id])
+
   return (
     <div className="win">
       <TitleBar theme={theme_} onToggleTheme={() => setThemeBoth(nextTheme(theme_))}
@@ -512,7 +678,12 @@ export default function App() {
           {/* panel slot */}
           {panelOpen && (aiForm === 'side' || activePanel !== 'ai') && (
             <div className="fade-in" style={{ display: 'flex' }}>
-              {activePanel === 'ai' && <AIPanel onClose={() => setPanelOpen(false)} mode={aiMode} conn={curConn ?? undefined} attachment={aiAttachment} onClearAttachment={() => setAiAttachment(null)} onInsert={insertToTerminal} canInsert={canInsert} onOpenSettings={goSettings} />}
+              {activePanel === 'ai' && <AIPanel onClose={() => setPanelOpen(false)} mode={aiMode} conn={curConn ?? undefined} attachment={aiAttachment} onClearAttachment={() => setAiAttachment(null)} onInsert={insertToTerminal} canInsert={canInsert} onOpenSettings={goSettings}
+                conversation={activeConversation} busy={activeConvBusy} history={agentHistory}
+                onSend={cur ? (text => void sendAgentMessage(cur.id, text)) : undefined}
+                onNewConversation={cur ? (() => newAgentConversation(cur.id)) : undefined}
+                onRestoreConversation={cur ? (convId => restoreConversation(cur.id, convId)) : undefined}
+                onDeleteConversation={cur ? (convId => deleteAgentConversation(cur.id, convId)) : undefined} />}
               {activePanel === 'sftp' && <SftpPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} />}
               {activePanel === 'monitor' && <MonitorPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} />}
               {activePanel === 'tunnels' && <TunnelsPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} activeConnId={cur?.connId} profiles={profiles} />}

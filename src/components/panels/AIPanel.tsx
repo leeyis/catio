@@ -1,4 +1,4 @@
-/* ported from ref-ui/_extract/blob9.txt — real streaming chat per plan A2 */
+/* ported from ref-ui/_extract/blob9.txt — controlled per-tab conversation view (P2) */
 import React, { useState, useRef, useEffect, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import ReactMarkdown from 'react-markdown'
@@ -8,9 +8,8 @@ import { Icon } from '../Icon'
 import { IconBtn } from '../atoms'
 import { highlightSQL } from '../dbviews'
 import { useAgentConfig } from '../../state/agentConfig'
-import { chat } from '../../services/agent'
-import type { ChatMsg } from '../../services/agent'
 import type { Connection } from '../../services/types'
+import type { Conversation } from '../../state/conversations'
 import { PanelShell } from './PanelShell'
 
 export interface Attachment {
@@ -28,11 +27,20 @@ export interface AIPanelProps {
   onInsert?: (code: string) => void
   canInsert?: boolean
   onOpenSettings?: () => void
-}
-
-interface ChatTurn {
-  role: 'user' | 'assistant'
-  content: string
+  /** The active tab's current conversation (controlled by App). */
+  conversation?: Conversation
+  /** True while a send is streaming for the active conversation. */
+  busy?: boolean
+  /** Past conversations for the active tab's host (newest first). */
+  history?: Conversation[]
+  /** Send a user message in the current conversation. */
+  onSend?: (text: string) => void
+  /** Start a fresh conversation for the active tab's host. */
+  onNewConversation?: () => void
+  /** Restore a past conversation by id. */
+  onRestoreConversation?: (convId: string) => void
+  /** Delete a past conversation by id. */
+  onDeleteConversation?: (convId: string) => void
 }
 
 function shellHL(code: string): string {
@@ -233,24 +241,81 @@ function AssistantMessage({ text, mode, onInsert, canInsert }: AssistantMessageP
   )
 }
 
-export function AIPanel({ onClose, mode = 'sql', conn, attachment, onClearAttachment, onInsert, canInsert, onOpenSettings }: AIPanelProps) {
+// ---- Relative-time formatter for the history dropdown ----
+function useRelativeTime() {
+  const { t } = useTranslation()
+  return (ts: number): string => {
+    const diff = Date.now() - ts
+    const min = Math.floor(diff / 60000)
+    if (min < 1) return t('panels.relJustNow')
+    if (min < 60) return t('panels.relMinutesAgo', { count: min })
+    const hr = Math.floor(min / 60)
+    if (hr < 24) return t('panels.relHoursAgo', { count: hr })
+    const day = Math.floor(hr / 24)
+    return t('panels.relDaysAgo', { count: day })
+  }
+}
+
+interface HistoryDropdownProps {
+  history: Conversation[]
+  currentId?: string
+  onRestore?: (id: string) => void
+  onDelete?: (id: string) => void
+  onClose: () => void
+}
+
+function HistoryDropdown({ history, currentId, onRestore, onDelete, onClose }: HistoryDropdownProps) {
+  const { t } = useTranslation()
+  const rel = useRelativeTime()
+  return (
+    <>
+      <div style={{ position: 'fixed', inset: 0, zIndex: 40 }} onClick={onClose} />
+      <div className="pop-in" style={{ position: 'absolute', top: 28, right: 0, zIndex: 50, width: 248, background: 'var(--surface-elevated)', border: '1px solid var(--border-hairline-alt)', borderRadius: 10, boxShadow: 'var(--shadow-dropdown)', padding: 5, maxHeight: 320, overflowY: 'auto' }}>
+        {history.length === 0 ? (
+          <div className="col" style={{ alignItems: 'center', justifyContent: 'center', padding: '22px 0', gap: 6, color: 'var(--text-faint)' }}>
+            <Icon name="history" size={20} />
+            <span style={{ fontSize: 12 }}>{t('panels.noConversations')}</span>
+          </div>
+        ) : history.map(c => {
+          const active = c.id === currentId
+          return (
+            <div key={c.id} className="row gap6" style={{ width: '100%', padding: '7px 8px', borderRadius: 8, background: active ? 'var(--accent-soft)' : 'transparent' }}
+              onMouseEnter={e => { if (!active) (e.currentTarget as HTMLDivElement).style.background = 'var(--surface-sunken)' }}
+              onMouseLeave={e => { if (!active) (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}>
+              <button className="col" style={{ flex: 1, minWidth: 0, alignItems: 'flex-start', textAlign: 'left', background: 'transparent', border: 'none', padding: 0, cursor: 'pointer' }}
+                onClick={() => { onRestore?.(c.id); onClose() }}>
+                <span className="ell" style={{ fontSize: 12.5, fontWeight: active ? 600 : 500, color: active ? 'var(--accent-primary)' : 'var(--text-secondary)', maxWidth: 180 }}>{c.title || t('panels.untitledConversation')}</span>
+                <span style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{rel(c.updatedAt)}</span>
+              </button>
+              <button className="icon-btn bare" style={{ width: 22, height: 22, flex: 'none' }} title={t('panels.deleteConversation')}
+                onClick={e => { e.stopPropagation(); onDelete?.(c.id) }}>
+                <Icon name="trash-2" size={13} />
+              </button>
+            </div>
+          )
+        })}
+      </div>
+    </>
+  )
+}
+
+export function AIPanel({ onClose, mode = 'sql', conn, attachment, onClearAttachment, onInsert, canInsert, onOpenSettings, conversation, busy = false, history = [], onSend, onNewConversation, onRestoreConversation, onDeleteConversation }: AIPanelProps) {
   const { t } = useTranslation()
   const { config: cfg } = useAgentConfig()
   const isSql = mode !== 'shell'
   const target = conn ? conn.name : (isSql ? 'prod-orders' : 'prod-web-01')
   const accent = isSql ? 'var(--signal-blue)' : 'var(--signal-amber)'
   const [draft, setDraft] = useState('')
-  const [msgs, setMsgs] = useState<ChatTurn[]>([])
-  const [busy, setBusy] = useState(false)
+  const [histOpen, setHistOpen] = useState(false)
   const taRef = useRef<HTMLTextAreaElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
-  const abortRef = useRef<AbortController | null>(null)
+
+  const msgs = conversation?.messages ?? []
 
   useEffect(() => { if (attachment && taRef.current) taRef.current.focus() }, [attachment])
-  useEffect(() => () => { abortRef.current?.abort() }, [])
   useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight }, [msgs])
 
-  async function send() {
+  function send() {
     const text = draft.trim()
     if (!text || !cfg.model || busy) return
 
@@ -259,48 +324,14 @@ export function AIPanel({ onClose, mode = 'sql', conn, attachment, onClearAttach
       userContent += `\n\n---\n${attachment.text}`
       onClearAttachment()
     }
-
-    const system: ChatMsg = {
-      role: 'system',
-      content: `You are a terminal/shell assistant for host "${conn?.name ?? target}". When you suggest a shell command, put it in a fenced code block.`,
-    }
-    const prior: ChatMsg[] = msgs.map(m => ({ role: m.role, content: m.content }))
-    const outgoing: ChatMsg[] = [system, ...prior, { role: 'user', content: userContent }]
-
-    setMsgs(m => [...m, { role: 'user', content: userContent }, { role: 'assistant', content: '' }])
+    onSend?.(userContent)
     setDraft('')
-    setBusy(true)
-
-    const controller = new AbortController()
-    abortRef.current = controller
-    try {
-      await chat(outgoing, cfg, {
-        signal: controller.signal,
-        onToken: tok => setMsgs(m => {
-          const n = [...m]
-          const lastIdx = n.length - 1
-          n[lastIdx] = { ...n[lastIdx], content: n[lastIdx].content + tok }
-          return n
-        }),
-      })
-    } catch (err) {
-      if (controller.signal.aborted) return
-      const message = (err as { message?: string } | null)?.message ?? String(err)
-      setMsgs(m => {
-        const n = [...m]
-        const lastIdx = n.length - 1
-        n[lastIdx] = { ...n[lastIdx], content: t('panels.agentError', { message }) }
-        return n
-      })
-    } finally {
-      setBusy(false)
-    }
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      void send()
+      send()
     }
   }
 
@@ -308,7 +339,18 @@ export function AIPanel({ onClose, mode = 'sql', conn, attachment, onClearAttach
     <PanelShell icon="sparkles" title="Catio Agent"
       sub={isSql ? t('panels.sqlAssistantSub', { target }) : t('panels.shellAssistantSub', { target })}
       onClose={onClose}
-      actions={<IconBtn name="history" size={15} variant="bare" title={t('panels.sessionHistory')} />}>
+      actions={
+        <>
+          <IconBtn name="plus" size={15} variant="bare" title={t('panels.newConversation')} onClick={() => onNewConversation?.()} />
+          <div style={{ position: 'relative' }}>
+            <IconBtn name="history" size={15} variant="bare" title={t('panels.conversationHistory')} active={histOpen} onClick={() => setHistOpen(o => !o)} />
+            {histOpen && (
+              <HistoryDropdown history={history} currentId={conversation?.id} onClose={() => setHistOpen(false)}
+                onRestore={onRestoreConversation} onDelete={onDeleteConversation} />
+            )}
+          </div>
+        </>
+      }>
       {/* scope banner — strictly follows the active workbench tab */}
       <div className="row gap8" style={{ padding: '8px 12px', borderBottom: '1px solid var(--border-hairline)' }}>
         <span className="chip" style={{ background: `color-mix(in srgb, ${accent} 15%, transparent)`, color: accent, fontWeight: 600 }}>
