@@ -98,12 +98,13 @@ export function SqlConsole({ density, fresh, queryN, writable = true, connId }: 
     return map
   }, [connId, liveSchema, liveColumns, D.schema, D.tableStructures])
 
-  function run() {
+  function run(sqlOverride?: string) {
     setRunErr(null)
+    // A selection-run passes just the highlighted SQL; otherwise run the whole editor.
+    const sql = sqlOverride && sqlOverride.trim() ? sqlOverride : code
     if (connId) {
       // Live path: execute the typed SQL against the backend.
       setPhase('running')
-      const sql = code
       runQuery(connId, sql)
         .then(res => { setResult({ columns: res.columns, rows: res.rows, sql }); setPhase('done') })
         .catch(e => { setRunErr(dbErrMsg(e)); setPhase('done') })
@@ -135,7 +136,7 @@ export function SqlConsole({ density, fresh, queryN, writable = true, connId }: 
           <button className="icon-btn bare" title={t('dbviews.format')}><Icon name="wrench" size={15} /></button>
           <button className="icon-btn bare" title={t('dbviews.clear')} onClick={() => setCode('')}><Icon name="eraser" size={15} /></button>
           <div style={{ width: 1, height: 18, background: 'var(--border-hairline)' }} />
-          <Btn size="sm" variant="primary" icon={phase === 'running' ? 'loader' : 'play'} onClick={run}>
+          <Btn size="sm" variant="primary" icon={phase === 'running' ? 'loader' : 'play'} onClick={() => run()}>
             {phase === 'running' ? t('dbviews.running') : t('dbviews.run')} <span style={{ opacity: .6, fontSize: 10, marginLeft: 2 }}>⌘↵</span>
           </Btn>
         </div>
@@ -144,7 +145,7 @@ export function SqlConsole({ density, fresh, queryN, writable = true, connId }: 
           When there are no results yet it fills the whole console; once a run
           starts it shares the space with the results region below (a split). */}
       <div style={{ flex: 1, minHeight: 140, width: '100%', borderBottom: phase === 'idle' ? 'none' : '1px solid var(--border-hairline)' }}>
-        <SqlEditor code={code} onChange={setCode} schema={editorSchema} onRun={run} />
+        <SqlEditor code={code} onChange={setCode} schema={editorSchema} onRun={run} onRunSelection={connId ? (sql => run(sql)) : undefined} />
       </div>
       {/* results — only rendered once a run has started (running/done). While
           idle (fresh query) the editor above fills everything. */}
@@ -161,6 +162,7 @@ export function SqlConsole({ density, fresh, queryN, writable = true, connId }: 
                     rows={result?.rows ?? []}
                     statusTones={D.statusTones} density={density}
                     writable={writable} connId={connId} sql={result?.sql}
+                    resultLabel={t('dbviews.queryResult')}
                     loadError={runErr ?? undefined} />
                 : <DataGrid
                     columns={D.ordersColumns.map(c => ({ name: c.name, type: c.type, pk: c.pk, fk: c.fk, icon: c.icon }))}

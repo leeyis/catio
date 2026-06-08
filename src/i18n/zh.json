@@ -81,6 +81,8 @@
     "running": "执行中",
     "run": "运行",
     "newQueryComment": "新建查询",
+    "queryResult": "查询结果",
+    "runSelection": "运行",
     "executingOn": "正在 prod-orders 上执行…",
     "runToSeeResults": "运行查询以查看结果",
     "runHint": "⌘↵ 或点击「运行」",

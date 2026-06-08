@@ -17,6 +17,9 @@ export interface DataGridProps {
   connId?: string
   /** Target table for generated DML (defaults to 'orders' to match the seeded mock). */
   table?: string
+  /** Header label override (e.g. "Query result") — used when the grid shows ad-hoc
+   * query output rather than a single table, so it doesn't show the mock 'orders'. */
+  resultLabel?: string
   /** Optional schema qualifier for generated DML. */
   schema?: string
   /** Base SQL re-run for server-side pagination (when connId is set, legacy raw-SQL path). */
@@ -49,7 +52,7 @@ function colIcon(col: ResultColumn): string {
   return 'type'
 }
 
-export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortable', writable = true, connId, table = 'orders', schema, sql, livePreview, onRefresh, truncated, loadError }: DataGridProps) {
+export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortable', writable = true, connId, table = 'orders', schema, sql, livePreview, onRefresh, truncated, loadError, resultLabel }: DataGridProps) {
   const { t } = useTranslation()
   const [sel, setSel] = useState({ r: 2, c: 3 })
   const [sortCol, setSortCol] = useState<string | null>(null)
@@ -209,7 +212,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   const editCount = Object.keys(edits).length
   // Toolbar table chip: live path uses the real schema/table (no bogus `public.`);
   // mock/demo path keeps the original `public.orders` label for pixel parity.
-  const toolbarLabel = connId ? (schema ? `${schema}.${table}` : table) : 'public.orders'
+  const toolbarLabel = resultLabel ?? (connId ? (schema ? `${schema}.${table}` : table) : 'public.orders')
   // Row count shown in the toolbar: live path reflects the loaded page rows; mock keeps rows.length.
   const rowCount = connId ? baseRows.length : rows.length
   // Fixed per-column widths so the row is exactly as wide as the sum of its

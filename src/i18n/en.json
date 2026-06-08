@@ -81,6 +81,8 @@
     "running": "Running",
     "run": "Run",
     "newQueryComment": "New query",
+    "queryResult": "Query result",
+    "runSelection": "Run",
     "executingOn": "Executing on prod-orders…",
     "runToSeeResults": "Run a query to see results",
     "runHint": "⌘↵ or click Run",

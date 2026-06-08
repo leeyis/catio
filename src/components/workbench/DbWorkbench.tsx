@@ -152,7 +152,7 @@ export function DbWorkbench({ conn, density }: DbWorkbenchProps) {
   }
 
   return (
-    <div style={{ display: 'flex', alignItems: 'stretch', height: '100%', minHeight: 0, overflow: 'hidden' }}>
+    <div style={{ display: 'flex', alignItems: 'stretch', height: '100%', width: '100%', flex: 1, minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
       <SchemaBrowser onPick={pickTable} active={obj.type === 'table' ? { schema: obj.schema, table: obj.table } : null}
         onNewQuery={newQuery} onOpenER={openER} erActive={obj.type === 'er'} sqlActive={obj.type === 'sql'}
         disabledSql={!caps.sqlConsole} disabledEr={!caps.er}

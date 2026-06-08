@@ -24,6 +24,8 @@ export interface SqlEditorProps {
   schema?: Record<string, string[]>
   /** Invoked on Cmd/Ctrl+Enter (the "run query" shortcut). */
   onRun?: () => void
+  /** Run just the currently-selected SQL (from the selection toolbar's Run action). */
+  onRunSelection?: (sql: string) => void
 }
 
 /** Map a backend engine name to a lang-sql dialect (default PostgreSQL). */
@@ -100,7 +102,7 @@ const catioTheme = EditorView.theme(
   { dark: true },
 )
 
-export function SqlEditor({ code, onChange, minHeight, target = 'prod-orders', schema, onRun }: SqlEditorProps) {
+export function SqlEditor({ code, onChange, minHeight, target = 'prod-orders', schema, onRun, onRunSelection }: SqlEditorProps) {
   const { t: tr } = useTranslation()
   const hostRef = useRef<HTMLDivElement>(null)
   const rootRef = useRef<HTMLDivElement>(null)
@@ -111,7 +113,7 @@ export function SqlEditor({ code, onChange, minHeight, target = 'prod-orders', s
   onChangeRef.current = onChange
   const onRunRef = useRef(onRun)
   onRunRef.current = onRun
-  const [selBar, setSelBar] = useState<{ left: number; top: number; text: string } | null>(null)
+  const [selBar, setSelBar] = useState<{ left: number; top: number; text: string; below: boolean } | null>(null)
 
   // Mount once.
   useEffect(() => {
@@ -200,9 +202,18 @@ export function SqlEditor({ code, onChange, minHeight, target = 'prod-orders', s
     if (!text || !text.trim()) { setSelBar(null); return }
     const rootRect = root.getBoundingClientRect()
     const scale = (rootRect.width / root.offsetWidth) || 1
-    const left = (e.clientX - rootRect.left) / scale
+    const rawLeft = (e.clientX - rootRect.left) / scale
     const top = (e.clientY - rootRect.top) / scale
-    setSelBar({ left, top, text: text.trim() })
+    // Dynamic placement: the bar is ~33px tall and sits ABOVE the cursor by default.
+    // If there isn't room above (near the top), flip it BELOW. Clamp horizontally so
+    // it never gets clipped by the editor's overflow:hidden.
+    const below = top < 48
+    const left = Math.max(86, Math.min(rawLeft, root.offsetWidth - 86))
+    setSelBar({ left, top, text: text.trim(), below })
+  }
+  function runSel() {
+    if (selBar) onRunSelection?.(selBar.text)
+    setSelBar(null)
   }
   function copySel() {
     if (selBar && navigator.clipboard) navigator.clipboard.writeText(selBar.text).catch(() => {})
@@ -216,9 +227,10 @@ export function SqlEditor({ code, onChange, minHeight, target = 'prod-orders', s
   return (
     <div ref={rootRef} style={{ position: 'relative', background: 'var(--surface-subtle)', minHeight: minHeight || 0, height: '100%', width: '100%', overflow: 'hidden' }}>
       <div ref={hostRef} onMouseUp={onMouseUp} onMouseDown={() => setSelBar(null)} style={{ height: '100%', width: '100%' }} />
-      {/* selection toolbar — copy / ask AI */}
+      {/* selection toolbar — copy / ask AI / run. Flips below the cursor when there
+          isn't room above, and is clamped horizontally, so it's never clipped. */}
       {selBar && (
-        <div className="row gap2 pop-in" style={{ position: 'absolute', left: selBar.left, top: selBar.top - 10, transform: 'translate(-50%, -100%)', zIndex: 30, background: 'var(--surface-elevated)', border: '1px solid var(--border-hairline-alt)', borderRadius: 9, boxShadow: 'var(--shadow-dropdown)', padding: 3 }}>
+        <div className="row gap2 pop-in" style={{ position: 'absolute', left: selBar.left, top: selBar.below ? selBar.top + 18 : selBar.top - 10, transform: selBar.below ? 'translate(-50%, 0)' : 'translate(-50%, -100%)', zIndex: 30, background: 'var(--surface-elevated)', border: '1px solid var(--border-hairline-alt)', borderRadius: 9, boxShadow: 'var(--shadow-dropdown)', padding: 3 }}>
           <button className="row gap5 sel-pill" onMouseDown={e => e.preventDefault()} onClick={copySel}
             style={{ height: 27, padding: '0 10px', borderRadius: 7, fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>
             <Icon name="copy" size={13} /> {tr('dbviews.copySel')}
@@ -228,7 +240,15 @@ export function SqlEditor({ code, onChange, minHeight, target = 'prod-orders', s
             style={{ height: 27, padding: '0 10px', borderRadius: 7, fontSize: 12, fontWeight: 600, color: 'var(--accent-primary)' }}>
             <Icon name="sparkles" size={13} /> {tr('dbviews.askAI')}
           </button>
-          <span style={{ position: 'absolute', left: '50%', bottom: -5, transform: 'translateX(-50%) rotate(45deg)', width: 8, height: 8, background: 'var(--surface-elevated)', borderRight: '1px solid var(--border-hairline-alt)', borderBottom: '1px solid var(--border-hairline-alt)' }} />
+          {onRunSelection && <>
+            <div style={{ width: 1, background: 'var(--border-hairline)', margin: '3px 1px' }} />
+            <button className="row gap5 sel-pill" onMouseDown={e => e.preventDefault()} onClick={runSel}
+              style={{ height: 27, padding: '0 10px', borderRadius: 7, fontSize: 12, fontWeight: 600, color: 'var(--signal-green)' }}>
+              <Icon name="play" size={13} /> {tr('dbviews.runSelection')}
+            </button>
+          </>}
+          {/* caret: points down when above the cursor, up when below */}
+          <span style={{ position: 'absolute', left: '50%', ...(selBar.below ? { top: -5 } : { bottom: -5 }), transform: 'translateX(-50%) rotate(45deg)', width: 8, height: 8, background: 'var(--surface-elevated)', borderRight: '1px solid var(--border-hairline-alt)', borderBottom: '1px solid var(--border-hairline-alt)' }} />
         </div>
       )}
     </div>
