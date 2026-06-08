@@ -1,5 +1,13 @@
 import type { AuthMethod } from '../services/ssh'
 
+/** Non-secret jump/bastion host config stored with the profile. Secret is NEVER persisted. */
+export interface JumpProfile {
+  host: string
+  port: number
+  user: string
+  auth: AuthMethod
+}
+
 export interface ConnectionProfile {
   id: string
   name: string
@@ -7,6 +15,8 @@ export interface ConnectionProfile {
   port: number
   user: string
   auth: AuthMethod
+  /** ProxyJump bastion config — secrets are never stored here. */
+  jump?: JumpProfile
 }
 
 const KEY = 'catio-connections'

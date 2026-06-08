@@ -45,15 +45,12 @@ describe('ConnRow', () => {
     expect(onDetail).not.toHaveBeenCalled()
   })
 
-  it('host row shows the detail icon on hover, which calls onDetail', () => {
-    const onOpen = vi.fn()
-    const onDetail = vi.fn()
-    const { container } = wrap(<ConnRow conn={hostConn} onOpen={onOpen} onDetail={onDetail} />)
+  it('host row does not render a detail icon on hover (merged UI: click opens details)', () => {
+    // After merging the redesigned shell, the per-card hover detail icon was
+    // removed — clicking the card itself opens the details panel.
+    const { container } = wrap(<ConnRow conn={hostConn} onOpen={() => {}} onDetail={() => {}} />)
     const row = container.firstElementChild as HTMLElement
     fireEvent.mouseEnter(row)
-    const btn = screen.getByTitle('详情')
-    fireEvent.click(btn)
-    expect(onDetail).toHaveBeenCalledWith(hostConn)
-    expect(onOpen).not.toHaveBeenCalled()
+    expect(screen.queryByTitle('详情')).toBeNull()
   })
 })

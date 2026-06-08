@@ -3,9 +3,14 @@ pub mod conn;
 pub mod ids;
 pub mod knownhosts;
 pub mod manager;
+pub mod monitor;
+pub mod multiexec;
+pub mod osc;
 pub mod parse;
 pub mod sftp;
+pub mod shell_integration;
 pub mod term;
+pub mod tunnel;
 
 use serde::Serialize;
 

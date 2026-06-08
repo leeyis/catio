@@ -1,0 +1,24 @@
+<svg viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#6366F1"/>
+      <stop offset="1" stop-color="#4338CA"/>
+    </linearGradient>
+  </defs>
+  <rect x="24" y="24" width="208" height="208" rx="56" fill="url(#g)"/>
+  <!-- short rounded ears -->
+  <g fill="#FFF7ED" stroke="#FFF7ED" stroke-width="16" stroke-linejoin="round">
+    <path d="M88 100 L94 76 L118 93 Z"/>
+    <path d="M168 100 L162 76 L138 93 Z"/>
+  </g>
+  <!-- head -->
+  <circle cx="128" cy="138" r="58" fill="#FFF7ED"/>
+  <!-- eyes -->
+  <circle cx="109" cy="131" r="8" fill="#4338CA"/>
+  <circle cx="147" cy="131" r="8" fill="#4338CA"/>
+  <!-- blush -->
+  <circle cx="93" cy="153" r="7.5" fill="#FB9BC0" opacity="0.78"/>
+  <circle cx="163" cy="153" r="7.5" fill="#FB9BC0" opacity="0.78"/>
+  <!-- terminal cursor mouth -->
+  <rect x="118" y="153" width="20" height="9" rx="4.5" fill="#4338CA"/>
+</svg>

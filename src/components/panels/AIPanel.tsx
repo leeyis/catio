@@ -1,11 +1,15 @@
-/* ported from ref-ui/_extract/blob9.txt — verbatim per plan T1-T7 */
-import { useState, useRef, useEffect } from 'react'
+/* ported from ref-ui/_extract/blob9.txt — controlled per-tab conversation view (P2) */
+import React, { useState, useRef, useEffect, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import type { Components } from 'react-markdown'
 import { Icon } from '../Icon'
 import { IconBtn } from '../atoms'
 import { highlightSQL } from '../dbviews'
-import { useData } from '../../state/DataContext'
-import type { Connection, ChatMessage, AgentSnippet } from '../../services/types'
+import { useAgentConfig } from '../../state/agentConfig'
+import type { Connection } from '../../services/types'
+import type { Conversation } from '../../state/conversations'
 import { PanelShell } from './PanelShell'
 
 export interface Attachment {
@@ -20,13 +24,23 @@ export interface AIPanelProps {
   conn?: Connection
   attachment: Attachment | null
   onClearAttachment: () => void
-}
-
-function mdBold(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/\*\*([^*]+)\*\*/g, '<b style="color:var(--text-primary)">$1</b>')
+  onInsert?: (code: string) => void
+  canInsert?: boolean
+  onOpenSettings?: () => void
+  /** The active tab's current conversation (controlled by App). */
+  conversation?: Conversation
+  /** True while a send is streaming for the active conversation. */
+  busy?: boolean
+  /** Past conversations for the active tab's host (newest first). */
+  history?: Conversation[]
+  /** Send a user message in the current conversation. */
+  onSend?: (text: string) => void
+  /** Start a fresh conversation for the active tab's host. */
+  onNewConversation?: () => void
+  /** Restore a past conversation by id. */
+  onRestoreConversation?: (convId: string) => void
+  /** Delete a past conversation by id. */
+  onDeleteConversation?: (convId: string) => void
 }
 
 function shellHL(code: string): string {
@@ -36,89 +50,307 @@ function shellHL(code: string): string {
   return h
 }
 
-interface SnippetCardProps {
-  snippet: AgentSnippet & { preRan?: boolean }
+const SHELL_LANGS = new Set(['sh', 'bash', 'shell', 'zsh', 'console'])
+const SQL_LANGS = new Set(['sql', 'mysql', 'postgres', 'postgresql', 'pgsql'])
+
+// ---- Shared copy button hook ----
+function useCopied() {
+  const [copied, setCopied] = useState(false)
+  function copy(text: string) {
+    if (navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {})
+    setCopied(true)
+    setTimeout(() => setCopied(false), 1400)
+  }
+  return { copied, copy }
 }
 
-function SnippetCard({ snippet }: SnippetCardProps) {
+// ---- Block code card with action row ----
+interface BlockCodeProps {
+  lang: string
+  code: string
+  mode: 'sql' | 'shell'
+  onInsert?: (code: string) => void
+  canInsert?: boolean
+}
+
+function BlockCode({ lang, code, mode, onInsert, canInsert }: BlockCodeProps) {
   const { t } = useTranslation()
-  const isSql = snippet.kind === 'sql'
-  const tone = isSql ? 'var(--signal-blue)' : 'var(--signal-amber)'
-  const [inserted, setInserted] = useState(false)
-  const [phase, setPhase] = useState(snippet.preRan ? 'done' : 'idle') // idle | running | done
-  function doInsert() { setInserted(true); setTimeout(() => setInserted(false), 1800) }
-  function doExec() { setPhase('running'); setTimeout(() => setPhase('done'), 520) }
+  const { copied, copy } = useCopied()
+  const isSqlBlock = SQL_LANGS.has(lang) || (lang === '' && mode === 'sql')
+  const isShellBlock = SHELL_LANGS.has(lang) || (lang === '' && mode === 'shell')
+  const tone = isSqlBlock ? 'var(--signal-blue)' : 'var(--signal-amber)'
+  const canInsertShell = isShellBlock && !!onInsert && !!canInsert
   return (
     <div className="col" style={{ border: '1px solid var(--border-hairline)', borderRadius: 12, overflow: 'hidden', background: 'var(--surface-card)' }}>
-      {/* header: scope + action, then insert/execute icons */}
       <div className="row gap6" style={{ padding: '6px 8px 6px 10px', background: 'var(--surface-subtle)', borderBottom: '1px solid var(--border-hairline)' }}>
         <span className="dot" style={{ background: tone }} />
-        <Icon name={isSql ? 'database' : 'terminal'} size={12} style={{ color: tone }} />
-        <span className="mono" style={{ fontSize: 10.5, fontWeight: 700, color: 'var(--text-secondary)' }}>{isSql ? 'SQL' : 'SHELL'}</span>
-        {snippet.action && <span className="badge-accent" style={{ background: `color-mix(in srgb, ${tone} 14%, transparent)`, color: tone }}>{snippet.action}</span>}
+        <Icon name={isSqlBlock ? 'database' : 'terminal'} size={12} style={{ color: tone }} />
+        <span className="mono" style={{ fontSize: 10.5, fontWeight: 700, color: 'var(--text-secondary)' }}>{isSqlBlock ? 'SQL' : 'SHELL'}</span>
         <div className="grow" />
-        <button className="icon-btn bare" style={{ width: 24, height: 24 }} title={isSql ? t('panels.insertSqlEditor') : t('panels.insertTerminal')} onClick={doInsert}>
-          <Icon name="arrow-right-to-line" size={14} />
-        </button>
-        <button className="icon-btn" style={{ width: 24, height: 24, background: `color-mix(in srgb, ${tone} 14%, transparent)`, color: tone }} title={isSql ? t('panels.execQuery') : t('panels.execCommand')} onClick={doExec}>
-          <Icon name={phase === 'running' ? 'loader' : 'play'} size={13} style={phase === 'running' ? { animation: 'spin 1s linear infinite' } : undefined} />
+        {canInsertShell && (
+          <button className="icon-btn bare" style={{ width: 24, height: 24 }} title={t('panels.insertTerminal')} onClick={() => onInsert?.(code)}>
+            <Icon name="arrow-right-to-line" size={14} />
+          </button>
+        )}
+        <button className="icon-btn bare" style={{ width: 24, height: 24 }} title={copied ? t('panels.copied') : t('panels.copy')} onClick={() => copy(code)}>
+          <Icon name={copied ? 'check' : 'copy'} size={13} style={copied ? { color: 'var(--signal-green)' } : undefined} />
         </button>
       </div>
-      {/* code */}
       <pre className="mono" style={{ margin: 0, padding: '9px 10px', fontSize: 11.5, lineHeight: 1.55, color: 'var(--text-secondary)', whiteSpace: 'pre-wrap', background: 'var(--surface-subtle)', overflowX: 'auto' }}
-        dangerouslySetInnerHTML={{ __html: isSql ? highlightSQL(snippet.code) : shellHL(snippet.code) }} />
-      {/* inserted toast */}
-      {inserted && (
-        <div className="row gap6 fade-in" style={{ padding: '6px 10px', borderTop: '1px solid var(--border-hairline)', background: 'var(--accent-soft-alt)', color: 'var(--accent-primary)', fontSize: 11.5, fontWeight: 500 }}>
-          <Icon name="check" size={12} /> {isSql ? t('panels.insertedSqlEditor') : t('panels.insertedTerminal')}
-        </div>
-      )}
-      {/* execution result */}
-      {phase === 'running' && (
-        <div className="row gap6" style={{ padding: '7px 10px', borderTop: '1px solid var(--border-hairline)', color: 'var(--text-tertiary)', fontSize: 11.5 }}>
-          <Icon name="loader" size={12} style={{ animation: 'spin 1s linear infinite' }} /> {t('panels.executingOn', { target: snippet.target })}
-        </div>
-      )}
-      {phase === 'done' && snippet.result && (
-        <div className="row gap6 fade-in" style={{ padding: '7px 10px', borderTop: '1px solid var(--border-hairline)' }}>
-          <Icon name="corner-down-right" size={12} style={{ color: 'var(--signal-green)', flex: 'none' }} />
-          <span className="mono" style={{ fontSize: 11.5, color: 'var(--text-primary)', fontWeight: 500 }}>{snippet.result}</span>
-        </div>
-      )}
+        dangerouslySetInnerHTML={{ __html: isSqlBlock ? highlightSQL(code) : shellHL(code) }} />
     </div>
   )
 }
 
-interface AgentMessageProps {
-  m: ChatMessage
+// ---- Build react-markdown components with closure over mode/onInsert/canInsert ----
+function makeComponents(mode: 'sql' | 'shell', onInsert?: (code: string) => void, canInsert?: boolean): Components {
+  return {
+    // ---- code: inline vs block detection ----
+    // In react-markdown v10 there is no `inline` prop. Block code has className like "language-sh".
+    // Inline code has no className. We also treat code with a newline as block.
+    code({ className, children, ...rest }) {
+      const lang = (className ?? '').replace('language-', '')
+      const isBlock = !!className || String(children).includes('\n')
+      if (!isBlock) {
+        // Inline code
+        return (
+          <code
+            {...rest}
+            style={{
+              fontFamily: 'var(--font-mono, monospace)',
+              fontSize: '12px',
+              background: 'var(--surface-sunken)',
+              color: 'var(--text-primary)',
+              padding: '1px 5px',
+              borderRadius: 4,
+              border: '1px solid var(--border-hairline)',
+            }}
+          >
+            {children}
+          </code>
+        )
+      }
+      const code = String(children).replace(/\n$/, '')
+      return <BlockCode lang={lang} code={code} mode={mode} onInsert={onInsert} canInsert={canInsert} />
+    },
+    // pre: let the code component handle block rendering; pre itself just renders children
+    pre({ children }) {
+      return <>{children}</>
+    },
+    // ---- Headings — sized down to fit 13px panel body ----
+    h1({ children }) {
+      return <h1 style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-primary)', margin: '10px 0 4px', lineHeight: 1.3 }}>{children}</h1>
+    },
+    h2({ children }) {
+      return <h2 style={{ fontSize: 14, fontWeight: 700, color: 'var(--text-primary)', margin: '8px 0 4px', lineHeight: 1.3 }}>{children}</h2>
+    },
+    h3({ children }) {
+      return <h3 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)', margin: '6px 0 3px', lineHeight: 1.3 }}>{children}</h3>
+    },
+    h4({ children }) {
+      return <h4 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)', margin: '4px 0 2px', lineHeight: 1.3 }}>{children}</h4>
+    },
+    // ---- Paragraph ----
+    p({ children }) {
+      return <p style={{ margin: '6px 0', lineHeight: 1.55, color: 'var(--text-secondary)', fontSize: 13 }}>{children}</p>
+    },
+    // ---- Lists ----
+    ul({ children }) {
+      return <ul style={{ margin: '4px 0', paddingLeft: 18, listStyleType: 'disc' }}>{children}</ul>
+    },
+    ol({ children }) {
+      return <ol style={{ margin: '4px 0', paddingLeft: 18, listStyleType: 'decimal' }}>{children}</ol>
+    },
+    li({ children }) {
+      return <li style={{ fontSize: 13, lineHeight: 1.55, color: 'var(--text-secondary)', marginBottom: 2 }}>{children}</li>
+    },
+    // ---- Strong / em ----
+    strong({ children }) {
+      return <strong style={{ fontWeight: 700, color: 'var(--text-primary)' }}>{children}</strong>
+    },
+    em({ children }) {
+      return <em style={{ fontStyle: 'italic', color: 'var(--text-secondary)' }}>{children}</em>
+    },
+    // ---- Links — prevent Tauri webview navigation ----
+    a({ href, children }) {
+      function handleClick(e: React.MouseEvent<HTMLAnchorElement>) {
+        e.preventDefault()
+        if (href) window.open(href, '_blank', 'noreferrer')
+      }
+      return (
+        <a href={href} onClick={handleClick} rel="noreferrer"
+          style={{ color: 'var(--accent-primary)', textDecoration: 'underline', cursor: 'pointer' }}>
+          {children}
+        </a>
+      )
+    },
+    // ---- Tables (GFM) ----
+    table({ children }) {
+      return (
+        <div style={{ overflowX: 'auto', margin: '6px 0' }}>
+          <table style={{ borderCollapse: 'collapse', fontSize: 12, width: '100%', color: 'var(--text-secondary)' }}>{children}</table>
+        </div>
+      )
+    },
+    th({ children }) {
+      return (
+        <th style={{ border: '1px solid var(--border-hairline)', padding: '4px 8px', fontWeight: 700, color: 'var(--text-primary)', background: 'var(--surface-subtle)', textAlign: 'left' }}>
+          {children}
+        </th>
+      )
+    },
+    td({ children }) {
+      return <td style={{ border: '1px solid var(--border-hairline)', padding: '4px 8px' }}>{children}</td>
+    },
+    // ---- Blockquote ----
+    blockquote({ children }) {
+      return (
+        <blockquote style={{ borderLeft: '3px solid var(--border-hairline)', margin: '6px 0', paddingLeft: 10, color: 'var(--text-tertiary)', fontStyle: 'italic' }}>
+          {children}
+        </blockquote>
+      )
+    },
+    // ---- HR ----
+    hr() {
+      return <hr style={{ border: 'none', borderTop: '1px solid var(--border-hairline)', margin: '8px 0' }} />
+    },
+  }
 }
 
-function AgentMessage({ m }: AgentMessageProps) {
+interface AssistantMessageProps {
+  text: string
+  mode: 'sql' | 'shell'
+  onInsert?: (code: string) => void
+  canInsert?: boolean
+}
+
+function AssistantMessage({ text, mode, onInsert, canInsert }: AssistantMessageProps) {
+  // Memoize components so react-markdown doesn't remount its subtree on every token update.
+  // onInsert and canInsert are stable per conversation turn, so this is safe.
+  const components = useMemo(
+    () => makeComponents(mode, onInsert, canInsert),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [mode, onInsert, canInsert],
+  )
   return (
-    <div className="col gap8" style={{ maxWidth: '94%' }}>
-      {m.text && <div style={{ fontSize: 13, lineHeight: 1.55, color: 'var(--text-secondary)' }} dangerouslySetInnerHTML={{ __html: mdBold(m.text) }} />}
-      {m.snippet && <SnippetCard snippet={m.snippet} />}
-      {(m.steps || []).map((s, i) => <SnippetCard key={i} snippet={{ ...s, action: s.label, preRan: true }} />)}
-      {m.text2 && <div style={{ fontSize: 13, lineHeight: 1.55, color: 'var(--text-secondary)' }} dangerouslySetInnerHTML={{ __html: mdBold(m.text2) }} />}
+    <div className="col gap4" style={{ maxWidth: '94%' }}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+        {text}
+      </ReactMarkdown>
     </div>
   )
 }
 
-export function AIPanel({ onClose, mode = 'sql', conn, attachment, onClearAttachment }: AIPanelProps) {
+// ---- Relative-time formatter for the history dropdown ----
+function useRelativeTime() {
   const { t } = useTranslation()
-  const D = useData()
+  return (ts: number): string => {
+    const diff = Date.now() - ts
+    const min = Math.floor(diff / 60000)
+    if (min < 1) return t('panels.relJustNow')
+    if (min < 60) return t('panels.relMinutesAgo', { count: min })
+    const hr = Math.floor(min / 60)
+    if (hr < 24) return t('panels.relHoursAgo', { count: hr })
+    const day = Math.floor(hr / 24)
+    return t('panels.relDaysAgo', { count: day })
+  }
+}
+
+interface HistoryDropdownProps {
+  history: Conversation[]
+  currentId?: string
+  onRestore?: (id: string) => void
+  onDelete?: (id: string) => void
+  onClose: () => void
+}
+
+function HistoryDropdown({ history, currentId, onRestore, onDelete, onClose }: HistoryDropdownProps) {
+  const { t } = useTranslation()
+  const rel = useRelativeTime()
+  return (
+    <>
+      <div style={{ position: 'fixed', inset: 0, zIndex: 40 }} onClick={onClose} />
+      <div className="pop-in" style={{ position: 'absolute', top: 28, right: 0, zIndex: 50, width: 248, background: 'var(--surface-elevated)', border: '1px solid var(--border-hairline-alt)', borderRadius: 10, boxShadow: 'var(--shadow-dropdown)', padding: 5, maxHeight: 320, overflowY: 'auto' }}>
+        {history.length === 0 ? (
+          <div className="col" style={{ alignItems: 'center', justifyContent: 'center', padding: '22px 0', gap: 6, color: 'var(--text-faint)' }}>
+            <Icon name="history" size={20} />
+            <span style={{ fontSize: 12 }}>{t('panels.noConversations')}</span>
+          </div>
+        ) : history.map(c => {
+          const active = c.id === currentId
+          return (
+            <div key={c.id} className="row gap6" style={{ width: '100%', padding: '7px 8px', borderRadius: 8, background: active ? 'var(--accent-soft)' : 'transparent' }}
+              onMouseEnter={e => { if (!active) (e.currentTarget as HTMLDivElement).style.background = 'var(--surface-sunken)' }}
+              onMouseLeave={e => { if (!active) (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}>
+              <button className="col" style={{ flex: 1, minWidth: 0, alignItems: 'flex-start', textAlign: 'left', background: 'transparent', border: 'none', padding: 0, cursor: 'pointer' }}
+                onClick={() => { onRestore?.(c.id); onClose() }}>
+                <span className="ell" style={{ fontSize: 12.5, fontWeight: active ? 600 : 500, color: active ? 'var(--accent-primary)' : 'var(--text-secondary)', maxWidth: 180 }}>{c.title || t('panels.untitledConversation')}</span>
+                <span style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{rel(c.updatedAt)}</span>
+              </button>
+              <button className="icon-btn bare" style={{ width: 22, height: 22, flex: 'none' }} title={t('panels.deleteConversation')}
+                onClick={e => { e.stopPropagation(); onDelete?.(c.id) }}>
+                <Icon name="trash-2" size={13} />
+              </button>
+            </div>
+          )
+        })}
+      </div>
+    </>
+  )
+}
+
+export function AIPanel({ onClose, mode = 'sql', conn, attachment, onClearAttachment, onInsert, canInsert, onOpenSettings, conversation, busy = false, history = [], onSend, onNewConversation, onRestoreConversation, onDeleteConversation }: AIPanelProps) {
+  const { t } = useTranslation()
+  const { config: cfg } = useAgentConfig()
   const isSql = mode !== 'shell'
-  const thread = isSql ? D.aiSql : D.aiShell
   const target = conn ? conn.name : (isSql ? 'prod-orders' : 'prod-web-01')
   const accent = isSql ? 'var(--signal-blue)' : 'var(--signal-amber)'
   const [draft, setDraft] = useState('')
+  const [histOpen, setHistOpen] = useState(false)
   const taRef = useRef<HTMLTextAreaElement>(null)
+  const scrollRef = useRef<HTMLDivElement>(null)
+
+  const msgs = conversation?.messages ?? []
+
   useEffect(() => { if (attachment && taRef.current) taRef.current.focus() }, [attachment])
+  useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight }, [msgs])
+
+  function send() {
+    const text = draft.trim()
+    if (!text || !cfg.model || busy) return
+
+    let userContent = text
+    if (attachment) {
+      userContent += `\n\n---\n${attachment.text}`
+      onClearAttachment()
+    }
+    onSend?.(userContent)
+    setDraft('')
+  }
+
+  function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      send()
+    }
+  }
+
   return (
     <PanelShell icon="sparkles" title="Catio Agent"
       sub={isSql ? t('panels.sqlAssistantSub', { target }) : t('panels.shellAssistantSub', { target })}
       onClose={onClose}
-      actions={<IconBtn name="history" size={15} variant="bare" title={t('panels.sessionHistory')} />}>
+      actions={
+        <>
+          <IconBtn name="plus" size={15} variant="bare" title={t('panels.newConversation')} onClick={() => onNewConversation?.()} />
+          <div style={{ position: 'relative' }}>
+            <IconBtn name="history" size={15} variant="bare" title={t('panels.conversationHistory')} active={histOpen} onClick={() => setHistOpen(o => !o)} />
+            {histOpen && (
+              <HistoryDropdown history={history} currentId={conversation?.id} onClose={() => setHistOpen(false)}
+                onRestore={onRestoreConversation} onDelete={onDeleteConversation} />
+            )}
+          </div>
+        </>
+      }>
       {/* scope banner — strictly follows the active workbench tab */}
       <div className="row gap8" style={{ padding: '8px 12px', borderBottom: '1px solid var(--border-hairline)' }}>
         <span className="chip" style={{ background: `color-mix(in srgb, ${accent} 15%, transparent)`, color: accent, fontWeight: 600 }}>
@@ -129,12 +361,25 @@ export function AIPanel({ onClose, mode = 'sql', conn, attachment, onClearAttach
           <span>{t('panels.followActiveTab', { target })}</span>
         </span>
       </div>
-      {/* quick actions removed — actions live in the composer flow */}
-      <div className="grow" style={{ overflowY: 'auto', padding: '14px 12px', display: 'flex', flexDirection: 'column', gap: 14 }}>
-        {thread.map((m, i) => m.role === 'user'
-          ? <div key={i} style={{ alignSelf: 'flex-end', maxWidth: '88%', background: 'var(--accent-primary)', color: 'var(--on-accent)', padding: '9px 12px', borderRadius: '14px 14px 4px 14px', fontSize: 13, lineHeight: 1.5 }}>{m.text}</div>
-          : <AgentMessage key={i} m={m} />)}
-      </div>
+      {/* message area */}
+      {!cfg.model ? (
+        <div className="grow col" style={{ alignItems: 'center', justifyContent: 'center', gap: 14, padding: '24px 28px', textAlign: 'center' }}>
+          <div className="icon-badge" style={{ width: 48, height: 48, borderRadius: 14, background: 'var(--surface-sunken)', color: 'var(--text-faint)' }}><Icon name="box" size={22} /></div>
+          <span style={{ fontSize: 13, lineHeight: 1.55, color: 'var(--text-tertiary)' }}>{t('panels.agentNoModel')}</span>
+          <button className="btn btn-primary sm" onClick={() => onOpenSettings?.()}><Icon name="settings" size={14} /> {t('panels.agentConfigure')}</button>
+        </div>
+      ) : (
+        <div ref={scrollRef} className="grow" style={{ overflowY: 'auto', padding: '14px 12px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+          {msgs.map((m, i) => m.role === 'user'
+            ? <div key={i} style={{ alignSelf: 'flex-end', maxWidth: '88%', background: 'var(--accent-primary)', color: 'var(--on-accent)', padding: '9px 12px', borderRadius: '14px 14px 4px 14px', fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{m.content}</div>
+            : <AssistantMessage key={i} text={m.content} mode={mode} onInsert={onInsert} canInsert={canInsert} />)}
+          {busy && msgs.length > 0 && msgs[msgs.length - 1].content === '' && (
+            <div className="row gap6" style={{ color: 'var(--text-tertiary)', fontSize: 12 }}>
+              <Icon name="loader" size={13} style={{ animation: 'spin 1s linear infinite' }} /> {t('panels.agentThinking')}
+            </div>
+          )}
+        </div>
+      )}
       {/* composer */}
       <div style={{ padding: 10, borderTop: '1px solid var(--border-hairline)' }}>
         {/* attached terminal/SQL output — piped in via "问 AI" */}
@@ -150,16 +395,16 @@ export function AIPanel({ onClose, mode = 'sql', conn, attachment, onClearAttach
           </div>
         )}
         <div className="col" style={{ background: 'var(--surface-sunken)', border: `1px solid ${attachment ? 'var(--accent-border)' : 'var(--border-hairline)'}`, borderRadius: 12, padding: 8 }}>
-          <textarea ref={taRef} value={draft} onChange={e => setDraft(e.target.value)}
+          <textarea ref={taRef} value={draft} onChange={e => setDraft(e.target.value)} onKeyDown={onKeyDown}
             placeholder={attachment ? t('panels.composerPlaceholderAttached') : (isSql ? t('panels.composerPlaceholderSql') : t('panels.composerPlaceholderShell', { target }))}
             rows={2} style={{ border: 'none', outline: 'none', background: 'transparent', resize: 'none', fontSize: 13, color: 'var(--text-primary)', fontFamily: 'inherit' }} />
           <div className="row" style={{ justifyContent: 'space-between', marginTop: 4 }}>
             <div className="row gap4">
               <button className="icon-btn bare" style={{ width: 26, height: 26 }} title={t('panels.attachContext')}><Icon name="plus" size={15} /></button>
-              <button className="icon-btn bare" style={{ width: 26, height: 26 }} title={t('panels.selectModel')}><Icon name="box" size={14} /></button>
-              <span style={{ fontSize: 11, color: 'var(--text-faint)', alignSelf: 'center' }}>{t('panels.modelInfo')}</span>
+              <button className="icon-btn bare" style={{ width: 26, height: 26 }} title={t('panels.selectModel')} onClick={() => onOpenSettings?.()}><Icon name="box" size={14} /></button>
+              <span style={{ fontSize: 11, color: 'var(--text-faint)', alignSelf: 'center' }}>{cfg.model || t('panels.modelInfo')}</span>
             </div>
-            <button className="btn btn-primary sm" style={{ width: 32, padding: 0 }} title={t('panels.send')}><Icon name="send" size={14} /></button>
+            <button className="btn btn-primary sm" style={{ width: 32, padding: 0 }} title={t('panels.send')} disabled={busy || !cfg.model || !draft.trim()} onClick={() => void send()}><Icon name="send" size={14} /></button>
           </div>
         </div>
       </div>

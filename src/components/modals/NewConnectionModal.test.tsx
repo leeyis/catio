@@ -2,21 +2,58 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { vi, describe, it, expect, beforeEach } from 'vitest'
 import { LanguageProvider } from '../../state/LanguageContext'
 import { DataProvider } from '../../state/DataContext'
+import type { ConnectionProfile } from '../../state/connections'
 
 // ---- mock the db service so the test-connection path is driven without Tauri ----
 const h = vi.hoisted(() => ({
   testConnection: vi.fn(),
   dbConnect: vi.fn(),
+  saveProfile: vi.fn(),
+  sshTest: vi.fn(),
 }))
 vi.mock('../../services/db', async (importOriginal) => {
   const mod = await importOriginal<typeof import('../../services/db')>()
   return { ...mod, testConnection: h.testConnection, dbConnect: h.dbConnect }
 })
+vi.mock('../../state/connections', () => ({ saveProfile: h.saveProfile }))
+vi.mock('../../services/ssh', async (orig) => {
+  const actual = await orig<typeof import('../../services/ssh')>()
+  return { ...actual, sshTest: h.sshTest }
+})
 
 import { NewConnectionModal } from './NewConnectionModal'
 
-const wrap = (ui: React.ReactNode) =>
-  render(<LanguageProvider><DataProvider>{ui}</DataProvider></LanguageProvider>)
+const PROFILE: ConnectionProfile = {
+  id: 'live-1.2.3.4:22-deploy',
+  name: 'my-server',
+  host: '1.2.3.4',
+  port: 2222,
+  user: 'deploy',
+  auth: { method: 'password' },
+}
+
+const PROFILE_WITH_JUMP: ConnectionProfile = {
+  id: 'live-1.2.3.4:22-deploy',
+  name: 'my-server',
+  host: '1.2.3.4',
+  port: 2222,
+  user: 'deploy',
+  auth: { method: 'password' },
+  jump: {
+    host: 'bastion.example.com',
+    port: 22,
+    user: 'ec2-user',
+    auth: { method: 'password' },
+  },
+}
+
+function wrap(ui: React.ReactNode) {
+  return render(
+    <LanguageProvider>
+      <DataProvider>{ui}</DataProvider>
+    </LanguageProvider>
+  )
+}
 
 describe('NewConnectionModal', () => {
   beforeEach(() => {
@@ -76,5 +113,161 @@ describe('NewConnectionModal', () => {
       expect(screen.getByText('测试失败')).toBeTruthy()
       expect(screen.getByText('connection refused')).toBeTruthy()
     })
+  })
+})
+
+describe('NewConnectionModal — create mode', () => {
+  beforeEach(() => { h.saveProfile.mockClear(); h.sshTest.mockReset() })
+
+  it('starts with EMPTY defaults (no prototype sample values)', () => {
+    wrap(<NewConnectionModal onClose={() => {}} onConnect={() => {}} />)
+    // host/SSH tab so the host fields are visible
+    fireEvent.click(screen.getByText('主机 / 终端'))
+    const name = screen.getByText('名称').parentElement!.querySelector('input') as HTMLInputElement
+    const host = screen.getByText('主机').parentElement!.querySelector('input') as HTMLInputElement
+    expect(name.value).toBe('')
+    expect(host.value).toBe('')
+    const user = screen.getByText('用户名').parentElement!.querySelector('input') as HTMLInputElement
+    expect(user.value).toBe('')
+    // No prototype sample values anywhere.
+    expect(screen.queryByDisplayValue('prod-web-01')).toBeNull()
+    expect(screen.queryByDisplayValue('10.0.1.21')).toBeNull()
+    expect(screen.queryByDisplayValue('deploy')).toBeNull()
+    expect(screen.queryByDisplayValue('catio')).toBeNull()
+    // Port resets to the sensible SSH default on the host tab.
+    const port = screen.getByText('端口').parentElement!.querySelector('input') as HTMLInputElement
+    expect(port.value).toBe('22')
+  })
+
+  it('Test button calls sshTest and renders the real result', async () => {
+    h.sshTest.mockResolvedValue({ ok: true, latencyMs: 17 })
+    wrap(<NewConnectionModal onClose={() => {}} onConnect={() => {}} />)
+    fireEvent.click(screen.getByText('主机 / 终端'))
+    const host = screen.getByText('主机').parentElement!.querySelector('input') as HTMLInputElement
+    const user = screen.getByText('用户名').parentElement!.querySelector('input') as HTMLInputElement
+    fireEvent.input(host, { target: { value: '1.2.3.4' } })
+    fireEvent.input(user, { target: { value: 'root' } })
+    fireEvent.click(screen.getByText('测试连接'))
+    expect(h.sshTest).toHaveBeenCalledTimes(1)
+    expect(h.sshTest.mock.calls[0][0]).toMatchObject({ host: '1.2.3.4', user: 'root' })
+    await waitFor(() => expect(screen.getByText(/测试通过 · 17ms/)).toBeTruthy())
+  })
+
+  it('ProxyJump toggle is OFF by default and reveals jump fields when ON', () => {
+    wrap(<NewConnectionModal onClose={() => {}} onConnect={() => {}} />)
+    fireEvent.click(screen.getByText('主机 / 终端'))
+    // Jump fields not shown initially
+    expect(screen.queryByText('跳板主机')).toBeNull()
+    // Toggle ProxyJump ON
+    const toggleBtn = screen.getByRole('switch')
+    fireEvent.click(toggleBtn)
+    // Jump fields should now be visible
+    expect(screen.getByText('跳板主机')).toBeTruthy()
+    expect(screen.getByText('跳板用户')).toBeTruthy()
+    expect(screen.getByText('跳板密码/口令')).toBeTruthy()
+  })
+
+  it('Save&Connect includes jump in args (with secret) and saves profile WITHOUT jump secret', () => {
+    const onConnect = vi.fn()
+    wrap(<NewConnectionModal onClose={() => {}} onConnect={onConnect} />)
+    fireEvent.click(screen.getByText('主机 / 终端'))
+
+    // Fill target fields
+    const host = screen.getByText('主机').parentElement!.querySelector('input') as HTMLInputElement
+    const user = screen.getByText('用户名').parentElement!.querySelector('input') as HTMLInputElement
+    fireEvent.input(host, { target: { value: '10.0.0.5' } })
+    fireEvent.input(user, { target: { value: 'app' } })
+
+    // Enable ProxyJump
+    const toggleBtn = screen.getByRole('switch')
+    fireEvent.click(toggleBtn)
+
+    // Fill jump fields
+    const jumpHost = screen.getByText('跳板主机').parentElement!.querySelector('input') as HTMLInputElement
+    const jumpUser = screen.getByText('跳板用户').parentElement!.querySelector('input') as HTMLInputElement
+    fireEvent.input(jumpHost, { target: { value: 'bastion.example.com' } })
+    fireEvent.input(jumpUser, { target: { value: 'ec2-user' } })
+
+    // Fill jump secret (placeholder is the proxyJumpSecret i18n key: '跳板密码/口令')
+    const jumpSecretInput = screen.getByPlaceholderText('跳板密码/口令') as HTMLInputElement
+    fireEvent.change(jumpSecretInput, { target: { value: 'jump-pw-123' } })
+
+    // Click Save & Connect
+    fireEvent.click(screen.getByText('保存并连接'))
+
+    // onConnect args should carry jump with secret
+    expect(onConnect).toHaveBeenCalledTimes(1)
+    const [args] = onConnect.mock.calls[0] as [import('../../services/ssh').SshConnectArgs, unknown]
+    expect(args.jump).toBeDefined()
+    expect(args.jump?.host).toBe('bastion.example.com')
+    expect(args.jump?.user).toBe('ec2-user')
+    expect(args.jump?.secret).toBe('jump-pw-123')
+
+    // saveProfile should be called WITHOUT jump secret
+    expect(h.saveProfile).toHaveBeenCalledTimes(1)
+    const savedProfile = h.saveProfile.mock.calls[0][0] as ConnectionProfile
+    expect(savedProfile.jump?.host).toBe('bastion.example.com')
+    expect(JSON.stringify(savedProfile)).not.toContain('jump-pw-123')
+    // jump.secret should not be in the saved profile
+    expect(JSON.stringify(savedProfile)).not.toContain('"secret"')
+  })
+})
+
+describe('NewConnectionModal — edit mode', () => {
+  beforeEach(() => { h.saveProfile.mockClear(); h.sshTest.mockReset() })
+
+  it('leaves the password field empty in edit mode (secrets never stored)', () => {
+    wrap(<NewConnectionModal editProfile={PROFILE} onClose={() => {}} />)
+    const pw = screen.getByPlaceholderText('密码') as HTMLInputElement
+    expect(pw.value).toBe('')
+  })
+
+  it('renders the edit title and prefills fields from the profile', () => {
+    wrap(<NewConnectionModal editProfile={PROFILE} onClose={() => {}} />)
+    expect(screen.getByText('编辑连接')).toBeTruthy()
+    expect((screen.getByDisplayValue('my-server') as HTMLInputElement)).toBeTruthy()
+    expect((screen.getByDisplayValue('1.2.3.4') as HTMLInputElement)).toBeTruthy()
+    expect((screen.getByDisplayValue('2222') as HTMLInputElement)).toBeTruthy()
+    expect((screen.getByDisplayValue('deploy') as HTMLInputElement)).toBeTruthy()
+  })
+
+  it('Save updates the SAME id, calls onSaved, and does NOT call onConnect', () => {
+    const onSaved = vi.fn()
+    const onConnect = vi.fn()
+    const onClose = vi.fn()
+    wrap(<NewConnectionModal editProfile={PROFILE} onSaved={onSaved} onConnect={onConnect} onClose={onClose} />)
+    fireEvent.click(screen.getByText('保存'))
+    expect(h.saveProfile).toHaveBeenCalledTimes(1)
+    expect(h.saveProfile.mock.calls[0][0]).toMatchObject({ id: 'live-1.2.3.4:22-deploy', name: 'my-server', host: '1.2.3.4', port: 2222, user: 'deploy' })
+    expect(onSaved).toHaveBeenCalledTimes(1)
+    expect(onConnect).not.toHaveBeenCalled()
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('prefills jump fields from editProfile.jump (no secret)', () => {
+    wrap(<NewConnectionModal editProfile={PROFILE_WITH_JUMP} onClose={() => {}} />)
+    // Toggle should be ON because profile has jump
+    expect(screen.getByText('跳板主机')).toBeTruthy()
+    expect(screen.getByDisplayValue('bastion.example.com')).toBeTruthy()
+    expect(screen.getByDisplayValue('ec2-user')).toBeTruthy()
+    // Jump secret should be empty (never prefilled)
+    const jumpSecretInputs = document.querySelectorAll('input[type="password"]')
+    jumpSecretInputs.forEach(inp => {
+      expect((inp as HTMLInputElement).value).toBe('')
+    })
+  })
+
+  it('Save in edit mode persists jump profile WITHOUT secret', () => {
+    const onSaved = vi.fn()
+    const onClose = vi.fn()
+    wrap(<NewConnectionModal editProfile={PROFILE_WITH_JUMP} onSaved={onSaved} onClose={onClose} />)
+    fireEvent.click(screen.getByText('保存'))
+    expect(h.saveProfile).toHaveBeenCalledTimes(1)
+    const saved = h.saveProfile.mock.calls[0][0] as ConnectionProfile
+    expect(saved.jump?.host).toBe('bastion.example.com')
+    expect(saved.jump?.user).toBe('ec2-user')
+    // No secret in saved profile
+    expect(JSON.stringify(saved)).not.toContain('"secret"')
+    expect(onSaved).toHaveBeenCalledTimes(1)
   })
 })

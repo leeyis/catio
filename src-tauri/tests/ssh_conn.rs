@@ -1,7 +1,9 @@
 mod common;
 use common::test_server;
 
-use catio_lib::ssh::conn::{connect_authenticated, connect_checked, AuthMethod, ConnectArgs};
+use catio_lib::ssh::conn::{
+    connect_authenticated, connect_checked, test_connection, AuthMethod, ConnectArgs,
+};
 
 #[tokio::test]
 async fn test_server_starts_and_binds() {
@@ -19,8 +21,9 @@ async fn connects_with_password() {
         user: test_server::TEST_USER.into(),
         auth: AuthMethod::Password,
         secret: Some(test_server::TEST_PW.into()),
+        jump: None,
     };
-    let (handle, fp) = connect_authenticated(&args).await.expect("should connect");
+    let (handle, fp, _, _) = connect_authenticated(&args).await.expect("should connect");
     assert!(!fp.is_empty(), "fingerprint captured");
     handle
         .disconnect(russh::Disconnect::ByApplication, "", "en")
@@ -37,6 +40,7 @@ async fn rejects_wrong_password() {
         user: test_server::TEST_USER.into(),
         auth: AuthMethod::Password,
         secret: Some("wrong".into()),
+        jump: None,
     };
     assert!(connect_authenticated(&args).await.is_err());
 }
@@ -54,6 +58,7 @@ async fn rejects_host_key_mismatch() {
         user: test_server::TEST_USER.into(),
         auth: AuthMethod::Password,
         secret: Some(test_server::TEST_PW.into()),
+        jump: None,
     };
     let res = connect_checked(&args, Some(dir.as_path())).await;
     assert!(matches!(res, Err(catio_lib::ssh::SshError::HostKeyMismatch)));
@@ -70,8 +75,9 @@ async fn trusts_known_host() {
         user: test_server::TEST_USER.into(),
         auth: AuthMethod::Password,
         secret: Some(test_server::TEST_PW.into()),
+        jump: None,
     };
-    let (handle, fp, _) = connect_checked(&args, None).await.expect("first connect");
+    let (handle, fp, _, _, _) = connect_checked(&args, None).await.expect("first connect");
     handle
         .disconnect(russh::Disconnect::ByApplication, "", "en")
         .await
@@ -83,7 +89,7 @@ async fn trusts_known_host() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("known_hosts"), format!("{hp} {fp}\n")).unwrap();
 
-    let (handle2, fp2, trusted) = connect_checked(&args, Some(dir.as_path()))
+    let (handle2, fp2, _, _, trusted) = connect_checked(&args, Some(dir.as_path()))
         .await
         .expect("second connect should succeed");
     assert!(trusted, "host should be trusted");
@@ -97,6 +103,40 @@ async fn trusts_known_host() {
 }
 
 #[tokio::test]
+async fn test_connection_ok_with_correct_password() {
+    let addr = test_server::start().await;
+    let args = ConnectArgs {
+        host: addr.ip().to_string(),
+        port: addr.port(),
+        user: test_server::TEST_USER.into(),
+        auth: AuthMethod::Password,
+        secret: Some(test_server::TEST_PW.into()),
+        jump: None,
+    };
+    let res = test_connection(args).await;
+    assert!(res.ok, "test should succeed with correct password");
+    assert!(res.error.is_none(), "no error on success");
+    // latency_ms is always set (>=0); just confirm the field is present and sane.
+    assert!(res.latency_ms < 60_000, "latency should be a sane value");
+}
+
+#[tokio::test]
+async fn test_connection_fails_with_wrong_password() {
+    let addr = test_server::start().await;
+    let args = ConnectArgs {
+        host: addr.ip().to_string(),
+        port: addr.port(),
+        user: test_server::TEST_USER.into(),
+        auth: AuthMethod::Password,
+        secret: Some("wrong".into()),
+        jump: None,
+    };
+    let res = test_connection(args).await;
+    assert!(!res.ok, "test should fail with wrong password");
+    assert!(res.error.is_some(), "error should be set on failure");
+}
+
+#[tokio::test]
 async fn connects_with_key_file() {
     let addr = test_server::start().await;
     let key_path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/id_test");
@@ -106,7 +146,8 @@ async fn connects_with_key_file() {
         user: test_server::TEST_USER.into(),
         auth: AuthMethod::KeyFile { path: key_path.into() },
         secret: None,
+        jump: None,
     };
-    let (handle, _fp) = connect_authenticated(&args).await.expect("key auth");
+    let (handle, _fp, _, _) = connect_authenticated(&args).await.expect("key auth");
     handle.disconnect(russh::Disconnect::ByApplication, "", "en").await.ok();
 }

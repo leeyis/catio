@@ -6,10 +6,19 @@ import { IconBtn, Segmented, ConnGlyph, Btn } from '../atoms'
 import { useData } from '../../state/DataContext'
 import type { Snippet, HistoryItem, Connection } from '../../services/types'
 import { PanelShell } from './PanelShell'
+import { ConfirmModal } from '../modals/ConfirmModal'
 
 export interface HistoryPanelProps {
   onClose: () => void
   onAddSnippet?: (s: Snippet) => void
+  /** Live history items from the real store (H4 will use this; H3 passes it in). */
+  items?: HistoryItem[]
+  /** Called when the user confirms clearing all history. */
+  onClear?: () => void
+  /** Called when the user clicks the insert button on a history row. */
+  onInsert?: (text: string) => void
+  /** Whether insert is currently possible (e.g. an active terminal exists). */
+  canInsert?: boolean
 }
 
 interface MenuItemProps {
@@ -38,18 +47,22 @@ function MenuItem({ active, onClick, conn, kind, icon, label, count }: MenuItemP
 interface HistoryRowProps {
   h: HistoryItem
   onSave: (h: HistoryItem) => void
+  onInsert?: (text: string) => void
+  canInsert?: boolean
 }
 
-function HistoryRow({ h, onSave }: HistoryRowProps) {
+function HistoryRow({ h, onSave, onInsert, canInsert }: HistoryRowProps) {
   const { t } = useTranslation()
   const [hover, setHover] = useState(false)
   const [copied, setCopied] = useState(false)
+  const hasFailed = h.exitCode != null && h.exitCode !== 0
   function copy(e: React.MouseEvent) {
     e.stopPropagation()
     if (navigator.clipboard) navigator.clipboard.writeText(h.text).catch(() => {})
     setCopied(true)
     setTimeout(() => setCopied(false), 1400)
   }
+  const insertEnabled = !!onInsert && !!canInsert
   return (
     <div onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
       className="col" style={{ padding: '9px 10px', borderRadius: 10, gap: 6, cursor: 'pointer', background: hover ? 'var(--surface-sunken)' : 'transparent' }}>
@@ -61,14 +74,21 @@ function HistoryRow({ h, onSave }: HistoryRowProps) {
         <span style={{ fontSize: 10.5, color: 'var(--text-disabled)' }}>{h.when}</span>
       </div>
       <div className="row gap6" style={{ minWidth: 0 }}>
-        <span className="ell mono" style={{ fontSize: 11.5, color: 'var(--text-secondary)', flex: 1 }}>{h.text}</span>
+        <span className="ell mono" style={{ fontSize: 11.5, color: hasFailed ? 'var(--danger-fg)' : 'var(--text-secondary)', flex: 1 }}>{h.text}</span>
+        {hasFailed && (
+          <span className="mono" style={{ fontSize: 9.5, color: 'var(--danger-fg)', background: 'color-mix(in srgb, var(--danger-fg) 12%, transparent)', borderRadius: 4, padding: '1px 5px', flex: 'none' }}>
+            exit {h.exitCode}
+          </span>
+        )}
         <div className="row gap2" style={{ flex: 'none', opacity: hover || copied ? 1 : 0, transition: 'opacity .12s' }}>
           <button className="icon-btn bare" style={{ width: 22, height: 22, color: copied ? 'var(--signal-green)' : 'var(--text-tertiary)' }} title={copied ? t('panels.copied') : t('panels.copy')} onClick={copy}>
             <Icon name={copied ? 'check' : 'copy'} size={13} />
           </button>
-          <button className="icon-btn bare" style={{ width: 22, height: 22 }} title={h.kind === 'sql' ? t('panels.insertEditor') : t('panels.insertTerminal')} onClick={e => e.stopPropagation()}>
-            <Icon name="arrow-right-to-line" size={13} />
-          </button>
+          {insertEnabled && (
+            <button className="icon-btn bare" style={{ width: 22, height: 22 }} title={h.kind === 'sql' ? t('panels.insertEditor') : t('panels.insertTerminal')} onClick={e => { e.stopPropagation(); onInsert(h.text) }}>
+              <Icon name="arrow-right-to-line" size={13} />
+            </button>
+          )}
           <button className="icon-btn bare" style={{ width: 22, height: 22 }} title={t('panels.saveToSnippets')} onClick={e => { e.stopPropagation(); onSave && onSave(h) }}>
             <Icon name="snippet" size={13} />
           </button>
@@ -123,7 +143,7 @@ function SaveSnippetModal({ row, onClose, onSave }: SaveSnippetModalProps) {
   )
 }
 
-export function HistoryPanel({ onClose, onAddSnippet }: HistoryPanelProps) {
+export function HistoryPanel({ onClose, onAddSnippet, items, onClear, onInsert, canInsert }: HistoryPanelProps) {
   const { t } = useTranslation()
   const D = useData()
   const [q, setQ] = useState('')
@@ -131,14 +151,17 @@ export function HistoryPanel({ onClose, onAddSnippet }: HistoryPanelProps) {
   const [target, setTarget] = useState('all')
   const [menuOpen, setMenuOpen] = useState(false)
   const [saveRow, setSaveRow] = useState<HistoryItem | null>(null)
+  const [confirmClear, setConfirmClear] = useState(false)
   const byName = useMemo(() => Object.fromEntries(D.connections.map(c => [c.name, c])), [D.connections])
+  // Prefer real store items passed in; fall back to mock D.history (demo / H4 not yet wired).
+  const historyItems = items ?? D.history
   // distinct targets present in history
   const targets = useMemo(() => {
     const seen: Array<{ name: string; kind: string }> = []
-    D.history.forEach(h => { if (!seen.find(t2 => t2.name === h.target)) seen.push({ name: h.target, kind: h.kind }) })
+    historyItems.forEach(h => { if (!seen.find(t2 => t2.name === h.target)) seen.push({ name: h.target, kind: h.kind }) })
     return seen
-  }, [D.history])
-  const rows = D.history.filter(h => {
+  }, [historyItems])
+  const rows = historyItems.filter(h => {
     if (kind !== 'all' && h.kind !== kind) return false
     if (target !== 'all' && h.target !== target) return false
     if (q && !(h.text.toLowerCase().includes(q.toLowerCase()) || h.target.toLowerCase().includes(q.toLowerCase()))) return false
@@ -175,10 +198,10 @@ export function HistoryPanel({ onClose, onAddSnippet }: HistoryPanelProps) {
               <>
                 <div style={{ position: 'fixed', inset: 0, zIndex: 40 }} onClick={() => setMenuOpen(false)} />
                 <div className="pop-in" style={{ position: 'absolute', top: 34, left: 0, right: 0, zIndex: 50, background: 'var(--surface-elevated)', border: '1px solid var(--border-hairline-alt)', borderRadius: 10, boxShadow: 'var(--shadow-dropdown)', padding: 5, maxHeight: 260, overflowY: 'auto' }}>
-                  <MenuItem active={target === 'all'} onClick={() => { setTarget('all'); setMenuOpen(false) }} icon="filter" label={t('panels.allConnections')} count={D.history.length} />
+                  <MenuItem active={target === 'all'} onClick={() => { setTarget('all'); setMenuOpen(false) }} icon="filter" label={t('panels.allConnections')} count={historyItems.length} />
                   {targets.map(t2 => {
                     const conn = byName[t2.name]
-                    const n = D.history.filter(h => h.target === t2.name).length
+                    const n = historyItems.filter(h => h.target === t2.name).length
                     return <MenuItem key={t2.name} active={target === t2.name} onClick={() => { setTarget(t2.name); setMenuOpen(false) }} conn={conn} kind={t2.kind} label={t2.name} count={n} />
                   })}
                 </div>
@@ -189,7 +212,7 @@ export function HistoryPanel({ onClose, onAddSnippet }: HistoryPanelProps) {
       </div>
       {/* list */}
       <div className="grow" style={{ overflowY: 'auto', padding: 10, display: 'flex', flexDirection: 'column', gap: 4 }}>
-        {rows.length ? rows.map(h => <HistoryRow key={h.id} h={h} onSave={setSaveRow} />) : (
+        {rows.length ? rows.map(h => <HistoryRow key={h.id} h={h} onSave={setSaveRow} onInsert={onInsert} canInsert={canInsert} />) : (
           <div className="col" style={{ alignItems: 'center', justifyContent: 'center', padding: '30px 0', gap: 8, color: 'var(--text-faint)' }}>
             <Icon name="search" size={22} /><span style={{ fontSize: 12.5 }}>{t('panels.noHistory')}</span>
           </div>
@@ -197,10 +220,25 @@ export function HistoryPanel({ onClose, onAddSnippet }: HistoryPanelProps) {
       </div>
       {/* footer count */}
       <div className="row gap6" style={{ padding: '8px 12px', borderTop: '1px solid var(--border-hairline)', fontSize: 11, color: 'var(--text-faint)' }}>
-        <Icon name="history" size={12} /> {t('panels.showingCount', { shown: rows.length, total: D.history.length })}
-        {(kind !== 'all' || target !== 'all' || q) && <button className="btn btn-ghost sm" style={{ marginLeft: 'auto', height: 22, padding: '0 8px', fontSize: 11 }} onClick={() => { setKind('all'); setTarget('all'); setQ('') }}>{t('panels.clearFilters')}</button>}
+        <Icon name="history" size={12} /> {t('panels.showingCount', { shown: rows.length, total: historyItems.length })}
+        {(kind !== 'all' || target !== 'all' || q) && <button className="btn btn-ghost sm" style={{ height: 22, padding: '0 8px', fontSize: 11 }} onClick={() => { setKind('all'); setTarget('all'); setQ('') }}>{t('panels.clearFilters')}</button>}
+        {onClear && historyItems.length > 0 && (
+          <button className="btn btn-ghost sm" style={{ marginLeft: 'auto', height: 22, padding: '0 8px', fontSize: 11, color: 'var(--danger-fg)' }} onClick={() => setConfirmClear(true)}>
+            {t('panels.clearHistory')}
+          </button>
+        )}
       </div>
       {saveRow && <SaveSnippetModal row={saveRow} onClose={() => setSaveRow(null)} onSave={(s) => { onAddSnippet && onAddSnippet(s as Snippet); setSaveRow(null) }} />}
+      {confirmClear && (
+        <ConfirmModal
+          title={t('panels.clearHistoryTitle')}
+          message={t('panels.clearHistoryMsg')}
+          confirmLabel={t('panels.clearHistory')}
+          danger
+          onConfirm={() => { setConfirmClear(false); onClear?.() }}
+          onCancel={() => setConfirmClear(false)}
+        />
+      )}
     </PanelShell>
   )
 }

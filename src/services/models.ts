@@ -15,7 +15,7 @@ interface OpenAIModelsResponse {
   data: Array<{ id: string }>
 }
 
-function trimSlash(url: string): string {
+export function trimSlash(url: string): string {
   return url.replace(/\/+$/, '')
 }
 
@@ -39,7 +39,7 @@ function isOpenAIModelsResponse(v: unknown): v is OpenAIModelsResponse {
 
 // Resolve the fetch function: use Tauri HTTP plugin in Tauri context (bypasses CORS),
 // fall back to globalThis.fetch for browser/jsdom (works for same-origin/localhost).
-async function resolveFetch(): Promise<typeof globalThis.fetch> {
+export async function resolveFetch(): Promise<typeof globalThis.fetch> {
   if (isTauri) {
     try {
       const { fetch: tauriFetch } = await import('@tauri-apps/plugin-http')

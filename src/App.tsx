@@ -1,5 +1,5 @@
 /* ported from ref-ui/_extract/blob15.txt — verbatim per plan T1-T7 */
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { TitleBar, Sidebar, IconRail } from './components/shell/Sidebar'
 import { HomeView } from './components/views/HomeView'
@@ -15,6 +15,9 @@ import { SnippetsPanel } from './components/panels/SnippetsPanel'
 import { HistoryPanel } from './components/panels/HistoryPanel'
 import { DetailsPanel } from './components/panels/DetailsPanel'
 import { NewConnectionModal } from './components/modals/NewConnectionModal'
+import { ConnectSecretPrompt } from './components/modals/ConnectSecretPrompt'
+import { HostKeyPrompt } from './components/modals/HostKeyPrompt'
+import { ConfirmModal } from './components/modals/ConfirmModal'
 import { AuthGate } from './components/auth/AuthGate'
 import { Icon } from './components/Icon'
 import { Btn } from './components/atoms'
@@ -27,6 +30,24 @@ import {
   setActiveDbConnection, removeDbConnection, removeActiveDbConnection,
   type DbProfile,
 } from './state/dbConnections'
+import { sshConnect, sshDisconnect, sshTrustHost, isTauri, onHistory, sshSysinfo } from './services/ssh'
+import type { SshConnectArgs } from './services/ssh'
+import { appendHistory, loadHistory, clearHistory } from './state/history'
+import type { HistoryItem } from './services/types'
+import { loadProfiles, saveProfile, deleteProfile } from './state/connections'
+import { loadSnippets, saveSnippet, newSnippetId } from './state/snippets'
+import {
+  loadConversations,
+  saveConversation,
+  deleteConversation as deleteConversationStore,
+  conversationsForHost,
+  newConversation as makeConversation,
+} from './state/conversations'
+import type { Conversation } from './state/conversations'
+import { chat } from './services/agent'
+import type { ChatMsg } from './services/agent'
+import { useAgentConfig } from './state/agentConfig'
+import type { ConnectionProfile } from './state/connections'
 import type { Tab, Connection, Snippet } from './services/types'
 import type { AuthUser } from './components/auth/AuthGate'
 import type { Attachment } from './components/panels/AIPanel'
@@ -34,31 +55,89 @@ import type { Attachment } from './components/panels/AIPanel'
 export default function App() {
   const D = useData()
   const dbProfiles = useDbConnections()
+  const { t } = useTranslation()
   const hash = (location.hash || '').replace('#', '')
   const initTheme = hash.includes('amber') ? 'amber' : hash.includes('grove') ? 'grove' : ((localStorage.getItem('catio-theme') || 'dawn') as 'dawn' | 'amber' | 'grove')
   const initView = (['home', 'workbench', 'settings'] as const).find(v => hash.includes(v)) || 'home'
   const [tweaks, setTweak] = useTweaks({ ...TWEAK_DEFAULTS, theme: initTheme })
   const [view, setView] = useState<string>(initView)
   const [prevView, setPrevView] = useState<string>('home')
-  // Seed only the (real, mock-host) bastion terminal tab. The previous mock DB
-  // tab ('d-orders') referenced a now-hidden mock connection, so it's dropped and
-  // the app lands on 'home' by default (clean, no auto-opened mock db).
-  const [tabs, setTabs] = useState<Tab[]>([
-    { id: 'tab-bastion', kind: 'terminal', connId: 'h-bastion', title: 'db-bastion' },
-  ])
-  const [activeTab, setActiveTab] = useState<string>('tab-bastion')
+  // Which Settings section to open to (theme | security | ai | ...).
+  const [settingsSection, setSettingsSection] = useState<string>('theme')
+  // Start with no open tabs — the app lands on 'home' by default (clean, no
+  // auto-opened mock host/db). Tabs are created on demand by openConn/openLiveTab.
+  const [tabs, setTabs] = useState<Tab[]>([])
+  const [activeTab, setActiveTab] = useState<string>('')
   const [activePanel, setActivePanel] = useState<string>('ai')
-  const [panelOpen, setPanelOpen] = useState<boolean>(true)
+  const [panelOpen, setPanelOpen] = useState<boolean>(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false)
   const [detailConn, setDetailConn] = useState<Connection | null>(null)
   const [showNew, setShowNew] = useState<boolean>(false)
+  // EDIT mode for the DB NewConnectionModal (null = create/new DB profile).
   const [editProfile, setEditProfile] = useState<DbProfile | null>(null)
-  const [sidebarFilter, setSidebarFilter] = useState<string>('all') // all | host | db
+  // Sidebar vault filter: all | host | db.
+  const [sidebarFilter, setSidebarFilter] = useState<string>('all')
+  // EDIT mode for the SSH NewConnectionModal (null = create/new host profile).
+  const [editing, setEditing] = useState<ConnectionProfile | null>(null)
+  // Pending delete confirmation (styled ConfirmModal).
+  const [pendingDelete, setPendingDelete] = useState<Connection | null>(null)
   const [aiAttachment, setAiAttachment] = useState<Attachment | null>(null)
-  const [snippets, setSnippets] = useState<Snippet[]>(() => D.snippets)
+  const [snippets, setSnippets] = useState<Snippet[]>(() => loadSnippets())
+
+  // ---- Catio Agent conversations (P2): per-host persisted, per-tab current ----
+  const { config: agentCfg } = useAgentConfig()
+  const [conversations, setConversations] = useState<Conversation[]>(() => loadConversations())
+  // Authoritative mirror of `conversations` for mutations/persistence. React 18
+  // does not guarantee a setState updater runs synchronously during streaming,
+  // so we never rely on the updater's return value to persist — we mutate this
+  // ref synchronously, persist from it, then push it into state for rendering.
+  const conversationsRef = useRef<Conversation[]>(conversations)
+  // tabId -> the conversation id currently shown for that tab.
+  const [currentConvByTab, setCurrentConvByTab] = useState<Record<string, string>>({})
+  // tabId -> AbortController for the in-flight send (so streaming survives view/tab switches).
+  const agentAborts = useRef<Record<string, AbortController>>({})
+  // convIds with a live in-flight stream (drives the panel's busy state).
+  const [busyConvs, setBusyConvs] = useState<Record<string, boolean>>({})
+  // sessionId -> cached sysinfo string (fetched once per session on first agent send).
+  const sysinfoCache = useRef<Record<string, string>>({})
+
+  // Upsert into the ref (source of truth), localStorage, and render state.
+  function upsertConversation(conv: Conversation) {
+    const next = [...conversationsRef.current.filter(c => c.id !== conv.id), conv]
+    conversationsRef.current = next
+    setConversations(next)
+    saveConversation(conv)
+  }
+
+  // Real saved connection profiles (localStorage) — these seed the Vault & Home.
+  const [profiles, setProfiles] = useState<ConnectionProfile[]>(() => loadProfiles())
+  const reloadProfiles = () => setProfiles(loadProfiles())
+
+  // ---- ORCH: live SSH session orchestration ----
+  // connId -> sessionId for live (Tauri) connections.
+  const [sessionMap, setSessionMap] = useState<Record<string, string>>({})
+  // Display Connection objects for live conns (not present in mock D.byId).
+  const [liveConns, setLiveConns] = useState<Record<string, Connection>>({})
+  // sessionId -> live PTY channel id (surfaced by TerminalPane.onChannel). Used to
+  // write snippet/history "insert" payloads into the active terminal.
+  const [chanMap, setChanMap] = useState<Record<string, string>>({})
+  // History items loaded from localStorage; updated on each new audit event.
+  const [history, setHistory] = useState<HistoryItem[]>(() => loadHistory())
+  // sessionId -> unlisten fn for history:// subscriptions; avoids re-render on update.
+  const historyUnlisteners = useRef<Record<string, () => void>>({})
+  // Per-event idempotency: a single backend command must produce exactly one row
+  // even if multiple listeners observe the same history:// event. Bounded below.
+  const seenHistIds = useRef<Set<string>>(new Set())
+  // Connect-flow state machine: collect secret, then (maybe) trust host key.
+  // pendingJumpSecret: when a profile has a jump host, collect jump secret first.
+  const [pendingJumpSecret, setPendingJumpSecret] = useState<{ args: SshConnectArgs; name: string } | null>(null)
+  const [pendingConnect, setPendingConnect] = useState<{ args: SshConnectArgs; name: string } | null>(null)
+  const [pendingTrust, setPendingTrust] = useState<{ args: SshConnectArgs; name: string; sessionId: string; fingerprint: string } | null>(null)
+  const resolveSessionId = (connId: string) => sessionMap[connId]
 
   function addSnippet(s: Snippet) {
-    setSnippets(prev => [{ ...s, id: 's' + Date.now() }, ...prev])
+    saveSnippet({ ...s, id: newSnippetId() })
+    setSnippets(loadSnippets())
     setActivePanel('snippets')
     setPanelOpen(true)
   }
@@ -76,12 +155,23 @@ export default function App() {
   const locked = authEnabled && !sessionUser
   // the first account created owns the seed vault; other users get an isolated (empty) vault
   const ownsVault = !authEnabled || sessionUser === ownerUser || sessionUser === '__open'
-  // Connection list = real saved DB connections (reactive) + mock SSH hosts.
+  // Vault = real saved SSH host profiles + real saved DB connections (reactive).
   // Mock DB connections are excluded — only real saved profiles drive DB rows now.
+  // Real saved SSH host profiles (localStorage) → host Connection rows.
+  const profileConns: Connection[] = profiles.map(p => ({
+    id: p.id,
+    group: '',
+    kind: 'host',
+    name: p.name,
+    sub: `${p.user}@${p.host}:${p.port}`,
+    icon: 'server',
+    status: 'idle',
+    proto: 'ssh',
+  }))
+  // Real saved DB connections (reactive) → db Connection rows.
   const activeProfileIds = new Set(listActiveDbConnections().map(a => a.profileId))
   const realDbConns = dbProfiles.map(p => dbProfileToConnection(p, activeProfileIds.has(p.id)))
-  const mockHostConns = D.connections.filter(c => c.kind === 'host')
-  const vaultConns = ownsVault ? [...mockHostConns, ...realDbConns] : []
+  const vaultConns = ownsVault ? [...profileConns, ...realDbConns] : []
   const currentName = authEnabled && sessionUser && sessionUser !== '__open' ? sessionUser : 'skyler'
 
   function enableAuth() {
@@ -134,10 +224,136 @@ export default function App() {
 
   const setThemeBoth = (x: string) => setTweak('theme', x as 'dawn' | 'amber' | 'grove')
 
+  // Build a display Connection for a live SSH session and open its terminal tab.
+  function openLiveTab(args: SshConnectArgs, name: string, sessionId?: string) {
+    const connId = `live-${args.host}:${args.port}-${args.user}`
+    const conn: Connection = {
+      id: connId,
+      group: '',
+      kind: 'host',
+      name,
+      sub: `${args.user}@${args.host}:${args.port}`,
+      icon: 'server',
+      status: 'up',
+      proto: 'ssh',
+    }
+    setLiveConns(prev => ({ ...prev, [connId]: conn }))
+    if (sessionId) setSessionMap(prev => ({ ...prev, [connId]: sessionId }))
+    const tabId = 'tab-' + connId
+    setTabs(prev => prev.some(tb => tb.id === tabId)
+      ? prev.map(tb => tb.id === tabId ? { ...tb, sessionId } : tb)
+      : [...prev, { id: tabId, kind: 'terminal', connId, title: name, sessionId }])
+    setActiveTab(tabId)
+    setView('workbench')
+    // Surface any newly-saved profile in the vault (saveProfile ran in the modal).
+    reloadProfiles()
+
+    // Subscribe to shell-command audit events for this session (Tauri only).
+    // Reserve the slot SYNCHRONOUSLY before awaiting so a re-entrant call (e.g.
+    // a second openLiveTab for the same session) can't double-subscribe.
+    if (sessionId && !historyUnlisteners.current[sessionId]) {
+      historyUnlisteners.current[sessionId] = () => { /* reserve immediately to block re-entry */ }
+      void onHistory(sessionId, e => {
+        // Per-event dedup: drop any event id we've already applied so one backend
+        // command yields exactly one history row even with multiple listeners.
+        if (seenHistIds.current.has(e.id)) return
+        seenHistIds.current.add(e.id)
+        // Bound the set so it can't grow without limit on long-lived sessions.
+        if (seenHistIds.current.size > 5000) seenHistIds.current.clear()
+        appendHistory({
+          kind: 'shell',
+          target: e.host || name,
+          text: e.command,
+          when: new Date().toLocaleTimeString(),
+          dur: e.durationMs + 'ms',
+          exitCode: e.exitCode ?? undefined,
+        })
+        setHistory(loadHistory())
+      }).then(unlisten => {
+        // If the session was torn down while subscribing, unlisten now; otherwise
+        // replace the placeholder with the real unlisten fn.
+        if (historyUnlisteners.current[sessionId]) historyUnlisteners.current[sessionId] = unlisten
+        else unlisten()
+      })
+    }
+  }
+
+  // ORCH connect entrypoint — invoked by NewConnectionModal's onConnect and by
+  // reconnect actions. `args.secret` may carry an in-memory secret typed in the
+  // modal; when present we connect straight away (no second prompt).
+  function connectProfile(args: SshConnectArgs, display: { name: string }) {
+    if (!isTauri()) {
+      // Demo path: no IPC, just open a demo terminal tab (no sessionId).
+      openLiveTab(args, display.name)
+      return
+    }
+    // If the modal already supplied a target secret, the jump secret (if any) also
+    // came from the form — connect directly (skip all prompts).
+    if (args.secret && args.secret.length > 0) {
+      void performConnect(args, display.name, args.secret)
+      return
+    }
+    // Reconnect path: collect secrets interactively.
+    // If a jump host is configured AND it has no secret yet, collect jump secret first.
+    if (args.jump && !args.jump.secret) {
+      setPendingJumpSecret({ args, name: display.name })
+      return
+    }
+    // Otherwise collect target secret.
+    setPendingConnect({ args, name: display.name })
+  }
+
+  // Secret collected → call sshConnect; route to trust prompt / success / error.
+  // args.jump (with its secret) is forwarded intact to sshConnect.
+  async function performConnect(args: SshConnectArgs, name: string, secret: string) {
+    try {
+      const result = await sshConnect({ ...args, secret, jump: args.jump })
+      if (result.hostKeyTrusted === false) {
+        setPendingTrust({ args, name, sessionId: result.sessionId, fingerprint: result.hostKeyFingerprint })
+        return
+      }
+      openLiveTab(args, name, result.sessionId)
+    } catch (err) {
+      const kind = (err as { kind?: string } | null)?.kind
+      if (kind === 'HostKeyMismatch') {
+        window.alert(t('modals.connectErrorMismatch'))
+      } else {
+        const message = (err as { message?: string } | null)?.message ?? String(err)
+        window.alert(t('modals.connectErrorGeneric', { message }))
+      }
+    }
+  }
+
+  // Trust accepted → record host key, then open the (already-established) session.
+  async function trustAndOpen(p: NonNullable<typeof pendingTrust>) {
+    try {
+      await sshTrustHost(`${p.args.host}:${p.args.port}`, p.fingerprint)
+    } catch { /* best-effort — proceed even if recording fails */ }
+    openLiveTab(p.args, p.name, p.sessionId)
+    setPendingTrust(null)
+  }
+
+  // Trust rejected → tear down the untrusted session.
+  function rejectTrust(p: NonNullable<typeof pendingTrust>) {
+    sshDisconnect(p.sessionId).catch(() => { /* best-effort */ })
+    setPendingTrust(null)
+  }
+
   function openConn(conn: Connection) {
+    // If this vault entry maps to a saved profile, run the REAL connect flow
+    // (collects the secret, verifies host key, opens a live session/tab).
+    const profile = profiles.find(p => p.id === conn.id)
+    if (profile) {
+      connectProfile(
+        { host: profile.host, port: profile.port, user: profile.user, auth: profile.auth, jump: profile.jump },
+        { name: profile.name },
+      )
+      return
+    }
+    // Fallback: mock/live display conns without a saved profile just open a tab.
     const isHost = conn.kind === 'host'
     const tabId = (isHost ? 'tab-' : 'tab-') + conn.id
-    setTabs(prev => prev.some(t => t.id === tabId) ? prev : [...prev, {
+    setTabs(prev => prev.some(tb => tb.id === tabId) ? prev : [...prev, {
       id: tabId,
       kind: isHost ? 'terminal' : 'sql',
       connId: conn.id,
@@ -146,9 +362,51 @@ export default function App() {
     setActiveTab(tabId)
     setView('workbench')
   }
+  // If a closing tab held a live session that no remaining tab shares, drop it.
+  function reapSession(closing: Tab | undefined, remaining: Tab[]) {
+    // Abort any in-flight agent stream + drop this tab's current-conversation map.
+    if (closing) {
+      agentAborts.current[closing.id]?.abort()
+      delete agentAborts.current[closing.id]
+      setCurrentConvByTab(prev => {
+        if (!(closing.id in prev)) return prev
+        const n = { ...prev }
+        delete n[closing.id]
+        return n
+      })
+    }
+    if (!closing?.sessionId) return
+    const sid = closing.sessionId
+    const stillUsed = remaining.some(tb => tb.sessionId === sid)
+    if (stillUsed) return
+    sshDisconnect(sid).catch(() => { /* best-effort */ })
+    // Unsubscribe from history audit events for this session.
+    const unlisten = historyUnlisteners.current[sid]
+    if (unlisten) {
+      unlisten()
+      delete historyUnlisteners.current[sid]
+    }
+    setSessionMap(prev => {
+      const next = { ...prev }
+      delete next[closing.connId]
+      return next
+    })
+    setLiveConns(prev => {
+      const next = { ...prev }
+      delete next[closing.connId]
+      return next
+    })
+    setChanMap(prev => {
+      const next = { ...prev }
+      delete next[sid]
+      return next
+    })
+  }
   function closeTab(id: string) {
     setTabs(prev => {
-      const next = prev.filter(t => t.id !== id)
+      const closing = prev.find(tb => tb.id === id)
+      const next = prev.filter(tb => tb.id !== id)
+      reapSession(closing, next)
       if (next.length === 0) {
         setView('home') // no sessions left → back to home automatically
       } else if (activeTab === id) {
@@ -159,7 +417,8 @@ export default function App() {
   }
   function closeOthers(id: string) {
     setTabs(prev => {
-      const next = prev.filter(t => t.id === id)
+      const next = prev.filter(tb => tb.id === id)
+      prev.filter(tb => tb.id !== id).forEach(tb => reapSession(tb, next))
       if (next.length === 0) {
         setView('home')
       } else {
@@ -169,7 +428,10 @@ export default function App() {
     })
   }
   function closeAll() {
-    setTabs([])
+    setTabs(prev => {
+      prev.forEach(tb => reapSession(tb, []))
+      return []
+    })
     setView('home')
   }
   function openDetail(conn: Connection) {
@@ -177,7 +439,8 @@ export default function App() {
     setActivePanel('details')
     setPanelOpen(true)
   }
-  // ---- DB details-panel actions ----
+
+  // ---- DB details-panel actions (operate on the saved DbProfile) ----
   function editDbProfile(profile: DbProfile) {
     // Open the New Connection modal in EDIT mode pre-filled with this profile.
     setEditProfile(profile)
@@ -214,57 +477,298 @@ export default function App() {
     openConn(dbProfileToConnection(profile, true))
     setView('workbench')
   }
+
+  // ---- SSH DetailsPanel actions (operate on the REAL saved SSH profile) ----
+
+  // 连接 — look up the profile and run the real connect flow.
+  function connectFromDetail(conn: Connection) {
+    const profile = profiles.find(p => p.id === conn.id)
+    if (!profile) return
+    connectProfile(
+      { host: profile.host, port: profile.port, user: profile.user, auth: profile.auth, jump: profile.jump },
+      { name: profile.name },
+    )
+  }
+
+  // 编辑 — open NewConnectionModal in EDIT mode prefilled from the profile.
+  function editConn(conn: Connection) {
+    const profile = profiles.find(p => p.id === conn.id)
+    if (!profile) return
+    setEditing(profile)
+  }
+
+  // 复制 — duplicate the profile under a fresh, unique id.
+  function copyConn(conn: Connection) {
+    const profile = profiles.find(p => p.id === conn.id)
+    if (!profile) return
+    const existing = new Set(profiles.map(p => p.id))
+    let newId = `${profile.id}-copy`
+    let n = 2
+    while (existing.has(newId)) { newId = `${profile.id}-copy${n}`; n += 1 }
+    try {
+      saveProfile({ ...profile, id: newId, name: `${profile.name} (副本)` })
+    } catch { /* localStorage unavailable — ignore */ }
+    reloadProfiles()
+  }
+
+  // Tear down a live session for a connId (disconnect + drop maps + close its tab).
+  function teardownSession(connId: string) {
+    const sid = sessionMap[connId]
+    if (sid) sshDisconnect(sid).catch(() => { /* best-effort */ })
+    setSessionMap(prev => { const next = { ...prev }; delete next[connId]; return next })
+    setLiveConns(prev => { const next = { ...prev }; delete next[connId]; return next })
+    if (sid) setChanMap(prev => { const next = { ...prev }; delete next[sid]; return next })
+    closeTab('tab-' + connId)
+  }
+
+  // 关闭会话 — disconnect the live session for this connection.
+  function closeSessionForConn(conn: Connection) {
+    teardownSession(conn.id)
+    setDetailConn(prev => prev && prev.id === conn.id ? { ...prev, status: 'idle' } : prev)
+  }
+
+  // 删除 (confirmed) — remove the profile, tear down any session, close the panel.
+  function confirmDelete(conn: Connection) {
+    if (sessionMap[conn.id]) teardownSession(conn.id)
+    try { deleteProfile(conn.id) } catch { /* localStorage unavailable — ignore */ }
+    reloadProfiles()
+    if (detailConn?.id === conn.id) { setDetailConn(null); setPanelOpen(false) }
+  }
   function selectPanel(id: string) {
     if (activePanel === id && panelOpen) { setPanelOpen(false) }
     else { setActivePanel(id); setPanelOpen(true) }
   }
-  function goSettings() {
+  // Open Settings, optionally to a specific section (e.g. 'security', 'ai'). The
+  // guard handles being used directly as a click handler (event arg != string).
+  function goSettings(section?: string) {
+    setSettingsSection(typeof section === 'string' ? section : 'theme')
     if (view !== 'settings') setPrevView(view)
     setView(view === 'settings' ? prevView : 'settings')
   }
 
-  const cur = tabs.find(t => t.id === activeTab)
+  const cur = tabs.find(tb => tb.id === activeTab)
   // Resolve the active tab's connection: prefer the live vault list (real saved DB
-  // connections + mock hosts), falling back to the mock byId index. This lets a
-  // workbench tab opened for a real saved DB profile resolve to its Connection.
-  const curConn = cur ? (vaultConns.find(c => c.id === cur.connId) ?? D.byId[cur.connId] ?? null) : null
+  // connections + saved SSH host profiles), then live SSH display conns, then the
+  // mock byId index. This lets a workbench tab opened for a real saved DB profile
+  // OR a live SSH session resolve to its Connection.
+  const curConn = cur ? (vaultConns.find(c => c.id === cur.connId) ?? liveConns[cur.connId] ?? D.byId[cur.connId] ?? null) : null
   const aiMode = cur && cur.kind === 'terminal' ? 'shell' : 'sql'
+
+  // Write text into the active terminal's live PTY channel (no trailing newline).
+  async function insertToTerminal(code: string) {
+    const sid = cur?.sessionId
+    const chan = sid ? chanMap[sid] : undefined
+    if (!sid || !chan) return
+    const { termWrite } = await import('./services/ssh')
+    await termWrite(sid, chan, btoa(unescape(encodeURIComponent(code))))
+  }
+  const canInsert = !!(cur?.sessionId && chanMap[cur.sessionId])
+
+  // ---- Agent conversation controller (P2) ----
+
+  // Resolve the conversation id for a tab, lazily creating + persisting a fresh
+  // one for the tab's host (connId) if none is mapped yet. Returns the id.
+  function ensureConvId(tab: Tab): string {
+    const existing = currentConvByTab[tab.id]
+    if (existing) return existing
+    const conv = makeConversation(tab.connId)
+    upsertConversation(conv)
+    setCurrentConvByTab(prev => ({ ...prev, [tab.id]: conv.id }))
+    return conv.id
+  }
+
+  // Mutate a conversation by id in the ref (source of truth) + localStorage +
+  // render state. Persistence reads from the freshly-computed value, never from
+  // a setState updater return (which is unreliable under streaming bursts).
+  function patchConversation(convId: string, fn: (c: Conversation) => Conversation) {
+    let updated: Conversation | undefined
+    const next = conversationsRef.current.map(c => {
+      if (c.id !== convId) return c
+      updated = fn(c)
+      return updated
+    })
+    if (!updated) return
+    conversationsRef.current = next
+    setConversations(next)
+    saveConversation(updated)
+  }
+
+  // Fetch sysinfo for a session once and cache it; subsequent calls return the
+  // cached string immediately. If the fetch fails, '' is cached so we don't retry
+  // on every message (the LLM just won't have that context for this session).
+  async function getSysinfo(sessionId: string): Promise<string> {
+    if (sessionId in sysinfoCache.current) {
+      return sysinfoCache.current[sessionId]
+    }
+    try {
+      const info = await sshSysinfo(sessionId)
+      sysinfoCache.current[sessionId] = info
+      return info
+    } catch {
+      sysinfoCache.current[sessionId] = ''
+      return ''
+    }
+  }
+
+  async function sendAgentMessage(tabId: string, text: string) {
+    const tab = tabs.find(tb => tb.id === tabId)
+    if (!tab) return
+    const convId = ensureConvId(tab)
+    const tabConn = D.byId[tab.connId] ?? liveConns[tab.connId] ?? null
+    const hostName = tabConn?.name ?? tab.title
+
+    // Snapshot the prior messages for the outgoing payload BEFORE appending.
+    const prior = conversationsRef.current.find(c => c.id === convId)?.messages ?? []
+
+    // Append the user message + an empty assistant placeholder; persist.
+    patchConversation(convId, c => ({
+      ...c,
+      messages: [...c.messages, { role: 'user', content: text }, { role: 'assistant', content: '' }],
+    }))
+
+    // ---- P3 SEAM: enrich the system prompt with host sysinfo (OS/time/CPU/mem/disk/GPU).
+    // Fetch once per session (cached); await before building outgoing payload so the
+    // system message is complete. If the tab has no live session or fetch fails, the
+    // prompt falls back to the base shell-assistant instruction unchanged.
+    const liveSessionId = tab.sessionId
+    const sysinfo = liveSessionId ? await getSysinfo(liveSessionId) : ''
+    const sysinfoBlock = sysinfo
+      ? `\n\n系统会话上下文（当前连接的主机信息，供参考）:\n${sysinfo}\n回答时可据此结合该主机的实际环境（操作系统/时间/CPU/内存/磁盘/GPU）。`
+      : ''
+    const system: ChatMsg = {
+      role: 'system',
+      content: `You are a terminal/shell assistant for host "${hostName}". When you suggest a shell command, put it in a fenced code block.${sysinfoBlock}`,
+    }
+    const outgoing: ChatMsg[] = [
+      system,
+      ...prior.map(m => ({ role: m.role, content: m.content } as ChatMsg)),
+      { role: 'user', content: text },
+    ]
+
+    const controller = new AbortController()
+    agentAborts.current[tabId] = controller
+    setBusyConvs(prev => ({ ...prev, [convId]: true }))
+    try {
+      await chat(outgoing, agentCfg, {
+        signal: controller.signal,
+        onToken: tok => patchConversation(convId, c => {
+          const msgs = [...c.messages]
+          const last = msgs.length - 1
+          if (last >= 0 && msgs[last].role === 'assistant') {
+            msgs[last] = { ...msgs[last], content: msgs[last].content + tok }
+          }
+          return { ...c, messages: msgs }
+        }),
+      })
+    } catch (err) {
+      if (controller.signal.aborted) return
+      const message = (err as { message?: string } | null)?.message ?? String(err)
+      patchConversation(convId, c => {
+        const msgs = [...c.messages]
+        const last = msgs.length - 1
+        if (last >= 0 && msgs[last].role === 'assistant') {
+          msgs[last] = { ...msgs[last], content: t('panels.agentError', { message }) }
+        }
+        return { ...c, messages: msgs }
+      })
+    } finally {
+      delete agentAborts.current[tabId]
+      setBusyConvs(prev => { const n = { ...prev }; delete n[convId]; return n })
+    }
+  }
+
+  function newAgentConversation(tabId: string) {
+    const tab = tabs.find(tb => tb.id === tabId)
+    if (!tab) return
+    const conv = makeConversation(tab.connId)
+    upsertConversation(conv)
+    setCurrentConvByTab(prev => ({ ...prev, [tabId]: conv.id }))
+  }
+
+  function restoreConversation(tabId: string, convId: string) {
+    setCurrentConvByTab(prev => ({ ...prev, [tabId]: convId }))
+  }
+
+  function deleteAgentConversation(tabId: string, convId: string) {
+    deleteConversationStore(convId)
+    const next = conversationsRef.current.filter(c => c.id !== convId)
+    conversationsRef.current = next
+    setConversations(next)
+    // If the deleted conv was current for this tab, drop the mapping so a fresh
+    // one is created lazily on next render/send.
+    setCurrentConvByTab(prev => {
+      if (prev[tabId] !== convId) return prev
+      const n = { ...prev }
+      delete n[tabId]
+      return n
+    })
+  }
+
+  // The conversation object shown for the ACTIVE tab (created lazily on render so
+  // the panel always has something to render for the active tab's host).
+  const activeConvId = cur ? currentConvByTab[cur.id] : undefined
+  const activeConversation = activeConvId ? conversations.find(c => c.id === activeConvId) : undefined
+  const activeConvBusy = activeConvId ? !!busyConvs[activeConvId] : false
+  const agentHistory = cur ? conversationsForHost(cur.connId) : []
+
+  // Lazily create a conversation for the active tab so the panel has one to show.
+  useEffect(() => {
+    if (cur && !currentConvByTab[cur.id]) {
+      ensureConvId(cur)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cur?.id])
 
   return (
     <div className="win">
       <TitleBar theme={theme_} onToggleTheme={() => setThemeBoth(nextTheme(theme_))}
-        onOpenSettings={goSettings} settingsActive={view === 'settings'} onSearch={() => {}} />
+        onOpenSettings={() => goSettings()} settingsActive={view === 'settings'} onSearch={() => {}} />
 
-      {view === 'settings' ? (
-        <SettingsView theme={theme_} onTheme={setThemeBoth} onClose={() => setView(prevView)}
-          authEnabled={authEnabled} users={users} currentUser={currentName} ownerUser={ownerUser}
-          onEnableAuth={enableAuth} onDisableAuth={disableAuth} onLock={lockApp} onRemoveUser={(name: string) => {
-            const next = users.filter(x => x.username !== name)
-            setUsers(next)
-            localStorage.setItem('catio-users', JSON.stringify(next))
-          }} />
-      ) : (
-        <div className="body">
-          <Sidebar activeId={cur ? cur.connId : undefined} onOpen={openConn} onDetail={openDetail} onNew={() => setShowNew(true)}
+      {/* content region — body is ALWAYS mounted so terminals/workbench survive
+          view switches; Settings renders as an overlay on top (does NOT unmount
+          the body), mirroring the AuthGate overlay pattern. */}
+      <div style={{ flex: 1, minHeight: 0, minWidth: 0, position: 'relative', display: 'flex' }}>
+        <div className="body" style={{ flex: 1 }}>
+          <Sidebar activeId={detailConn ? detailConn.id : (cur ? cur.connId : undefined)} onOpen={openDetail} onDetail={openDetail} onNew={() => setShowNew(true)}
             collapsed={sidebarCollapsed} onToggleCollapse={() => setSidebarCollapsed(c => !c)}
-            conns={vaultConns} currentUser={currentName} authEnabled={authEnabled} onLock={lockApp}
+            conns={vaultConns} currentUser={currentName} authEnabled={authEnabled} onLock={lockApp} onEnableAuth={() => goSettings('security')}
             filter={sidebarFilter} onFilterChange={setSidebarFilter} />
 
           {/* main */}
           <div className="card-surface grow col" style={{ overflow: 'hidden', position: 'relative' }}>
             {/* view body */}
             <div className="grow col" style={{ minHeight: 0 }}>
-              {view === 'home' && <HomeView onOpen={openConn} onNew={() => setShowNew(true)} onVault={() => setView('workbench')} owned={ownsVault} userName={currentName} />}
-              {view === 'workbench' && (
-                tabs.length ? (
-                  <>
-                    <WorkbenchTabs tabs={tabs} activeTab={activeTab} onActivate={setActiveTab} onClose={closeTab} onCloseOthers={closeOthers} onCloseAll={closeAll} onNew={() => setShowNew(true)} />
-                    <div className="grow" style={{ minHeight: 0 }}>
-                      {cur && cur.kind === 'terminal' && <TerminalPane conn={curConn} key={cur.id} />}
-                      {cur && cur.kind === 'sql' && curConn && <DbWorkbench conn={curConn} density={density} key={cur.id} />}
-                    </div>
-                  </>
-                ) : <EmptyWorkbench onNew={() => setShowNew(true)} />
+              {view === 'home' && <HomeView onOpen={openConn} onNew={() => setShowNew(true)} onVault={() => setView('workbench')} owned={ownsVault} userName={authEnabled ? currentName : ''} authEnabled={authEnabled} conns={vaultConns} />}
+
+              {/* tab bar — only in workbench when there are tabs */}
+              {view === 'workbench' && tabs.length > 0 && (
+                <WorkbenchTabs tabs={tabs} activeTab={activeTab} onActivate={setActiveTab} onClose={closeTab} onCloseOthers={closeOthers} onCloseAll={closeAll} onNew={() => setShowNew(true)} />
+              )}
+              {view === 'workbench' && tabs.length === 0 && <EmptyWorkbench onNew={() => setShowNew(true)} />}
+
+              {/* persistent panes container — ALWAYS mounted regardless of view.
+                  One pane per tab; visibility toggled via CSS display so the live
+                  PTY + xterm buffer survive home/settings/tab switches. A pane is
+                  shown only when this is the active workbench tab; otherwise it is
+                  display:none but stays mounted. term_close fires only when a tab
+                  is removed from `tabs` (real close) → React unmounts that pane. */}
+              {tabs.length > 0 && (
+                <div className="grow" style={{ minHeight: 0, position: 'relative', display: view === 'workbench' ? 'block' : 'none' }}>
+                  {tabs.map(tab => {
+                    const tabConn = D.byId[tab.connId] ?? liveConns[tab.connId] ?? null
+                    const isShown = view === 'workbench' && tab.id === activeTab
+                    return (
+                      <div key={tab.id} style={{ height: '100%', display: isShown ? 'flex' : 'none', position: 'absolute', inset: 0 }}>
+                        {tab.kind === 'terminal' && (
+                          <TerminalPane conn={tabConn} sessionId={tab.sessionId} active={isShown} resolveSessionId={resolveSessionId} onChannel={(sid, chan) => setChanMap(m => { const n = { ...m }; if (chan) n[sid] = chan; else delete n[sid]; return n })} />
+                        )}
+                        {tab.kind === 'sql' && tabConn && (
+                          <DbWorkbench conn={tabConn} density={density} />
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
               )}
             </div>
 
@@ -276,27 +780,124 @@ export default function App() {
           {/* panel slot */}
           {panelOpen && (aiForm === 'side' || activePanel !== 'ai') && (
             <div className="fade-in" style={{ display: 'flex' }}>
-              {activePanel === 'ai' && <AIPanel onClose={() => setPanelOpen(false)} mode={aiMode} conn={curConn ?? undefined} attachment={aiAttachment} onClearAttachment={() => setAiAttachment(null)} />}
-              {activePanel === 'sftp' && <SftpPanel onClose={() => setPanelOpen(false)} />}
-              {activePanel === 'monitor' && <MonitorPanel onClose={() => setPanelOpen(false)} />}
-              {activePanel === 'tunnels' && <TunnelsPanel onClose={() => setPanelOpen(false)} />}
-              {activePanel === 'snippets' && <SnippetsPanel onClose={() => setPanelOpen(false)} snippets={snippets} />}
-              {activePanel === 'history' && <HistoryPanel onClose={() => setPanelOpen(false)} onAddSnippet={addSnippet} />}
-              {activePanel === 'details' && <DetailsPanel conn={detailConn ?? undefined} onClose={() => setPanelOpen(false)}
-                onEdit={editDbProfile} onDelete={deleteDbProfile} onConnect={connectDbProfile} />}
+              {activePanel === 'ai' && <AIPanel onClose={() => setPanelOpen(false)} mode={aiMode} conn={curConn ?? undefined} attachment={aiAttachment} onClearAttachment={() => setAiAttachment(null)} onInsert={insertToTerminal} canInsert={canInsert} onOpenSettings={() => goSettings('ai')}
+                conversation={activeConversation} busy={activeConvBusy} history={agentHistory}
+                onSend={cur ? (text => void sendAgentMessage(cur.id, text)) : undefined}
+                onNewConversation={cur ? (() => newAgentConversation(cur.id)) : undefined}
+                onRestoreConversation={cur ? (convId => restoreConversation(cur.id, convId)) : undefined}
+                onDeleteConversation={cur ? (convId => deleteAgentConversation(cur.id, convId)) : undefined} />}
+              {activePanel === 'sftp' && <SftpPanel onClose={() => setPanelOpen(false)} conn={curConn ?? undefined} sessionId={cur?.sessionId} />}
+              {activePanel === 'monitor' && <MonitorPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} />}
+              {activePanel === 'tunnels' && <TunnelsPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} activeConnId={cur?.connId} profiles={profiles} />}
+              {activePanel === 'snippets' && <SnippetsPanel onClose={() => setPanelOpen(false)} snippets={snippets} onChange={() => setSnippets(loadSnippets())} onInsert={insertToTerminal} canInsert={canInsert} />}
+              {activePanel === 'history' && <HistoryPanel onClose={() => setPanelOpen(false)} onAddSnippet={addSnippet} items={history} onClear={() => { clearHistory(); setHistory([]) }} onInsert={insertToTerminal} canInsert={canInsert} />}
+              {/* DetailsPanel branches internally on conn.kind === 'db': DB conns use the
+                  onEditDb/onDeleteDb/onConnectDb handlers; host conns use the SSH handlers. */}
+              {activePanel === 'details' && (
+                <DetailsPanel
+                  conn={detailConn ?? undefined}
+                  connected={detailConn ? !!sessionMap[detailConn.id] : false}
+                  onClose={() => setPanelOpen(false)}
+                  // DB-specific actions (operate on the saved DbProfile)
+                  onEditDb={editDbProfile}
+                  onDeleteDb={deleteDbProfile}
+                  onConnectDb={connectDbProfile}
+                  // Host / SSH actions (operate on the Connection)
+                  onConnect={connectFromDetail}
+                  onEdit={editConn}
+                  onCopy={copyConn}
+                  onDelete={conn => setPendingDelete(conn)}
+                  onCloseSession={closeSessionForConn}
+                />
+              )}
             </div>
           )}
 
           {/* icon rail */}
           <IconRail active={activePanel} onSelect={selectPanel} panelOpen={panelOpen} />
         </div>
+
+        {/* Settings overlay — covers the body region (below the title bar) without
+            unmounting it. SettingsView keeps its identical markup/props/behavior. */}
+        {view === 'settings' && (
+          <div style={{ position: 'absolute', inset: 0, zIndex: 50, display: 'flex', background: 'var(--bg-canvas)' }}>
+            <SettingsView theme={theme_} onTheme={setThemeBoth} onClose={() => setView(prevView)} initialSection={settingsSection}
+              authEnabled={authEnabled} users={users} currentUser={currentName} ownerUser={ownerUser}
+              onEnableAuth={enableAuth} onDisableAuth={disableAuth} onLock={lockApp} onRemoveUser={(name: string) => {
+                const next = users.filter(x => x.username !== name)
+                setUsers(next)
+                localStorage.setItem('catio-users', JSON.stringify(next))
+              }} />
+          </div>
+        )}
+      </div>
+
+      {/* Unified New/Edit connection modal — supports BOTH host/SSH and DB kinds.
+          `editing` (ConnectionProfile) drives SSH edit mode; `editProfile`
+          (DbProfile) drives DB edit mode; otherwise it's a create flow whose
+          default kind comes from the sidebar filter. */}
+      {(showNew || editing || editProfile) && (
+        <NewConnectionModal
+          key={editing ? editing.id : editProfile ? editProfile.id : 'new'}
+          editProfile={editing ?? editProfile ?? undefined}
+          initialKind={sidebarFilter === 'host' ? 'host' : sidebarFilter === 'db' ? 'db' : undefined}
+          onSaved={reloadProfiles}
+          onClose={() => { setShowNew(false); setEditing(null); setEditProfile(null) }}
+          onConnect={connectProfile}
+          onConnected={(profile) => openConn(dbProfileToConnection(profile, true))}
+        />
       )}
 
-      {showNew && <NewConnectionModal onClose={() => { setShowNew(false); setEditProfile(null) }} initialKind={sidebarFilter === 'host' ? 'host' : 'db'}
-        editProfile={editProfile ?? undefined}
-        onConnected={(profile) => openConn(dbProfileToConnection(profile, true))} />}
+      {pendingDelete && (
+        <ConfirmModal
+          title={t('modals.deleteConfirmTitle')}
+          message={t('modals.deleteConfirmMsg', { name: pendingDelete.name })}
+          confirmLabel={t('modals.confirmDelete')}
+          danger
+          onConfirm={() => { const c = pendingDelete; setPendingDelete(null); confirmDelete(c) }}
+          onCancel={() => setPendingDelete(null)}
+        />
+      )}
 
-      {locked && <AuthGate users={users} onLogin={loginUser} onCreate={createUser} />}
+      {pendingJumpSecret && (
+        <ConnectSecretPrompt
+          label={t('panels.jumpSecretPrompt', { host: pendingJumpSecret.args.jump?.host ?? '' })}
+          onSubmit={jumpSec => {
+            const p = pendingJumpSecret
+            setPendingJumpSecret(null)
+            // Attach the jump secret (in-memory only) then collect target secret.
+            const argsWithJump: SshConnectArgs = {
+              ...p.args,
+              jump: p.args.jump ? { ...p.args.jump, secret: jumpSec } : undefined,
+            }
+            setPendingConnect({ args: argsWithJump, name: p.name })
+          }}
+          onCancel={() => setPendingJumpSecret(null)}
+        />
+      )}
+
+      {pendingConnect && (
+        <ConnectSecretPrompt
+          label={pendingConnect.args.auth.method === 'keyFile' ? t('modals.secretPromptPassphrase') : t('modals.secretPromptPassword')}
+          onSubmit={secret => {
+            const p = pendingConnect
+            setPendingConnect(null)
+            void performConnect(p.args, p.name, secret)
+          }}
+          onCancel={() => setPendingConnect(null)}
+        />
+      )}
+
+      {pendingTrust && (
+        <HostKeyPrompt
+          host={`${pendingTrust.args.host}:${pendingTrust.args.port}`}
+          fingerprint={pendingTrust.fingerprint}
+          onTrust={() => { void trustAndOpen(pendingTrust) }}
+          onCancel={() => rejectTrust(pendingTrust)}
+        />
+      )}
+
+      {locked && <AuthGate users={users} onLogin={loginUser} onCreate={createUser} onCancel={disableAuth} />}
     </div>
   )
 }

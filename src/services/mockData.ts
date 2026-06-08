@@ -8,8 +8,6 @@ import type {
   Recent,
   ChatMessage,
   Snippet,
-  SftpItem,
-  Sftp,
   TermLine,
   Tunnel,
   JumpNode,
@@ -374,24 +372,6 @@ const snippets: Snippet[] = [
   { id: 's6', scope: 'MySQL', desc: '查看行锁等待', icon: 'database', code: 'select * from performance_schema.data_lock_waits\\G' },
 ]
 
-// ---- SFTP listing (for prod-web-01) ----
-const sftpItems: SftpItem[] = [
-  { name: '..', type: 'up' },
-  { name: 'releases', type: 'dir', size: '—', mod: 'May 28' },
-  { name: 'shared', type: 'dir', size: '—', mod: 'May 12' },
-  { name: 'public', type: 'dir', size: '—', mod: 'May 28' },
-  { name: '.env.production', type: 'file', size: '2.1 KB', mod: 'May 28' },
-  { name: 'ecosystem.config.js', type: 'file', size: '1.4 KB', mod: 'May 28' },
-  { name: 'package.json', type: 'file', size: '3.8 KB', mod: 'May 28' },
-  { name: 'access.log', type: 'file', size: '184 MB', mod: '2m' },
-  { name: 'error.log', type: 'file', size: '12 MB', mod: '8m' },
-]
-
-const sftp: Sftp = {
-  path: '/var/www/app/current',
-  items: sftpItems,
-}
-
 // ---- Terminal buffer (for db-bastion) ----
 const termLines: TermLine[] = [
   { t: 'sys', s: 'Connected to db-bastion (bastion.catio.io) · alpine 3.19 · ssh-ed25519' },
@@ -485,7 +465,7 @@ const byId: Record<string, Connection> = Object.fromEntries(connections.map(c =>
 
 export const DATA: CatioData = {
   groups, connections, engineMeta, osMeta, schema, ordersColumns, ordersRows,
-  statusTones, sampleSQL, recent, aiThread, snippets, sftp, termLines,
+  statusTones, sampleSQL, recent, aiThread, snippets, termLines,
   tunnels, jumpChain, monitor, multiExec, history, automation,
   tableStructures, erModel, aiSql, aiShell, aiQuickActions,
   byId,

@@ -2,6 +2,7 @@
 import React from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
+import { BrandMark } from '../BrandMark'
 import { ConnGlyph, IconBadge, SectionHead } from '../atoms'
 import { useData } from '../../state/DataContext'
 import { useDbConnections, dbProfileToConnection } from '../../state/dbConnections'
@@ -15,6 +16,10 @@ export interface HomeViewProps {
   onVault: () => void
   owned?: boolean
   userName?: string
+  /** Whether local account auth is on — greeting shows a name only when true. */
+  authEnabled?: boolean
+  /** Real saved connections (from the vault). Empty on a fresh install. */
+  conns?: Connection[]
 }
 
 interface StatProps {
@@ -74,16 +79,27 @@ function InfoRow({ conn, onOpen, onDetail, showGroup }: InfoRowProps) {
   )
 }
 
-export function HomeView({ onOpen, onNew, onVault, owned = true, userName = 'skyler' }: HomeViewProps) {
+export function HomeView({ onOpen, onNew, onVault, owned = true, userName = '', authEnabled = false }: HomeViewProps) {
   const D = useData()
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
+  // Real time-based greeting + live date/time (was a hardcoded mock). Name only
+  // when account auth is on (otherwise there is no real user to greet).
+  const now = new Date()
+  const hr = now.getHours()
+  const greet = t(hr < 12 ? 'home.greetMorning' : hr < 18 ? 'home.greetAfternoon' : 'home.greetEvening')
+  const greetLine = authEnabled && userName ? t('home.greetingWithName', { greet, name: userName }) : greet
+  const lang = i18n.language || 'zh'
+  const statusLine = now.toLocaleDateString(lang, { weekday: 'long' }) + ' · ' + now.toLocaleTimeString(lang, { hour: '2-digit', minute: '2-digit', hour12: false })
   // Real saved DB connections (reactive). Mock DBs are hidden from the home view —
   // only real saved profiles + mock SSH hosts surface here.
   const dbProfiles = useDbConnections()
   const realDbConns = dbProfiles.map(p => dbProfileToConnection(p))
   const mockDbIds = new Set(D.connections.filter(c => c.kind === 'db').map(c => c.id))
+  // Stats reflect REAL saved connections.
   const hostCount = D.connections.filter(c => c.kind === 'host').length
   const dbCount = realDbConns.length
+  // Active tunnels are not yet wired to a real backend in this sub-project → 0.
+  const tunnelCount = 0
   // Recent sessions, minus any that reference a hidden mock DB connection.
   const recents = D.recent.filter(r => !(r.kind === 'db' && mockDbIds.has(r.ref)))
   // Quick-connect: two mock hosts + the first real saved DB connection (if any).
@@ -92,9 +108,9 @@ export function HomeView({ onOpen, onNew, onVault, owned = true, userName = 'sky
 
   if (!owned) {
     return (
-      <div className="grow fade-in" style={{ overflowY: 'auto' }}>
+      <div className="grow fade-in" style={{ overflowY: 'auto', overflowX: 'hidden' }}>
         <div className="col" style={{ alignItems: 'center', justifyContent: 'center', minHeight: '100%', gap: 18, padding: 40, textAlign: 'center' }}>
-          <div className="logo-mark" style={{ width: 56, height: 56, borderRadius: 18 }}><span className="mono" style={{ fontSize: 26, fontWeight: 700 }}>&gt;_</span></div>
+          <BrandMark size={56} style={{ borderRadius: 18 }} />
           <div className="col" style={{ gap: 6, maxWidth: 420 }}>
             <span style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.4px' }}>{t('home.welcomeTitle', { name: userName })}</span>
             <span style={{ fontSize: 13.5, color: 'var(--text-secondary)', lineHeight: 1.6, textWrap: 'pretty' }}>{t('home.welcomeDesc')}</span>
@@ -109,17 +125,17 @@ export function HomeView({ onOpen, onNew, onVault, owned = true, userName = 'sky
   }
 
   return (
-    <div className="grow fade-in" style={{ overflowY: 'auto' }}>
+    <div className="grow fade-in" style={{ overflowY: 'auto', overflowX: 'hidden' }}>
       <div style={{ maxWidth: 1040, margin: '0 auto', padding: '32px 40px 48px' }}>
         {/* Hero */}
         <div style={{ borderRadius: 20, background: 'var(--accent-soft-alt)', border: '1px solid var(--accent-border)', padding: '26px 30px', marginBottom: 32, position: 'relative', overflow: 'hidden' }}>
           <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 20 }}>
             <div className="col" style={{ gap: 14, maxWidth: 560 }}>
               <div className="row gap10">
-                <div className="logo-mark" style={{ width: 40, height: 40, borderRadius: 13 }}><span className="mono" style={{ fontSize: 18, fontWeight: 700 }}>&gt;_</span></div>
+                <BrandMark size={40} style={{ borderRadius: 13 }} />
                 <div className="col" style={{ lineHeight: 1.1 }}>
-                  <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--accent-primary)', letterSpacing: '0.3px' }}>{t('home.greeting', { name: userName })}</span>
-                  <span style={{ fontSize: 11.5, color: 'var(--text-tertiary)' }}>{t('home.statusLine')}</span>
+                  <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--accent-primary)', letterSpacing: '0.3px' }}>{greetLine}</span>
+                  <span style={{ fontSize: 11.5, color: 'var(--text-tertiary)' }}>{statusLine}</span>
                 </div>
               </div>
               <h1 style={{ margin: 0, fontSize: 26, fontWeight: 700, letterSpacing: '-0.6px', color: 'var(--text-primary)', lineHeight: 1.2 }}>{t('home.heroTitle')}<br />{t('home.heroTitleLine2')}</h1>
@@ -129,7 +145,7 @@ export function HomeView({ onOpen, onNew, onVault, owned = true, userName = 'sky
                 <div style={{ width: 1, height: 30, background: 'var(--accent-border)' }} />
                 <Stat n={dbCount} label={t('home.statDatabases')} icon="database" />
                 <div style={{ width: 1, height: 30, background: 'var(--accent-border)' }} />
-                <Stat n={3} label={t('home.statActiveTunnels')} icon="link" />
+                <Stat n={tunnelCount} label={t('home.statActiveTunnels')} icon="link" />
               </div>
             </div>
             <div className="col gap8">
@@ -139,58 +155,71 @@ export function HomeView({ onOpen, onNew, onVault, owned = true, userName = 'sky
           </div>
         </div>
 
-        {/* Recent */}
+        {/* Recent — real session history when present, otherwise an empty state */}
         <SectionHead title={t('home.recentSessions')} count={recents.length} />
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16, marginBottom: 32 }}>
-          {recents.map(r => {
-            const conn = D.byId[r.ref]
-            return (
-              <button key={r.id} onClick={() => conn && onOpen(conn)} className="card-surface" style={{ textAlign: 'left', padding: 16, display: 'flex', gap: 12, alignItems: 'center', transition: 'transform .12s, box-shadow .12s' }}
-                onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = 'var(--shadow-pill)' }}
-                onMouseLeave={e => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = 'var(--shadow-card)' }}>
-                {conn ? <ConnGlyph conn={conn} size={42} radius={12} /> : <IconBadge icon={r.icon} />}
-                <div className="col grow" style={{ lineHeight: 1.3, minWidth: 0 }}>
-                  <span className="ell" style={{ fontSize: 14, fontWeight: 600 }}>{r.title}</span>
-                  <span className="ell" style={{ fontSize: 11.5, color: 'var(--text-faint)' }}>{r.detail}</span>
-                </div>
-                <div className="col" style={{ alignItems: 'flex-end', gap: 6 }}>
-                  <Icon name={r.kind === 'db' ? 'table-2' : 'terminal'} size={14} style={{ color: 'var(--text-disabled)' }} />
-                  <span style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{r.when}</span>
-                </div>
-              </button>
-            )
-          })}
-        </div>
+        {recents.length ? (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16, marginBottom: 32 }}>
+            {recents.map(r => {
+              const conn = D.byId[r.ref]
+              return (
+                <button key={r.id} onClick={() => conn && onOpen(conn)} className="card-surface" style={{ textAlign: 'left', padding: 16, display: 'flex', gap: 12, alignItems: 'center', transition: 'transform .12s, box-shadow .12s' }}
+                  onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = 'var(--shadow-pill)' }}
+                  onMouseLeave={e => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = 'var(--shadow-card)' }}>
+                  {conn ? <ConnGlyph conn={conn} size={42} radius={12} /> : <IconBadge icon={r.icon} />}
+                  <div className="col grow" style={{ lineHeight: 1.3, minWidth: 0 }}>
+                    <span className="ell" style={{ fontSize: 14, fontWeight: 600 }}>{r.title}</span>
+                    <span className="ell" style={{ fontSize: 11.5, color: 'var(--text-faint)' }}>{r.detail}</span>
+                  </div>
+                  <div className="col" style={{ alignItems: 'flex-end', gap: 6 }}>
+                    <Icon name={r.kind === 'db' ? 'table-2' : 'terminal'} size={14} style={{ color: 'var(--text-disabled)' }} />
+                    <span style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{r.when}</span>
+                  </div>
+                </button>
+              )
+            })}
+          </div>
+        ) : (
+          <div style={{ marginBottom: 32 }}>
+            <EmptySection icon="history" text={t('home.recentEmpty')} />
+          </div>
+        )}
 
         {/* Automation + quick */}
         <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 16 }}>
           <div>
             <SectionHead title={t('home.quickConnect')} hint={t('home.quickConnectHint')} />
             <div className="col gap8">
-              {quickConns.map(c => (
-                <InfoRow key={c.id} conn={c} onOpen={onOpen} />
-              ))}
+              {quickConns.length
+                ? quickConns.map(c => <InfoRow key={c.id} conn={c} onOpen={onOpen} />)
+                : <EmptySection icon="server" text={t('home.quickConnectEmpty')} />}
             </div>
           </div>
           <div>
             <SectionHead title={t('home.automation')} hint={t('home.automationHint')} />
             <div className="col gap8">
-              {D.automation.map(a => (
-                <div key={a.id} className="card-surface" style={{ padding: '12px 14px', display: 'flex', gap: 12, alignItems: 'center' }}>
-                  <div className="icon-badge" style={{ width: 36, height: 36, borderRadius: 10, background: a.kind === 'ansible' ? 'color-mix(in srgb, var(--signal-rose) 13%, transparent)' : 'color-mix(in srgb, var(--signal-violet) 13%, transparent)', color: a.kind === 'ansible' ? 'var(--signal-rose)' : 'var(--signal-violet)' }}>
-                    <Icon name={a.kind === 'ansible' ? 'play-circle' : 'box'} size={17} />
-                  </div>
-                  <div className="col grow" style={{ lineHeight: 1.3, minWidth: 0 }}>
-                    <span className="ell mono" style={{ fontSize: 12.5, fontWeight: 600 }}>{a.name}</span>
-                    <span className="ell" style={{ fontSize: 11, color: 'var(--text-faint)' }}>{a.desc}</span>
-                  </div>
-                  <button className="icon-btn bare"><Icon name="play" size={14} /></button>
-                </div>
-              ))}
+              <EmptySection icon="box" text={t('home.automationEmpty')} />
             </div>
           </div>
         </div>
       </div>
+    </div>
+  )
+}
+
+// ---- Empty section placeholder (honest, tidy, no fake cards) ----
+
+interface EmptySectionProps {
+  icon: string
+  text: string
+}
+
+function EmptySection({ icon, text }: EmptySectionProps) {
+  return (
+    <div className="col" style={{ alignItems: 'center', justifyContent: 'center', gap: 8, padding: '28px 16px', textAlign: 'center', border: '1px dashed var(--border-hairline)', borderRadius: 14, background: 'var(--surface-subtle)' }}>
+      <div className="icon-badge" style={{ width: 36, height: 36, borderRadius: 10, background: 'var(--surface-sunken)', color: 'var(--text-faint)' }}>
+        <Icon name={icon} size={17} />
+      </div>
+      <span style={{ fontSize: 12, color: 'var(--text-faint)' }}>{text}</span>
     </div>
   )
 }

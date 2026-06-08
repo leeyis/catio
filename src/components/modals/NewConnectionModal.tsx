@@ -4,9 +4,12 @@ import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn, IconBtn, Segmented, Toggle, ConnGlyph } from '../atoms'
 import { useData } from '../../state/DataContext'
-import type { AuthMethod } from '../../services/ssh'
+import type { AuthMethod, SshConnectArgs, SshTestResult } from '../../services/ssh'
+import { sshTest } from '../../services/ssh'
 import type { DbType } from '../../services/db'
 import { dbConnect, testConnection } from '../../services/db'
+import { saveProfile } from '../../state/connections'
+import type { ConnectionProfile, JumpProfile } from '../../state/connections'
 import { saveDbConnection, setActiveDbConnection, generateProfileId } from '../../state/dbConnections'
 import type { DbProfile } from '../../state/dbConnections'
 
@@ -16,35 +19,56 @@ export interface NewConnectionModalProps {
   onClose: () => void
   /** Default connection kind, derived from the sidebar's active filter tab. */
   initialKind?: 'host' | 'db'
+  /** ORCH: emit a live connect request for a HOST/SSH connection. */
+  onConnect?: (args: SshConnectArgs, display: { name: string }) => void
   /** Called on a successful live DB connect (Tauri) with the saved profile, so the
    *  caller can immediately open the workbench for it. Not called in non-Tauri dev. */
   onConnected?: (profile: DbProfile) => void
-  /** When set, the modal opens in EDIT mode pre-filled with this DB profile. Saving
-   *  upserts under the SAME id (update, not a new entry). */
-  editProfile?: DbProfile
+  /** When set, the modal opens in EDIT mode pre-filled with this profile. A
+   *  ConnectionProfile edits an SSH/host connection; a DbProfile edits a DB
+   *  connection. Saving upserts under the SAME id (update, not a new entry). */
+  editProfile?: ConnectionProfile | DbProfile
+  /** Called after a successful save in host/SSH edit mode (App uses it to reloadProfiles). */
+  onSaved?: () => void
+}
+
+// `editProfile` is a union — DbProfile carries `dbType`, ConnectionProfile carries `auth`.
+function isDbProfile(p: ConnectionProfile | DbProfile | undefined): p is DbProfile {
+  return !!p && 'dbType' in p
 }
 
 interface FieldProps {
   label: string
   value: string
-  onChange: (v: string) => void
   placeholder?: string
   w?: number
   mono?: boolean
   type?: string
+  /** Controlled change handler (DB kind). When provided the input is controlled
+   *  via `value`; otherwise the input is uncontrolled (SSH kind, via `inputRef`). */
+  onChange?: (v: string) => void
   /** When set, restrict input to digits only (e.g. port numbers). */
   numeric?: boolean
+  /** Uncontrolled-mode ref (SSH kind) — lets handlers read the value on submit. */
+  inputRef?: React.Ref<HTMLInputElement>
+  onInput?: React.FormEventHandler<HTMLInputElement>
 }
 
-// Defined at module scope (NOT inside the component) so its identity is stable
-// across renders — otherwise React remounts the <input> on every keystroke and
-// the field loses focus mid-typing.
-function Field({ label, value, onChange, placeholder, w, mono, type, numeric }: FieldProps) {
+// Hoisted to module scope so it keeps a stable component identity across
+// re-renders — otherwise React remounts the <input> on every render and inputs
+// lose focus/value mid-typing (e.g. when the test result or canTest state changes).
+//
+// Dual-mode: pass `onChange` for a controlled field (DB kind), or `inputRef`
+// (+ optional `onInput`) for an uncontrolled field (SSH/host kind).
+function Field({ label, value, onChange, placeholder, w, mono, type, numeric, inputRef, onInput }: FieldProps) {
+  const controlled = typeof onChange === 'function'
   return (
     <label className="col" style={{ gap: 5, flex: w || 1 }}>
       <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{label}</span>
-      <input value={value}
-        onChange={e => onChange(numeric ? e.target.value.replace(/\D/g, '') : e.target.value)}
+      <input
+        {...(controlled
+          ? { value, onChange: (e: React.ChangeEvent<HTMLInputElement>) => onChange!(numeric ? e.target.value.replace(/\D/g, '') : e.target.value) }
+          : { ref: inputRef, defaultValue: value, onInput })}
         placeholder={placeholder}
         {...(numeric ? { inputMode: 'numeric' as const } : {})}
         type={type ?? 'text'}
@@ -80,40 +104,76 @@ function shortVersion(v: string): string {
 
 // ---- Component ----
 
-export function NewConnectionModal({ onClose, initialKind = 'db', onConnected, editProfile }: NewConnectionModalProps) {
+export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onConnected, editProfile, onSaved }: NewConnectionModalProps) {
   const D = useData()
   const { t } = useTranslation()
   const isEdit = !!editProfile
+  const editDb = isDbProfile(editProfile)
+  // SSH/host profile, when editing a host connection (narrowed for prefill below).
+  const editHost: ConnectionProfile | undefined = isEdit && !editDb ? (editProfile as ConnectionProfile) : undefined
+  // DB profile, when editing a DB connection.
+  const editDbProfile: DbProfile | undefined = editDb ? (editProfile as DbProfile) : undefined
+  // Uncontrolled SSH/host field refs (preserve focus across re-renders).
+  const nameRef = useRef<HTMLInputElement>(null)
+  const hostRef = useRef<HTMLInputElement>(null)
+  const portRef = useRef<HTMLInputElement>(null)
+  const userRef = useRef<HTMLInputElement>(null)
   const PROTOS = [
     { id: 'ssh', label: 'SSH' }, { id: 'mosh', label: 'Mosh' },
     { id: 'telnet', label: 'Telnet' }, { id: 'serial', label: 'Serial' },
     { id: 'local', label: t('modals.protoLocal') },
   ]
-  const [kind, setKind] = useState<string>(editProfile ? 'db' : initialKind)
-  const [engine, setEngine] = useState<DbType>(editProfile?.dbType ?? 'postgres')
+  // Edit mode opens on the tab matching the profile kind; otherwise the sidebar tab.
+  const [kind, setKind] = useState<string>(isEdit ? (editDb ? 'db' : 'host') : initialKind)
+  const [engine, setEngine] = useState<DbType>(editDbProfile?.dbType ?? 'postgres')
   const [engineOpen, setEngineOpen] = useState(false)
   const engineRef = useRef<HTMLDivElement>(null)
   const [proto, setProto] = useState('ssh')
-  const [authMethod, setAuthMethod] = useState<AuthMethod['method']>('password')
-  const [keyPath, setKeyPath] = useState('')
-  const [tunnel, setTunnel] = useState(false)
+  const [authMethod, setAuthMethod] = useState<AuthMethod['method']>(editHost?.auth.method ?? 'password')
+  const [keyPath, setKeyPath] = useState(editHost?.auth.method === 'keyFile' ? editHost.auth.path : '')
+  // In-memory secret only: password (password auth) or key passphrase (key-file auth).
+  // Never prefilled (secrets are not persisted) and never written to a profile.
+  const [secret, setSecret] = useState('')
+  // ProxyJump / SSH-tunnel toggle — defaults OFF.
+  const [tunnel, setTunnel] = useState(isEdit ? !!editHost?.jump : false)
   const [via, setVia] = useState('h-bastion')
-  const [tested, setTested] = useState(false)
-  const [testResult, setTestResult] = useState<{ version: string; latencyMs: number } | null>(null)
+  // Jump host config fields
+  const jumpHostRef = useRef<HTMLInputElement>(null)
+  const jumpPortRef = useRef<HTMLInputElement>(null)
+  const jumpUserRef = useRef<HTMLInputElement>(null)
+  const [jumpAuthMethod, setJumpAuthMethod] = useState<AuthMethod['method']>(
+    editHost?.jump?.auth.method ?? 'password'
+  )
+  const [jumpKeyPath, setJumpKeyPath] = useState(
+    editHost?.jump?.auth.method === 'keyFile' ? editHost.jump.auth.path : ''
+  )
+  // In-memory jump secret — never stored, cleared after use.
+  const [jumpSecret, setJumpSecret] = useState('')
+  // Real SSH connection-test state (host kind).
   const [testing, setTesting] = useState(false)
-  const [testError, setTestError] = useState<string | null>(null)
+  const [testResult, setTestResult] = useState<SshTestResult | null>(null)
+  // Reactive enablement for the SSH Test button — host & user must be non-empty.
+  // host/user are uncontrolled refs; recompute on their input events.
+  const [canTest, setCanTest] = useState(editHost ? !!editHost.host && !!editHost.user : false)
+  const recomputeCanTest = () =>
+    setCanTest(!!(hostRef.current?.value || '').trim() && !!(userRef.current?.value || '').trim())
   const [color, setColor] = useState('var(--signal-rose)')
   const hosts = D.connections.filter(c => c.kind === 'host' && c.proto !== 'local')
 
   // DB-specific controlled state — empty by default (or pre-filled from editProfile).
-  const [dbName, setDbName] = useState(editProfile?.name ?? '')
-  const [dbHost, setDbHost] = useState(editProfile?.host ?? '')
-  const [dbPort, setDbPort] = useState(editProfile ? String(editProfile.port) : '5432')
-  const [dbUser, setDbUser] = useState(editProfile?.user ?? '')
-  const [dbDatabase, setDbDatabase] = useState(editProfile?.database ?? '')
+  const [dbName, setDbName] = useState(editDbProfile?.name ?? '')
+  const [dbHost, setDbHost] = useState(editDbProfile?.host ?? '')
+  const [dbPort, setDbPort] = useState(editDbProfile ? String(editDbProfile.port) : '5432')
+  const [dbUser, setDbUser] = useState(editDbProfile?.user ?? '')
+  const [dbDatabase, setDbDatabase] = useState(editDbProfile?.database ?? '')
   const [dbSecret, setDbSecret] = useState('')
   const [dbConnecting, setDbConnecting] = useState(false)
   const [dbError, setDbError] = useState<string | null>(null)
+  // Real DB connection-test state (db kind) — version + latency.
+  const [dbTested, setDbTested] = useState(false)
+  const [dbTestResult, setDbTestResult] = useState<{ version: string; latencyMs: number } | null>(null)
+  const [dbTesting, setDbTesting] = useState(false)
+  const [dbTestError, setDbTestError] = useState<string | null>(null)
 
   // Reset port to the new engine's default whenever the engine changes, so the
   // port field always reflects the selected engine (never a stale value from a
@@ -125,18 +185,118 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnected, e
     const eng = DB_ENGINES.find(e => e.id === id)
     if (eng) setDbPort(eng.defaultPort > 0 ? String(eng.defaultPort) : '')
     // Connection params changed — any prior test result is stale.
-    setTested(false)
-    setTestResult(null)
-    setTestError(null)
+    setDbTested(false)
+    setDbTestResult(null)
+    setDbTestError(null)
   }
 
-  // Any change to connection params invalidates a prior test result.
+  // Any change to DB connection params invalidates a prior test result.
   useEffect(() => {
-    setTested(false)
-    setTestResult(null)
-    setTestError(null)
+    setDbTested(false)
+    setDbTestResult(null)
+    setDbTestError(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dbHost, dbPort, dbUser, dbDatabase, dbSecret])
+
+  // Build the auth descriptor (non-secret) from the current form.
+  function currentAuth(): AuthMethod {
+    return authMethod === 'keyFile'
+      ? { method: 'keyFile', path: keyPath.trim() }
+      : { method: 'password' }
+  }
+
+  // Build the jump auth descriptor (non-secret).
+  function currentJumpAuth(): AuthMethod {
+    return jumpAuthMethod === 'keyFile'
+      ? { method: 'keyFile', path: jumpKeyPath.trim() }
+      : { method: 'password' }
+  }
+
+  // Build the non-secret jump profile for persistence.
+  function currentJumpProfile(): JumpProfile | undefined {
+    if (!tunnel) return undefined
+    const jHost = (jumpHostRef.current?.value || '').trim()
+    const jUser = (jumpUserRef.current?.value || '').trim()
+    const jPort = Number(jumpPortRef.current?.value) || 22
+    if (!jHost) return undefined
+    return { host: jHost, port: jPort, user: jUser, auth: currentJumpAuth() }
+  }
+
+  // Build live connect/test args from the form, INCLUDING the in-memory secret.
+  function currentArgs(): SshConnectArgs {
+    const host = (hostRef.current?.value || '').trim()
+    const user = (userRef.current?.value || '').trim()
+    const port = Number(portRef.current?.value) || 22
+    // password auth → password; key-file auth → optional passphrase. Empty → undefined.
+    const sec = secret.length > 0 ? secret : undefined
+    // Jump config — include secret only when present.
+    let jump: SshConnectArgs['jump'] | undefined
+    if (tunnel) {
+      const jHost = (jumpHostRef.current?.value || '').trim()
+      const jUser = (jumpUserRef.current?.value || '').trim()
+      const jPort = Number(jumpPortRef.current?.value) || 22
+      if (jHost) {
+        const jSec = jumpSecret.length > 0 ? jumpSecret : undefined
+        jump = { host: jHost, port: jPort, user: jUser, auth: currentJumpAuth(), secret: jSec }
+      }
+    }
+    return { host, port, user, auth: currentAuth(), secret: sec, jump }
+  }
+
+  // Real SSH connection test (host kind).
+  async function runTest() {
+    const args = currentArgs()
+    if (!args.host || !args.user || testing) return
+    setTesting(true)
+    setTestResult(null)
+    try {
+      const result = await sshTest(args)
+      setTestResult(result)
+    } catch (err) {
+      const message = (err as { message?: string } | null)?.message ?? String(err)
+      setTestResult({ ok: false, latencyMs: 0, error: message })
+    } finally {
+      setTesting(false)
+    }
+  }
+
+  // SSH/host save + connect (and host edit-mode save).
+  function handleSave() {
+    // EDIT mode (host): update the existing profile in place (same id), no auto-connect.
+    if (isEdit && editHost) {
+      const host = (hostRef.current?.value || '').trim()
+      const user = (userRef.current?.value || '').trim()
+      const port = Number(portRef.current?.value) || 22
+      const name = (nameRef.current?.value || '').trim() || host
+      const auth = currentAuth()
+      // Persist jump WITHOUT secret.
+      const jump = currentJumpProfile()
+      try {
+        saveProfile({ id: editHost.id, name, host, port, user, auth, jump })
+      } catch { /* localStorage unavailable — ignore */ }
+      onSaved?.()
+      onClose()
+      return
+    }
+    // SSH/host connections drive the live connect flow (ORCH).
+    if (kind === 'host' && proto === 'ssh' && onConnect) {
+      const host = (hostRef.current?.value || '').trim()
+      const user = (userRef.current?.value || '').trim()
+      const port = Number(portRef.current?.value) || 22
+      const name = (nameRef.current?.value || '').trim() || host
+      const auth = currentAuth()
+      // args carries the in-memory secret so App can connect WITHOUT a 2nd prompt.
+      // jump.secret also rides in args (in-memory only, never persisted).
+      const args = currentArgs()
+      // Persist the NON-secret profile only (best-effort). Secret never leaves memory.
+      const jump = currentJumpProfile()
+      try {
+        saveProfile({ id: `live-${host}:${port}-${user}`, name, host, port, user, auth, jump })
+      } catch { /* localStorage unavailable — ignore */ }
+      onConnect(args, { name })
+    }
+    onClose()
+  }
 
   useEffect(() => {
     if (!engineOpen) return
@@ -152,10 +312,10 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnected, e
   // Real, ephemeral connection test (DB kind). Builds the same args as
   // save-and-connect, pings the server, and surfaces version + latency.
   const handleTestConnection = async () => {
-    setTested(false)
-    setTestResult(null)
-    setTestError(null)
-    setTesting(true)
+    setDbTested(false)
+    setDbTestResult(null)
+    setDbTestError(null)
+    setDbTesting(true)
     try {
       const result = await testConnection({
         dbType: engine,
@@ -165,12 +325,12 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnected, e
         ...(dbDatabase ? { database: dbDatabase } : {}),
         secret: dbSecret || undefined,
       })
-      setTestResult(result)
-      setTested(true)
+      setDbTestResult(result)
+      setDbTested(true)
     } catch (err) {
-      setTestError(err instanceof Error ? err.message : String(err))
+      setDbTestError(err instanceof Error ? err.message : String(err))
     } finally {
-      setTesting(false)
+      setDbTesting(false)
     }
   }
 
@@ -179,10 +339,10 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnected, e
     setDbConnecting(true)
     // EDIT mode reuses the existing profile id so saveDbConnection upserts (updates)
     // the same entry instead of creating a new one.
-    const id = editProfile ? editProfile.id : generateProfileId()
+    const id = editDbProfile ? editDbProfile.id : generateProfileId()
     const profile = {
       id,
-      ...(editProfile?.group ? { group: editProfile.group } : {}),
+      ...(editDbProfile?.group ? { group: editDbProfile.group } : {}),
       name: dbName,
       dbType: engine,
       host: dbHost,
@@ -228,8 +388,8 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnected, e
         {/* header */}
         <div className="row" style={{ justifyContent: 'space-between', padding: '18px 20px 14px', borderBottom: '1px solid var(--border-hairline)' }}>
           <div className="col" style={{ gap: 2 }}>
-            <span style={{ fontSize: 17, fontWeight: 700, letterSpacing: '-0.3px' }}>{isEdit ? t('modals.editConnection') : t('modals.newConnection')}</span>
-            <span style={{ fontSize: 12, color: 'var(--text-faint)' }}>{t('modals.newConnectionSub')}</span>
+            <span style={{ fontSize: 17, fontWeight: 700, letterSpacing: '-0.3px' }}>{isEdit ? t('modals.editTitle') : t('modals.newConnection')}</span>
+            <span style={{ fontSize: 12, color: 'var(--text-faint)' }}>{isEdit ? t('modals.editSub') : t('modals.newConnectionSub')}</span>
           </div>
           <IconBtn name="x" size={16} variant="bare" onClick={onClose} />
         </div>
@@ -311,7 +471,7 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnected, e
             <div className="row gap10">
               {kind === 'db'
                 ? <Field label={t('modals.fieldName')} value={dbName} onChange={setDbName} placeholder="my-database" w={1.4} />
-                : <Field label={t('modals.fieldName')} value="prod-web-01" onChange={() => undefined} w={1.4} />}
+                : <Field key={`name-${kind}`} label={t('modals.fieldName')} value={editHost ? editHost.name : ''} w={1.4} inputRef={nameRef} />}
               <label className="col" style={{ gap: 5, flex: 1 }}>
                 <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.fieldGroup')}</span>
                 <div className="row gap6" style={{ height: 36 }}>
@@ -322,15 +482,20 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnected, e
             <div className="row gap10">
               {kind === 'db'
                 ? <Field label={t('modals.fieldHost')} value={dbHost} onChange={setDbHost} placeholder="127.0.0.1" mono w={2} />
-                : <Field label={t('modals.fieldHost')} value="10.0.1.21" onChange={() => undefined} mono w={2} />}
+                : <Field key={`host-${kind}`} label={t('modals.fieldHost')} value={editHost ? editHost.host : ''} mono w={2} inputRef={hostRef} onInput={recomputeCanTest} />}
               {kind === 'db'
                 ? <Field label={t('modals.fieldPort')} value={dbPort} onChange={setDbPort} numeric mono w={0.8} />
-                : <Field label={t('modals.fieldPort')} value="22" onChange={() => undefined} mono w={0.8} />}
+                : <Field key={`port-${kind}`} label={t('modals.fieldPort')} value={editHost ? String(editHost.port) : '22'} numeric mono w={0.8} inputRef={portRef} />}
             </div>
             <div className="row gap10">
               {kind === 'db'
                 ? <Field label={t('modals.fieldUser')} value={dbUser} onChange={setDbUser} placeholder={t('modals.fieldUserPlaceholder')} mono />
-                : <Field label={t('modals.fieldUsername')} value="deploy" onChange={() => undefined} mono />}
+                : <Field key={`user-${kind}`} label={t('modals.fieldUsername')} value={editHost ? editHost.user : ''} mono inputRef={userRef} onInput={recomputeCanTest} />}
+              {/* Secret field.
+                  DB kind: password/key field, controlled, never persisted.
+                  Host kind: coherent with the chosen auth method —
+                    password auth → password; key-file auth → optional passphrase.
+                    Controlled so it can feed sshTest / connect; never persisted. */}
               {kind === 'db' ? (
                 <label className="col" style={{ gap: 5, flex: 1 }}>
                   <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.fieldPasswordKey')}</span>
@@ -341,12 +506,21 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnected, e
                       style={{ flex: 1, height: '100%', border: 'none', background: 'transparent', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }} />
                   </div>
                 </label>
-              ) : (
+              ) : authMethod === 'password' ? (
                 <label className="col" style={{ gap: 5, flex: 1 }}>
-                  <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.fieldPasswordKey')}</span>
+                  <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.fieldPassword')}</span>
                   <div className="row" style={{ height: 36, borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', paddingLeft: 10, paddingRight: 12, gap: 6, alignItems: 'center' }}>
                     <Icon name="lock" size={12} style={{ color: 'var(--text-faint)', flex: 'none' }} />
-                    <input defaultValue="" placeholder={t('modals.fieldPasswordPlaceholder')} className="mono"
+                    <input type="password" value={secret} onChange={e => setSecret(e.target.value)} placeholder={t('modals.fieldPassword')} className="mono"
+                      style={{ flex: 1, height: '100%', border: 'none', background: 'transparent', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }} />
+                  </div>
+                </label>
+              ) : (
+                <label className="col" style={{ gap: 5, flex: 1 }}>
+                  <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.fieldPassphrase')}</span>
+                  <div className="row" style={{ height: 36, borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', paddingLeft: 10, paddingRight: 12, gap: 6, alignItems: 'center' }}>
+                    <Icon name="lock" size={12} style={{ color: 'var(--text-faint)', flex: 'none' }} />
+                    <input type="password" value={secret} onChange={e => setSecret(e.target.value)} placeholder={t('modals.fieldPassphrasePlaceholder')} className="mono"
                       style={{ flex: 1, height: '100%', border: 'none', background: 'transparent', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }} />
                   </div>
                 </label>
@@ -360,8 +534,8 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnected, e
             {kind === 'db' && dbError && (
               <span style={{ fontSize: 12, color: 'var(--danger-fg)' }}>{dbError}</span>
             )}
-            {kind === 'db' && testError && (
-              <span style={{ fontSize: 12, color: 'var(--danger-fg)' }}>{testError}</span>
+            {kind === 'db' && dbTestError && (
+              <span style={{ fontSize: 12, color: 'var(--danger-fg)' }}>{dbTestError}</span>
             )}
           </div>
 
@@ -406,7 +580,85 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnected, e
               </div>
               <Toggle on={tunnel} onChange={setTunnel} accent />
             </div>
-            {tunnel && (
+            {tunnel && kind === 'host' && (
+              <div className="col gap10" style={{ padding: 14, borderTop: '1px solid var(--border-hairline)' }}>
+                {/* Jump host connection fields */}
+                <div className="row gap10">
+                  <Field
+                    label={t('modals.proxyJumpHost')}
+                    value={editHost?.jump?.host ?? ''}
+                    placeholder="bastion.example.com"
+                    mono
+                    w={2}
+                    inputRef={jumpHostRef}
+                  />
+                  <Field
+                    label={t('modals.fieldPort')}
+                    value={String(editHost?.jump?.port ?? 22)}
+                    mono
+                    w={0.8}
+                    inputRef={jumpPortRef}
+                  />
+                </div>
+                <div className="row gap10">
+                  <Field
+                    label={t('modals.proxyJumpUser')}
+                    value={editHost?.jump?.user ?? ''}
+                    placeholder="ec2-user"
+                    mono
+                    inputRef={jumpUserRef}
+                  />
+                  {/* Jump secret — password or passphrase, never persisted */}
+                  <label className="col" style={{ gap: 5, flex: 1 }}>
+                    <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.proxyJumpSecret')}</span>
+                    <div className="row" style={{ height: 36, borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', paddingLeft: 10, paddingRight: 12, gap: 6, alignItems: 'center' }}>
+                      <Icon name="lock" size={12} style={{ color: 'var(--text-faint)', flex: 'none' }} />
+                      <input
+                        type="password"
+                        value={jumpSecret}
+                        onChange={e => setJumpSecret(e.target.value)}
+                        placeholder={t('modals.proxyJumpSecret')}
+                        aria-label={t('modals.proxyJumpSecret')}
+                        className="mono"
+                        style={{ flex: 1, height: '100%', border: 'none', background: 'transparent', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }}
+                      />
+                    </div>
+                  </label>
+                </div>
+                {/* Jump auth method */}
+                <div className="col" style={{ gap: 6 }}>
+                  <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.authMethod')}</span>
+                  <Segmented
+                    value={jumpAuthMethod}
+                    onChange={v => setJumpAuthMethod(v as AuthMethod['method'])}
+                    options={[
+                      { value: 'password', label: t('modals.authPassword') },
+                      { value: 'keyFile', label: t('modals.authKeyFile') },
+                    ]}
+                  />
+                </div>
+                {jumpAuthMethod === 'keyFile' && (
+                  <label className="col" style={{ gap: 5 }}>
+                    <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.keyPath')}</span>
+                    <input
+                      value={jumpKeyPath}
+                      onChange={e => setJumpKeyPath(e.target.value)}
+                      placeholder={t('modals.keyPathPlaceholder')}
+                      className="mono"
+                      style={{ height: 36, padding: '0 12px', borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }}
+                    />
+                  </label>
+                )}
+                {/* Jump chain preview */}
+                <div className="row gap8" style={{ padding: '8px 10px', background: 'var(--surface-sunken)', borderRadius: 10 }}>
+                  <Icon name="git-commit" size={13} style={{ color: 'var(--text-faint)' }} />
+                  <span className="mono" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+                    localhost → {(jumpHostRef.current?.value || '').trim() || 'bastion'} → {(hostRef.current?.value || '').trim() || 'target'}
+                  </span>
+                </div>
+              </div>
+            )}
+            {tunnel && kind === 'db' && (
               <div className="col gap10" style={{ padding: 14, borderTop: '1px solid var(--border-hairline)' }}>
                 <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.tunnelSelectHost')}</span>
                 <div className="col gap6">
@@ -427,7 +679,7 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnected, e
                 </div>
                 <div className="row gap8" style={{ padding: '8px 10px', background: 'var(--surface-sunken)', borderRadius: 10 }}>
                   <Icon name="git-commit" size={13} style={{ color: 'var(--text-faint)' }} />
-                  <span className="mono" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>localhost → {D.byId[via] ? D.byId[via].name : 'bastion'} → {kind === 'db' ? '10.0.4.2:5432' : 'target'}</span>
+                  <span className="mono" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>localhost → {D.byId[via] ? D.byId[via].name : 'bastion'} → 10.0.4.2:5432</span>
                 </div>
               </div>
             )}
@@ -437,20 +689,34 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnected, e
         {/* footer */}
         <div className="row" style={{ justifyContent: 'space-between', padding: '14px 20px', borderTop: '1px solid var(--border-hairline)' }}>
           {kind === 'db' ? (
-            <button className="btn btn-secondary" onClick={handleTestConnection} disabled={testing}>
-              {testing ? (
+            // DB kind: real db_test_connection returning version + latency.
+            <button className="btn btn-secondary" onClick={handleTestConnection} disabled={dbTesting}>
+              {dbTesting ? (
                 <><Icon name="zap" size={15} /> {t('modals.testing')}</>
-              ) : tested && testResult ? (
-                <><Icon name="circle-check" size={15} style={{ color: 'var(--signal-green)' }} /> {t('modals.testPassed', { version: shortVersion(testResult.version), latency: testResult.latencyMs })}</>
-              ) : testError ? (
+              ) : dbTested && dbTestResult ? (
+                <><Icon name="circle-check" size={15} style={{ color: 'var(--signal-green)' }} /> {t('modals.testPassed', { version: shortVersion(dbTestResult.version), latency: dbTestResult.latencyMs })}</>
+              ) : dbTestError ? (
                 <><Icon name="alert-triangle" size={15} style={{ color: 'var(--danger-fg)' }} /> {t('modals.testFailed')}</>
               ) : (
                 <><Icon name="zap" size={15} /> {t('modals.testConnection')}</>
               )}
             </button>
           ) : (
-            <button className="btn btn-secondary" onClick={() => setTested(true)}>
-              {tested ? <><Icon name="circle-check" size={15} style={{ color: 'var(--signal-green)' }} /> {t('modals.testPassed', { version: '', latency: 28 })}</> : <><Icon name="zap" size={15} /> {t('modals.testConnection')}</>}
+            // Host/SSH kind: real sshTest with latency + ok/error.
+            <button className="btn btn-secondary" onClick={runTest}
+              disabled={testing || !canTest}
+              style={{ opacity: testing || !canTest ? 0.55 : 1, cursor: testing || !canTest ? 'not-allowed' : 'pointer' }}>
+              {testing ? (
+                <><Icon name="loader" size={15} className="spin" /> {t('modals.testing')}</>
+              ) : testResult ? (
+                testResult.ok ? (
+                  <><Icon name="circle-check" size={15} style={{ color: 'var(--signal-green)' }} /> <span style={{ color: 'var(--signal-green)' }}>{t('modals.testOk')} · {testResult.latencyMs}ms</span></>
+                ) : (
+                  <><Icon name="alert-triangle" size={15} style={{ color: 'var(--danger-fg)' }} /> <span style={{ color: 'var(--danger-fg)' }}>{t('modals.testFail')} · {testResult.error}</span></>
+                )
+              ) : (
+                <><Icon name="zap" size={15} /> {t('modals.testConn')}</>
+              )}
             </button>
           )}
           <div className="row gap8">
@@ -459,7 +725,7 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnected, e
               ? <Btn variant="primary" icon="check" onClick={handleDbSaveAndConnect} disabled={dbConnecting}>
                   {dbConnecting ? t('modals.connecting') ?? 'Connecting…' : isEdit ? t('modals.save') : t('modals.saveAndConnect')}
                 </Btn>
-              : <Btn variant="primary" icon="check">{t('modals.saveAndConnect')}</Btn>}
+              : <Btn variant="primary" icon="check" onClick={handleSave}>{isEdit ? t('modals.save') : t('modals.saveAndConnect')}</Btn>}
           </div>
         </div>
       </div>

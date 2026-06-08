@@ -636,7 +636,12 @@ html, body {
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+  overflow: hidden;
 }
+/* Desktop-app look: no visible scrollbar chrome anywhere (vertical or horizontal).
+   Scrolling still works via wheel/trackpad/keys; regions keep overflow:auto. */
+* { scrollbar-width: none; }
+*::-webkit-scrollbar { width: 0; height: 0; background: transparent; }
 .mono { font-family: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace; }
 button { font-family: inherit; cursor: pointer; border: none; background: none; }
 input, textarea { font-family: inherit; }
@@ -671,12 +676,14 @@ input, textarea { font-family: inherit; }
 /* ============================================================
    Window frame
    ============================================================ */
+/* In the Tauri app the OS window IS the chrome, so .win fills it (the fixed
+   1440x960 + #stage/#win-scale letterbox was only for the standalone-HTML demo).
+   Filling the real window keeps the sidebar footer pinned + visible at any size. */
+#root { height: 100%; }
 .win {
-  width: 1440px; height: 960px;
+  width: 100%; height: 100%;
   background: var(--bg-canvas);
-  border-radius: 14px;
   overflow: hidden;
-  box-shadow: var(--shadow-window), 0 0 0 1px rgba(255,255,255,0.04);
   display: flex; flex-direction: column;
   color: var(--text-primary);
   position: relative;
@@ -740,7 +747,11 @@ input, textarea { font-family: inherit; }
 
 /* Body grid (workbench §5.3) */
 .body {
-  flex: 1; min-height: 0;
+  flex: 1; min-height: 0; min-width: 0;
+  /* overflow:hidden keeps the fixed-width Sidebar + IconRail from being pushed
+     off-screen (clipped) on narrower windows: the only flexible child (the main
+     .card-surface.grow column, which carries min-width:0) shrinks instead. */
+  overflow: hidden;
   display: flex; gap: 12px;
   padding: 12px;
 }
@@ -751,6 +762,9 @@ input, textarea { font-family: inherit; }
   border: 1px solid var(--border-hairline);
   border-radius: 16px;
   box-shadow: var(--shadow-card);
+  /* allow a flex-child card-surface (e.g. the main grow column) to shrink below
+     its content size instead of forcing the row to overflow / clip the rail. */
+  min-width: 0;
 }
 
 /* ============================================================
@@ -852,3 +866,15 @@ input, textarea { font-family: inherit; }
 @keyframes fadeIn { from { transform: translateY(5px); } to { transform: none; } }
 .pop-in { animation: popIn .18s cubic-bezier(.2,1.2,.4,1); }
 @keyframes popIn { from { transform: scale(.98); } to { transform: none; } }
+.spin { animation: spin .8s linear infinite; }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+/* skeleton shimmer (loading placeholder) — theme-aware via surface tokens */
+.skel {
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--surface-inset) 25%, var(--surface-sunken) 50%, var(--surface-inset) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s linear infinite;
+}
+@keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) { .skel { animation: none; } }

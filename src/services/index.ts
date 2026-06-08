@@ -10,7 +10,7 @@ export { DATA }
 export { fetchModels, testModel } from './models'
 export type { ModelTestResult } from './models'
 
-export { getTermBuffer, getSftp, getTunnels, getMonitor } from './ssh'
+export { getTermBuffer, sftpList, sftpRealpath, getTunnels, getMonitor } from './ssh'
 
 export { runQuery, getSchema, dbConnect, dbDisconnect, getHistory, getSnippets, saveSnippet } from './db'
 export type { QueryResult } from './types'

@@ -2,6 +2,7 @@
 import React, { useState, useMemo, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
+import { BrandMark } from '../BrandMark'
 import { IconBtn, StatusDot, ConnGlyph, Segmented } from '../atoms'
 import { useData } from '../../state/DataContext'
 import type { Connection } from '../../services/types'
@@ -20,8 +21,11 @@ export interface TitleBarProps {
 
 export interface SidebarProps {
   activeId?: string
+  /** Primary card action. Wired by App to open the connection DETAILS panel. */
   onOpen: (conn: Connection) => void
-  onDetail: (conn: Connection) => void
+  /** Opens the connection DETAILS panel. Used by DB cards (click) and the
+   *  hover detail icon on host/SSH cards. */
+  onDetail?: (conn: Connection) => void
   onNew?: React.MouseEventHandler<HTMLButtonElement>
   collapsed?: boolean
   onToggleCollapse?: React.MouseEventHandler<HTMLButtonElement>
@@ -34,13 +38,14 @@ export interface SidebarProps {
    *  state when not provided (preserves standalone usage). */
   filter?: string
   onFilterChange?: (filter: string) => void
+  onEnableAuth?: () => void
 }
 
 export interface ConnRowProps {
   conn: Connection
   active?: boolean
   onOpen: (conn: Connection) => void
-  onDetail: (conn: Connection) => void
+  onDetail?: (conn: Connection) => void
   nested?: boolean
 }
 
@@ -113,9 +118,7 @@ export function TitleBar({ theme, onToggleTheme, onOpenSettings, settingsActive 
   return (
     <div className="titlebar" data-tauri-drag-region>
       <div className="brand" style={isMac ? { paddingLeft: 70 } : undefined}>
-        <div className="logo-mark">
-          <span className="mono" style={{ fontSize: 13, fontWeight: 700, transform: 'translateY(-0.5px)' }}>&gt;_</span>
-        </div>
+        <BrandMark size={26} style={{ borderRadius: 8 }} />
         <div className="col" style={{ lineHeight: 1.05 }}>
           <span className="brand-name">Catio</span>
         </div>
@@ -148,7 +151,7 @@ export function TitleBar({ theme, onToggleTheme, onOpenSettings, settingsActive 
 
 // ---- Sidebar ----
 
-export function Sidebar({ activeId, onOpen, onDetail, onNew, collapsed, onToggleCollapse, conns: vaultConns, currentUser, authEnabled, onLock, filter: filterProp, onFilterChange }: SidebarProps) {
+export function Sidebar({ activeId, onOpen, onDetail, onNew, collapsed, onToggleCollapse, conns: vaultConns, currentUser, authEnabled, onLock, onEnableAuth, filter: filterProp, onFilterChange }: SidebarProps) {
   const { t } = useTranslation()
   const D = useData()
   const allConns = vaultConns || D.connections
@@ -216,6 +219,32 @@ export function Sidebar({ activeId, onOpen, onDetail, onNew, collapsed, onToggle
 
       {/* list */}
       <div className="grow" style={{ overflowY: 'auto', padding: '2px 8px 10px' }}>
+        {/* Saved profiles carry no preset group ('') — surface them under a SAVED section
+            so the real vault renders even without the mock group taxonomy. */}
+        {(() => {
+          const groupIds = new Set(D.groups.map(g => g.id))
+          const ungrouped = conns.filter(c => !groupIds.has(c.group))
+          if (!ungrouped.length) return null
+          const open = openGroups.__saved !== false
+          return (
+            <div style={{ marginBottom: 6 }}>
+              <button onClick={() => setOpenGroups(s => ({ ...s, __saved: s.__saved === false }))}
+                style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 7, padding: '7px 8px', color: 'var(--text-tertiary)' }}>
+                <Icon name="chevron-right" size={13} style={{ transition: 'transform .15s', transform: open ? 'rotate(90deg)' : 'none' }} />
+                <span className="dot" style={{ background: 'var(--accent-primary)' }} />
+                <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.4px', textTransform: 'uppercase' }}>{t('shell.saved')}</span>
+                <span className="mono" style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--text-faint)' }}>{ungrouped.length}</span>
+              </button>
+              {open && (
+                <div className="col" style={{ gap: 1 }}>
+                  {ungrouped.map(c => (
+                    <ConnRow key={c.id} conn={c} active={activeId === c.id} onOpen={onOpen} onDetail={onDetail} />
+                  ))}
+                </div>
+              )}
+            </div>
+          )
+        })()}
         {D.groups.map(g => {
           const items = conns.filter(c => c.group === g.id)
           if (!items.length) return null
@@ -268,15 +297,24 @@ export function Sidebar({ activeId, onOpen, onDetail, onNew, collapsed, onToggle
       {/* footer status */}
       <div className="row" style={{ padding: '10px 12px', borderTop: '1px solid var(--border-hairline)', gap: 8 }}>
         <div className="icon-badge" style={{ width: 26, height: 26, borderRadius: 8, background: 'var(--accent-soft)', color: 'var(--accent-primary)' }}>
-          <Icon name="user" size={14} />
+          <Icon name={authEnabled ? 'user' : 'shield'} size={14} />
         </div>
-        <div className="col grow" style={{ lineHeight: 1.2, minWidth: 0 }}>
-          <span className="ell" style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>{currentUser || 'skyler'}</span>
-          <span style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{authEnabled ? t('shell.localLoginIsolated') : t('shell.activeStatus')}</span>
-        </div>
-        {authEnabled
-          ? <button className="icon-btn bare" title={t('shell.lockWorkspace')} onClick={onLock}><Icon name="lock" size={15} /></button>
-          : <StatusDot status="up" size={7} />}
+        {authEnabled ? (
+          <>
+            <div className="col grow" style={{ lineHeight: 1.2, minWidth: 0 }}>
+              <span className="ell" style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>{currentUser}</span>
+              <span style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{t('shell.localLoginIsolated')}</span>
+            </div>
+            <button className="icon-btn bare" title={t('shell.lockWorkspace')} onClick={onLock}><Icon name="lock" size={15} /></button>
+          </>
+        ) : (
+          <>
+            <div className="col grow" style={{ lineHeight: 1.2, minWidth: 0 }}>
+              <span className="ell" style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>{t('shell.authDisabled')}</span>
+              <button style={{ background: 'none', border: 'none', padding: 0, fontSize: 10.5, color: 'var(--accent-primary)', cursor: 'pointer', textAlign: 'left', whiteSpace: 'nowrap', alignSelf: 'flex-start' }} onClick={() => onEnableAuth?.()}>{t('shell.enableAuth')}</button>
+            </div>
+          </>
+        )}
       </div>
     </div>
   )
@@ -285,13 +323,13 @@ export function Sidebar({ activeId, onOpen, onDetail, onNew, collapsed, onToggle
 // ---- ConnRow ----
 
 export function ConnRow({ conn, active, onOpen, onDetail, nested }: ConnRowProps) {
-  const { t } = useTranslation()
   const D = useData()
   const [hover, setHover] = useState(false)
   // DB cards open the details panel on click (no workbench, no detail icon).
   // Host/SSH cards keep the original behavior: click → workbench, hover → detail icon.
+  // (onOpen is wired by the parent; Connect moves to the DetailsPanel's Connect button.)
   const isDb = conn.kind === 'db'
-  const handlePrimary = () => (isDb ? onDetail(conn) : onOpen(conn))
+  const handlePrimary = () => (isDb ? onDetail?.(conn) : onOpen(conn))
   return (
     <div onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
       onClick={handlePrimary} onDoubleClick={handlePrimary}
@@ -308,13 +346,7 @@ export function ConnRow({ conn, active, onOpen, onDetail, nested }: ConnRowProps
         </div>
         <span className="ell mono" style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{nested ? (D.engineMeta[conn.engine ?? ''] || {}).label : conn.sub}</span>
       </div>
-      {hover && !isDb ? (
-        <button className="icon-btn bare" style={{ width: 22, height: 22 }} onClick={(e) => { e.stopPropagation(); onDetail(conn) }} title={t('shell.details')}>
-          <Icon name="info" size={14} />
-        </button>
-      ) : (
-        <StatusDot status={conn.status} size={6} />
-      )}
+      <StatusDot status={conn.status} size={6} />
     </div>
   )
 }

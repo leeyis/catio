@@ -2,6 +2,7 @@
 import React, { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
+import { BrandMark } from '../BrandMark'
 
 // ---- Prop types ----
 
@@ -15,11 +16,15 @@ export interface AuthGateProps {
   users: AuthUser[]
   onLogin: (username: string) => void
   onCreate: (user: { username: string; pass: string; hint: string }) => void
+  /** Cancel/exit setup. Offered only on first-run (no accounts yet) — backing out
+   *  there reverts the accidental auth-enable. Not shown when accounts exist (a
+   *  returning user must log in; we don't let cancel bypass the lock). */
+  onCancel?: () => void
 }
 
 // ---- Component ----
 
-export function AuthGate({ users, onLogin, onCreate }: AuthGateProps) {
+export function AuthGate({ users, onLogin, onCreate, onCancel }: AuthGateProps) {
   const { t } = useTranslation()
   const firstRun = users.length === 0
   const [screen, setScreen] = useState(firstRun ? 'init' : 'login')
@@ -52,11 +57,17 @@ export function AuthGate({ users, onLogin, onCreate }: AuthGateProps) {
   return (
     <div style={{ position: 'absolute', inset: 0, zIndex: 90, display: 'grid', placeItems: 'center',
       background: 'color-mix(in srgb, var(--cta-bg) 55%, transparent)', backdropFilter: 'blur(10px)' }}>
-      <div className="pop-in col" style={{ width: 380, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', borderRadius: 20, boxShadow: 'var(--shadow-window)', overflow: 'hidden' }}>
+      <div className="pop-in col" style={{ width: 380, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', borderRadius: 20, boxShadow: 'var(--shadow-window)', overflow: 'hidden', position: 'relative' }}>
+        {/* close / cancel — first-run only, so an accidental auth-enable can be backed out */}
+        {users.length === 0 && onCancel && (
+          <button className="icon-btn bare" style={{ position: 'absolute', top: 12, right: 12, width: 30, height: 30, zIndex: 1 }} title={t('auth.cancelSetup')} onClick={onCancel}>
+            <Icon name="x" size={16} />
+          </button>
+        )}
         {/* header */}
         <div className="col" style={{ alignItems: 'center', gap: 12, padding: '28px 28px 18px' }}>
-          <div className="logo-mark" style={{ width: 52, height: 52, borderRadius: 16, position: 'relative' }}>
-            <span className="mono" style={{ fontSize: 24, fontWeight: 700 }}>&gt;_</span>
+          <div style={{ width: 52, height: 52, position: 'relative' }}>
+            <BrandMark size={52} style={{ borderRadius: 16 }} />
             <div style={{ position: 'absolute', right: -4, bottom: -4, width: 24, height: 24, borderRadius: 999, background: 'var(--surface-card)', display: 'grid', placeItems: 'center', boxShadow: 'var(--shadow-card)' }}>
               <Icon name={isInit ? 'user' : 'lock'} size={13} style={{ color: 'var(--accent-primary)' }} />
             </div>

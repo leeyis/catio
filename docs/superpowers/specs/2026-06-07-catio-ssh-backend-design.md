@@ -4,6 +4,60 @@
 - 前置：子项目 1（UI 外壳）已完成，建立了 `src/services/` 数据接缝层。
 - **Reach**（github.com/alexandrosnt/Reach）— Tauri v2 + Rust(`russh`) + Svelte 5，MIT。本子项目复用其 russh Rust 栈，作参考实现。
 
+## 实现状态
+
+**子项目 2 已实现**，落在分支 `catio-ui-shell`（Rust `russh` 后端 + 前端接线）。下文为已落地的实现摘要；后续各节为原始设计。
+
+### 已注册的 Tauri 命令
+
+- **连接 / 主机密钥**：`ssh_connect`、`ssh_disconnect`、`ssh_trust_host`
+- **终端 (PTY)**：`term_open`、`term_write`、`term_resize`、`term_close`
+- **SFTP**：`sftp_list`、`sftp_download`、`sftp_upload`、`sftp_mkdir`、`sftp_rename`、`sftp_delete`
+- **隧道**：`tunnel_open`（L/R/D）、`tunnel_close`、`tunnel_list`
+- **监控**：`monitor_start`、`monitor_stop`
+- **多会话广播**：`multiexec_run`
+
+### 事件（发往前端）
+
+- `term://{channelId}` — 终端输出字节流
+- `sftp-progress://download` / `sftp-progress://upload` — SFTP 传输进度
+- `tunnel://{tunnelId}` — 周期性隧道字节计数（up/down）
+- `monitor://{sessionId}` — 周期性系统监控快照
+- `multiexec://{runId}` — 多会话广播执行的每会话结果流
+
+### known_hosts 位置
+
+`app_data_dir/known_hosts`（由 `tauri::path().app_data_dir()` 解析；启动时 `create_dir_all`）。TOFU：首次连接 `Unknown` → 前端提示信任 → `ssh_trust_host` 写入；`Mismatch` → 拒绝连接并返回 `SshError::HostKeyMismatch`。
+
+### 安全说明
+
+- **秘密仅驻留内存**：密码 / 私钥口令仅在连接期存在于内存，绝不持久化、绝不回传前端（`ConnectArgs` 手写 `Debug` 以遮蔽 `secret`）。
+- **连接档案（非敏感）** 存 localStorage，键名 `catio-connections`（host/port/user/认证方式/密钥路径）。
+- **真正的加密保险库 / OS keychain 是子项目 4** 的范围，本子项目不实现。
+
+### 测试策略
+
+进程内 `russh` 测试 server 夹具（`src-tauri/tests/common/test_server.rs`）：每个测试随机端口起一个内存 SSH server，覆盖连接/认证/PTY/SFTP/隧道/监控/multiexec 的真实 SSH 往返。**无需 Docker** 即可跑整套 `cargo test`。
+
+### 健壮性：断开时拆除会话后台任务
+
+`ssh_disconnect(session_id)` 现在的清理顺序：
+
+1. **中止并移除该会话的周期监控任务**（`remove_monitor`；无监控任务时为 no-op）——避免它继续在已死 handle 上 `exec`。
+2. 从 manager 移除 `Session`——drop 其 `terms` 中所有 mpsc 发送端，各终端 owner 任务在 channel 关闭时自行结束。
+3. 调 russh `handle.disconnect(...)`。
+
+**已知限制**：隧道以隧道 id 为键、不与会话生命周期绑定，故断开会话时**不会**自动关闭其隧道；用户须经 `tunnel_close` 主动关闭。
+
+### 待人工 QA（GUI 无法 headless 测试，需真实 sshd）
+
+- 终端全屏程序（`vim`/`htop`/`top`/`less`）
+- SFTP 浏览 + 上传 / 下载 / mkdir / rename / delete
+- 隧道 L / R / D（含字节计数）
+- 实时监控（CPU/mem/net/disk/进程，GPU 可选）
+- 多会话广播执行
+- 主机密钥首次信任 / mismatch 拒绝
+
 ## 0. 范围决策（来自 brainstorming）
 
 | 决策 | 选择 |
