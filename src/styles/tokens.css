@@ -803,6 +803,11 @@ input, textarea { font-family: inherit; }
 .icon-btn.bare:hover { background: var(--surface-sunken); }
 .icon-btn.danger:hover { background: var(--danger-soft); color: var(--danger-fg); }
 
+/* Structure tab: per-column edit/drop actions reveal on row hover */
+.structrow-actions { opacity: 0; transition: opacity .12s; }
+.structrow:hover .structrow-actions,
+.structrow:focus-within .structrow-actions { opacity: 1; }
+
 /* chips & badges */
 .chip {
   display: inline-flex; align-items: center; gap: 5px;

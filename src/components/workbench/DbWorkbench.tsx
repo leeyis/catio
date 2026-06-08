@@ -251,7 +251,7 @@ export function DbWorkbench({ conn, density }: DbWorkbenchProps) {
                     columns={D.ordersColumns.map((c): ResultColumn => ({ name: c.name, type: c.type, pk: c.pk, fk: c.fk, icon: c.icon }))}
                     rows={D.ordersRows.map(r => D.ordersColumns.map(c => (r as unknown as Record<string, unknown>)[c.name]))}
                     statusTones={D.statusTones} density={density} key={obj.table} />)}
-              {effectiveTableTab === 'structure' && <StructureView table={obj.table} schema={selectedSchema} connId={connId ?? undefined} key={`${selectedSchema ?? ''}.${obj.table}`} />}
+              {effectiveTableTab === 'structure' && <StructureView table={obj.table} schema={selectedSchema} connId={connId ?? undefined} engine={conn.engine} key={`${selectedSchema ?? ''}.${obj.table}`} />}
             </div>
           </>
         )}

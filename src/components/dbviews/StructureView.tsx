@@ -1,12 +1,13 @@
-/* ported from ref-ui/_extract/blob5.txt — verbatim per plan T1-T7; live structure wired in E-series */
+/* ported from ref-ui/_extract/blob5.txt — verbatim per plan T1-T7; live structure wired in E-series; column editing (add/modify/drop) added */
 import React, { useState, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
-import { Btn, Segmented } from '../atoms'
+import { Btn, IconBtn, Segmented, Toggle } from '../atoms'
 import { useData } from '../../state/DataContext'
-import { tableStructure, dbErrMsg } from '../../services/db'
-import type { TableStructure } from '../../services/types'
+import { tableStructure, runQuery, dbErrMsg } from '../../services/db'
+import type { StructColumn, TableStructure } from '../../services/types'
 import { highlightSQL } from './highlightSQL'
+import { dialectFor, qualifiedTable, buildAddColumn, buildModifyColumn, buildDropColumn, type ColumnDraft } from './structureDdl'
 
 export interface StructureViewProps {
   table: string
@@ -14,6 +15,8 @@ export interface StructureViewProps {
   connId?: string
   /** Schema namespace qualifying the table (live path); used for the real structure fetch + DDL prefix. */
   schema?: string
+  /** Engine string (Connection.engine / DbType) — selects identifier quoting. Postgres-first. */
+  engine?: string
 }
 
 // `table-layout: fixed` makes the table honor `width:100%` strictly and split the
@@ -22,6 +25,7 @@ export interface StructureViewProps {
 const tblStyle: React.CSSProperties = { width: '100%', tableLayout: 'fixed', borderCollapse: 'collapse', fontSize: 12.5 }
 const thCell: React.CSSProperties = { textAlign: 'left', padding: '9px 12px', fontSize: 11, fontWeight: 700, letterSpacing: '0.3px', textTransform: 'uppercase', color: 'var(--text-faint)', borderBottom: '1px solid var(--border-hairline-alt)', position: 'sticky', top: 0, background: 'var(--surface-subtle)', zIndex: 1 }
 const tdCell: React.CSSProperties = { padding: '8px 12px', borderBottom: '1px solid var(--border-hairline)', color: 'var(--text-secondary)', verticalAlign: 'middle' }
+const inputStyle: React.CSSProperties = { border: '1px solid var(--border-hairline)', borderRadius: 7, padding: '6px 9px', background: 'var(--surface-card)', color: 'var(--text-primary)', font: 'inherit', fontSize: 12.5, outline: 'none', width: '100%' }
 
 function buildDDL(qualified: string, st: TableStructure) {
   const cols = st.columns.map(c => `  ${c.name.padEnd(16)} ${c.type}${c.nullable ? '' : ' not null'}${c.default ? ' default ' + c.default : ''}${c.key === 'PK' ? ' primary key' : ''}`).join(',\n')
@@ -33,13 +37,25 @@ function Empty({ icon, text }: { icon: string; text: string }) {
   return <div className="col" style={{ alignItems: 'center', justifyContent: 'center', height: '100%', gap: 8, color: 'var(--text-faint)' }}><Icon name={icon} size={26} /><span style={{ fontSize: 13 }}>{text}</span></div>
 }
 
-export function StructureView({ table, connId, schema }: StructureViewProps) {
+/** Local edit-form state for the add/modify dialog. */
+interface ColForm {
+  /** 'add' → ADD COLUMN; otherwise the name of the existing column being modified. */
+  mode: 'add' | { editing: string; original: ColumnDraft }
+  name: string
+  type: string
+  nullable: boolean
+  default: string
+}
+
+export function StructureView({ table, connId, schema, engine }: StructureViewProps) {
   const { t } = useTranslation()
   const D = useData()
   const mockSt = D.tableStructures[table] || D.tableStructures['orders']
   // Live path: fetch the real structure from the backend; null until loaded.
   const [liveSt, setLiveSt] = useState<TableStructure | null>(null)
   const [structErr, setStructErr] = useState<string | null>(null)
+  // Bumped after a successful DDL apply to force a structure re-fetch.
+  const [refreshTick, setRefreshTick] = useState(0)
   useEffect(() => {
     if (!connId) { setLiveSt(null); setStructErr(null); return }
     let cancelled = false
@@ -48,15 +64,73 @@ export function StructureView({ table, connId, schema }: StructureViewProps) {
       .then(s => { if (!cancelled) setLiveSt(s) })
       .catch(e => { if (!cancelled) { setLiveSt(null); setStructErr(dbErrMsg(e)) } })
     return () => { cancelled = true }
-  }, [connId, schema, table])
+  }, [connId, schema, table, refreshTick])
   // When connected, render real data once loaded; otherwise the mock structure.
   const st: TableStructure = connId ? (liveSt ?? { comment: '', columns: [], indexes: [], fks: [] }) : mockSt
   const ddlQualified = connId ? (schema ? `${schema}.${table}` : table) : `public.${table}`
   const [tab, setTab] = useState('columns')
   const keyTone: Record<string, string> = { PK: 'var(--signal-amber)', FK: 'var(--signal-blue)', UNI: 'var(--signal-violet)' }
 
+  // ---- Column editing (live path only) ----
+  const editable = !!connId
+  const dialect = dialectFor(engine)
+  const sqlQualified = qualifiedTable(dialect, schema, table)
+  // Open add/modify form (null = closed).
+  const [form, setForm] = useState<ColForm | null>(null)
+  // Preview gate: the generated statements awaiting confirmation.
+  const [preview, setPreview] = useState<string[] | null>(null)
+  const [applying, setApplying] = useState(false)
+  const [applyErr, setApplyErr] = useState<string | null>(null)
+
+  function openAdd() {
+    setApplyErr(null)
+    setForm({ mode: 'add', name: '', type: '', nullable: true, default: '' })
+  }
+  function openEdit(c: StructColumn) {
+    setApplyErr(null)
+    const original: ColumnDraft = { name: c.name, type: c.type, nullable: c.nullable, default: c.default ?? '' }
+    setForm({ mode: { editing: c.name, original }, name: c.name, type: c.type, nullable: c.nullable, default: c.default ?? '' })
+  }
+
+  // Build the statements for the open form and hand them to the preview gate.
+  function submitForm() {
+    if (!form) return
+    const draft: ColumnDraft = { name: form.name, type: form.type, nullable: form.nullable, default: form.default }
+    const stmts = form.mode === 'add'
+      ? buildAddColumn(dialect, sqlQualified, draft)
+      : buildModifyColumn(dialect, sqlQualified, form.mode.original, draft)
+    if (stmts.length === 0) return
+    setApplyErr(null)
+    setForm(null)
+    setPreview(stmts)
+  }
+
+  // DROP COLUMN → straight to the preview gate (the gate itself is the confirm step).
+  function startDrop(c: StructColumn) {
+    setApplyErr(null)
+    setPreview(buildDropColumn(dialect, sqlQualified, c.name))
+  }
+
+  // Run each statement sequentially; stop + surface on the first error; refresh on success.
+  async function confirmApply() {
+    if (!preview || !connId) return
+    setApplying(true)
+    setApplyErr(null)
+    try {
+      for (const stmt of preview) {
+        await runQuery(connId, stmt)
+      }
+      setPreview(null)
+      setRefreshTick(n => n + 1)
+    } catch (e) {
+      setApplyErr(t('dbviews.applyError', { message: dbErrMsg(e) }))
+    } finally {
+      setApplying(false)
+    }
+  }
+
   return (
-    <div className="col" style={{ height: '100%', minHeight: 0 }}>
+    <div className="col" style={{ height: '100%', minHeight: 0, position: 'relative' }}>
       <div className="row" style={{ padding: '8px 12px', borderBottom: '1px solid var(--border-hairline)', gap: 8, flex: 'none' }}>
         <Segmented size="sm" value={tab} onChange={setTab} options={[
           { value: 'columns', label: `${t('dbviews.tabColumns')} (${st.columns.length})` },
@@ -66,7 +140,7 @@ export function StructureView({ table, connId, schema }: StructureViewProps) {
         ]} />
         <div className="grow" />
         <span style={{ fontSize: 11.5, color: 'var(--text-faint)' }}>{st.comment}</span>
-        <Btn size="sm" variant="secondary" icon="plus">{t('dbviews.addColumn')}</Btn>
+        <Btn size="sm" variant="secondary" icon="plus" onClick={editable ? openAdd : undefined} disabled={!editable}>{t('dbviews.addColumn')}</Btn>
       </div>
       <div className="grow" style={{ overflow: 'auto' }}>
         {structErr && <Empty icon="alert-triangle" text={structErr} />}
@@ -76,6 +150,7 @@ export function StructureView({ table, connId, schema }: StructureViewProps) {
               {['', t('dbviews.colName'), t('dbviews.colType'), t('dbviews.colNullable'), t('dbviews.colDefault'), t('dbviews.colKey'), t('dbviews.colComment')].map((h, i) => (
                 <th key={i} style={{ ...thCell, width: i === 0 ? 36 : undefined, textAlign: i === 3 ? 'center' : 'left' }}>{h}</th>
               ))}
+              {editable && <th style={{ ...thCell, width: 72, textAlign: 'right' }} />}
             </tr></thead>
             <tbody>
               {st.columns.map((c, i) => (
@@ -87,6 +162,14 @@ export function StructureView({ table, connId, schema }: StructureViewProps) {
                   <td style={tdCell}><span className="mono" style={{ color: 'var(--text-tertiary)', fontSize: 11.5 }}>{c.default || '—'}</span></td>
                   <td style={tdCell}>{c.key ? <span className="badge-accent" style={{ background: `color-mix(in srgb, ${keyTone[c.key]} 16%, transparent)`, color: keyTone[c.key] }}>{c.key}</span> : ''}</td>
                   <td style={{ ...tdCell, color: 'var(--text-faint)', fontSize: 11.5 }}>{c.extra}</td>
+                  {editable && (
+                    <td style={{ ...tdCell, textAlign: 'right', whiteSpace: 'nowrap' }}>
+                      <span className="structrow-actions row gap6" style={{ justifyContent: 'flex-end' }}>
+                        <IconBtn name="pencil" size={13} variant="bare" title={t('dbviews.editColumn')} onClick={() => openEdit(c)} />
+                        <IconBtn name="trash-2" size={13} variant="bare" title={t('dbviews.dropColumn')} style={{ color: 'var(--danger-fg)' }} onClick={() => startDrop(c)} />
+                      </span>
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>
@@ -131,6 +214,79 @@ export function StructureView({ table, connId, schema }: StructureViewProps) {
             dangerouslySetInnerHTML={{ __html: highlightSQL(buildDDL(ddlQualified, st)) }} />
         )}
       </div>
+
+      {/* Add / Modify column form — modal, mirrors the DML preview gate's visual language */}
+      {form && (
+        <div onClick={() => setForm(null)}
+          style={{ position: 'absolute', inset: 0, zIndex: 70, background: 'color-mix(in srgb, var(--cta-bg) 42%, transparent)', backdropFilter: 'blur(3px)', display: 'grid', placeItems: 'center' }}>
+          <div onClick={e => e.stopPropagation()} className="pop-in"
+            style={{ width: 460, maxWidth: '90%', background: 'var(--surface-card)', borderRadius: 18, border: '1px solid var(--border-hairline)', boxShadow: 'var(--shadow-window)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+            <div className="row" style={{ justifyContent: 'space-between', padding: '18px 20px 14px', borderBottom: '1px solid var(--border-hairline)' }}>
+              <span style={{ fontSize: 15, fontWeight: 700, letterSpacing: '-0.2px' }}>
+                {form.mode === 'add' ? t('dbviews.addColumnTitle') : t('dbviews.editColumnTitle')}
+              </span>
+              <IconBtn name="x" size={16} variant="bare" onClick={() => setForm(null)} />
+            </div>
+            <div className="col" style={{ gap: 12, padding: '16px 20px 20px' }}>
+              <label className="col" style={{ gap: 5 }}>
+                <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('dbviews.colName')}</span>
+                <input autoFocus value={form.name} onChange={e => setForm(f => f && { ...f, name: e.target.value })}
+                  onKeyDown={e => { if (e.key === 'Enter') submitForm() }} style={inputStyle} />
+              </label>
+              <label className="col" style={{ gap: 5 }}>
+                <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('dbviews.colType')}</span>
+                <input value={form.type} onChange={e => setForm(f => f && { ...f, type: e.target.value })}
+                  placeholder="text, integer, timestamptz…"
+                  onKeyDown={e => { if (e.key === 'Enter') submitForm() }} style={{ ...inputStyle, fontFamily: 'var(--font-mono, monospace)' }} />
+              </label>
+              <div className="row" style={{ justifyContent: 'space-between', gap: 12, alignItems: 'center' }}>
+                <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('dbviews.colNullable')}</span>
+                <Toggle on={form.nullable} onChange={v => setForm(f => f && { ...f, nullable: v })} />
+              </div>
+              <label className="col" style={{ gap: 5 }}>
+                <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('dbviews.colDefault')} <span style={{ color: 'var(--text-faint)', fontWeight: 400 }}>({t('dbviews.optional')})</span></span>
+                <input value={form.default} onChange={e => setForm(f => f && { ...f, default: e.target.value })}
+                  placeholder="0, 'pending', now()…"
+                  onKeyDown={e => { if (e.key === 'Enter') submitForm() }} style={{ ...inputStyle, fontFamily: 'var(--font-mono, monospace)' }} />
+              </label>
+              <div className="row gap8" style={{ justifyContent: 'flex-end', marginTop: 2 }}>
+                <Btn variant="ghost" onClick={() => setForm(null)}>{t('dbviews.cancel')}</Btn>
+                <Btn variant="primary" icon="arrow-right" onClick={submitForm} disabled={!form.name.trim() || !form.type.trim()}>{t('dbviews.previewSql')}</Btn>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* DDL preview gate — mirrors DataGrid's "Review changes" modal */}
+      {preview && (
+        <div onClick={() => !applying && setPreview(null)}
+          style={{ position: 'absolute', inset: 0, zIndex: 70, background: 'color-mix(in srgb, var(--cta-bg) 42%, transparent)', backdropFilter: 'blur(3px)', display: 'grid', placeItems: 'center' }}>
+          <div onClick={e => e.stopPropagation()} className="pop-in"
+            style={{ width: 540, maxWidth: '90%', background: 'var(--surface-card)', borderRadius: 18, border: '1px solid var(--border-hairline)', boxShadow: 'var(--shadow-window)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+            <div className="row" style={{ justifyContent: 'space-between', padding: '18px 20px 14px', borderBottom: '1px solid var(--border-hairline)' }}>
+              <div className="col" style={{ gap: 2 }}>
+                <span style={{ fontSize: 15, fontWeight: 700, letterSpacing: '-0.2px' }}>{t('dbviews.previewTitle')}</span>
+                <span style={{ fontSize: 11.5, color: 'var(--text-tertiary)' }}>{t('dbviews.previewSubtitle', { count: preview.length })}</span>
+              </div>
+              <IconBtn name="x" size={16} variant="bare" onClick={() => !applying && setPreview(null)} />
+            </div>
+            <div className="col" style={{ gap: 10, padding: '16px 20px 20px' }}>
+              <pre className="mono" style={{ margin: 0, padding: '12px 14px', borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', color: 'var(--text-primary)', fontSize: 12.5, lineHeight: 1.6, maxHeight: 260, overflow: 'auto', whiteSpace: 'pre-wrap' }}>{preview.join('\n')}</pre>
+              {applyErr && (
+                <div className="row gap6" style={{ padding: '9px 12px', borderRadius: 10, border: '1px solid var(--danger-border)', background: 'var(--danger-soft)', color: 'var(--danger-fg)', fontSize: 12 }}>
+                  <Icon name="alert-triangle" size={14} style={{ flex: 'none' }} />
+                  <span>{applyErr}</span>
+                </div>
+              )}
+              <div className="row gap8" style={{ justifyContent: 'flex-end', marginTop: 2 }}>
+                <Btn variant="ghost" onClick={() => setPreview(null)} disabled={applying}>{t('dbviews.cancel')}</Btn>
+                <Btn variant="primary" icon="check" onClick={confirmApply} disabled={applying}>{applying ? t('dbviews.applying') : t('dbviews.applyChanges')}</Btn>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
