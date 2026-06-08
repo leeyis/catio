@@ -59,6 +59,17 @@ it('vault is empty on a fresh install, and renders a saved profile', () => {
   expect(screen.getAllByText('my-server').length).toBeGreaterThan(0)
 })
 
+it('clicking a vault card opens the connection details (not a terminal tab)', () => {
+  saveProfile({ id: 'live-1.2.3.4:22-deploy', name: 'my-server', host: '1.2.3.4', port: 22, user: 'deploy', auth: { method: 'password' } })
+  wrap()
+  // Click the saved card in the sidebar (first occurrence of the name).
+  fireEvent.click(screen.getAllByText('my-server')[0])
+  // Details panel header should appear (panels.detailsTitle zh).
+  expect(screen.getByText('连接详情')).toBeTruthy()
+  // The DetailsPanel Connect button is present; no terminal tab was opened.
+  expect(screen.getByText('连接')).toBeTruthy()
+})
+
 it('clicking 新建连接 opens the New Connection modal', () => {
   wrap()
   fireEvent.click(screen.getAllByText('新建连接')[0])

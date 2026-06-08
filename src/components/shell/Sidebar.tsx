@@ -20,8 +20,8 @@ export interface TitleBarProps {
 
 export interface SidebarProps {
   activeId?: string
+  /** Primary card action. Wired by App to open the connection DETAILS panel. */
   onOpen: (conn: Connection) => void
-  onDetail: (conn: Connection) => void
   onNew?: React.MouseEventHandler<HTMLButtonElement>
   collapsed?: boolean
   onToggleCollapse?: React.MouseEventHandler<HTMLButtonElement>
@@ -35,7 +35,6 @@ export interface ConnRowProps {
   conn: Connection
   active?: boolean
   onOpen: (conn: Connection) => void
-  onDetail: (conn: Connection) => void
   nested?: boolean
 }
 
@@ -143,7 +142,7 @@ export function TitleBar({ theme, onToggleTheme, onOpenSettings, settingsActive 
 
 // ---- Sidebar ----
 
-export function Sidebar({ activeId, onOpen, onDetail, onNew, collapsed, onToggleCollapse, conns: vaultConns, currentUser, authEnabled, onLock }: SidebarProps) {
+export function Sidebar({ activeId, onOpen, onNew, collapsed, onToggleCollapse, conns: vaultConns, currentUser, authEnabled, onLock }: SidebarProps) {
   const { t } = useTranslation()
   const D = useData()
   const allConns = vaultConns || D.connections
@@ -227,7 +226,7 @@ export function Sidebar({ activeId, onOpen, onDetail, onNew, collapsed, onToggle
               {open && (
                 <div className="col" style={{ gap: 1 }}>
                   {ungrouped.map(c => (
-                    <ConnRow key={c.id} conn={c} active={activeId === c.id} onOpen={onOpen} onDetail={onDetail} />
+                    <ConnRow key={c.id} conn={c} active={activeId === c.id} onOpen={onOpen} />
                   ))}
                 </div>
               )}
@@ -252,18 +251,18 @@ export function Sidebar({ activeId, onOpen, onDetail, onNew, collapsed, onToggle
                   {buildSidebarTree(items, filter).map(node => (
                     node.nested ? (
                       <div key={node.host.id} className="col" style={{ gap: 1 }}>
-                        <ConnRow conn={node.host} active={activeId === node.host.id} onOpen={onOpen} onDetail={onDetail} />
+                        <ConnRow conn={node.host} active={activeId === node.host.id} onOpen={onOpen} />
                         <div className="col" style={{ gap: 1, marginLeft: 19, paddingLeft: 11, borderLeft: '1.5px solid var(--border-hairline)' }}>
                           {node.dbs.map((c) => (
                             <div key={c.id} style={{ position: 'relative' }}>
                               <span style={{ position: 'absolute', left: -11, top: 18, width: 8, height: 1.5, background: 'var(--border-hairline)' }} />
-                              <ConnRow conn={c} active={activeId === c.id} onOpen={onOpen} onDetail={onDetail} nested />
+                              <ConnRow conn={c} active={activeId === c.id} onOpen={onOpen} nested />
                             </div>
                           ))}
                         </div>
                       </div>
                     ) : (
-                      <ConnRow key={node.conn.id} conn={node.conn} active={activeId === node.conn.id} onOpen={onOpen} onDetail={onDetail} />
+                      <ConnRow key={node.conn.id} conn={node.conn} active={activeId === node.conn.id} onOpen={onOpen} />
                     )
                   ))}
                 </div>
@@ -302,10 +301,11 @@ export function Sidebar({ activeId, onOpen, onDetail, onNew, collapsed, onToggle
 
 // ---- ConnRow ----
 
-export function ConnRow({ conn, active, onOpen, onDetail, nested }: ConnRowProps) {
-  const { t } = useTranslation()
+export function ConnRow({ conn, active, onOpen, nested }: ConnRowProps) {
   const D = useData()
   const [hover, setHover] = useState(false)
+  // Clicking a card body now opens the connection DETAILS (onOpen is wired by the
+  // parent to openDetail). Connecting moves to the DetailsPanel's Connect button.
   return (
     <div onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
       onClick={() => onOpen(conn)} onDoubleClick={() => onOpen(conn)}
@@ -322,13 +322,7 @@ export function ConnRow({ conn, active, onOpen, onDetail, nested }: ConnRowProps
         </div>
         <span className="ell mono" style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{nested ? (D.engineMeta[conn.engine ?? ''] || {}).label : conn.sub}</span>
       </div>
-      {hover ? (
-        <button className="icon-btn bare" style={{ width: 22, height: 22 }} onClick={(e) => { e.stopPropagation(); onDetail(conn) }} title={t('shell.details')}>
-          <Icon name="info" size={14} />
-        </button>
-      ) : (
-        <StatusDot status={conn.status} size={6} />
-      )}
+      <StatusDot status={conn.status} size={6} />
     </div>
   )
 }

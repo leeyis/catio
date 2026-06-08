@@ -17,6 +17,7 @@ import { DetailsPanel } from './components/panels/DetailsPanel'
 import { NewConnectionModal } from './components/modals/NewConnectionModal'
 import { ConnectSecretPrompt } from './components/modals/ConnectSecretPrompt'
 import { HostKeyPrompt } from './components/modals/HostKeyPrompt'
+import { ConfirmModal } from './components/modals/ConfirmModal'
 import { AuthGate } from './components/auth/AuthGate'
 import { Icon } from './components/Icon'
 import { Btn } from './components/atoms'
@@ -25,7 +26,7 @@ import { nextTheme, useApplyTheme } from './state/ThemeContext'
 import { useData } from './state/DataContext'
 import { sshConnect, sshDisconnect, sshTrustHost, isTauri } from './services/ssh'
 import type { SshConnectArgs } from './services/ssh'
-import { loadProfiles } from './state/connections'
+import { loadProfiles, saveProfile, deleteProfile } from './state/connections'
 import type { ConnectionProfile } from './state/connections'
 import type { Tab, Connection, Snippet } from './services/types'
 import type { AuthUser } from './components/auth/AuthGate'
@@ -47,6 +48,10 @@ export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false)
   const [detailConn, setDetailConn] = useState<Connection | null>(null)
   const [showNew, setShowNew] = useState<boolean>(false)
+  // EDIT mode for NewConnectionModal (null = create/new).
+  const [editing, setEditing] = useState<ConnectionProfile | null>(null)
+  // Pending delete confirmation (styled ConfirmModal).
+  const [pendingDelete, setPendingDelete] = useState<Connection | null>(null)
   const [aiAttachment, setAiAttachment] = useState<Attachment | null>(null)
   const [snippets, setSnippets] = useState<Snippet[]>(() => D.snippets)
 
@@ -296,6 +301,62 @@ export default function App() {
     setActivePanel('details')
     setPanelOpen(true)
   }
+
+  // ---- DetailsPanel actions (operate on the REAL saved profile) ----
+
+  // 连接 — look up the profile and run the real connect flow.
+  function connectFromDetail(conn: Connection) {
+    const profile = profiles.find(p => p.id === conn.id)
+    if (!profile) return
+    connectProfile(
+      { host: profile.host, port: profile.port, user: profile.user, auth: profile.auth },
+      { name: profile.name },
+    )
+  }
+
+  // 编辑 — open NewConnectionModal in EDIT mode prefilled from the profile.
+  function editConn(conn: Connection) {
+    const profile = profiles.find(p => p.id === conn.id)
+    if (!profile) return
+    setEditing(profile)
+  }
+
+  // 复制 — duplicate the profile under a fresh, unique id.
+  function copyConn(conn: Connection) {
+    const profile = profiles.find(p => p.id === conn.id)
+    if (!profile) return
+    const existing = new Set(profiles.map(p => p.id))
+    let newId = `${profile.id}-copy`
+    let n = 2
+    while (existing.has(newId)) { newId = `${profile.id}-copy${n}`; n += 1 }
+    try {
+      saveProfile({ ...profile, id: newId, name: `${profile.name} (副本)` })
+    } catch { /* localStorage unavailable — ignore */ }
+    reloadProfiles()
+  }
+
+  // Tear down a live session for a connId (disconnect + drop maps + close its tab).
+  function teardownSession(connId: string) {
+    const sid = sessionMap[connId]
+    if (sid) sshDisconnect(sid).catch(() => { /* best-effort */ })
+    setSessionMap(prev => { const next = { ...prev }; delete next[connId]; return next })
+    setLiveConns(prev => { const next = { ...prev }; delete next[connId]; return next })
+    closeTab('tab-' + connId)
+  }
+
+  // 关闭会话 — disconnect the live session for this connection.
+  function closeSessionForConn(conn: Connection) {
+    teardownSession(conn.id)
+    setDetailConn(prev => prev && prev.id === conn.id ? { ...prev, status: 'idle' } : prev)
+  }
+
+  // 删除 (confirmed) — remove the profile, tear down any session, close the panel.
+  function confirmDelete(conn: Connection) {
+    if (sessionMap[conn.id]) teardownSession(conn.id)
+    try { deleteProfile(conn.id) } catch { /* localStorage unavailable — ignore */ }
+    reloadProfiles()
+    if (detailConn?.id === conn.id) { setDetailConn(null); setPanelOpen(false) }
+  }
   function selectPanel(id: string) {
     if (activePanel === id && panelOpen) { setPanelOpen(false) }
     else { setActivePanel(id); setPanelOpen(true) }
@@ -324,7 +385,7 @@ export default function App() {
           }} />
       ) : (
         <div className="body">
-          <Sidebar activeId={cur ? cur.connId : undefined} onOpen={openConn} onDetail={openDetail} onNew={() => setShowNew(true)}
+          <Sidebar activeId={detailConn ? detailConn.id : (cur ? cur.connId : undefined)} onOpen={openDetail} onNew={() => setShowNew(true)}
             collapsed={sidebarCollapsed} onToggleCollapse={() => setSidebarCollapsed(c => !c)}
             conns={vaultConns} currentUser={currentName} authEnabled={authEnabled} onLock={lockApp} />
 
@@ -360,7 +421,18 @@ export default function App() {
               {activePanel === 'tunnels' && <TunnelsPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} />}
               {activePanel === 'snippets' && <SnippetsPanel onClose={() => setPanelOpen(false)} snippets={snippets} />}
               {activePanel === 'history' && <HistoryPanel onClose={() => setPanelOpen(false)} onAddSnippet={addSnippet} />}
-              {activePanel === 'details' && <DetailsPanel conn={detailConn ?? undefined} onClose={() => setPanelOpen(false)} />}
+              {activePanel === 'details' && (
+                <DetailsPanel
+                  conn={detailConn ?? undefined}
+                  connected={detailConn ? !!sessionMap[detailConn.id] : false}
+                  onClose={() => setPanelOpen(false)}
+                  onConnect={connectFromDetail}
+                  onEdit={editConn}
+                  onCopy={copyConn}
+                  onDelete={conn => setPendingDelete(conn)}
+                  onCloseSession={closeSessionForConn}
+                />
+              )}
             </div>
           )}
 
@@ -369,7 +441,26 @@ export default function App() {
         </div>
       )}
 
-      {showNew && <NewConnectionModal onClose={() => setShowNew(false)} onConnect={connectProfile} />}
+      {(showNew || editing) && (
+        <NewConnectionModal
+          key={editing ? editing.id : 'new'}
+          editProfile={editing ?? undefined}
+          onSaved={reloadProfiles}
+          onClose={() => { setShowNew(false); setEditing(null) }}
+          onConnect={connectProfile}
+        />
+      )}
+
+      {pendingDelete && (
+        <ConfirmModal
+          title={t('modals.deleteConfirmTitle')}
+          message={t('modals.deleteConfirmMsg', { name: pendingDelete.name })}
+          confirmLabel={t('modals.confirmDelete')}
+          danger
+          onConfirm={() => { const c = pendingDelete; setPendingDelete(null); confirmDelete(c) }}
+          onCancel={() => setPendingDelete(null)}
+        />
+      )}
 
       {pendingConnect && (
         <ConnectSecretPrompt

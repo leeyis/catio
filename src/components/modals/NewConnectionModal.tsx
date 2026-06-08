@@ -5,6 +5,7 @@ import { Icon } from '../Icon'
 import { Btn, IconBtn, Segmented, Toggle, ConnGlyph } from '../atoms'
 import { useData } from '../../state/DataContext'
 import { saveProfile } from '../../state/connections'
+import type { ConnectionProfile } from '../../state/connections'
 import type { AuthMethod, SshConnectArgs } from '../../services/ssh'
 
 // ---- Prop types ----
@@ -13,6 +14,10 @@ export interface NewConnectionModalProps {
   onClose: () => void
   /** ORCH: emit a live connect request for a HOST/SSH connection. */
   onConnect?: (args: SshConnectArgs, display: { name: string }) => void
+  /** When set, the modal runs in EDIT mode: prefill + save (no auto-connect). */
+  editProfile?: ConnectionProfile
+  /** Called after a successful save in edit mode (App uses it to reloadProfiles). */
+  onSaved?: () => void
 }
 
 interface FieldProps {
@@ -38,9 +43,10 @@ const DB_ENGINES = [
 
 // ---- Component ----
 
-export function NewConnectionModal({ onClose, onConnect }: NewConnectionModalProps) {
+export function NewConnectionModal({ onClose, onConnect, editProfile, onSaved }: NewConnectionModalProps) {
   const D = useData()
   const { t } = useTranslation()
+  const isEdit = !!editProfile
   const nameRef = useRef<HTMLInputElement>(null)
   const hostRef = useRef<HTMLInputElement>(null)
   const portRef = useRef<HTMLInputElement>(null)
@@ -50,13 +56,14 @@ export function NewConnectionModal({ onClose, onConnect }: NewConnectionModalPro
     { id: 'telnet', label: 'Telnet' }, { id: 'serial', label: 'Serial' },
     { id: 'local', label: t('modals.protoLocal') },
   ]
-  const [kind, setKind] = useState('db')
+  // Saved profiles are always SSH hosts → edit mode opens on the host tab.
+  const [kind, setKind] = useState(isEdit ? 'host' : 'db')
   const [engine, setEngine] = useState('postgres')
   const [engineOpen, setEngineOpen] = useState(false)
   const engineRef = useRef<HTMLDivElement>(null)
   const [proto, setProto] = useState('ssh')
-  const [authMethod, setAuthMethod] = useState<AuthMethod['method']>('password')
-  const [keyPath, setKeyPath] = useState('')
+  const [authMethod, setAuthMethod] = useState<AuthMethod['method']>(editProfile?.auth.method ?? 'password')
+  const [keyPath, setKeyPath] = useState(editProfile?.auth.method === 'keyFile' ? editProfile.auth.path : '')
   const [tunnel, setTunnel] = useState(true)
   const [via, setVia] = useState('h-bastion')
   const [tested, setTested] = useState(false)
@@ -64,6 +71,22 @@ export function NewConnectionModal({ onClose, onConnect }: NewConnectionModalPro
   const hosts = D.connections.filter(c => c.kind === 'host' && c.proto !== 'local')
 
   function handleSave() {
+    // EDIT mode: update the existing profile in place (same id), no auto-connect.
+    if (isEdit && editProfile) {
+      const host = (hostRef.current?.value || '').trim()
+      const user = (userRef.current?.value || '').trim()
+      const port = Number(portRef.current?.value) || 22
+      const name = (nameRef.current?.value || '').trim() || host
+      const auth: AuthMethod = authMethod === 'keyFile'
+        ? { method: 'keyFile', path: keyPath.trim() }
+        : { method: 'password' }
+      try {
+        saveProfile({ id: editProfile.id, name, host, port, user, auth })
+      } catch { /* localStorage unavailable — ignore */ }
+      onSaved?.()
+      onClose()
+      return
+    }
     // SSH/host connections drive the live connect flow (ORCH).
     // DB connections (sub-project 3) keep the prototype's close-only behavior.
     if (kind === 'host' && proto === 'ssh' && onConnect) {
@@ -109,8 +132,8 @@ export function NewConnectionModal({ onClose, onConnect }: NewConnectionModalPro
         {/* header */}
         <div className="row" style={{ justifyContent: 'space-between', padding: '18px 20px 14px', borderBottom: '1px solid var(--border-hairline)' }}>
           <div className="col" style={{ gap: 2 }}>
-            <span style={{ fontSize: 17, fontWeight: 700, letterSpacing: '-0.3px' }}>{t('modals.newConnection')}</span>
-            <span style={{ fontSize: 12, color: 'var(--text-faint)' }}>{t('modals.newConnectionSub')}</span>
+            <span style={{ fontSize: 17, fontWeight: 700, letterSpacing: '-0.3px' }}>{isEdit ? t('modals.editTitle') : t('modals.newConnection')}</span>
+            <span style={{ fontSize: 12, color: 'var(--text-faint)' }}>{isEdit ? t('modals.editSub') : t('modals.newConnectionSub')}</span>
           </div>
           <IconBtn name="x" size={16} variant="bare" onClick={onClose} />
         </div>
@@ -190,7 +213,7 @@ export function NewConnectionModal({ onClose, onConnect }: NewConnectionModalPro
           {/* base fields */}
           <div className="col gap10" style={{ marginBottom: 14 }}>
             <div className="row gap10">
-              <Field label={t('modals.fieldName')} value={kind === 'db' ? 'prod-orders' : 'prod-web-01'} w={1.4} inputRef={nameRef} />
+              <Field label={t('modals.fieldName')} value={isEdit ? editProfile.name : (kind === 'db' ? 'prod-orders' : 'prod-web-01')} w={1.4} inputRef={nameRef} />
               <label className="col" style={{ gap: 5, flex: 1 }}>
                 <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.fieldGroup')}</span>
                 <div className="row gap6" style={{ height: 36 }}>
@@ -199,11 +222,11 @@ export function NewConnectionModal({ onClose, onConnect }: NewConnectionModalPro
               </label>
             </div>
             <div className="row gap10">
-              <Field label={t('modals.fieldHost')} value={kind === 'db' ? '10.0.4.2' : '10.0.1.21'} mono w={2} inputRef={hostRef} />
-              <Field label={t('modals.fieldPort')} value={kind === 'db' ? (engine === 'postgres' ? '5432' : engine === 'redis' ? '6379' : '3306') : '22'} mono w={0.8} inputRef={portRef} />
+              <Field label={t('modals.fieldHost')} value={isEdit ? editProfile.host : (kind === 'db' ? '10.0.4.2' : '10.0.1.21')} mono w={2} inputRef={hostRef} />
+              <Field label={t('modals.fieldPort')} value={isEdit ? String(editProfile.port) : (kind === 'db' ? (engine === 'postgres' ? '5432' : engine === 'redis' ? '6379' : '3306') : '22')} mono w={0.8} inputRef={portRef} />
             </div>
             <div className="row gap10">
-              <Field label={kind === 'db' ? t('modals.fieldUser') : t('modals.fieldUsername')} value={kind === 'db' ? 'app_ro' : 'deploy'} mono inputRef={userRef} />
+              <Field label={kind === 'db' ? t('modals.fieldUser') : t('modals.fieldUsername')} value={isEdit ? editProfile.user : (kind === 'db' ? 'app_ro' : 'deploy')} mono inputRef={userRef} />
               <label className="col" style={{ gap: 5, flex: 1 }}>
                 <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.fieldPasswordKey')}</span>
                 <div className="row" style={{ height: 36, borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', paddingLeft: 10, paddingRight: 12, gap: 6, alignItems: 'center' }}>
@@ -291,7 +314,7 @@ export function NewConnectionModal({ onClose, onConnect }: NewConnectionModalPro
           </button>
           <div className="row gap8">
             <Btn variant="ghost" onClick={onClose}>{t('modals.cancel')}</Btn>
-            <Btn variant="primary" icon="check" onClick={handleSave}>{t('modals.saveAndConnect')}</Btn>
+            <Btn variant="primary" icon="check" onClick={handleSave}>{isEdit ? t('modals.save') : t('modals.saveAndConnect')}</Btn>
           </div>
         </div>
       </div>
