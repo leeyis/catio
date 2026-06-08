@@ -49,6 +49,24 @@ fn map_pool_error(e: PoolError) -> DbError {
     DbError::ConnectFailed(e.to_string())
 }
 
+/// Extract a human-readable message from a query error. `tokio_postgres::Error`'s
+/// Display is the useless "db error"; the real server message (e.g. `relation
+/// "foo" does not exist`) lives in `as_db_error()`. Append the server HINT when
+/// present (Postgres often suggests the right schema-qualified name there).
+fn pg_query_err(e: &tokio_postgres::Error) -> DbError {
+    if let Some(db) = e.as_db_error() {
+        let mut msg = db.message().to_string();
+        if let Some(hint) = db.hint() {
+            msg.push_str(" (hint: ");
+            msg.push_str(hint);
+            msg.push(')');
+        }
+        DbError::QueryFailed(msg)
+    } else {
+        DbError::QueryFailed(e.to_string())
+    }
+}
+
 /// 协议族默认库名（照搬 dbx models/connection.rs default_database）。
 fn default_database(profile: Option<&str>) -> Option<String> {
     match profile {
@@ -136,7 +154,7 @@ impl Driver for PostgresDriver {
     async fn test(&self) -> Result<String, DbError> {
         let client = self.pool.get().await.map_err(|e| DbError::ConnectFailed(e.to_string()))?;
         let row = client.query_one("SELECT version()", &[]).await
-            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+            .map_err(|e| pg_query_err(&e))?;
         Ok(row.get::<_, String>(0))
     }
 
@@ -146,13 +164,13 @@ impl Driver for PostgresDriver {
         let client = self.pool.get().await
             .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
         let stmt = client.prepare(sql).await
-            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+            .map_err(|e| pg_query_err(&e))?;
 
         // Write statements (UPDATE/INSERT/DELETE/DDL) have no result columns.
         // Use execute() to get rows_affected count instead of fetching rows.
         if stmt.columns().is_empty() {
             let affected = client.execute(&stmt, &[]).await
-                .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+                .map_err(|e| pg_query_err(&e))?;
             return Ok(QueryResult {
                 columns: vec![],
                 rows: vec![],
@@ -168,7 +186,7 @@ impl Driver for PostgresDriver {
         }).collect();
 
         let pg_rows = client.query(&stmt, &[]).await
-            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+            .map_err(|e| pg_query_err(&e))?;
 
         let mut rows: Vec<Vec<Value>> = Vec::new();
         let mut truncated = false;
@@ -201,7 +219,7 @@ impl Driver for PostgresDriver {
              AND n.nspname NOT LIKE 'pg_temp_%' \
              ORDER BY n.nspname",
             &[],
-        ).await.map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        ).await.map_err(|e| pg_query_err(&e))?;
         Ok(rows.iter().map(|r| r.get::<_, String>(0)).collect())
     }
 
@@ -221,7 +239,7 @@ impl Driver for PostgresDriver {
              WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','f','p') \
              ORDER BY c.relname",
             &[&schema],
-        ).await.map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        ).await.map_err(|e| pg_query_err(&e))?;
         Ok(rows.iter().map(|r| {
             let kind = if r.get::<_, String>(1) == "VIEW" { "view" } else { "table" };
             let est: Option<i64> = r.try_get::<_, Option<i64>>(2).ok().flatten()
@@ -286,7 +304,7 @@ impl Driver for PostgresDriver {
              WHERE c.table_schema = $1 AND c.table_name = $2 \
              ORDER BY c.ordinal_position",
             &[&schema, &table],
-        ).await.map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        ).await.map_err(|e| pg_query_err(&e))?;
 
         let columns: Vec<ColumnDef> = col_rows.iter().map(|r| {
             let is_pk: bool = r.try_get(4).unwrap_or(false);
@@ -321,7 +339,7 @@ impl Driver for PostgresDriver {
              GROUP BY i.relname, i.oid, ix.indisunique, ix.indpred, ix.indrelid, am.amname \
              ORDER BY i.relname",
             &[&schema, &table],
-        ).await.map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        ).await.map_err(|e| pg_query_err(&e))?;
 
         let indexes: Vec<IndexDef> = idx_rows.iter().map(|r| {
             let cols: Vec<String> = r.try_get::<_, Vec<String>>(1).unwrap_or_default();
@@ -356,7 +374,7 @@ impl Driver for PostgresDriver {
                AND fk.table_schema = $1 AND fk.table_name = $2 \
              ORDER BY fk.constraint_name, fk.ordinal_position",
             &[&schema, &table],
-        ).await.map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        ).await.map_err(|e| pg_query_err(&e))?;
 
         let fks: Vec<ForeignKeyDef> = fk_rows.iter().map(|r| {
             let ref_schema: String = r.get::<_, String>(1);
@@ -398,7 +416,7 @@ impl Driver for PostgresDriver {
                AND pk.table_schema = $1 \
              ORDER BY fk.table_name, fk.constraint_name, fk.ordinal_position",
             &[&schema],
-        ).await.map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        ).await.map_err(|e| pg_query_err(&e))?;
         Ok(rows.iter().map(|r| ErRelation {
             from: r.get::<_, String>(0),
             from_col: r.get::<_, String>(1),
@@ -418,7 +436,7 @@ impl Driver for PostgresDriver {
              WHERE n.nspname = $1 AND p.prokind IN ('f','p') \
              ORDER BY p.proname",
             &[&schema],
-        ).await.map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        ).await.map_err(|e| pg_query_err(&e))?;
         Ok(rows.iter().map(|r| r.get::<_, String>(0)).collect())
     }
 }
