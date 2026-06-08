@@ -212,7 +212,10 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   const toolbarLabel = connId ? (schema ? `${schema}.${table}` : table) : 'public.orders'
   // Row count shown in the toolbar: live path reflects the loaded page rows; mock keeps rows.length.
   const rowCount = connId ? baseRows.length : rows.length
-  const gridTemplate = '46px ' + columns.map(c => c.name === 'channel' || c.name === 'currency' ? '92px' : c.name === 'created_at' || c.name === 'updated_at' ? '150px' : c.name === 'customer_id' ? '150px' : 'minmax(96px, 1fr)').join(' ')
+  // Fixed per-column widths so the row is exactly as wide as the sum of its
+  // columns and the grid scrolls horizontally — no flex/1fr stretch that would
+  // blow up a couple of columns to fill the viewport and hide the rest.
+  const gridTemplate = '46px ' + columns.map(c => c.name === 'channel' || c.name === 'currency' ? '92px' : c.name === 'created_at' || c.name === 'updated_at' ? '150px' : c.name === 'customer_id' ? '150px' : '160px').join(' ')
 
   return (
     <div className="col" style={{ height: '100%', minHeight: 0, position: 'relative' }}>
@@ -244,7 +247,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
         <div style={{ minWidth: 'max-content' }}>
           {/* header */}
           <div style={{ display: 'grid', gridTemplateColumns: gridTemplate, position: 'sticky', top: 0, zIndex: 2, background: 'var(--surface-subtle)', borderBottom: '1px solid var(--border-hairline-alt)' }}>
-            <div style={{ ...thStyle, justifyContent: 'center', color: 'var(--text-faint)' }}>#</div>
+            <div style={{ ...thStyle, justifyContent: 'center', color: 'var(--text-faint)', position: 'sticky', left: 0, zIndex: 3, background: 'var(--surface-subtle)' }}>#</div>
             {columns.map((col) => (
               <div key={col.name} style={thStyle} onClick={() => toggleSort(col.name)} className="gridhead">
                 <Icon name={col.icon ?? colIcon(col)} size={12} style={{ color: col.pk ? 'var(--signal-amber)' : col.fk ? 'var(--signal-blue)' : 'var(--text-faint)' }} />
@@ -260,7 +263,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
             return (
               <div key={origIdx} style={{ display: 'grid', gridTemplateColumns: gridTemplate, height: rowH, background: ri % 2 ? 'var(--surface-subtle)' : 'transparent' }}
                 className="gridrow">
-                <div style={{ ...tdStyle, justifyContent: 'center', color: 'var(--text-faint)', fontSize: 11, background: 'var(--surface-sunken)', borderRight: '1px solid var(--border-hairline)' }}>{globalIdx + 1}</div>
+                <div style={{ ...tdStyle, justifyContent: 'center', color: 'var(--text-faint)', fontSize: 11, background: 'var(--surface-sunken)', borderRight: '1px solid var(--border-hairline)', position: 'sticky', left: 0, zIndex: 1 }}>{globalIdx + 1}</div>
                 {columns.map((col, ci) => {
                   const k = cellKey(origIdx, col.name)
                   const isEdited = edits[k] !== undefined

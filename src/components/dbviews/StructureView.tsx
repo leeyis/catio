@@ -16,7 +16,10 @@ export interface StructureViewProps {
   schema?: string
 }
 
-const tblStyle: React.CSSProperties = { width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }
+// `table-layout: fixed` makes the table honor `width:100%` strictly and split the
+// remaining width evenly across the (non-`#`) columns instead of shrink-wrapping to
+// content and leaving a large blank on the right.
+const tblStyle: React.CSSProperties = { width: '100%', tableLayout: 'fixed', borderCollapse: 'collapse', fontSize: 12.5 }
 const thCell: React.CSSProperties = { textAlign: 'left', padding: '9px 12px', fontSize: 11, fontWeight: 700, letterSpacing: '0.3px', textTransform: 'uppercase', color: 'var(--text-faint)', borderBottom: '1px solid var(--border-hairline-alt)', position: 'sticky', top: 0, background: 'var(--surface-subtle)', zIndex: 1 }
 const tdCell: React.CSSProperties = { padding: '8px 12px', borderBottom: '1px solid var(--border-hairline)', color: 'var(--text-secondary)', verticalAlign: 'middle' }
 
@@ -71,7 +74,7 @@ export function StructureView({ table, connId, schema }: StructureViewProps) {
           <table style={tblStyle}>
             <thead><tr>
               {['', t('dbviews.colName'), t('dbviews.colType'), t('dbviews.colNullable'), t('dbviews.colDefault'), t('dbviews.colKey'), t('dbviews.colComment')].map((h, i) => (
-                <th key={i} style={{ ...thCell, textAlign: i === 3 ? 'center' : 'left' }}>{h}</th>
+                <th key={i} style={{ ...thCell, width: i === 0 ? 36 : undefined, textAlign: i === 3 ? 'center' : 'left' }}>{h}</th>
               ))}
             </tr></thead>
             <tbody>
@@ -91,7 +94,7 @@ export function StructureView({ table, connId, schema }: StructureViewProps) {
         )}
         {!structErr && tab === 'indexes' && (
           <table style={tblStyle}>
-            <thead><tr>{['', t('dbviews.idxName'), t('dbviews.idxCols'), t('dbviews.idxUnique'), t('dbviews.idxMethod')].map((h, i) => <th key={i} style={thCell}>{h}</th>)}</tr></thead>
+            <thead><tr>{['', t('dbviews.idxName'), t('dbviews.idxCols'), t('dbviews.idxUnique'), t('dbviews.idxMethod')].map((h, i) => <th key={i} style={{ ...thCell, width: i === 0 ? 36 : undefined }}>{h}</th>)}</tr></thead>
             <tbody>
               {st.indexes.map((ix, i) => (
                 <tr key={ix.name} style={{ background: i % 2 ? 'var(--surface-subtle)' : 'transparent' }}>
@@ -108,7 +111,7 @@ export function StructureView({ table, connId, schema }: StructureViewProps) {
         {!structErr && tab === 'fks' && (
           st.fks.length ? (
             <table style={tblStyle}>
-              <thead><tr>{['', t('dbviews.fkCol'), t('dbviews.fkRef'), 'ON DELETE', 'ON UPDATE'].map((h, i) => <th key={i} style={thCell}>{h}</th>)}</tr></thead>
+              <thead><tr>{['', t('dbviews.fkCol'), t('dbviews.fkRef'), 'ON DELETE', 'ON UPDATE'].map((h, i) => <th key={i} style={{ ...thCell, width: i === 0 ? 36 : undefined }}>{h}</th>)}</tr></thead>
               <tbody>
                 {st.fks.map((fk, i) => (
                   <tr key={i} style={{ background: i % 2 ? 'var(--surface-subtle)' : 'transparent' }}>

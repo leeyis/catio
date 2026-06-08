@@ -214,8 +214,8 @@ export function SqlEditor({ code, onChange, minHeight, target = 'prod-orders', s
   }
 
   return (
-    <div ref={rootRef} style={{ position: 'relative', background: 'var(--surface-subtle)', minHeight: minHeight || 0, height: '100%', overflow: 'hidden' }}>
-      <div ref={hostRef} onMouseUp={onMouseUp} onMouseDown={() => setSelBar(null)} style={{ height: '100%' }} />
+    <div ref={rootRef} style={{ position: 'relative', background: 'var(--surface-subtle)', minHeight: minHeight || 0, height: '100%', width: '100%', overflow: 'hidden' }}>
+      <div ref={hostRef} onMouseUp={onMouseUp} onMouseDown={() => setSelBar(null)} style={{ height: '100%', width: '100%' }} />
       {/* selection toolbar — copy / ask AI */}
       {selBar && (
         <div className="row gap2 pop-in" style={{ position: 'absolute', left: selBar.left, top: selBar.top - 10, transform: 'translate(-50%, -100%)', zIndex: 30, background: 'var(--surface-elevated)', border: '1px solid var(--border-hairline-alt)', borderRadius: 9, boxShadow: 'var(--shadow-dropdown)', padding: 3 }}>

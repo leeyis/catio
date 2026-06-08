@@ -125,7 +125,7 @@ export function SqlConsole({ density, fresh, queryN, writable = true, connId }: 
   }, [])
 
   return (
-    <div className="col" style={{ height: '100%', minHeight: 0 }}>
+    <div className="col" style={{ height: '100%', width: '100%', minHeight: 0, minWidth: 0 }}>
       {/* console toolbar */}
       <div className="row" style={{ justifyContent: 'space-between', padding: '7px 12px', borderBottom: '1px solid var(--border-hairline)', flex: 'none' }}>
         <div className="row gap8">
@@ -140,35 +140,34 @@ export function SqlConsole({ density, fresh, queryN, writable = true, connId }: 
           </Btn>
         </div>
       </div>
-      {/* editor */}
-      <div style={{ flex: 'none', height: 188, borderBottom: '1px solid var(--border-hairline)' }}>
+      {/* editor — always grows to fill the available area (full width + height).
+          When there are no results yet it fills the whole console; once a run
+          starts it shares the space with the results region below (a split). */}
+      <div style={{ flex: 1, minHeight: 140, width: '100%', borderBottom: phase === 'idle' ? 'none' : '1px solid var(--border-hairline)' }}>
         <SqlEditor code={code} onChange={setCode} schema={editorSchema} onRun={run} />
       </div>
-      {/* results */}
-      <div className="grow" style={{ minHeight: 0 }}>
-        {phase === 'running'
-          ? <div className="col" style={{ alignItems: 'center', justifyContent: 'center', height: '100%', gap: 10, color: 'var(--text-tertiary)' }}>
-              <Icon name="loader" size={26} style={{ animation: 'spin 1s linear infinite' }} />
-              <span style={{ fontSize: 13 }}>{t('dbviews.executingOn')}</span>
-            </div>
-          : phase === 'idle'
-          ? <div className="col" style={{ alignItems: 'center', justifyContent: 'center', height: '100%', gap: 8, color: 'var(--text-faint)' }}>
-              <Icon name="play-circle" size={28} />
-              <span style={{ fontSize: 13 }}>{t('dbviews.runToSeeResults')}</span>
-              <span style={{ fontSize: 11.5 }}>{t('dbviews.runHint')}</span>
-            </div>
-          : (connId
-              ? <DataGrid
-                  columns={result?.columns ?? []}
-                  rows={result?.rows ?? []}
-                  statusTones={D.statusTones} density={density}
-                  writable={writable} connId={connId} sql={result?.sql}
-                  loadError={runErr ?? undefined} />
-              : <DataGrid
-                  columns={D.ordersColumns.map(c => ({ name: c.name, type: c.type, pk: c.pk, fk: c.fk, icon: c.icon }))}
-                  rows={D.ordersRows.map(r => D.ordersColumns.map(c => (r as unknown as Record<string, unknown>)[c.name]))}
-                  statusTones={D.statusTones} density={density} />)}
-      </div>
+      {/* results — only rendered once a run has started (running/done). While
+          idle (fresh query) the editor above fills everything. */}
+      {phase !== 'idle' && (
+        <div style={{ flex: 1, minHeight: 0, width: '100%' }}>
+          {phase === 'running'
+            ? <div className="col" style={{ alignItems: 'center', justifyContent: 'center', height: '100%', gap: 10, color: 'var(--text-tertiary)' }}>
+                <Icon name="loader" size={26} style={{ animation: 'spin 1s linear infinite' }} />
+                <span style={{ fontSize: 13 }}>{t('dbviews.executingOn')}</span>
+              </div>
+            : (connId
+                ? <DataGrid
+                    columns={result?.columns ?? []}
+                    rows={result?.rows ?? []}
+                    statusTones={D.statusTones} density={density}
+                    writable={writable} connId={connId} sql={result?.sql}
+                    loadError={runErr ?? undefined} />
+                : <DataGrid
+                    columns={D.ordersColumns.map(c => ({ name: c.name, type: c.type, pk: c.pk, fk: c.fk, icon: c.icon }))}
+                    rows={D.ordersRows.map(r => D.ordersColumns.map(c => (r as unknown as Record<string, unknown>)[c.name]))}
+                    statusTones={D.statusTones} density={density} />)}
+        </div>
+      )}
     </div>
   )
 }
