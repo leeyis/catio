@@ -185,3 +185,17 @@ export async function multiexecRun(sessionIds: string[], cmd: string): Promise<s
 export async function getTermBuffer(_id: string): Promise<TermLine[]> {
   return DATA.termLines
 }
+
+// ---- History audit event subscription ----
+
+export interface HistoryEvent {
+  command: string
+  exitCode: number | null
+  cwd: string
+  durationMs: number
+  host: string
+}
+
+export async function onHistory(sessionId: string, cb: (e: HistoryEvent) => void): Promise<() => void> {
+  return listen<HistoryEvent>(`history://${sessionId}`, cb)
+}

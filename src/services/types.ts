@@ -328,6 +328,7 @@ export interface HistoryItem {
   text: string
   when: string
   dur: string
+  exitCode?: number
 }
 
 // ---- Automation ----

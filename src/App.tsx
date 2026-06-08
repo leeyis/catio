@@ -1,5 +1,5 @@
 /* ported from ref-ui/_extract/blob15.txt — verbatim per plan T1-T7 */
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { TitleBar, Sidebar, IconRail } from './components/shell/Sidebar'
 import { HomeView } from './components/views/HomeView'
@@ -24,8 +24,10 @@ import { Btn } from './components/atoms'
 import { useTweaks, TWEAK_DEFAULTS } from './state/useTweaks'
 import { nextTheme, useApplyTheme } from './state/ThemeContext'
 import { useData } from './state/DataContext'
-import { sshConnect, sshDisconnect, sshTrustHost, isTauri } from './services/ssh'
+import { sshConnect, sshDisconnect, sshTrustHost, isTauri, onHistory } from './services/ssh'
 import type { SshConnectArgs } from './services/ssh'
+import { appendHistory, loadHistory } from './state/history'
+import type { HistoryItem } from './services/types'
 import { loadProfiles, saveProfile, deleteProfile } from './state/connections'
 import type { ConnectionProfile } from './state/connections'
 import type { Tab, Connection, Snippet } from './services/types'
@@ -64,6 +66,10 @@ export default function App() {
   const [sessionMap, setSessionMap] = useState<Record<string, string>>({})
   // Display Connection objects for live conns (not present in mock D.byId).
   const [liveConns, setLiveConns] = useState<Record<string, Connection>>({})
+  // History items loaded from localStorage; updated on each new audit event.
+  const [history, setHistory] = useState<HistoryItem[]>(() => loadHistory())
+  // sessionId -> unlisten fn for history:// subscriptions; avoids re-render on update.
+  const historyUnlisteners = useRef<Record<string, () => void>>({})
   // Connect-flow state machine: collect secret, then (maybe) trust host key.
   const [pendingConnect, setPendingConnect] = useState<{ args: SshConnectArgs; name: string } | null>(null)
   const [pendingTrust, setPendingTrust] = useState<{ args: SshConnectArgs; name: string; sessionId: string; fingerprint: string } | null>(null)
@@ -175,6 +181,23 @@ export default function App() {
     setView('workbench')
     // Surface any newly-saved profile in the vault (saveProfile ran in the modal).
     reloadProfiles()
+
+    // Subscribe to shell-command audit events for this session (Tauri only).
+    if (sessionId && !historyUnlisteners.current[sessionId]) {
+      void onHistory(sessionId, e => {
+        appendHistory({
+          kind: 'shell',
+          target: e.host || name,
+          text: e.command,
+          when: new Date().toLocaleTimeString(),
+          dur: e.durationMs + 'ms',
+          exitCode: e.exitCode ?? undefined,
+        })
+        setHistory(loadHistory())
+      }).then(unlisten => {
+        historyUnlisteners.current[sessionId] = unlisten
+      })
+    }
   }
 
   // ORCH connect entrypoint — invoked by NewConnectionModal's onConnect and by
@@ -260,6 +283,12 @@ export default function App() {
     const stillUsed = remaining.some(tb => tb.sessionId === sid)
     if (stillUsed) return
     sshDisconnect(sid).catch(() => { /* best-effort */ })
+    // Unsubscribe from history audit events for this session.
+    const unlisten = historyUnlisteners.current[sid]
+    if (unlisten) {
+      unlisten()
+      delete historyUnlisteners.current[sid]
+    }
     setSessionMap(prev => {
       const next = { ...prev }
       delete next[closing.connId]
@@ -427,7 +456,7 @@ export default function App() {
               {activePanel === 'monitor' && <MonitorPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} />}
               {activePanel === 'tunnels' && <TunnelsPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} />}
               {activePanel === 'snippets' && <SnippetsPanel onClose={() => setPanelOpen(false)} snippets={snippets} />}
-              {activePanel === 'history' && <HistoryPanel onClose={() => setPanelOpen(false)} onAddSnippet={addSnippet} />}
+              {activePanel === 'history' && <HistoryPanel onClose={() => setPanelOpen(false)} onAddSnippet={addSnippet} items={history} />}
               {activePanel === 'details' && (
                 <DetailsPanel
                   conn={detailConn ?? undefined}

@@ -10,6 +10,8 @@ import { PanelShell } from './PanelShell'
 export interface HistoryPanelProps {
   onClose: () => void
   onAddSnippet?: (s: Snippet) => void
+  /** Live history items from the real store (H4 will use this; H3 passes it in). */
+  items?: HistoryItem[]
 }
 
 interface MenuItemProps {
@@ -123,7 +125,7 @@ function SaveSnippetModal({ row, onClose, onSave }: SaveSnippetModalProps) {
   )
 }
 
-export function HistoryPanel({ onClose, onAddSnippet }: HistoryPanelProps) {
+export function HistoryPanel({ onClose, onAddSnippet, items }: HistoryPanelProps) {
   const { t } = useTranslation()
   const D = useData()
   const [q, setQ] = useState('')
@@ -132,13 +134,15 @@ export function HistoryPanel({ onClose, onAddSnippet }: HistoryPanelProps) {
   const [menuOpen, setMenuOpen] = useState(false)
   const [saveRow, setSaveRow] = useState<HistoryItem | null>(null)
   const byName = useMemo(() => Object.fromEntries(D.connections.map(c => [c.name, c])), [D.connections])
+  // Prefer real store items passed in; fall back to mock D.history (demo / H4 not yet wired).
+  const historyItems = items ?? D.history
   // distinct targets present in history
   const targets = useMemo(() => {
     const seen: Array<{ name: string; kind: string }> = []
-    D.history.forEach(h => { if (!seen.find(t2 => t2.name === h.target)) seen.push({ name: h.target, kind: h.kind }) })
+    historyItems.forEach(h => { if (!seen.find(t2 => t2.name === h.target)) seen.push({ name: h.target, kind: h.kind }) })
     return seen
-  }, [D.history])
-  const rows = D.history.filter(h => {
+  }, [historyItems])
+  const rows = historyItems.filter(h => {
     if (kind !== 'all' && h.kind !== kind) return false
     if (target !== 'all' && h.target !== target) return false
     if (q && !(h.text.toLowerCase().includes(q.toLowerCase()) || h.target.toLowerCase().includes(q.toLowerCase()))) return false
@@ -175,10 +179,10 @@ export function HistoryPanel({ onClose, onAddSnippet }: HistoryPanelProps) {
               <>
                 <div style={{ position: 'fixed', inset: 0, zIndex: 40 }} onClick={() => setMenuOpen(false)} />
                 <div className="pop-in" style={{ position: 'absolute', top: 34, left: 0, right: 0, zIndex: 50, background: 'var(--surface-elevated)', border: '1px solid var(--border-hairline-alt)', borderRadius: 10, boxShadow: 'var(--shadow-dropdown)', padding: 5, maxHeight: 260, overflowY: 'auto' }}>
-                  <MenuItem active={target === 'all'} onClick={() => { setTarget('all'); setMenuOpen(false) }} icon="filter" label={t('panels.allConnections')} count={D.history.length} />
+                  <MenuItem active={target === 'all'} onClick={() => { setTarget('all'); setMenuOpen(false) }} icon="filter" label={t('panels.allConnections')} count={historyItems.length} />
                   {targets.map(t2 => {
                     const conn = byName[t2.name]
-                    const n = D.history.filter(h => h.target === t2.name).length
+                    const n = historyItems.filter(h => h.target === t2.name).length
                     return <MenuItem key={t2.name} active={target === t2.name} onClick={() => { setTarget(t2.name); setMenuOpen(false) }} conn={conn} kind={t2.kind} label={t2.name} count={n} />
                   })}
                 </div>
@@ -197,7 +201,7 @@ export function HistoryPanel({ onClose, onAddSnippet }: HistoryPanelProps) {
       </div>
       {/* footer count */}
       <div className="row gap6" style={{ padding: '8px 12px', borderTop: '1px solid var(--border-hairline)', fontSize: 11, color: 'var(--text-faint)' }}>
-        <Icon name="history" size={12} /> {t('panels.showingCount', { shown: rows.length, total: D.history.length })}
+        <Icon name="history" size={12} /> {t('panels.showingCount', { shown: rows.length, total: historyItems.length })}
         {(kind !== 'all' || target !== 'all' || q) && <button className="btn btn-ghost sm" style={{ marginLeft: 'auto', height: 22, padding: '0 8px', fontSize: 11 }} onClick={() => { setKind('all'); setTarget('all'); setQ('') }}>{t('panels.clearFilters')}</button>}
       </div>
       {saveRow && <SaveSnippetModal row={saveRow} onClose={() => setSaveRow(null)} onSave={(s) => { onAddSnippet && onAddSnippet(s as Snippet); setSaveRow(null) }} />}
