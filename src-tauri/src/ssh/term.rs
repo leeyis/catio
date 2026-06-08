@@ -180,9 +180,9 @@ fn emit_scanned(
         // The first OSC marker means shell integration is live (first prompt
         // reached) → unmute and emit this (clean, post-eval) batch. Otherwise a
         // 3s fallback unmutes shells that never emit markers.
-        if !events.is_empty() {
-            *muted = false;
-        } else if started.elapsed() > std::time::Duration::from_millis(MUTE_FALLBACK_MS) {
+        // First OSC marker → shell integration live; otherwise a 3s fallback
+        // unmutes shells that never emit markers.
+        if !events.is_empty() || started.elapsed() > std::time::Duration::from_millis(MUTE_FALLBACK_MS) {
             *muted = false;
         }
     }

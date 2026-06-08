@@ -1,12 +1,11 @@
-/* ported from ref-ui/_extract/blob9.txt — verbatim per plan T1-T7 */
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { IconBtn } from '../atoms'
-import type { Connection, Sftp, SftpItem } from '../../services/types'
+import type { Connection, SftpItem, TransferProgress } from '../../services/types'
 import { PanelShell } from './PanelShell'
 import { PanelEmpty } from './PanelEmpty'
-import { getSftp, sftpUpload, sftpDownload, listen } from '../../services/ssh'
+import { sftpList, sftpRealpath, sftpUpload, sftpDownload, listen } from '../../services/ssh'
 
 function isTauriEnv(): boolean {
   return (
@@ -15,23 +14,47 @@ function isTauriEnv(): boolean {
   )
 }
 
-function posixJoin(base: string, name: string): string {
-  const b = base === '.' ? '' : base.replace(/\/$/, '')
-  return b ? `${b}/${name}` : name
+// ---- pure path helpers (absolute POSIX paths) ----
+function joinPath(dir: string, name: string): string {
+  return dir.endsWith('/') ? dir + name : `${dir}/${name}`
+}
+function parentPath(p: string): string {
+  if (p === '/' || p === '') return '/'
+  const t = p.replace(/\/+$/, '')
+  const i = t.lastIndexOf('/')
+  return i <= 0 ? '/' : t.slice(0, i)
+}
+function baseName(p: string): string {
+  const segs = p.replace(/\\/g, '/').replace(/\/+$/, '').split('/')
+  return segs[segs.length - 1] || p
 }
 
-function posixParent(p: string): string {
-  if (p === '.' || p === '' || p === '/') return '.'
-  const trimmed = p.replace(/\/$/, '')
-  const slash = trimmed.lastIndexOf('/')
-  if (slash <= 0) return '.'
-  return trimmed.slice(0, slash)
+// ---- pure formatters ----
+function fmtSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`
+  return `${(bytes / 1024 ** 3).toFixed(1)} GB`
+}
+function fmtDate(epoch: number): string {
+  if (!epoch) return '—'
+  const d = new Date(epoch * 1000)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
-function posixBasename(p: string): string {
-  const trimmed = p.replace(/\/$/, '')
-  const slash = trimmed.lastIndexOf('/')
-  return slash === -1 ? trimmed : trimmed.slice(slash + 1)
+interface ActiveTransfer {
+  id: string
+  filename: string
+  percent: number
+  status: 'active' | 'error'
+  kind: 'up' | 'down'
+}
+
+interface HoverState {
+  item: SftpItem
+  x: number
+  y: number
 }
 
 export interface SftpPanelProps {
@@ -43,110 +66,279 @@ export interface SftpPanelProps {
 export function SftpPanel({ onClose, conn, sessionId }: SftpPanelProps) {
   const { t } = useTranslation()
 
-  const EMPTY_SFTP: Sftp = { path: '', items: [] }
-  const [sftp, setSftp] = useState<Sftp>(EMPTY_SFTP)
+  const [items, setItems] = useState<SftpItem[]>([])
   const [path, setPath] = useState<string>('')
+  const [pathInput, setPathInput] = useState<string>('')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [selected, setSelected] = useState<string | null>(null)
+  const [transfers, setTransfers] = useState<ActiveTransfer[]>([])
+  const [dragging, setDragging] = useState(false)
+  const [hover, setHover] = useState<HoverState | null>(null)
+
+  // refs so the once-mounted drag-drop listener always sees the latest values.
+  const sessionRef = useRef(sessionId)
+  sessionRef.current = sessionId
+  const pathRef = useRef('')
 
   const load = useCallback((p: string) => {
-    if (!sessionId) return
-    getSftp(sessionId, p).then(result => {
-      setSftp(result)
-      setPath(result.path)
-    }).catch(() => {
-      // On error keep current state (e.g. no session yet)
-    })
-  }, [sessionId])
-
-  useEffect(() => {
-    if (sessionId) {
-      load(path || '.')
-    } else {
-      setSftp(EMPTY_SFTP)
-      setPath('')
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId])
-
-  const handleItemClick = (it: SftpItem) => {
-    if (!sessionId || !isTauriEnv()) return
-    if (it.type === 'dir') {
-      const next = posixJoin(path, it.name)
-      load(next)
-    } else if (it.type === 'up') {
-      const next = posixParent(path)
-      load(next)
-    } else if (it.type === 'file') {
-      // Download on file click (Tauri only)
-      import('@tauri-apps/plugin-dialog').then(({ save }) => {
-        save({ defaultPath: it.name }).then(dest => {
-          if (!dest) return
-          const remote = posixJoin(path, it.name)
-          sftpDownload(sessionId, remote, dest).then(() => load(path))
-        })
+    const sid = sessionRef.current
+    if (!sid) return
+    setLoading(true)
+    setError(null)
+    sftpList(sid, p)
+      .then(list => {
+        setItems(list)
+        setPath(p)
+        pathRef.current = p
+        setPathInput(p)
+        setSelected(null)
       })
-    }
-  }
+      .catch(e => setError(String(e)))
+      .finally(() => setLoading(false))
+  }, [])
 
-  const handleUpload = () => {
+  // Resolve home ('.') to an absolute path on (re)connect, then list it.
+  useEffect(() => {
+    if (!sessionId) {
+      setItems([])
+      setPath('')
+      pathRef.current = ''
+      setPathInput('')
+      return
+    }
+    sftpRealpath(sessionId, '.')
+      .then(abs => load(abs))
+      .catch(() => load('.'))
+  }, [sessionId, load])
+
+  // ---- transfers ----
+  const trackTransfer = useCallback(async (id: string, filename: string, kind: 'up' | 'down') => {
+    setTransfers(prev => [...prev, { id, filename, percent: 0, status: 'active', kind }])
+    const offs: Array<() => void> = []
+    const cleanup = () => offs.forEach(f => f())
+    offs.push(await listen<TransferProgress>(`transfer-progress-${id}`, p => {
+      setTransfers(prev => prev.map(x => (x.id === id ? { ...x, percent: p.percent } : x)))
+    }))
+    offs.push(await listen(`transfer-complete-${id}`, () => {
+      cleanup()
+      setTransfers(prev => prev.filter(x => x.id !== id))
+      load(pathRef.current)
+    }))
+    offs.push(await listen<string>(`transfer-error-${id}`, msg => {
+      cleanup()
+      setTransfers(prev => prev.map(x => (x.id === id ? { ...x, status: 'error' } : x)))
+      setError(typeof msg === 'string' ? msg : 'transfer failed')
+      // drop the errored row after a short delay
+      setTimeout(() => setTransfers(prev => prev.filter(x => x.id !== id)), 4000)
+    }))
+  }, [load])
+
+  const uploadLocal = useCallback(async (localPath: string) => {
+    const sid = sessionRef.current
+    if (!sid) return
+    const remote = joinPath(pathRef.current, baseName(localPath))
+    try {
+      const id = await sftpUpload(sid, localPath, remote)
+      await trackTransfer(id, baseName(localPath), 'up')
+    } catch (e) {
+      setError(String(e))
+    }
+  }, [trackTransfer])
+
+  const handleDrop = useCallback(async (paths: string[]) => {
+    if (!sessionRef.current || paths.length === 0) return
+    for (const p of paths) {
+      // skip directories silently (only files are uploaded)
+      await uploadLocal(p)
+    }
+  }, [uploadLocal])
+
+  // Native (OS) drag-and-drop — Tauri intercepts file drops, so HTML5 ondrop
+  // never fires; we must use the webview drag-drop event instead.
+  useEffect(() => {
+    if (!isTauriEnv()) return
+    let un: (() => void) | undefined
+    let alive = true
+    import('@tauri-apps/api/webview').then(({ getCurrentWebview }) => {
+      getCurrentWebview()
+        .onDragDropEvent(ev => {
+          const ty = ev.payload.type
+          if (ty === 'enter' || ty === 'over') setDragging(true)
+          else if (ty === 'leave') setDragging(false)
+          else if (ty === 'drop') {
+            setDragging(false)
+            void handleDrop(ev.payload.paths)
+          }
+        })
+        .then(u => { if (alive) un = u; else u() })
+    })
+    return () => { alive = false; un?.() }
+  }, [handleDrop])
+
+  // ---- actions ----
+  const handleUploadClick = () => {
     if (!sessionId || !isTauriEnv()) return
     import('@tauri-apps/plugin-dialog').then(({ open }) => {
-      open({ multiple: false }).then(picked => {
+      open({ multiple: true }).then(picked => {
         if (!picked) return
-        const localPath = typeof picked === 'string' ? picked : picked
-        const remotePath = posixJoin(path, posixBasename(localPath))
-        // Subscribe to upload progress; reload on completion
-        const progressPromise = listen<{ done: number; total: number }>('sftp-progress://upload', () => {
-          // No visual indicator added — progress deferred (no clean spot in layout)
-        })
-        sftpUpload(sessionId, localPath, remotePath).then(() => {
-          progressPromise.then(unlisten => unlisten())
-          load(path)
-        }).catch(() => {
-          progressPromise.then(unlisten => unlisten())
-        })
+        const arr = Array.isArray(picked) ? picked : [picked]
+        void (async () => { for (const p of arr) await uploadLocal(p as string) })()
       })
     })
   }
 
-  const handleRefresh = () => {
-    load(path)
+  const downloadItem = (it: SftpItem) => {
+    if (!sessionId || !isTauriEnv()) return
+    import('@tauri-apps/plugin-dialog').then(({ save }) => {
+      save({ defaultPath: it.name }).then(dest => {
+        if (!dest) return
+        sftpDownload(sessionId, it.path, dest).then(id => trackTransfer(id, it.name, 'down')).catch(e => setError(String(e)))
+      })
+    })
   }
 
-  // Build displayed items: synthetic '..' entry (only when not at root) + real items
-  const isRoot = path === '.' || path === '' || path === '/'
-  const displayItems: SftpItem[] = isRoot
-    ? sftp.items
-    : [{ name: '..', type: 'up' as const }, ...sftp.items]
+  const openItem = (it: SftpItem) => {
+    if (it.type === 'dir') load(it.path)
+    else if (it.type === 'file') downloadItem(it)
+  }
+
+  const goPath = (raw: string) => {
+    const p = raw.trim()
+    if (!p) return
+    load(p.startsWith('/') ? p : `/${p}`)
+  }
+
+  const isRoot = path === '/' || path === ''
 
   return (
-    <PanelShell icon="folder" title={`SFTP · ${conn ? conn.name : 'prod-web-01'}`} sub={sessionId ? sftp.path : undefined} onClose={onClose}
-      actions={<><IconBtn name="upload" size={15} variant="bare" title={t('panels.upload')} onClick={handleUpload} /><IconBtn name="refresh-cw" size={15} variant="bare" title={t('panels.refresh')} onClick={handleRefresh} /></>}>
+    <PanelShell
+      icon="folder"
+      title={`${t('panels.sftpTitle')} · ${conn ? conn.name : (path ? baseName(path) || '/' : t('panels.sftpTitle'))}`}
+      sub={sessionId ? path : undefined}
+      onClose={onClose}
+      actions={<>
+        <IconBtn name="upload" size={15} variant="bare" title={t('panels.upload')} onClick={handleUploadClick} />
+        <IconBtn name="refresh-cw" size={15} variant="bare" title={t('panels.refresh')} onClick={() => load(path || '.')} />
+      </>}
+    >
       {!sessionId ? (
         <PanelEmpty icon="folder" text={t('panels.noSessionHint')} />
       ) : (
         <>
-          <div className="row gap6" style={{ padding: '8px 12px', borderBottom: '1px solid var(--border-hairline)', fontSize: 11.5, color: 'var(--text-tertiary)' }}>
-            <Icon name="folder-open" size={13} style={{ color: 'var(--signal-amber)' }} />
-            <span className="mono ell">{sftp.path}</span>
+          {/* address bar */}
+          <div className="row gap6" style={{ padding: '8px 10px', borderBottom: '1px solid var(--border-hairline)' }}>
+            <IconBtn name="chevron-up" size={15} variant="bare" title={t('panels.sftpUp')} onClick={() => { if (!isRoot) load(parentPath(path)) }} style={{ opacity: isRoot ? 0.4 : 1 }} />
+            <input
+              className="mono"
+              value={pathInput}
+              onChange={e => setPathInput(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') goPath(pathInput); if (e.key === 'Escape') setPathInput(path) }}
+              placeholder={t('panels.sftpAddressPlaceholder')}
+              spellCheck={false}
+              style={{
+                flex: 1, minWidth: 0, height: 28, padding: '0 10px', fontSize: 12,
+                color: 'var(--text-secondary)', background: 'var(--surface-sunken)',
+                border: '1px solid var(--border-hairline)', borderRadius: 8, outline: 'none',
+              }}
+            />
           </div>
-          <div className="grow" style={{ overflowY: 'auto', padding: 6 }}>
-            {displayItems.map((it, i) => (
-              <div key={i} className="row gap8" style={{ padding: '7px 8px', borderRadius: 8, cursor: 'pointer' }}
-                onClick={() => handleItemClick(it)}
-                onMouseEnter={e => (e.currentTarget as HTMLDivElement).style.background = 'var(--surface-sunken)'} onMouseLeave={e => (e.currentTarget as HTMLDivElement).style.background = 'transparent'}>
-                <Icon name={it.type === 'up' ? 'corner-down-right' : it.type === 'dir' ? 'folder' : it.name.endsWith('.log') ? 'file' : it.name.endsWith('.js') || it.name.endsWith('.json') ? 'file-code' : 'file'}
-                  size={15} style={{ color: it.type === 'dir' ? 'var(--signal-amber)' : it.type === 'up' ? 'var(--text-faint)' : 'var(--text-tertiary)', flex: 'none' }} />
-                <span className="ell mono" style={{ fontSize: 12.5, color: it.type === 'up' ? 'var(--text-faint)' : 'var(--text-secondary)', flex: 1 }}>{it.name}</span>
-                {it.size && it.type !== 'up' && <span className="mono" style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{it.size}</span>}
-                {it.mod && it.type !== 'up' && <span style={{ fontSize: 10.5, color: 'var(--text-disabled)', width: 48, textAlign: 'right' }}>{it.mod}</span>}
+
+          {/* active transfers */}
+          {transfers.length > 0 && (
+            <div className="col" style={{ padding: '8px 12px', gap: 8, borderBottom: '1px solid var(--border-hairline)' }}>
+              {transfers.map(tr => (
+                <div key={tr.id} className="col" style={{ gap: 4 }}>
+                  <div className="row gap6" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+                    <Icon name={tr.kind === 'up' ? 'upload' : 'download'} size={11} />
+                    <span className="ell" style={{ flex: 1 }}>{tr.filename}</span>
+                    <span className="mono">{tr.status === 'error' ? '!' : `${Math.round(tr.percent)}%`}</span>
+                  </div>
+                  <div style={{ height: 4, borderRadius: 4, background: 'var(--surface-sunken)', overflow: 'hidden' }}>
+                    <div style={{ height: '100%', width: `${tr.percent}%`, background: tr.status === 'error' ? 'var(--signal-red, #e5484d)' : 'var(--accent-primary)', transition: 'width .15s' }} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {error && (
+            <div className="row gap6" style={{ padding: '8px 12px', fontSize: 11.5, color: 'var(--signal-red, #e5484d)', borderBottom: '1px solid var(--border-hairline)' }}>
+              <Icon name="alert-triangle" size={12} /> <span className="ell">{error}</span>
+            </div>
+          )}
+
+          {/* file list */}
+          <div className="grow" style={{ position: 'relative', overflowY: 'auto', padding: 6 }}>
+            {dragging && (
+              <div className="col" style={{
+                position: 'absolute', inset: 6, zIndex: 20, borderRadius: 12,
+                border: '2px dashed var(--accent-primary)', background: 'var(--accent-soft)',
+                alignItems: 'center', justifyContent: 'center', gap: 8, color: 'var(--accent-primary)',
+                pointerEvents: 'none',
+              }}>
+                <Icon name="upload" size={24} />
+                <span style={{ fontSize: 12.5, fontWeight: 600 }}>{t('panels.sftpDropToUpload')}</span>
               </div>
-            ))}
+            )}
+
+            {items.length === 0 && !loading ? (
+              <div className="col" style={{ alignItems: 'center', justifyContent: 'center', padding: '32px 12px', color: 'var(--text-faint)', fontSize: 12 }}>
+                {t('panels.sftpEmptyDir')}
+              </div>
+            ) : (
+              items.map((it, i) => (
+                <div key={`${it.path}-${i}`} className="row gap8"
+                  style={{ padding: '7px 8px', borderRadius: 8, cursor: 'pointer', background: selected === it.path ? 'var(--surface-sunken)' : 'transparent' }}
+                  onClick={() => setSelected(it.path)}
+                  onDoubleClick={() => openItem(it)}
+                  onMouseEnter={e => { setHover({ item: it, x: e.clientX, y: e.clientY }); (e.currentTarget as HTMLDivElement).style.background = 'var(--surface-sunken)' }}
+                  onMouseMove={e => setHover(h => (h && h.item.path === it.path ? { item: it, x: e.clientX, y: e.clientY } : h))}
+                  onMouseLeave={e => { setHover(null); (e.currentTarget as HTMLDivElement).style.background = selected === it.path ? 'var(--surface-sunken)' : 'transparent' }}
+                >
+                  <Icon name={it.type === 'dir' ? 'folder' : it.type === 'link' ? 'file-code' : 'file'}
+                    size={15} style={{ color: it.type === 'dir' ? 'var(--signal-amber)' : 'var(--text-tertiary)', flex: 'none' }} />
+                  <span className="ell mono" style={{ fontSize: 12.5, color: 'var(--text-secondary)', flex: 1 }}>{it.name}</span>
+                  {it.type === 'file' && (
+                    <IconBtn name="download" size={13} variant="bare" title={t('panels.sftpDownload')} onClick={e => { e.stopPropagation(); downloadItem(it) }} />
+                  )}
+                </div>
+              ))
+            )}
           </div>
+
+          {/* hover tooltip: detail moved off the row, shown on hover */}
+          {hover && (
+            <div style={{
+              position: 'fixed', left: Math.min(hover.x + 14, window.innerWidth - 220), top: hover.y + 12,
+              zIndex: 60, pointerEvents: 'none', minWidth: 168, maxWidth: 240,
+              padding: '8px 10px', borderRadius: 10, fontSize: 11,
+              background: 'var(--surface-overlay, var(--surface-card))', color: 'var(--text-secondary)',
+              border: '1px solid var(--border-hairline)', boxShadow: 'var(--shadow-card)',
+            }}>
+              <div className="ell" style={{ fontWeight: 600, color: 'var(--text-primary)', marginBottom: 4 }}>{hover.item.name}</div>
+              <TipRow label={t('panels.sftpTipModified')} value={fmtDate(hover.item.modified)} />
+              {hover.item.type === 'file' && <TipRow label={t('panels.sftpTipSize')} value={fmtSize(hover.item.size)} />}
+              <TipRow label={t('panels.sftpTipPerms')} value={hover.item.permissions || '—'} mono />
+              <TipRow label={t('panels.sftpTipOwner')} value={hover.item.owner || '—'} />
+              <TipRow label={t('panels.sftpTipGroup')} value={hover.item.group || '—'} />
+            </div>
+          )}
+
           <div className="row gap8" style={{ padding: '8px 12px', borderTop: '1px solid var(--border-hairline)', fontSize: 11, color: 'var(--text-faint)' }}>
             <Icon name="info" size={12} /> {t('panels.sftpDropHint')}
           </div>
         </>
       )}
     </PanelShell>
+  )
+}
+
+function TipRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="row gap8" style={{ justifyContent: 'space-between', lineHeight: 1.6 }}>
+      <span style={{ color: 'var(--text-faint)', flex: 'none' }}>{label}</span>
+      <span className={mono ? 'mono ell' : 'ell'} style={{ textAlign: 'right' }}>{value}</span>
+    </div>
   )
 }

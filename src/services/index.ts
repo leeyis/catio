@@ -27,4 +27,4 @@ export { DATA }
 export { fetchModels, testModel } from './models'
 export type { ModelTestResult } from './models'
 
-export { getTermBuffer, getSftp, getTunnels, getMonitor } from './ssh'
+export { getTermBuffer, sftpList, sftpRealpath, getTunnels, getMonitor } from './ssh'

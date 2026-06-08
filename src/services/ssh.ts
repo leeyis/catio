@@ -1,5 +1,5 @@
 import { DATA } from './mockData'
-import type { Sftp, SftpItem, Tunnel, Monitor, TermLine } from './types'
+import type { SftpItem, Tunnel, Monitor, TermLine } from './types'
 
 // ---- Tunnel wire shape from Tauri backend ----
 export interface TunnelStatusWire {
@@ -105,20 +105,34 @@ export async function listen<T>(event: string, cb: (payload: T) => void): Promis
 
 // ---- SFTP ----
 
-export async function getSftp(sessionId?: string, path?: string): Promise<Sftp> {
+/** List a remote directory. Returns entries with rich metadata (size/mtime/perms/owner/group). */
+export async function sftpList(sessionId: string, path: string): Promise<SftpItem[]> {
   if (isTauri() && sessionId) {
-    const items = await tauriInvoke<SftpItem[]>('sftp_list', { sessionId, path: path ?? '.' })
-    return { path: path ?? '.', items }
+    return tauriInvoke<SftpItem[]>('sftp_list', { sessionId, path })
   }
-  return { path: '', items: [] }
+  return []
 }
 
-export async function sftpUpload(sessionId: string, localPath: string, remotePath: string): Promise<void> {
-  return tauriInvoke('sftp_upload', { sessionId, localPath, remotePath })
+/** Resolve a path to its absolute form ("." → home dir). */
+export async function sftpRealpath(sessionId: string, path: string): Promise<string> {
+  if (isTauri() && sessionId) {
+    return tauriInvoke<string>('sftp_realpath', { sessionId, path })
+  }
+  return path
 }
 
-export async function sftpDownload(sessionId: string, remotePath: string, localPath: string): Promise<void> {
-  return tauriInvoke('sftp_download', { sessionId, remotePath, localPath })
+/** Start an upload. Returns a transfer id; progress flows via `transfer-progress-{id}` events. */
+export async function sftpUpload(sessionId: string, localPath: string, remotePath: string): Promise<string> {
+  return tauriInvoke<string>('sftp_upload', { sessionId, localPath, remotePath })
+}
+
+/** Start a download. Returns a transfer id; progress flows via `transfer-progress-{id}` events. */
+export async function sftpDownload(sessionId: string, remotePath: string, localPath: string): Promise<string> {
+  return tauriInvoke<string>('sftp_download', { sessionId, remotePath, localPath })
+}
+
+export async function sftpTouch(sessionId: string, path: string): Promise<void> {
+  return tauriInvoke('sftp_touch', { sessionId, path })
 }
 
 export async function sftpMkdir(sessionId: string, path: string): Promise<void> {

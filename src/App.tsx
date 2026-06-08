@@ -714,7 +714,7 @@ export default function App() {
                 onNewConversation={cur ? (() => newAgentConversation(cur.id)) : undefined}
                 onRestoreConversation={cur ? (convId => restoreConversation(cur.id, convId)) : undefined}
                 onDeleteConversation={cur ? (convId => deleteAgentConversation(cur.id, convId)) : undefined} />}
-              {activePanel === 'sftp' && <SftpPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} />}
+              {activePanel === 'sftp' && <SftpPanel onClose={() => setPanelOpen(false)} conn={curConn ?? undefined} sessionId={cur?.sessionId} />}
               {activePanel === 'monitor' && <MonitorPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} />}
               {activePanel === 'tunnels' && <TunnelsPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} activeConnId={cur?.connId} profiles={profiles} />}
               {activePanel === 'snippets' && <SnippetsPanel onClose={() => setPanelOpen(false)} snippets={snippets} onChange={() => setSnippets(loadSnippets())} onInsert={insertToTerminal} canInsert={canInsert} />}

@@ -222,14 +222,31 @@ export interface Snippet {
 
 export interface SftpItem {
   name: string
-  type: 'up' | 'dir' | 'file'
-  size?: string
-  mod?: string
+  /** Absolute remote path of this entry. */
+  path: string
+  type: 'dir' | 'file' | 'link'
+  /** Size in bytes (0 for directories). */
+  size: number
+  /** Modified time, unix epoch seconds (0 if unknown). */
+  modified: number
+  /** Permission string, e.g. "drwxr-xr-x". */
+  permissions: string
+  owner: string
+  group: string
 }
 
 export interface Sftp {
   path: string
   items: SftpItem[]
+}
+
+/** Progress payload for a `transfer-progress-{id}` event. */
+export interface TransferProgress {
+  id: string
+  filename: string
+  bytesTransferred: number
+  totalBytes: number
+  percent: number
 }
 
 // ---- Terminal buffer ----
@@ -370,7 +387,6 @@ export interface CatioData {
   aiShell: ChatMessage[]
   aiQuickActions: AiQuickActions
   snippets: Snippet[]
-  sftp: Sftp
   termLines: TermLine[]
   tunnels: Tunnel[]
   jumpChain: JumpNode[]
