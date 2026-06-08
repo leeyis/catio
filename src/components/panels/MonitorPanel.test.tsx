@@ -69,6 +69,17 @@ describe('MonitorPanel (monitor wiring)', () => {
     expect(h.listen.mock.calls[0][0]).toBe('monitor://sess-1')
   })
 
+  it('shows a loading skeleton until the first sample arrives, then real data', async () => {
+    const { container } = wrap(<MonitorPanel onClose={() => {}} sessionId="sess-1" />)
+    // before any payload: skeleton placeholders are present
+    await waitFor(() => expect(container.querySelectorAll('.skel').length).toBeGreaterThan(0))
+    await waitFor(() => expect(h.listenCb).not.toBeNull())
+    await act(async () => { h.listenCb!(CUSTOM_MONITOR) })
+    // after data: skeleton gone, real values shown
+    await waitFor(() => expect(screen.getByText(/77%/)).toBeTruthy())
+    expect(container.querySelectorAll('.skel').length).toBe(0)
+  })
+
   it('reflects live monitor data pushed via listen callback', async () => {
     wrap(<MonitorPanel onClose={() => {}} sessionId="sess-1" />)
     await waitFor(() => expect(h.listenCb).not.toBeNull())

@@ -121,6 +121,44 @@ function GpuCard({ g }: GpuCardProps) {
   )
 }
 
+// ---- loading skeleton (shimmer placeholder shown until first sample arrives) ----
+function Sk({ w, h = 12, r = 6 }: { w: number | string; h?: number; r?: number }) {
+  return <div className="skel" style={{ width: w, height: h, borderRadius: r, flex: 'none' }} />
+}
+function SkCard({ children }: { children: React.ReactNode }) {
+  return <div className="col" style={{ background: 'var(--surface-subtle)', border: '1px solid var(--border-hairline)', borderRadius: 12, padding: 10, gap: 10 }}>{children}</div>
+}
+function MonitorSkeleton() {
+  const statCard = (
+    <SkCard>
+      <div className="row" style={{ justifyContent: 'space-between' }}><Sk w={48} /><Sk w={32} /></div>
+      <Sk w="100%" h={36} r={8} />
+    </SkCard>
+  )
+  return (
+    <div className="grow" style={{ overflowY: 'auto', padding: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>{statCard}{statCard}</div>
+      <SkCard>
+        <div className="row" style={{ justifyContent: 'space-between' }}><Sk w={64} /><Sk w={40} /></div>
+        <Sk w="100%" h={48} r={8} />
+      </SkCard>
+      <div className="row" style={{ justifyContent: 'space-between', padding: '4px 2px 0' }}><Sk w={72} h={11} /><Sk w={66} h={19} r={9} /></div>
+      <SkCard>
+        <div className="row" style={{ justifyContent: 'space-between' }}><Sk w={48} /><Sk w={28} /></div>
+        <Sk w="100%" h={7} r={999} />
+      </SkCard>
+      <div className="col" style={{ gap: 6 }}>
+        <Sk w={72} h={11} />
+        {[0, 1, 2, 3].map(i => (
+          <div key={i} className="row" style={{ gap: 8, padding: '4px 8px', alignItems: 'center' }}>
+            <Sk w={34} h={10} /><Sk w="50%" h={10} /><div className="grow" /><Sk w={26} h={10} /><Sk w={26} h={10} />
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 const EMPTY_MONITOR: Monitor = {
   host: '',
   cpu: [],
@@ -175,6 +213,8 @@ export function MonitorPanel({ onClose, conn: _conn, sessionId }: MonitorPanelPr
     <PanelShell icon="gauge" title={t('panels.monitorTitle')} sub={sessionId ? (mon.host + ' · ' + t('panels.monitorRealtime')) : undefined} onClose={onClose} actions={<IconBtn name="refresh-cw" size={15} variant="bare" onClick={handleRefresh} />}>
       {!sessionId ? (
         <PanelEmpty icon="gauge" text={t('panels.noSessionHint')} />
+      ) : mon.cpu.length === 0 ? (
+        <MonitorSkeleton />
       ) : (
         <div className="grow" style={{ overflowY: 'auto', padding: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>

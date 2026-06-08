@@ -868,3 +868,13 @@ input, textarea { font-family: inherit; }
 @keyframes popIn { from { transform: scale(.98); } to { transform: none; } }
 .spin { animation: spin .8s linear infinite; }
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+/* skeleton shimmer (loading placeholder) — theme-aware via surface tokens */
+.skel {
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--surface-inset) 25%, var(--surface-sunken) 50%, var(--surface-inset) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s linear infinite;
+}
+@keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) { .skel { animation: none; } }
