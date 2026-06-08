@@ -2,6 +2,7 @@
 import React, { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
+import { BrandMark } from '../BrandMark'
 
 // ---- Prop types ----
 
@@ -65,8 +66,8 @@ export function AuthGate({ users, onLogin, onCreate, onCancel }: AuthGateProps) 
         )}
         {/* header */}
         <div className="col" style={{ alignItems: 'center', gap: 12, padding: '28px 28px 18px' }}>
-          <div className="logo-mark" style={{ width: 52, height: 52, borderRadius: 16, position: 'relative' }}>
-            <span className="mono" style={{ fontSize: 24, fontWeight: 700 }}>&gt;_</span>
+          <div style={{ width: 52, height: 52, position: 'relative' }}>
+            <BrandMark size={52} style={{ borderRadius: 16 }} />
             <div style={{ position: 'absolute', right: -4, bottom: -4, width: 24, height: 24, borderRadius: 999, background: 'var(--surface-card)', display: 'grid', placeItems: 'center', boxShadow: 'var(--shadow-card)' }}>
               <Icon name={isInit ? 'user' : 'lock'} size={13} style={{ color: 'var(--accent-primary)' }} />
             </div>

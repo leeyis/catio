@@ -2,6 +2,7 @@
 import React, { useState, useRef, useEffect } from 'react'
 import { Trans, useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
+import { BrandMark } from '../BrandMark'
 import { Btn, IconBtn, Toggle, Segmented } from '../atoms'
 import { useLang } from '../../state/LanguageContext'
 import { useAgentConfig } from '../../state/agentConfig'
@@ -503,7 +504,7 @@ function AboutSettings() {
   return (
     <Block title={t('settings.aboutTitle')}>
       <div className="row gap16" style={{ padding: 20, border: '1px solid var(--border-hairline)', borderRadius: 16, background: 'var(--surface-subtle)' }}>
-        <div className="logo-mark" style={{ width: 56, height: 56, borderRadius: 18 }}><span className="mono" style={{ fontSize: 26, fontWeight: 700 }}>&gt;_</span></div>
+        <BrandMark size={56} style={{ borderRadius: 18 }} />
         <div className="col" style={{ gap: 4 }}>
           <span style={{ fontSize: 18, fontWeight: 700, letterSpacing: '-0.3px' }}>Catio</span>
           <span style={{ fontSize: 12.5, color: 'var(--text-secondary)', lineHeight: 1.5, maxWidth: 420 }}><Trans i18nKey="settings.aboutDesc" components={{ b: <b /> }} /></span>
@@ -539,7 +540,7 @@ export function SettingsView({ theme, onTheme, onClose, authEnabled, users, curr
         </div>
         <div className="grow" />
         <div className="row gap8" style={{ padding: '10px 10px', background: 'var(--surface-sunken)', borderRadius: 12 }}>
-          <div className="logo-mark" style={{ width: 30, height: 30 }}><span className="mono" style={{ fontSize: 14, fontWeight: 700 }}>&gt;_</span></div>
+          <BrandMark size={30} style={{ borderRadius: 9 }} />
           <div className="col" style={{ lineHeight: 1.25 }}><span style={{ fontSize: 12, fontWeight: 600 }}>Catio</span><span className="mono" style={{ fontSize: 10, color: 'var(--text-faint)' }}>v1.0 · Reach × DBX</span></div>
         </div>
       </div>

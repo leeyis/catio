@@ -2,6 +2,7 @@
 import React, { useState, useMemo, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
+import { BrandMark } from '../BrandMark'
 import { IconBtn, StatusDot, ConnGlyph, Segmented } from '../atoms'
 import { useData } from '../../state/DataContext'
 import type { Connection } from '../../services/types'
@@ -108,9 +109,7 @@ export function TitleBar({ theme, onToggleTheme, onOpenSettings, settingsActive 
   return (
     <div className="titlebar" data-tauri-drag-region>
       <div className="brand" style={isMac ? { paddingLeft: 70 } : undefined}>
-        <div className="logo-mark">
-          <span className="mono" style={{ fontSize: 13, fontWeight: 700, transform: 'translateY(-0.5px)' }}>&gt;_</span>
-        </div>
+        <BrandMark size={26} style={{ borderRadius: 8 }} />
         <div className="col" style={{ lineHeight: 1.05 }}>
           <span className="brand-name">Catio</span>
         </div>

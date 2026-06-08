@@ -2,6 +2,7 @@
 import React from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
+import { BrandMark } from '../BrandMark'
 import { ConnGlyph, SectionHead } from '../atoms'
 import { useData } from '../../state/DataContext'
 import type { Connection } from '../../services/types'
@@ -97,7 +98,7 @@ export function HomeView({ onOpen, onNew, onVault, owned = true, userName = '', 
     return (
       <div className="grow fade-in" style={{ overflowY: 'auto', overflowX: 'hidden' }}>
         <div className="col" style={{ alignItems: 'center', justifyContent: 'center', minHeight: '100%', gap: 18, padding: 40, textAlign: 'center' }}>
-          <div className="logo-mark" style={{ width: 56, height: 56, borderRadius: 18 }}><span className="mono" style={{ fontSize: 26, fontWeight: 700 }}>&gt;_</span></div>
+          <BrandMark size={56} style={{ borderRadius: 18 }} />
           <div className="col" style={{ gap: 6, maxWidth: 420 }}>
             <span style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.4px' }}>{t('home.welcomeTitle', { name: userName })}</span>
             <span style={{ fontSize: 13.5, color: 'var(--text-secondary)', lineHeight: 1.6, textWrap: 'pretty' }}>{t('home.welcomeDesc')}</span>
@@ -119,7 +120,7 @@ export function HomeView({ onOpen, onNew, onVault, owned = true, userName = '', 
           <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 20 }}>
             <div className="col" style={{ gap: 14, maxWidth: 560 }}>
               <div className="row gap10">
-                <div className="logo-mark" style={{ width: 40, height: 40, borderRadius: 13 }}><span className="mono" style={{ fontSize: 18, fontWeight: 700 }}>&gt;_</span></div>
+                <BrandMark size={40} style={{ borderRadius: 13 }} />
                 <div className="col" style={{ lineHeight: 1.1 }}>
                   <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--accent-primary)', letterSpacing: '0.3px' }}>{greetLine}</span>
                   <span style={{ fontSize: 11.5, color: 'var(--text-tertiary)' }}>{statusLine}</span>
