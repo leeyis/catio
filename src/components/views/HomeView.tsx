@@ -14,6 +14,8 @@ export interface HomeViewProps {
   onVault: () => void
   owned?: boolean
   userName?: string
+  /** Whether local account auth is on — greeting shows a name only when true. */
+  authEnabled?: boolean
   /** Real saved connections (from the vault). Empty on a fresh install. */
   conns?: Connection[]
 }
@@ -75,8 +77,16 @@ function InfoRow({ conn, onOpen, onDetail, showGroup }: InfoRowProps) {
   )
 }
 
-export function HomeView({ onOpen, onNew, onVault, owned = true, userName = 'skyler', conns = [] }: HomeViewProps) {
-  const { t } = useTranslation()
+export function HomeView({ onOpen, onNew, onVault, owned = true, userName = '', authEnabled = false, conns = [] }: HomeViewProps) {
+  const { t, i18n } = useTranslation()
+  // Real time-based greeting + live date/time (was a hardcoded mock). Name only
+  // when account auth is on (otherwise there is no real user to greet).
+  const now = new Date()
+  const hr = now.getHours()
+  const greet = t(hr < 12 ? 'home.greetMorning' : hr < 18 ? 'home.greetAfternoon' : 'home.greetEvening')
+  const greetLine = authEnabled && userName ? t('home.greetingWithName', { greet, name: userName }) : greet
+  const lang = i18n.language || 'zh'
+  const statusLine = now.toLocaleDateString(lang, { weekday: 'long' }) + ' · ' + now.toLocaleTimeString(lang, { hour: '2-digit', minute: '2-digit', hour12: false })
   // Stats reflect REAL saved connections. Databases / active tunnels are not yet
   // wired to a real backend in this sub-project → 0.
   const hostCount = conns.filter(c => c.kind === 'host').length
@@ -111,8 +121,8 @@ export function HomeView({ onOpen, onNew, onVault, owned = true, userName = 'sky
               <div className="row gap10">
                 <div className="logo-mark" style={{ width: 40, height: 40, borderRadius: 13 }}><span className="mono" style={{ fontSize: 18, fontWeight: 700 }}>&gt;_</span></div>
                 <div className="col" style={{ lineHeight: 1.1 }}>
-                  <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--accent-primary)', letterSpacing: '0.3px' }}>{t('home.greeting', { name: userName })}</span>
-                  <span style={{ fontSize: 11.5, color: 'var(--text-tertiary)' }}>{t('home.statusLine')}</span>
+                  <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--accent-primary)', letterSpacing: '0.3px' }}>{greetLine}</span>
+                  <span style={{ fontSize: 11.5, color: 'var(--text-tertiary)' }}>{statusLine}</span>
                 </div>
               </div>
               <h1 style={{ margin: 0, fontSize: 26, fontWeight: 700, letterSpacing: '-0.6px', color: 'var(--text-primary)', lineHeight: 1.2 }}>{t('home.heroTitle')}<br />{t('home.heroTitleLine2')}</h1>

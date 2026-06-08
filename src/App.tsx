@@ -666,7 +666,7 @@ export default function App() {
           <div className="card-surface grow col" style={{ overflow: 'hidden', position: 'relative' }}>
             {/* view body */}
             <div className="grow col" style={{ minHeight: 0 }}>
-              {view === 'home' && <HomeView onOpen={openConn} onNew={() => setShowNew(true)} onVault={() => setView('workbench')} owned={ownsVault} userName={currentName} conns={vaultConns} />}
+              {view === 'home' && <HomeView onOpen={openConn} onNew={() => setShowNew(true)} onVault={() => setView('workbench')} owned={ownsVault} userName={authEnabled ? currentName : ''} authEnabled={authEnabled} conns={vaultConns} />}
 
               {/* tab bar — only in workbench when there are tabs */}
               {view === 'workbench' && tabs.length > 0 && (
