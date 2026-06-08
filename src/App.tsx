@@ -55,6 +55,8 @@ export default function App() {
   const [tweaks, setTweak] = useTweaks({ ...TWEAK_DEFAULTS, theme: initTheme })
   const [view, setView] = useState<string>(initView)
   const [prevView, setPrevView] = useState<string>('home')
+  // Which Settings section to open to (theme | security | ai | ...).
+  const [settingsSection, setSettingsSection] = useState<string>('theme')
   const [tabs, setTabs] = useState<Tab[]>([])
   const [activeTab, setActiveTab] = useState<string>('')
   const [activePanel, setActivePanel] = useState<string>('ai')
@@ -476,7 +478,10 @@ export default function App() {
     if (activePanel === id && panelOpen) { setPanelOpen(false) }
     else { setActivePanel(id); setPanelOpen(true) }
   }
-  function goSettings() {
+  // Open Settings, optionally to a specific section (e.g. 'security', 'ai'). The
+  // guard handles being used directly as a click handler (event arg != string).
+  function goSettings(section?: string) {
+    setSettingsSection(typeof section === 'string' ? section : 'theme')
     if (view !== 'settings') setPrevView(view)
     setView(view === 'settings' ? prevView : 'settings')
   }
@@ -646,7 +651,7 @@ export default function App() {
   return (
     <div className="win">
       <TitleBar theme={theme_} onToggleTheme={() => setThemeBoth(nextTheme(theme_))}
-        onOpenSettings={goSettings} settingsActive={view === 'settings'} onSearch={() => {}} />
+        onOpenSettings={() => goSettings()} settingsActive={view === 'settings'} onSearch={() => {}} />
 
       {/* content region — body is ALWAYS mounted so terminals/workbench survive
           view switches; Settings renders as an overlay on top (does NOT unmount
@@ -655,7 +660,7 @@ export default function App() {
         <div className="body" style={{ flex: 1 }}>
           <Sidebar activeId={detailConn ? detailConn.id : (cur ? cur.connId : undefined)} onOpen={openDetail} onNew={() => setShowNew(true)}
             collapsed={sidebarCollapsed} onToggleCollapse={() => setSidebarCollapsed(c => !c)}
-            conns={vaultConns} currentUser={currentName} authEnabled={authEnabled} onLock={lockApp} onEnableAuth={goSettings} />
+            conns={vaultConns} currentUser={currentName} authEnabled={authEnabled} onLock={lockApp} onEnableAuth={() => goSettings('security')} />
 
           {/* main */}
           <div className="card-surface grow col" style={{ overflow: 'hidden', position: 'relative' }}>
@@ -703,7 +708,7 @@ export default function App() {
           {/* panel slot */}
           {panelOpen && (aiForm === 'side' || activePanel !== 'ai') && (
             <div className="fade-in" style={{ display: 'flex' }}>
-              {activePanel === 'ai' && <AIPanel onClose={() => setPanelOpen(false)} mode={aiMode} conn={curConn ?? undefined} attachment={aiAttachment} onClearAttachment={() => setAiAttachment(null)} onInsert={insertToTerminal} canInsert={canInsert} onOpenSettings={goSettings}
+              {activePanel === 'ai' && <AIPanel onClose={() => setPanelOpen(false)} mode={aiMode} conn={curConn ?? undefined} attachment={aiAttachment} onClearAttachment={() => setAiAttachment(null)} onInsert={insertToTerminal} canInsert={canInsert} onOpenSettings={() => goSettings('ai')}
                 conversation={activeConversation} busy={activeConvBusy} history={agentHistory}
                 onSend={cur ? (text => void sendAgentMessage(cur.id, text)) : undefined}
                 onNewConversation={cur ? (() => newAgentConversation(cur.id)) : undefined}
@@ -737,7 +742,7 @@ export default function App() {
             unmounting it. SettingsView keeps its identical markup/props/behavior. */}
         {view === 'settings' && (
           <div style={{ position: 'absolute', inset: 0, zIndex: 50, display: 'flex', background: 'var(--bg-canvas)' }}>
-            <SettingsView theme={theme_} onTheme={setThemeBoth} onClose={() => setView(prevView)}
+            <SettingsView theme={theme_} onTheme={setThemeBoth} onClose={() => setView(prevView)} initialSection={settingsSection}
               authEnabled={authEnabled} users={users} currentUser={currentName} ownerUser={ownerUser}
               onEnableAuth={enableAuth} onDisableAuth={disableAuth} onLock={lockApp} onRemoveUser={(name: string) => {
                 const next = users.filter(x => x.username !== name)

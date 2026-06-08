@@ -636,7 +636,12 @@ html, body {
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+  overflow: hidden;
 }
+/* Desktop-app look: no visible scrollbar chrome anywhere (vertical or horizontal).
+   Scrolling still works via wheel/trackpad/keys; regions keep overflow:auto. */
+* { scrollbar-width: none; }
+*::-webkit-scrollbar { width: 0; height: 0; background: transparent; }
 .mono { font-family: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace; }
 button { font-family: inherit; cursor: pointer; border: none; background: none; }
 input, textarea { font-family: inherit; }

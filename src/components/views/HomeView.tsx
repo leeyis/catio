@@ -85,7 +85,7 @@ export function HomeView({ onOpen, onNew, onVault, owned = true, userName = 'sky
 
   if (!owned) {
     return (
-      <div className="grow fade-in" style={{ overflowY: 'auto' }}>
+      <div className="grow fade-in" style={{ overflowY: 'auto', overflowX: 'hidden' }}>
         <div className="col" style={{ alignItems: 'center', justifyContent: 'center', minHeight: '100%', gap: 18, padding: 40, textAlign: 'center' }}>
           <div className="logo-mark" style={{ width: 56, height: 56, borderRadius: 18 }}><span className="mono" style={{ fontSize: 26, fontWeight: 700 }}>&gt;_</span></div>
           <div className="col" style={{ gap: 6, maxWidth: 420 }}>
@@ -102,7 +102,7 @@ export function HomeView({ onOpen, onNew, onVault, owned = true, userName = 'sky
   }
 
   return (
-    <div className="grow fade-in" style={{ overflowY: 'auto' }}>
+    <div className="grow fade-in" style={{ overflowY: 'auto', overflowX: 'hidden' }}>
       <div style={{ maxWidth: 1040, margin: '0 auto', padding: '32px 40px 48px' }}>
         {/* Hero */}
         <div style={{ borderRadius: 20, background: 'var(--accent-soft-alt)', border: '1px solid var(--accent-border)', padding: '26px 30px', marginBottom: 32, position: 'relative', overflow: 'hidden' }}>

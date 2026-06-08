@@ -19,6 +19,8 @@ export interface SettingsViewProps {
   theme: string
   onTheme: (id: string) => void
   onClose: () => void
+  /** Section to open to on mount (theme | appearance | security | ai | ...). */
+  initialSection?: string
   authEnabled?: boolean
   users?: User[]
   currentUser?: string
@@ -512,9 +514,9 @@ function AboutSettings() {
   )
 }
 
-export function SettingsView({ theme, onTheme, onClose, authEnabled, users, currentUser, ownerUser, onEnableAuth, onDisableAuth, onLock, onRemoveUser }: SettingsViewProps) {
+export function SettingsView({ theme, onTheme, onClose, authEnabled, users, currentUser, ownerUser, onEnableAuth, onDisableAuth, onLock, onRemoveUser, initialSection }: SettingsViewProps) {
   const { t } = useTranslation()
-  const [nav, setNav] = React.useState('theme')
+  const [nav, setNav] = React.useState(initialSection || 'theme')
   return (
     <div className="body fade-in" style={{ flex: 1 }}>
       {/* left nav */}
