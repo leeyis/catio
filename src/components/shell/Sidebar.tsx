@@ -208,6 +208,32 @@ export function Sidebar({ activeId, onOpen, onDetail, onNew, collapsed, onToggle
 
       {/* list */}
       <div className="grow" style={{ overflowY: 'auto', padding: '2px 8px 10px' }}>
+        {/* Saved profiles carry no preset group ('') — surface them under a SAVED section
+            so the real vault renders even without the mock group taxonomy. */}
+        {(() => {
+          const groupIds = new Set(D.groups.map(g => g.id))
+          const ungrouped = conns.filter(c => !groupIds.has(c.group))
+          if (!ungrouped.length) return null
+          const open = openGroups.__saved !== false
+          return (
+            <div style={{ marginBottom: 6 }}>
+              <button onClick={() => setOpenGroups(s => ({ ...s, __saved: s.__saved === false }))}
+                style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 7, padding: '7px 8px', color: 'var(--text-tertiary)' }}>
+                <Icon name="chevron-right" size={13} style={{ transition: 'transform .15s', transform: open ? 'rotate(90deg)' : 'none' }} />
+                <span className="dot" style={{ background: 'var(--accent-primary)' }} />
+                <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.4px', textTransform: 'uppercase' }}>{t('shell.saved')}</span>
+                <span className="mono" style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--text-faint)' }}>{ungrouped.length}</span>
+              </button>
+              {open && (
+                <div className="col" style={{ gap: 1 }}>
+                  {ungrouped.map(c => (
+                    <ConnRow key={c.id} conn={c} active={activeId === c.id} onOpen={onOpen} onDetail={onDetail} />
+                  ))}
+                </div>
+              )}
+            </div>
+          )
+        })()}
         {D.groups.map(g => {
           const items = conns.filter(c => c.group === g.id)
           if (!items.length) return null

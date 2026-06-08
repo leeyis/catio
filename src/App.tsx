@@ -25,6 +25,8 @@ import { nextTheme, useApplyTheme } from './state/ThemeContext'
 import { useData } from './state/DataContext'
 import { sshConnect, sshDisconnect, sshTrustHost, isTauri } from './services/ssh'
 import type { SshConnectArgs } from './services/ssh'
+import { loadProfiles } from './state/connections'
+import type { ConnectionProfile } from './state/connections'
 import type { Tab, Connection, Snippet } from './services/types'
 import type { AuthUser } from './components/auth/AuthGate'
 import type { Attachment } from './components/panels/AIPanel'
@@ -38,18 +40,19 @@ export default function App() {
   const [tweaks, setTweak] = useTweaks({ ...TWEAK_DEFAULTS, theme: initTheme })
   const [view, setView] = useState<string>(initView)
   const [prevView, setPrevView] = useState<string>('home')
-  const [tabs, setTabs] = useState<Tab[]>([
-    { id: 'tab-bastion', kind: 'terminal', connId: 'h-bastion', title: 'db-bastion' },
-    { id: 'tab-orders', kind: 'sql', connId: 'd-orders', title: 'prod-orders · orders' },
-  ])
-  const [activeTab, setActiveTab] = useState<string>(hash.includes('term') ? 'tab-bastion' : 'tab-orders')
+  const [tabs, setTabs] = useState<Tab[]>([])
+  const [activeTab, setActiveTab] = useState<string>('')
   const [activePanel, setActivePanel] = useState<string>('ai')
-  const [panelOpen, setPanelOpen] = useState<boolean>(true)
+  const [panelOpen, setPanelOpen] = useState<boolean>(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false)
   const [detailConn, setDetailConn] = useState<Connection | null>(null)
   const [showNew, setShowNew] = useState<boolean>(false)
   const [aiAttachment, setAiAttachment] = useState<Attachment | null>(null)
   const [snippets, setSnippets] = useState<Snippet[]>(() => D.snippets)
+
+  // Real saved connection profiles (localStorage) — these seed the Vault & Home.
+  const [profiles, setProfiles] = useState<ConnectionProfile[]>(() => loadProfiles())
+  const reloadProfiles = () => setProfiles(loadProfiles())
 
   // ---- ORCH: live SSH session orchestration ----
   // connId -> sessionId for live (Tauri) connections.
@@ -80,7 +83,18 @@ export default function App() {
   const locked = authEnabled && !sessionUser
   // the first account created owns the seed vault; other users get an isolated (empty) vault
   const ownsVault = !authEnabled || sessionUser === ownerUser || sessionUser === '__open'
-  const vaultConns = ownsVault ? D.connections : []
+  // Vault is built from REAL saved profiles (not mock D.connections).
+  const profileConns: Connection[] = profiles.map(p => ({
+    id: p.id,
+    group: '',
+    kind: 'host',
+    name: p.name,
+    sub: `${p.user}@${p.host}:${p.port}`,
+    icon: 'server',
+    status: 'idle',
+    proto: 'ssh',
+  }))
+  const vaultConns = ownsVault ? profileConns : []
   const currentName = authEnabled && sessionUser && sessionUser !== '__open' ? sessionUser : 'skyler'
 
   function enableAuth() {
@@ -154,6 +168,8 @@ export default function App() {
       : [...prev, { id: tabId, kind: 'terminal', connId, title: name, sessionId }])
     setActiveTab(tabId)
     setView('workbench')
+    // Surface any newly-saved profile in the vault (saveProfile ran in the modal).
+    reloadProfiles()
   }
 
   // ORCH connect entrypoint — invoked by NewConnectionModal's onConnect.
@@ -203,6 +219,17 @@ export default function App() {
   }
 
   function openConn(conn: Connection) {
+    // If this vault entry maps to a saved profile, run the REAL connect flow
+    // (collects the secret, verifies host key, opens a live session/tab).
+    const profile = profiles.find(p => p.id === conn.id)
+    if (profile) {
+      connectProfile(
+        { host: profile.host, port: profile.port, user: profile.user, auth: profile.auth },
+        { name: profile.name },
+      )
+      return
+    }
+    // Fallback: mock/live display conns without a saved profile just open a tab.
     const isHost = conn.kind === 'host'
     const tabId = (isHost ? 'tab-' : 'tab-') + conn.id
     setTabs(prev => prev.some(tb => tb.id === tabId) ? prev : [...prev, {
@@ -305,7 +332,7 @@ export default function App() {
           <div className="card-surface grow col" style={{ overflow: 'hidden', position: 'relative' }}>
             {/* view body */}
             <div className="grow col" style={{ minHeight: 0 }}>
-              {view === 'home' && <HomeView onOpen={openConn} onNew={() => setShowNew(true)} onVault={() => setView('workbench')} owned={ownsVault} userName={currentName} />}
+              {view === 'home' && <HomeView onOpen={openConn} onNew={() => setShowNew(true)} onVault={() => setView('workbench')} owned={ownsVault} userName={currentName} conns={vaultConns} />}
               {view === 'workbench' && (
                 tabs.length ? (
                   <>

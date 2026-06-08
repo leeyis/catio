@@ -1,8 +1,11 @@
 import { render, screen, fireEvent } from '@testing-library/react'
-import { vi } from 'vitest'
+import { vi, beforeEach } from 'vitest'
 import { LanguageProvider } from '../src/state/LanguageContext'
 import { DataProvider } from '../src/state/DataContext'
+import { saveProfile } from '../src/state/connections'
 import App from '../src/App'
+
+beforeEach(() => localStorage.clear())
 
 // Mock xterm so the real library doesn't run in jsdom (avoids HTMLCanvasElement.getContext errors).
 vi.mock('@xterm/xterm', () => ({
@@ -34,6 +37,33 @@ it('renders home view by default with hero', () => {
   wrap()
   // stable zh string from HomeView hero (home.heroTitle)
   expect(screen.getAllByText(/服务器与数据库/).length).toBeGreaterThan(0)
+})
+
+it('boots clean: no demo tabs and Agent panel collapsed', () => {
+  wrap()
+  // No demo tab titles should be present (workbench shows nothing; we're on home).
+  expect(screen.queryByText(/prod-orders · orders/)).toBeNull()
+  // Agent panel is collapsed on boot → its composer placeholder is not rendered.
+  expect(screen.queryByText('SQL 模式')).toBeNull()
+})
+
+it('vault is empty on a fresh install, and renders a saved profile', () => {
+  // Fresh: no profiles → empty private-workspace state in the sidebar.
+  const fresh = wrap()
+  expect(screen.getByText('这是你的私有工作区')).toBeTruthy()
+  fresh.unmount()
+
+  // With a saved profile in localStorage, the vault renders it.
+  saveProfile({ id: 'live-1.2.3.4:22-deploy', name: 'my-server', host: '1.2.3.4', port: 22, user: 'deploy', auth: { method: 'password' } })
+  wrap()
+  expect(screen.getAllByText('my-server').length).toBeGreaterThan(0)
+})
+
+it('clicking 新建连接 opens the New Connection modal', () => {
+  wrap()
+  fireEvent.click(screen.getAllByText('新建连接')[0])
+  // modal subtitle is a stable, unique zh string
+  expect(screen.getByText('主机与数据库统一管理 · 凭据加密存储')).toBeTruthy()
 })
 
 it('theme toggle changes data-theme attribute', () => {

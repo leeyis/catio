@@ -2,7 +2,7 @@
 import React from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
-import { ConnGlyph, IconBadge, SectionHead } from '../atoms'
+import { ConnGlyph, SectionHead } from '../atoms'
 import { useData } from '../../state/DataContext'
 import type { Connection } from '../../services/types'
 
@@ -14,6 +14,8 @@ export interface HomeViewProps {
   onVault: () => void
   owned?: boolean
   userName?: string
+  /** Real saved connections (from the vault). Empty on a fresh install. */
+  conns?: Connection[]
 }
 
 interface StatProps {
@@ -73,11 +75,13 @@ function InfoRow({ conn, onOpen, onDetail, showGroup }: InfoRowProps) {
   )
 }
 
-export function HomeView({ onOpen, onNew, onVault, owned = true, userName = 'skyler' }: HomeViewProps) {
-  const D = useData()
+export function HomeView({ onOpen, onNew, onVault, owned = true, userName = 'skyler', conns = [] }: HomeViewProps) {
   const { t } = useTranslation()
-  const hostCount = D.connections.filter(c => c.kind === 'host').length
-  const dbCount = D.connections.filter(c => c.kind === 'db').length
+  // Stats reflect REAL saved connections. Databases / active tunnels are not yet
+  // wired to a real backend in this sub-project → 0.
+  const hostCount = conns.filter(c => c.kind === 'host').length
+  const dbCount = conns.filter(c => c.kind === 'db').length
+  const tunnelCount = 0
 
   if (!owned) {
     return (
@@ -118,7 +122,7 @@ export function HomeView({ onOpen, onNew, onVault, owned = true, userName = 'sky
                 <div style={{ width: 1, height: 30, background: 'var(--accent-border)' }} />
                 <Stat n={dbCount} label={t('home.statDatabases')} icon="database" />
                 <div style={{ width: 1, height: 30, background: 'var(--accent-border)' }} />
-                <Stat n={3} label={t('home.statActiveTunnels')} icon="link" />
+                <Stat n={tunnelCount} label={t('home.statActiveTunnels')} icon="link" />
               </div>
             </div>
             <div className="col gap8">
@@ -128,27 +132,10 @@ export function HomeView({ onOpen, onNew, onVault, owned = true, userName = 'sky
           </div>
         </div>
 
-        {/* Recent */}
-        <SectionHead title={t('home.recentSessions')} count={D.recent.length} />
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16, marginBottom: 32 }}>
-          {D.recent.map(r => {
-            const conn = D.byId[r.ref]
-            return (
-              <button key={r.id} onClick={() => conn && onOpen(conn)} className="card-surface" style={{ textAlign: 'left', padding: 16, display: 'flex', gap: 12, alignItems: 'center', transition: 'transform .12s, box-shadow .12s' }}
-                onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = 'var(--shadow-pill)' }}
-                onMouseLeave={e => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = 'var(--shadow-card)' }}>
-                {conn ? <ConnGlyph conn={conn} size={42} radius={12} /> : <IconBadge icon={r.icon} />}
-                <div className="col grow" style={{ lineHeight: 1.3, minWidth: 0 }}>
-                  <span className="ell" style={{ fontSize: 14, fontWeight: 600 }}>{r.title}</span>
-                  <span className="ell" style={{ fontSize: 11.5, color: 'var(--text-faint)' }}>{r.detail}</span>
-                </div>
-                <div className="col" style={{ alignItems: 'flex-end', gap: 6 }}>
-                  <Icon name={r.kind === 'db' ? 'table-2' : 'terminal'} size={14} style={{ color: 'var(--text-disabled)' }} />
-                  <span style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{r.when}</span>
-                </div>
-              </button>
-            )
-          })}
+        {/* Recent — no real session history backend yet → empty state */}
+        <SectionHead title={t('home.recentSessions')} count={0} />
+        <div style={{ marginBottom: 32 }}>
+          <EmptySection icon="history" text={t('home.recentEmpty')} />
         </div>
 
         {/* Automation + quick */}
@@ -156,30 +143,37 @@ export function HomeView({ onOpen, onNew, onVault, owned = true, userName = 'sky
           <div>
             <SectionHead title={t('home.quickConnect')} hint={t('home.quickConnectHint')} />
             <div className="col gap8">
-              {D.connections.filter(c => ['h-bastion', 'd-orders', 'h-web1'].includes(c.id)).map(c => (
-                <InfoRow key={c.id} conn={c} onOpen={onOpen} />
-              ))}
+              {conns.length
+                ? conns.slice(0, 3).map(c => <InfoRow key={c.id} conn={c} onOpen={onOpen} />)
+                : <EmptySection icon="server" text={t('home.quickConnectEmpty')} />}
             </div>
           </div>
           <div>
             <SectionHead title={t('home.automation')} hint={t('home.automationHint')} />
             <div className="col gap8">
-              {D.automation.map(a => (
-                <div key={a.id} className="card-surface" style={{ padding: '12px 14px', display: 'flex', gap: 12, alignItems: 'center' }}>
-                  <div className="icon-badge" style={{ width: 36, height: 36, borderRadius: 10, background: a.kind === 'ansible' ? 'color-mix(in srgb, var(--signal-rose) 13%, transparent)' : 'color-mix(in srgb, var(--signal-violet) 13%, transparent)', color: a.kind === 'ansible' ? 'var(--signal-rose)' : 'var(--signal-violet)' }}>
-                    <Icon name={a.kind === 'ansible' ? 'play-circle' : 'box'} size={17} />
-                  </div>
-                  <div className="col grow" style={{ lineHeight: 1.3, minWidth: 0 }}>
-                    <span className="ell mono" style={{ fontSize: 12.5, fontWeight: 600 }}>{a.name}</span>
-                    <span className="ell" style={{ fontSize: 11, color: 'var(--text-faint)' }}>{a.desc}</span>
-                  </div>
-                  <button className="icon-btn bare"><Icon name="play" size={14} /></button>
-                </div>
-              ))}
+              <EmptySection icon="box" text={t('home.automationEmpty')} />
             </div>
           </div>
         </div>
       </div>
+    </div>
+  )
+}
+
+// ---- Empty section placeholder (honest, tidy, no fake cards) ----
+
+interface EmptySectionProps {
+  icon: string
+  text: string
+}
+
+function EmptySection({ icon, text }: EmptySectionProps) {
+  return (
+    <div className="col" style={{ alignItems: 'center', justifyContent: 'center', gap: 8, padding: '28px 16px', textAlign: 'center', border: '1px dashed var(--border-hairline)', borderRadius: 14, background: 'var(--surface-subtle)' }}>
+      <div className="icon-badge" style={{ width: 36, height: 36, borderRadius: 10, background: 'var(--surface-sunken)', color: 'var(--text-faint)' }}>
+        <Icon name={icon} size={17} />
+      </div>
+      <span style={{ fontSize: 12, color: 'var(--text-faint)' }}>{text}</span>
     </div>
   )
 }
