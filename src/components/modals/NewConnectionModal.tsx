@@ -6,7 +6,8 @@ import { Btn, IconBtn, Segmented, Toggle, ConnGlyph } from '../atoms'
 import { useData } from '../../state/DataContext'
 import { saveProfile } from '../../state/connections'
 import type { ConnectionProfile } from '../../state/connections'
-import type { AuthMethod, SshConnectArgs } from '../../services/ssh'
+import type { AuthMethod, SshConnectArgs, SshTestResult } from '../../services/ssh'
+import { sshTest } from '../../services/ssh'
 
 // ---- Prop types ----
 
@@ -27,6 +28,20 @@ interface FieldProps {
   w?: number
   mono?: boolean
   inputRef?: React.Ref<HTMLInputElement>
+  onInput?: React.FormEventHandler<HTMLInputElement>
+}
+
+// Hoisted to module scope so it keeps a stable component identity across
+// re-renders — otherwise inputs would remount (and lose focus/value) whenever
+// the modal re-renders (e.g. when the test result or canTest state changes).
+function Field({ label, value, placeholder, w, mono, inputRef, onInput }: FieldProps) {
+  return (
+    <label className="col" style={{ gap: 5, flex: w || 1 }}>
+      <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{label}</span>
+      <input ref={inputRef} defaultValue={value} placeholder={placeholder} onInput={onInput} className={mono ? 'mono' : ''}
+        style={{ height: 36, padding: '0 12px', borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }} />
+    </label>
+  )
 }
 
 // ---- Constants ----
@@ -64,11 +79,55 @@ export function NewConnectionModal({ onClose, onConnect, editProfile, onSaved }:
   const [proto, setProto] = useState('ssh')
   const [authMethod, setAuthMethod] = useState<AuthMethod['method']>(editProfile?.auth.method ?? 'password')
   const [keyPath, setKeyPath] = useState(editProfile?.auth.method === 'keyFile' ? editProfile.auth.path : '')
-  const [tunnel, setTunnel] = useState(true)
+  // In-memory secret only: password (password auth) or key passphrase (key-file auth).
+  // Never prefilled (secrets are not persisted) and never written to a profile.
+  const [secret, setSecret] = useState('')
+  // ProxyJump / SSH-tunnel toggle — defaults OFF. Not wired to any backend behavior yet.
+  const [tunnel, setTunnel] = useState(false)
   const [via, setVia] = useState('h-bastion')
-  const [tested, setTested] = useState(false)
+  // Real connection-test state (replaces the old fake "tested" badge).
+  const [testing, setTesting] = useState(false)
+  const [testResult, setTestResult] = useState<SshTestResult | null>(null)
+  // Reactive enablement for the Test button — host & user must be non-empty.
+  // host/user are uncontrolled refs; recompute on their input events.
+  const [canTest, setCanTest] = useState(isEdit ? !!editProfile.host && !!editProfile.user : false)
+  const recomputeCanTest = () =>
+    setCanTest(!!(hostRef.current?.value || '').trim() && !!(userRef.current?.value || '').trim())
   const [color, setColor] = useState('var(--signal-rose)')
   const hosts = D.connections.filter(c => c.kind === 'host' && c.proto !== 'local')
+
+  // Build the auth descriptor (non-secret) from the current form.
+  function currentAuth(): AuthMethod {
+    return authMethod === 'keyFile'
+      ? { method: 'keyFile', path: keyPath.trim() }
+      : { method: 'password' }
+  }
+
+  // Build live connect/test args from the form, INCLUDING the in-memory secret.
+  function currentArgs(): SshConnectArgs {
+    const host = (hostRef.current?.value || '').trim()
+    const user = (userRef.current?.value || '').trim()
+    const port = Number(portRef.current?.value) || 22
+    // password auth → password; key-file auth → optional passphrase. Empty → undefined.
+    const sec = secret.length > 0 ? secret : undefined
+    return { host, port, user, auth: currentAuth(), secret: sec }
+  }
+
+  async function runTest() {
+    const args = currentArgs()
+    if (!args.host || !args.user || testing) return
+    setTesting(true)
+    setTestResult(null)
+    try {
+      const result = await sshTest(args)
+      setTestResult(result)
+    } catch (err) {
+      const message = (err as { message?: string } | null)?.message ?? String(err)
+      setTestResult({ ok: false, latencyMs: 0, error: message })
+    } finally {
+      setTesting(false)
+    }
+  }
 
   function handleSave() {
     // EDIT mode: update the existing profile in place (same id), no auto-connect.
@@ -77,9 +136,7 @@ export function NewConnectionModal({ onClose, onConnect, editProfile, onSaved }:
       const user = (userRef.current?.value || '').trim()
       const port = Number(portRef.current?.value) || 22
       const name = (nameRef.current?.value || '').trim() || host
-      const auth: AuthMethod = authMethod === 'keyFile'
-        ? { method: 'keyFile', path: keyPath.trim() }
-        : { method: 'password' }
+      const auth = currentAuth()
       try {
         saveProfile({ id: editProfile.id, name, host, port, user, auth })
       } catch { /* localStorage unavailable — ignore */ }
@@ -94,11 +151,11 @@ export function NewConnectionModal({ onClose, onConnect, editProfile, onSaved }:
       const user = (userRef.current?.value || '').trim()
       const port = Number(portRef.current?.value) || 22
       const name = (nameRef.current?.value || '').trim() || host
-      const auth: AuthMethod = authMethod === 'keyFile'
-        ? { method: 'keyFile', path: keyPath.trim() }
-        : { method: 'password' }
-      const args: SshConnectArgs = { host, port, user, auth }
-      // Persist the non-secret profile (best-effort).
+      const auth = currentAuth()
+      // args carries the in-memory secret so App can connect WITHOUT a 2nd prompt.
+      const sec = secret.length > 0 ? secret : undefined
+      const args: SshConnectArgs = { host, port, user, auth, secret: sec }
+      // Persist the NON-secret profile only (best-effort). Secret never leaves memory.
       try {
         saveProfile({ id: `live-${host}:${port}-${user}`, name, host, port, user, auth })
       } catch { /* localStorage unavailable — ignore */ }
@@ -117,14 +174,6 @@ export function NewConnectionModal({ onClose, onConnect, editProfile, onSaved }:
     window.addEventListener('mousedown', handleClickOutside)
     return () => window.removeEventListener('mousedown', handleClickOutside)
   }, [engineOpen])
-
-  const Field = ({ label, value, placeholder, w, mono, inputRef }: FieldProps) => (
-    <label className="col" style={{ gap: 5, flex: w || 1 }}>
-      <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{label}</span>
-      <input ref={inputRef} defaultValue={value} placeholder={placeholder} className={mono ? 'mono' : ''}
-        style={{ height: 36, padding: '0 12px', borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }} />
-    </label>
-  )
 
   return (
     <div onClick={onClose} style={{ position: 'absolute', inset: 0, zIndex: 60, background: 'color-mix(in srgb, var(--cta-bg) 42%, transparent)', backdropFilter: 'blur(3px)', display: 'grid', placeItems: 'center' }}>
@@ -213,7 +262,7 @@ export function NewConnectionModal({ onClose, onConnect, editProfile, onSaved }:
           {/* base fields */}
           <div className="col gap10" style={{ marginBottom: 14 }}>
             <div className="row gap10">
-              <Field label={t('modals.fieldName')} value={isEdit ? editProfile.name : (kind === 'db' ? 'prod-orders' : 'prod-web-01')} w={1.4} inputRef={nameRef} />
+              <Field label={t('modals.fieldName')} value={isEdit ? editProfile.name : ''} w={1.4} inputRef={nameRef} />
               <label className="col" style={{ gap: 5, flex: 1 }}>
                 <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.fieldGroup')}</span>
                 <div className="row gap6" style={{ height: 36 }}>
@@ -222,19 +271,33 @@ export function NewConnectionModal({ onClose, onConnect, editProfile, onSaved }:
               </label>
             </div>
             <div className="row gap10">
-              <Field label={t('modals.fieldHost')} value={isEdit ? editProfile.host : (kind === 'db' ? '10.0.4.2' : '10.0.1.21')} mono w={2} inputRef={hostRef} />
-              <Field label={t('modals.fieldPort')} value={isEdit ? String(editProfile.port) : (kind === 'db' ? (engine === 'postgres' ? '5432' : engine === 'redis' ? '6379' : '3306') : '22')} mono w={0.8} inputRef={portRef} />
+              <Field label={t('modals.fieldHost')} value={isEdit ? editProfile.host : ''} mono w={2} inputRef={hostRef} onInput={recomputeCanTest} />
+              <Field key={`port-${kind}-${engine}`} label={t('modals.fieldPort')} value={isEdit ? String(editProfile.port) : (kind === 'db' ? (engine === 'postgres' ? '5432' : engine === 'redis' ? '6379' : '3306') : '22')} mono w={0.8} inputRef={portRef} />
             </div>
             <div className="row gap10">
-              <Field label={kind === 'db' ? t('modals.fieldUser') : t('modals.fieldUsername')} value={isEdit ? editProfile.user : (kind === 'db' ? 'app_ro' : 'deploy')} mono inputRef={userRef} />
-              <label className="col" style={{ gap: 5, flex: 1 }}>
-                <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.fieldPasswordKey')}</span>
-                <div className="row" style={{ height: 36, borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', paddingLeft: 10, paddingRight: 12, gap: 6, alignItems: 'center' }}>
-                  <Icon name="lock" size={12} style={{ color: 'var(--text-faint)', flex: 'none' }} />
-                  <input defaultValue="" placeholder={t('modals.fieldPasswordPlaceholder')} className="mono"
-                    style={{ flex: 1, height: '100%', border: 'none', background: 'transparent', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }} />
-                </div>
-              </label>
+              <Field label={kind === 'db' ? t('modals.fieldUser') : t('modals.fieldUsername')} value={isEdit ? editProfile.user : ''} mono inputRef={userRef} onInput={recomputeCanTest} />
+              {/* Secret field — coherent with the chosen auth method.
+                  password auth → password; key-file auth → optional passphrase.
+                  Controlled so it can feed sshTest / connect; never persisted. */}
+              {authMethod === 'password' ? (
+                <label className="col" style={{ gap: 5, flex: 1 }}>
+                  <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.fieldPassword')}</span>
+                  <div className="row" style={{ height: 36, borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', paddingLeft: 10, paddingRight: 12, gap: 6, alignItems: 'center' }}>
+                    <Icon name="lock" size={12} style={{ color: 'var(--text-faint)', flex: 'none' }} />
+                    <input type="password" value={secret} onChange={e => setSecret(e.target.value)} placeholder={t('modals.fieldPassword')} className="mono"
+                      style={{ flex: 1, height: '100%', border: 'none', background: 'transparent', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }} />
+                  </div>
+                </label>
+              ) : (
+                <label className="col" style={{ gap: 5, flex: 1 }}>
+                  <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.fieldPassphrase')}</span>
+                  <div className="row" style={{ height: 36, borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', paddingLeft: 10, paddingRight: 12, gap: 6, alignItems: 'center' }}>
+                    <Icon name="lock" size={12} style={{ color: 'var(--text-faint)', flex: 'none' }} />
+                    <input type="password" value={secret} onChange={e => setSecret(e.target.value)} placeholder={t('modals.fieldPassphrasePlaceholder')} className="mono"
+                      style={{ flex: 1, height: '100%', border: 'none', background: 'transparent', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }} />
+                  </div>
+                </label>
+              )}
             </div>
           </div>
 
@@ -309,8 +372,20 @@ export function NewConnectionModal({ onClose, onConnect, editProfile, onSaved }:
 
         {/* footer */}
         <div className="row" style={{ justifyContent: 'space-between', padding: '14px 20px', borderTop: '1px solid var(--border-hairline)' }}>
-          <button className={`btn ${tested ? 'btn-secondary' : 'btn-secondary'}`} onClick={() => setTested(true)}>
-            {tested ? <><Icon name="circle-check" size={15} style={{ color: 'var(--signal-green)' }} /> {t('modals.testPassed')}</> : <><Icon name="zap" size={15} /> {t('modals.testConnection')}</>}
+          <button className="btn btn-secondary" onClick={runTest}
+            disabled={testing || !canTest}
+            style={{ opacity: testing || !canTest ? 0.55 : 1, cursor: testing || !canTest ? 'not-allowed' : 'pointer' }}>
+            {testing ? (
+              <><Icon name="loader" size={15} className="spin" /> {t('modals.testing')}</>
+            ) : testResult ? (
+              testResult.ok ? (
+                <><Icon name="circle-check" size={15} style={{ color: 'var(--signal-green)' }} /> <span style={{ color: 'var(--signal-green)' }}>{t('modals.testOk')} · {testResult.latencyMs}ms</span></>
+              ) : (
+                <><Icon name="alert-triangle" size={15} style={{ color: 'var(--danger-fg)' }} /> <span style={{ color: 'var(--danger-fg)' }}>{t('modals.testFail')} · {testResult.error}</span></>
+              )
+            ) : (
+              <><Icon name="zap" size={15} /> {t('modals.testConn')}</>
+            )}
           </button>
           <div className="row gap8">
             <Btn variant="ghost" onClick={onClose}>{t('modals.cancel')}</Btn>

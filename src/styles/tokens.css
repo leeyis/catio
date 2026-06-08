@@ -852,3 +852,5 @@ input, textarea { font-family: inherit; }
 @keyframes fadeIn { from { transform: translateY(5px); } to { transform: none; } }
 .pop-in { animation: popIn .18s cubic-bezier(.2,1.2,.4,1); }
 @keyframes popIn { from { transform: scale(.98); } to { transform: none; } }
+.spin { animation: spin .8s linear infinite; }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }

@@ -177,14 +177,21 @@ export default function App() {
     reloadProfiles()
   }
 
-  // ORCH connect entrypoint — invoked by NewConnectionModal's onConnect.
+  // ORCH connect entrypoint — invoked by NewConnectionModal's onConnect and by
+  // reconnect actions. `args.secret` may carry an in-memory secret typed in the
+  // modal; when present we connect straight away (no second prompt).
   function connectProfile(args: SshConnectArgs, display: { name: string }) {
     if (!isTauri()) {
       // Demo path: no IPC, just open a demo terminal tab (no sessionId).
       openLiveTab(args, display.name)
       return
     }
-    // Live path: collect the secret first via the secret prompt.
+    // If the modal already supplied a secret, connect directly (skip the prompt).
+    if (args.secret && args.secret.length > 0) {
+      void performConnect(args, display.name, args.secret)
+      return
+    }
+    // Otherwise (e.g. reconnect from DetailsPanel) collect the secret first.
     setPendingConnect({ args, name: display.name })
   }
 

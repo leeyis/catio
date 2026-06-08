@@ -40,8 +40,22 @@ export interface SshConnectResult {
   hostKeyTrusted: boolean
 }
 
+export interface SshTestResult {
+  ok: boolean
+  latencyMs: number
+  error?: string
+}
+
 export async function sshConnect(args: SshConnectArgs): Promise<SshConnectResult> {
   return tauriInvoke<SshConnectResult>('ssh_connect', { args })
+}
+
+// Real connection test: connect+auth then disconnect, returning latency.
+// Outside Tauri there is no SSH stack, so report a non-success result rather
+// than pretending the test passed.
+export async function sshTest(args: SshConnectArgs): Promise<SshTestResult> {
+  if (!isTauri()) return { ok: false, latencyMs: 0, error: 'desktop-only' }
+  return tauriInvoke<SshTestResult>('ssh_test', { args })
 }
 
 export async function sshDisconnect(sessionId: string): Promise<void> {

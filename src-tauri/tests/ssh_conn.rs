@@ -1,7 +1,9 @@
 mod common;
 use common::test_server;
 
-use catio_lib::ssh::conn::{connect_authenticated, connect_checked, AuthMethod, ConnectArgs};
+use catio_lib::ssh::conn::{
+    connect_authenticated, connect_checked, test_connection, AuthMethod, ConnectArgs,
+};
 
 #[tokio::test]
 async fn test_server_starts_and_binds() {
@@ -94,6 +96,38 @@ async fn trusts_known_host() {
         .ok();
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn test_connection_ok_with_correct_password() {
+    let addr = test_server::start().await;
+    let args = ConnectArgs {
+        host: addr.ip().to_string(),
+        port: addr.port(),
+        user: test_server::TEST_USER.into(),
+        auth: AuthMethod::Password,
+        secret: Some(test_server::TEST_PW.into()),
+    };
+    let res = test_connection(args).await;
+    assert!(res.ok, "test should succeed with correct password");
+    assert!(res.error.is_none(), "no error on success");
+    // latency_ms is always set (>=0); just confirm the field is present and sane.
+    assert!(res.latency_ms < 60_000, "latency should be a sane value");
+}
+
+#[tokio::test]
+async fn test_connection_fails_with_wrong_password() {
+    let addr = test_server::start().await;
+    let args = ConnectArgs {
+        host: addr.ip().to_string(),
+        port: addr.port(),
+        user: test_server::TEST_USER.into(),
+        auth: AuthMethod::Password,
+        secret: Some("wrong".into()),
+    };
+    let res = test_connection(args).await;
+    assert!(!res.ok, "test should fail with wrong password");
+    assert!(res.error.is_some(), "error should be set on failure");
 }
 
 #[tokio::test]

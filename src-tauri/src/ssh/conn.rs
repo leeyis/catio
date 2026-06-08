@@ -230,7 +230,49 @@ pub async fn connect_checked(
     Ok((handle, fingerprint, forwarded, trusted))
 }
 
+// ─── 连接测试 ───────────────────────────────────────────────────────────────
+
+/// 连接测试结果。不含任何 secret。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestResult {
+    pub ok: bool,
+    pub latency_ms: u64,
+    pub error: Option<String>,
+}
+
+/// 可测试核心：用 `args`（含 secret）建立连接 + 认证，随即断开。
+/// 不存会话、不写 known_hosts（connect_authenticated 接受任意主机密钥）、不记录 secret。
+/// `ssh_test` 命令是它的薄包装，使其无需 Tauri State 即可被集成测试。
+pub async fn test_connection(args: ConnectArgs) -> TestResult {
+    let start = std::time::Instant::now();
+    match connect_authenticated(&args).await {
+        Ok((handle, _fp, _forwarded)) => {
+            let _ = handle
+                .disconnect(russh::Disconnect::ByApplication, "", "en")
+                .await;
+            TestResult {
+                ok: true,
+                latency_ms: start.elapsed().as_millis() as u64,
+                error: None,
+            }
+        }
+        Err(e) => TestResult {
+            ok: false,
+            latency_ms: start.elapsed().as_millis() as u64,
+            error: Some(e.to_string()),
+        },
+    }
+}
+
 // ─── Tauri 命令 ───────────────────────────────────────────────────────────────
+
+/// 测试一条 SSH 连接：连接 + 认证后立即断开，返回是否成功与往返耗时。
+/// 不存会话、不写 known_hosts、不回传也不记录 secret。
+#[tauri::command]
+pub async fn ssh_test(args: ConnectArgs) -> Result<TestResult, SshError> {
+    Ok(test_connection(args).await)
+}
 
 /// 建立 SSH 连接（密码认证）。成功后存入 SessionManager 并返回会话信息。
 #[tauri::command]

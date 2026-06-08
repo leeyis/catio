@@ -12,6 +12,7 @@ pub fn run() {
             ssh::conn::ssh_connect,
             ssh::conn::ssh_disconnect,
             ssh::conn::ssh_trust_host,
+            ssh::conn::ssh_test,
             ssh::term::term_open,
             ssh::term::term_write,
             ssh::term::term_resize,
