@@ -52,7 +52,8 @@ pub fn run() {
             db::commands::db_table_preview,
             db::commands::db_history,
             db::commands::db_snippets,
-            db::commands::db_save_snippet
+            db::commands::db_save_snippet,
+            db::commands::export_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -9,10 +9,14 @@ import type { ResultColumn } from '../../services/types'
 const previewDml = vi.fn()
 const applyEdits = vi.fn()
 const queryPage = vi.fn()
+const tablePreview = vi.fn()
+const exportFile = vi.fn()
 vi.mock('../../services/db', () => ({
   previewDml: (...a: unknown[]) => previewDml(...a),
   applyEdits: (...a: unknown[]) => applyEdits(...a),
   queryPage: (...a: unknown[]) => queryPage(...a),
+  tablePreview: (...a: unknown[]) => tablePreview(...a),
+  exportFile: (...a: unknown[]) => exportFile(...a),
   dbErrMsg: (e: unknown) => (e instanceof Error ? e.message : String(e)),
 }))
 
@@ -20,7 +24,7 @@ const wrap = (ui: React.ReactNode) => render(<LanguageProvider>{ui}</LanguagePro
 
 describe('DataGrid generic rows', () => {
   beforeAll(async () => { await i18n.changeLanguage('en') })
-  beforeEach(() => { previewDml.mockReset(); applyEdits.mockReset(); queryPage.mockReset() })
+  beforeEach(() => { previewDml.mockReset(); applyEdits.mockReset(); queryPage.mockReset(); tablePreview.mockReset(); exportFile.mockReset() })
 
   it('renders columns and indexed row values', () => {
     const columns: ResultColumn[] = [

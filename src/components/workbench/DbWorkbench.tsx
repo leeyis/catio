@@ -8,7 +8,7 @@ import { SqlEditor } from '../dbviews/SqlEditor'
 import { SchemaBrowser } from './SchemaBrowser'
 import { useData } from '../../state/DataContext'
 import { listActiveDbConnections } from '../../state/dbConnections'
-import { getSchema, tablePreview, objectSource, dbErrMsg, type DbCapabilities } from '../../services/db'
+import { getSchema, tablePreview, tableStructure, objectSource, dbErrMsg, type DbCapabilities } from '../../services/db'
 import type { Connection, ResultColumn, Schema, SchemaNamespace } from '../../services/types'
 
 /** Initial page size for the live table preview (matches DataGrid's default). */
@@ -138,8 +138,24 @@ export function DbWorkbench({ conn, density }: DbWorkbenchProps) {
     setLiveErr(null)
     // Dialect-correct, identifier-quoted, paginated preview (works for all engines,
     // not just Postgres). Schema qualification lives in the backend command.
-    tablePreview(connId, selectedSchema, selectedTable, PREVIEW_PAGE, 0)
-      .then(res => { if (!cancelled) setLive({ columns: res.columns, rows: res.rows }) })
+    // In parallel, fetch the table structure to learn which columns are primary
+    // keys — `db_table_preview` doesn't mark PKs, but in-grid editing needs them
+    // (DataGrid's `canEdit` is gated on `pkCols.length > 0`). We mark `pk: true`
+    // on any preview column whose name is a PK in the structure. A failed
+    // structure fetch is non-fatal: we just leave pk flags off (editing stays
+    // disabled) rather than crashing or losing the data.
+    Promise.all([
+      tablePreview(connId, selectedSchema, selectedTable, PREVIEW_PAGE, 0),
+      tableStructure(connId, selectedSchema ?? '', selectedTable).catch(() => null),
+    ])
+      .then(([res, struct]) => {
+        if (cancelled) return
+        const pkNames = new Set((struct?.columns ?? []).filter(c => c.key === 'PK').map(c => c.name))
+        const columns: ResultColumn[] = pkNames.size
+          ? res.columns.map(c => (pkNames.has(c.name) ? { ...c, pk: true } : c))
+          : res.columns
+        setLive({ columns, rows: res.rows })
+      })
       .catch(e => { if (!cancelled) setLiveErr(dbErrMsg(e)) })
     return () => { cancelled = true }
   }, [connId, selectedTable, selectedSchema])

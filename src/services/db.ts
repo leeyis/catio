@@ -157,6 +157,16 @@ export async function tablePreview(
   return tauriInvoke<QueryResult>('db_table_preview', { connId, schema, table, limit, offset })
 }
 
+/**
+ * Write `contents` to an absolute `path` on disk via the backend. Used by the
+ * grid's CSV/JSON export (the webview `<a download>` is a no-op inside Tauri).
+ * No-op outside Tauri — the caller keeps the Blob-download fallback for the demo.
+ */
+export async function exportFile(path: string, contents: string): Promise<void> {
+  if (!isTauri()) return
+  return tauriInvoke('export_file', { path, contents })
+}
+
 // ---- History & saved snippets ----
 
 /** Execution history for a connection (most-recent first). Falls back to mock outside Tauri. */

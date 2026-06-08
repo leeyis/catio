@@ -279,6 +279,14 @@ pub async fn db_table_preview(conn_id: String, schema: Option<String>, table: St
     drv.paginated_query(&format!("SELECT * FROM {}", qualified), limit, offset).await
 }
 
+/// Write `contents` to `path` on disk. Used by the grid's CSV/JSON export, which
+/// picks a destination via the dialog plugin and then asks the backend to write
+/// the file (the webview `<a download>` trick is a no-op inside Tauri).
+#[tauri::command]
+pub async fn export_file(path: String, contents: String) -> Result<(), String> {
+    std::fs::write(&path, contents).map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::qualified_name;

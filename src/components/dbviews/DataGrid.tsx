@@ -3,7 +3,7 @@ import { useState, useMemo, useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn, IconBtn, Segmented } from '../atoms'
-import { previewDml, applyEdits, queryPage, tablePreview, dbErrMsg, type EditRequest } from '../../services/db'
+import { previewDml, applyEdits, queryPage, tablePreview, exportFile, dbErrMsg, type EditRequest } from '../../services/db'
 import type { ResultColumn } from '../../services/types'
 
 export interface DataGridProps {
@@ -60,6 +60,13 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   const [edits, setEdits] = useState<Record<string, string | number>>({})
   const [editing, setEditing] = useState<{ r: number; c: number } | null>(null)
   const [editVal, setEditVal] = useState('')
+  // Pending new rows: each is a map of column-name → value. Keyed by a negative
+  // synthetic index (-1, -2, …) so cell-edit keys never collide with existing rows.
+  const [newRows, setNewRows] = useState<{ id: number; cells: Record<string, string | number> }[]>([])
+  const newRowSeq = useRef(0)
+  // Original indexes (into baseRows) of existing rows marked for deletion.
+  const [deleted, setDeleted] = useState<Set<number>>(new Set())
+  const [exportErr, setExportErr] = useState<string | null>(null)
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(100)
   // server-side page rows (when connId set); null → use client-side slice of `rows`
@@ -200,21 +207,46 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
     URL.revokeObjectURL(url)
   }
 
-  // Export the CURRENTLY displayed rows (after filter + sort) and columns.
-  function exportAs(format: 'csv' | 'json') {
-    setExportMenuOpen(false)
+  const isTauri = () =>
+    typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window)
+
+  // Build the export text (CSV or JSON) from the CURRENTLY displayed rows
+  // (after filter + sort) and columns.
+  function buildExport(format: 'csv' | 'json'): { text: string; type: string } {
     const displayRows = pageRows.map(({ row }) => row)
     if (format === 'csv') {
       const header = columns.map(c => csvEscape(c.name)).join(',')
       const lines = displayRows.map(row => columns.map((_, ci) => csvEscape(row[ci])).join(','))
-      triggerDownload([header, ...lines].join('\n'), 'text/csv', 'export.csv')
-    } else {
-      const objs = displayRows.map(row => {
-        const o: Record<string, unknown> = {}
-        columns.forEach((c, ci) => { o[c.name] = row[ci] ?? null })
-        return o
+      return { text: [header, ...lines].join('\n'), type: 'text/csv' }
+    }
+    const objs = displayRows.map(row => {
+      const o: Record<string, unknown> = {}
+      columns.forEach((c, ci) => { o[c.name] = row[ci] ?? null })
+      return o
+    })
+    return { text: JSON.stringify(objs, null, 2), type: 'application/json' }
+  }
+
+  // Export the displayed rows. Inside Tauri the webview `<a download>` is a no-op,
+  // so pick a destination via the dialog plugin and write the file through the
+  // backend. Outside Tauri keep the Blob download so the demo still works.
+  async function exportAs(format: 'csv' | 'json') {
+    setExportMenuOpen(false)
+    setExportErr(null)
+    const { text, type } = buildExport(format)
+    if (!isTauri()) {
+      triggerDownload(text, type, `export.${format}`)
+      return
+    }
+    try {
+      const { save } = await import('@tauri-apps/plugin-dialog')
+      const path = await save({
+        defaultPath: `export.${format}`,
+        filters: [{ name: format.toUpperCase(), extensions: [format] }],
       })
-      triggerDownload(JSON.stringify(objs, null, 2), 'application/json', 'export.json')
+      if (path) await exportFile(path, text)
+    } catch (e) {
+      setExportErr(t('dbviews.applyError', { message: dbErrMsg(e) }))
     }
   }
   function cellKey(rowIdx: number, col: string) { return `${rowIdx}-${col}` }
@@ -222,13 +254,46 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
     if (!canEdit) return
     setEditing({ r: rIdx, c: cIdx }); setEditVal(String(val)); setSel({ r: rIdx, c: cIdx })
   }
+  // Commit an edit. Existing rows (origIdx >= 0) write into the `edits` map; new
+  // rows (encoded as r = -(rowId + 1)) write into their own `cells` map.
   function commitEdit(rowIdx: number, col: string) {
-    setEdits(e => ({ ...e, [cellKey(rowIdx, col)]: editVal }))
+    if (rowIdx < 0) {
+      const id = -rowIdx - 1
+      setNewRows(rs => rs.map(r => r.id === id ? { ...r, cells: { ...r.cells, [col]: editVal } } : r))
+    } else {
+      setEdits(e => ({ ...e, [cellKey(rowIdx, col)]: editVal }))
+    }
     setEditing(null)
   }
 
-  /** Group the pending `edits` map into one UPDATE EditRequest per edited row. */
+  // Add an empty pending row (tracked separately; becomes an INSERT on Save).
+  function addRow() {
+    if (!canEdit) return
+    const id = newRowSeq.current++
+    setNewRows(rs => [...rs, { id, cells: {} }])
+  }
+  function removeNewRow(id: number) {
+    setNewRows(rs => rs.filter(r => r.id !== id))
+    if (editing && editing.r === -(id + 1)) setEditing(null)
+  }
+  // Toggle an existing row (by its origIdx) in/out of the pending-delete set.
+  function toggleDelete(origIdx: number) {
+    if (!canEdit) return
+    setDeleted(d => {
+      const next = new Set(d)
+      if (next.has(origIdx)) next.delete(origIdx); else next.add(origIdx)
+      return next
+    })
+  }
+
+  /**
+   * Build the full set of pending statements: one UPDATE per edited existing row,
+   * one INSERT per non-empty new row, and one DELETE per row marked for deletion.
+   */
   function buildEditRequests(): EditRequest[] {
+    const reqs: EditRequest[] = []
+
+    // --- UPDATEs (skip rows that are also marked for deletion) ---
     const byRow = new Map<number, [string, unknown][]>()
     for (const key of Object.keys(edits)) {
       const dash = key.indexOf('-')
@@ -238,8 +303,8 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
       list.push([colName, edits[key]])
       byRow.set(origIdx, list)
     }
-    const reqs: EditRequest[] = []
     for (const [origIdx, cells] of byRow) {
+      if (deleted.has(origIdx)) continue
       const entry = tagged.find(e => e.origIdx === origIdx)
       if (!entry) continue
       const pk: [string, unknown][] = pkCols.map(name => {
@@ -248,6 +313,25 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
       })
       reqs.push({ schema, table, kind: 'update', pk, cells })
     }
+
+    // --- INSERTs (one per new row that has at least one filled cell) ---
+    for (const nr of newRows) {
+      const cells = Object.entries(nr.cells).filter(([, v]) => String(v).length > 0) as [string, unknown][]
+      if (cells.length === 0) continue
+      reqs.push({ schema, table, kind: 'insert', pk: [], cells })
+    }
+
+    // --- DELETEs (one per marked existing row) ---
+    for (const origIdx of deleted) {
+      const entry = tagged.find(e => e.origIdx === origIdx)
+      if (!entry) continue
+      const pk: [string, unknown][] = pkCols.map(name => {
+        const ci = columns.findIndex(c => c.name === name)
+        return [name, entry.row[ci]] as [string, unknown]
+      })
+      reqs.push({ schema, table, kind: 'delete', pk, cells: [] })
+    }
+
     return reqs
   }
 
@@ -269,6 +353,8 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
       const affected = await applyEdits(connId ?? '', preview.reqs)
       setApplyMsg(t('dbviews.rowsAffected', { count: affected }))
       setEdits({})
+      setNewRows([])
+      setDeleted(new Set())
       setPreview(null)
       if (fetchPage) {
         const res = await fetchPage(PAGE, (page - 1) * PAGE)
@@ -296,7 +382,21 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
     return () => document.removeEventListener('mousedown', onDocClick)
   }, [sortMenuOpen, exportMenuOpen])
 
-  const editCount = Object.keys(edits).length
+  // Footer counters. "edited" = existing rows with at least one changed cell that
+  // are NOT also marked for deletion; "new" = pending insert rows; "deleted" =
+  // existing rows marked for deletion. `pendingTotal` gates Save + the chip.
+  const editedRowIdxs = useMemo(() => {
+    const s = new Set<number>()
+    for (const key of Object.keys(edits)) s.add(Number(key.slice(0, key.indexOf('-'))))
+    for (const idx of deleted) s.delete(idx)
+    return s
+  }, [edits, deleted])
+  const editedCount = editedRowIdxs.size
+  const newCount = newRows.length
+  const deletedCount = deleted.size
+  const pendingTotal = editedCount + newCount + deletedCount
+  // Kept for the in-toolbar "unsaved edits" chip wording (cell-level count).
+  const editCount = pendingTotal
   // Toolbar table chip: live path uses the real schema/table (no bogus `public.`);
   // mock/demo path keeps the original `public.orders` label for pixel parity.
   const toolbarLabel = resultLabel ?? (connId ? (schema ? `${schema}.${table}` : table) : 'public.orders')
@@ -306,7 +406,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   // Fixed per-column widths so the row is exactly as wide as the sum of its
   // columns and the grid scrolls horizontally — no flex/1fr stretch that would
   // blow up a couple of columns to fill the viewport and hide the rest.
-  const gridTemplate = '46px ' + columns.map(c => c.name === 'channel' || c.name === 'currency' ? '92px' : c.name === 'created_at' || c.name === 'updated_at' ? '150px' : c.name === 'customer_id' ? '150px' : '160px').join(' ')
+  const gridTemplate = '46px ' + columns.map(c => c.name === 'channel' || c.name === 'currency' ? '92px' : c.name === 'created_at' || c.name === 'updated_at' ? '150px' : c.name === 'customer_id' ? '150px' : '160px').join(' ') + (canEdit ? ' 44px' : '')
 
   return (
     <div className="col" style={{ height: '100%', minHeight: 0, position: 'relative' }}>
@@ -324,7 +424,8 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
           )}
         </div>
         <div className="row gap6">
-          {canEdit && editCount > 0 && <Btn size="sm" variant="primary" icon="save" onClick={openPreview}>{t('dbviews.saveEdits')}</Btn>}
+          {canEdit && <Btn size="sm" variant="secondary" icon="plus" onClick={addRow}>{t('dbviews.addRow')}</Btn>}
+          {canEdit && pendingTotal > 0 && <Btn size="sm" variant="primary" icon="save" onClick={openPreview}>{t('dbviews.saveEdits')}</Btn>}
           <button className="icon-btn bare" title={t('dbviews.filter')} data-active={filterOpen ? '1' : undefined}
             onClick={() => setFilterOpen(o => !o)}><Icon name="filter" size={15} /></button>
           <div ref={sortMenuRef} style={{ position: 'relative' }}>
@@ -401,12 +502,14 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
                 {sortCol === col.name && <Icon name={sortDir === 'asc' ? 'chevron-up' : 'chevron-down'} size={12} style={{ color: 'var(--accent-primary)', marginLeft: 'auto' }} />}
               </div>
             ))}
+            {canEdit && <div style={{ ...thStyle, justifyContent: 'center', borderRight: 'none' }} />}
           </div>
           {/* body */}
           {pageRows.map(({ row, origIdx }, ri) => {
             const globalIdx = (page - 1) * PAGE + ri
+            const isDel = deleted.has(origIdx)
             return (
-              <div key={origIdx} style={{ display: 'grid', gridTemplateColumns: gridTemplate, height: rowH, background: ri % 2 ? 'var(--surface-subtle)' : 'transparent' }}
+              <div key={origIdx} style={{ display: 'grid', gridTemplateColumns: gridTemplate, height: rowH, background: isDel ? 'color-mix(in srgb, var(--danger-fg) 12%, transparent)' : ri % 2 ? 'var(--surface-subtle)' : 'transparent', opacity: isDel ? 0.6 : 1, textDecoration: isDel ? 'line-through' : 'none' }}
                 className="gridrow">
                 <div style={{ ...tdStyle, justifyContent: 'center', color: 'var(--text-faint)', fontSize: 11, background: 'var(--surface-sunken)', borderRight: '1px solid var(--border-hairline)', position: 'sticky', left: 0, zIndex: 1 }}>{globalIdx + 1}</div>
                 {columns.map((col, ci) => {
@@ -447,6 +550,50 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
                     </div>
                   )
                 })}
+                {canEdit && (
+                  <div style={{ ...tdStyle, justifyContent: 'center', borderRight: 'none', textDecoration: 'none' }}>
+                    <button className="icon-btn bare" style={{ width: 22, height: 22 }}
+                      title={isDel ? t('dbviews.undoDelete') : t('dbviews.deleteRow')}
+                      onClick={() => toggleDelete(origIdx)}>
+                      <Icon name={isDel ? 'rotate-ccw' : 'trash-2'} size={13}
+                        style={{ color: isDel ? 'var(--text-faint)' : 'var(--danger-fg)' }} />
+                    </button>
+                  </div>
+                )}
+              </div>
+            )
+          })}
+          {/* pending new rows (rendered after existing rows; become INSERTs on Save) */}
+          {canEdit && newRows.map(nr => {
+            const r = -(nr.id + 1)
+            return (
+              <div key={`new-${nr.id}`} style={{ display: 'grid', gridTemplateColumns: gridTemplate, height: rowH, background: 'color-mix(in srgb, var(--signal-green) 12%, transparent)' }}
+                className="gridrow">
+                <div style={{ ...tdStyle, justifyContent: 'center', color: 'var(--signal-green)', fontSize: 11, background: 'var(--surface-sunken)', borderRight: '1px solid var(--border-hairline)', position: 'sticky', left: 0, zIndex: 1 }}>+</div>
+                {columns.map((col, ci) => {
+                  const val = nr.cells[col.name] ?? ''
+                  const isEditing = editing && editing.r === r && editing.c === ci
+                  return (
+                    <div key={col.name} onClick={() => setSel({ r, c: ci })}
+                      onDoubleClick={() => startEdit(r, ci, r, col.name, val)}
+                      style={{ ...tdStyle, cursor: 'cell', background: isEditing ? 'var(--surface-card)' : 'transparent', color: 'var(--text-secondary)' }}>
+                      {isEditing ? (
+                        <input autoFocus value={editVal} onChange={e => setEditVal(e.target.value)}
+                          onBlur={() => commitEdit(r, col.name)}
+                          onKeyDown={e => { if (e.key === 'Enter') commitEdit(r, col.name); if (e.key === 'Escape') setEditing(null) }}
+                          style={{ width: '100%', border: 'none', outline: 'none', background: 'transparent', font: 'inherit', color: 'var(--text-primary)' }} />
+                      ) : (
+                        <span className="ell" style={{ color: String(val).length ? 'var(--text-primary)' : 'var(--text-faint)' }}>{String(val).length ? String(val) : '—'}</span>
+                      )}
+                    </div>
+                  )
+                })}
+                <div style={{ ...tdStyle, justifyContent: 'center', borderRight: 'none' }}>
+                  <button className="icon-btn bare" style={{ width: 22, height: 22 }}
+                    title={t('dbviews.removeRow')} onClick={() => removeNewRow(nr.id)}>
+                    <Icon name="x" size={13} style={{ color: 'var(--text-faint)' }} />
+                  </button>
+                </div>
               </div>
             )
           })}
@@ -462,11 +609,12 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
           {showTruncated && <span className="chip" style={{ background: 'color-mix(in srgb, var(--signal-amber) 14%, transparent)', color: 'var(--signal-amber)', fontWeight: 600 }}>{t('dbviews.truncated')}</span>}
           {applyMsg && <span style={{ color: 'var(--signal-green)' }}>{applyMsg}</span>}
           {loadError && <span className="row gap6" style={{ color: 'var(--danger-fg)' }}><Icon name="alert-triangle" size={12} /> {t('dbviews.loadError', { message: loadError })}</span>}
+          {exportErr && <span className="row gap6" style={{ color: 'var(--danger-fg)' }}><Icon name="alert-triangle" size={12} /> {exportErr}</span>}
         </div>
         <div className="row gap8">
-          <span className="mono" style={{ color: 'var(--signal-green)' }}>● 0 new</span>
-          <span className="mono" style={{ color: 'var(--signal-amber)' }}>● {editCount} edited</span>
-          <span className="mono" style={{ color: 'var(--danger-fg)' }}>● 0 deleted</span>
+          <span className="mono" style={{ color: 'var(--signal-green)' }}>● {newCount} new</span>
+          <span className="mono" style={{ color: 'var(--signal-amber)' }}>● {editedCount} edited</span>
+          <span className="mono" style={{ color: 'var(--danger-fg)' }}>● {deletedCount} deleted</span>
           <div style={{ width: 1, height: 14, background: 'var(--border-hairline)' }} />
           <Segmented size="sm" value={String(pageSize)} onChange={changePageSize}
             options={[{ value: '50', label: '50' }, { value: '100', label: '100' }, { value: '500', label: '500' }]} />
