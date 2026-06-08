@@ -1,6 +1,9 @@
 /* ported from ref-ui/_extract/blob9.txt — real streaming chat per plan A2 */
-import React, { useState, useRef, useEffect } from 'react'
+import React, { useState, useRef, useEffect, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import type { Components } from 'react-markdown'
 import { Icon } from '../Icon'
 import { IconBtn } from '../atoms'
 import { highlightSQL } from '../dbviews'
@@ -32,13 +35,6 @@ interface ChatTurn {
   content: string
 }
 
-function mdBold(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/\*\*([^*]+)\*\*/g, '<b style="color:var(--text-primary)">$1</b>')
-}
-
 function shellHL(code: string): string {
   let h = code.replace(/&/g, '&amp;').replace(/</g, '&lt;')
   h = h.replace(/('[^']*')/g, '<span style="color:var(--signal-green)">$1</span>')
@@ -46,32 +42,22 @@ function shellHL(code: string): string {
   return h
 }
 
-// ---- Fenced code-block parser ----
-// Splits assistant markdown into alternating text / code segments. Each code
-// segment carries the language tag (may be empty) from ```lang.
-
-interface TextSeg { type: 'text'; text: string }
-interface CodeSeg { type: 'code'; lang: string; code: string }
-type Seg = TextSeg | CodeSeg
-
-function parseSegments(md: string): Seg[] {
-  const segs: Seg[] = []
-  const re = /```(\w*)\n?([\s\S]*?)```/g
-  let last = 0
-  let m: RegExpExecArray | null
-  while ((m = re.exec(md)) !== null) {
-    if (m.index > last) segs.push({ type: 'text', text: md.slice(last, m.index) })
-    segs.push({ type: 'code', lang: (m[1] || '').toLowerCase(), code: m[2].replace(/\n$/, '') })
-    last = re.lastIndex
-  }
-  if (last < md.length) segs.push({ type: 'text', text: md.slice(last) })
-  return segs
-}
-
 const SHELL_LANGS = new Set(['sh', 'bash', 'shell', 'zsh', 'console'])
 const SQL_LANGS = new Set(['sql', 'mysql', 'postgres', 'postgresql', 'pgsql'])
 
-interface CodeBlockProps {
+// ---- Shared copy button hook ----
+function useCopied() {
+  const [copied, setCopied] = useState(false)
+  function copy(text: string) {
+    if (navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {})
+    setCopied(true)
+    setTimeout(() => setCopied(false), 1400)
+  }
+  return { copied, copy }
+}
+
+// ---- Block code card with action row ----
+interface BlockCodeProps {
   lang: string
   code: string
   mode: 'sql' | 'shell'
@@ -79,18 +65,13 @@ interface CodeBlockProps {
   canInsert?: boolean
 }
 
-function CodeBlock({ lang, code, mode, onInsert, canInsert }: CodeBlockProps) {
+function BlockCode({ lang, code, mode, onInsert, canInsert }: BlockCodeProps) {
   const { t } = useTranslation()
-  const [copied, setCopied] = useState(false)
+  const { copied, copy } = useCopied()
   const isSqlBlock = SQL_LANGS.has(lang) || (lang === '' && mode === 'sql')
   const isShellBlock = SHELL_LANGS.has(lang) || (lang === '' && mode === 'shell')
   const tone = isSqlBlock ? 'var(--signal-blue)' : 'var(--signal-amber)'
   const canInsertShell = isShellBlock && !!onInsert && !!canInsert
-  function copy() {
-    if (navigator.clipboard) navigator.clipboard.writeText(code).catch(() => {})
-    setCopied(true)
-    setTimeout(() => setCopied(false), 1400)
-  }
   return (
     <div className="col" style={{ border: '1px solid var(--border-hairline)', borderRadius: 12, overflow: 'hidden', background: 'var(--surface-card)' }}>
       <div className="row gap6" style={{ padding: '6px 8px 6px 10px', background: 'var(--surface-subtle)', borderBottom: '1px solid var(--border-hairline)' }}>
@@ -103,7 +84,7 @@ function CodeBlock({ lang, code, mode, onInsert, canInsert }: CodeBlockProps) {
             <Icon name="arrow-right-to-line" size={14} />
           </button>
         )}
-        <button className="icon-btn bare" style={{ width: 24, height: 24 }} title={copied ? t('panels.copied') : t('panels.copy')} onClick={copy}>
+        <button className="icon-btn bare" style={{ width: 24, height: 24 }} title={copied ? t('panels.copied') : t('panels.copy')} onClick={() => copy(code)}>
           <Icon name={copied ? 'check' : 'copy'} size={13} style={copied ? { color: 'var(--signal-green)' } : undefined} />
         </button>
       </div>
@@ -111,6 +92,121 @@ function CodeBlock({ lang, code, mode, onInsert, canInsert }: CodeBlockProps) {
         dangerouslySetInnerHTML={{ __html: isSqlBlock ? highlightSQL(code) : shellHL(code) }} />
     </div>
   )
+}
+
+// ---- Build react-markdown components with closure over mode/onInsert/canInsert ----
+function makeComponents(mode: 'sql' | 'shell', onInsert?: (code: string) => void, canInsert?: boolean): Components {
+  return {
+    // ---- code: inline vs block detection ----
+    // In react-markdown v10 there is no `inline` prop. Block code has className like "language-sh".
+    // Inline code has no className. We also treat code with a newline as block.
+    code({ className, children, ...rest }) {
+      const lang = (className ?? '').replace('language-', '')
+      const isBlock = !!className || String(children).includes('\n')
+      if (!isBlock) {
+        // Inline code
+        return (
+          <code
+            {...rest}
+            style={{
+              fontFamily: 'var(--font-mono, monospace)',
+              fontSize: '12px',
+              background: 'var(--surface-sunken)',
+              color: 'var(--text-primary)',
+              padding: '1px 5px',
+              borderRadius: 4,
+              border: '1px solid var(--border-hairline)',
+            }}
+          >
+            {children}
+          </code>
+        )
+      }
+      const code = String(children).replace(/\n$/, '')
+      return <BlockCode lang={lang} code={code} mode={mode} onInsert={onInsert} canInsert={canInsert} />
+    },
+    // pre: let the code component handle block rendering; pre itself just renders children
+    pre({ children }) {
+      return <>{children}</>
+    },
+    // ---- Headings — sized down to fit 13px panel body ----
+    h1({ children }) {
+      return <h1 style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-primary)', margin: '10px 0 4px', lineHeight: 1.3 }}>{children}</h1>
+    },
+    h2({ children }) {
+      return <h2 style={{ fontSize: 14, fontWeight: 700, color: 'var(--text-primary)', margin: '8px 0 4px', lineHeight: 1.3 }}>{children}</h2>
+    },
+    h3({ children }) {
+      return <h3 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)', margin: '6px 0 3px', lineHeight: 1.3 }}>{children}</h3>
+    },
+    h4({ children }) {
+      return <h4 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)', margin: '4px 0 2px', lineHeight: 1.3 }}>{children}</h4>
+    },
+    // ---- Paragraph ----
+    p({ children }) {
+      return <p style={{ margin: '6px 0', lineHeight: 1.55, color: 'var(--text-secondary)', fontSize: 13 }}>{children}</p>
+    },
+    // ---- Lists ----
+    ul({ children }) {
+      return <ul style={{ margin: '4px 0', paddingLeft: 18, listStyleType: 'disc' }}>{children}</ul>
+    },
+    ol({ children }) {
+      return <ol style={{ margin: '4px 0', paddingLeft: 18, listStyleType: 'decimal' }}>{children}</ol>
+    },
+    li({ children }) {
+      return <li style={{ fontSize: 13, lineHeight: 1.55, color: 'var(--text-secondary)', marginBottom: 2 }}>{children}</li>
+    },
+    // ---- Strong / em ----
+    strong({ children }) {
+      return <strong style={{ fontWeight: 700, color: 'var(--text-primary)' }}>{children}</strong>
+    },
+    em({ children }) {
+      return <em style={{ fontStyle: 'italic', color: 'var(--text-secondary)' }}>{children}</em>
+    },
+    // ---- Links — prevent Tauri webview navigation ----
+    a({ href, children }) {
+      function handleClick(e: React.MouseEvent<HTMLAnchorElement>) {
+        e.preventDefault()
+        if (href) window.open(href, '_blank', 'noreferrer')
+      }
+      return (
+        <a href={href} onClick={handleClick} rel="noreferrer"
+          style={{ color: 'var(--accent-primary)', textDecoration: 'underline', cursor: 'pointer' }}>
+          {children}
+        </a>
+      )
+    },
+    // ---- Tables (GFM) ----
+    table({ children }) {
+      return (
+        <div style={{ overflowX: 'auto', margin: '6px 0' }}>
+          <table style={{ borderCollapse: 'collapse', fontSize: 12, width: '100%', color: 'var(--text-secondary)' }}>{children}</table>
+        </div>
+      )
+    },
+    th({ children }) {
+      return (
+        <th style={{ border: '1px solid var(--border-hairline)', padding: '4px 8px', fontWeight: 700, color: 'var(--text-primary)', background: 'var(--surface-subtle)', textAlign: 'left' }}>
+          {children}
+        </th>
+      )
+    },
+    td({ children }) {
+      return <td style={{ border: '1px solid var(--border-hairline)', padding: '4px 8px' }}>{children}</td>
+    },
+    // ---- Blockquote ----
+    blockquote({ children }) {
+      return (
+        <blockquote style={{ borderLeft: '3px solid var(--border-hairline)', margin: '6px 0', paddingLeft: 10, color: 'var(--text-tertiary)', fontStyle: 'italic' }}>
+          {children}
+        </blockquote>
+      )
+    },
+    // ---- HR ----
+    hr() {
+      return <hr style={{ border: 'none', borderTop: '1px solid var(--border-hairline)', margin: '8px 0' }} />
+    },
+  }
 }
 
 interface AssistantMessageProps {
@@ -121,14 +217,18 @@ interface AssistantMessageProps {
 }
 
 function AssistantMessage({ text, mode, onInsert, canInsert }: AssistantMessageProps) {
-  const segs = parseSegments(text)
+  // Memoize components so react-markdown doesn't remount its subtree on every token update.
+  // onInsert and canInsert are stable per conversation turn, so this is safe.
+  const components = useMemo(
+    () => makeComponents(mode, onInsert, canInsert),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [mode, onInsert, canInsert],
+  )
   return (
-    <div className="col gap8" style={{ maxWidth: '94%' }}>
-      {segs.map((s, i) => s.type === 'text'
-        ? (s.text.trim()
-          ? <div key={i} style={{ fontSize: 13, lineHeight: 1.55, color: 'var(--text-secondary)' }} dangerouslySetInnerHTML={{ __html: mdBold(s.text) }} />
-          : null)
-        : <CodeBlock key={i} lang={s.lang} code={s.code} mode={mode} onInsert={onInsert} canInsert={canInsert} />)}
+    <div className="col gap4" style={{ maxWidth: '94%' }}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+        {text}
+      </ReactMarkdown>
     </div>
   )
 }

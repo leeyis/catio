@@ -26,17 +26,20 @@ beforeEach(() => {
 })
 
 describe('AIPanel real streaming chat', () => {
-  it('streams assistant tokens into a bubble', async () => {
+  it('streams markdown and renders headings + bold correctly', async () => {
     chatMock.mockImplementation(async (_m: ChatMsg[], _c: AgentConfig, opts?: ChatOptions) => {
-      opts?.onToken?.('hello ')
-      opts?.onToken?.('world')
-      return 'hello world'
+      opts?.onToken?.('# Title\n\nhello **world**')
+      return '# Title\n\nhello **world**'
     })
     wrap(<AIPanel onClose={() => {}} mode="shell" attachment={null} onClearAttachment={() => {}} />)
     const ta = screen.getByRole('textbox')
     fireEvent.change(ta, { target: { value: 'hi' } })
     fireEvent.click(screen.getByTitle('发送'))
-    await waitFor(() => expect(screen.getByText('hello world')).toBeTruthy())
+    // ReactMarkdown renders "# Title" as an <h1> and "**world**" as <strong>
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: 'Title' })).toBeTruthy()
+      expect(screen.getByText('world')).toBeTruthy()  // inside <strong>
+    })
   })
 
   it('renders a shell code block with an insert-into-terminal button', async () => {
