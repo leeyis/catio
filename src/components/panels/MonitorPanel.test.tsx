@@ -97,7 +97,7 @@ describe('MonitorPanel (monitor wiring)', () => {
     await waitFor(() => expect(h.monitorStop).toHaveBeenCalledWith('sess-1'))
   })
 
-  it('does NOT call monitorStart in demo mode (no sessionId)', async () => {
+  it('does NOT call monitorStart when no sessionId (empty state)', async () => {
     wrap(<MonitorPanel onClose={() => {}} />)
     // Give effects a tick.
     await new Promise(r => setTimeout(r, 50))
@@ -105,9 +105,11 @@ describe('MonitorPanel (monitor wiring)', () => {
     expect(h.listen).not.toHaveBeenCalled()
   })
 
-  it('renders demo data without crashing when no sessionId provided', () => {
-    const { container } = wrap(<MonitorPanel onClose={() => {}} />)
-    // Panel should render (host name present in the subtitle area).
-    expect(container.querySelector('.panel-shell, [data-panel]') || container.firstChild).toBeTruthy()
+  it('renders empty state when no sessionId provided', async () => {
+    wrap(<MonitorPanel onClose={() => {}} />)
+    // Panel renders PanelEmpty with the no-session hint (zh locale in tests)
+    await waitFor(() => {
+      expect(screen.getByText(/无活动会话/)).toBeTruthy()
+    })
   })
 })

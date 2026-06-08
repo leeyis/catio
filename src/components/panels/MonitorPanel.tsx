@@ -2,9 +2,9 @@
 import { useState, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { IconBtn } from '../atoms'
-import { useData } from '../../state/DataContext'
 import type { Connection, Gpu, Monitor } from '../../services/types'
 import { PanelShell } from './PanelShell'
+import { PanelEmpty } from './PanelEmpty'
 import { monitorStart, monitorStop, listen } from '../../services/ssh'
 
 // Mirror the Tauri guard used in SftpPanel / TerminalPane.
@@ -121,15 +121,26 @@ function GpuCard({ g }: GpuCardProps) {
   )
 }
 
+const EMPTY_MONITOR: Monitor = {
+  host: '',
+  cpu: [],
+  mem: [],
+  net: [],
+  disk: 0,
+  cores: 0,
+  memTotal: '',
+  memUsed: '',
+  gpus: [],
+  procs: [],
+}
+
 export function MonitorPanel({ onClose, conn: _conn, sessionId }: MonitorPanelProps) {
   const { t } = useTranslation()
-  const D = useData()
-  const [mon, setMon] = useState<Monitor>(D.monitor)
+  const [mon, setMon] = useState<Monitor>(EMPTY_MONITOR)
 
   useEffect(() => {
     if (!sessionId || !isTauriEnv()) {
-      // Demo mode: leave D.monitor as-is (pixel-identical)
-      setMon(D.monitor)
+      setMon(EMPTY_MONITOR)
       return
     }
 
@@ -161,38 +172,42 @@ export function MonitorPanel({ onClose, conn: _conn, sessionId }: MonitorPanelPr
   }
 
   return (
-    <PanelShell icon="gauge" title={t('panels.monitorTitle')} sub={mon.host + ' · ' + t('panels.monitorRealtime')} onClose={onClose} actions={<IconBtn name="refresh-cw" size={15} variant="bare" onClick={handleRefresh} />}>
-      <div className="grow" style={{ overflowY: 'auto', padding: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-          <Stat label={t('panels.cpu')} val={mon.cpu[mon.cpu.length - 1]} unit="%" data={mon.cpu} color="var(--signal-blue)" />
-          <Stat label={t('panels.mem')} val={mon.mem[mon.mem.length - 1]} unit="%" data={mon.mem} color="var(--signal-violet)" />
-        </div>
-        <Stat label={t('panels.netIO')} val={mon.net[mon.net.length - 1]} unit=" MB/s" data={mon.net} color="var(--signal-green)" />
+    <PanelShell icon="gauge" title={t('panels.monitorTitle')} sub={sessionId ? (mon.host + ' · ' + t('panels.monitorRealtime')) : undefined} onClose={onClose} actions={<IconBtn name="refresh-cw" size={15} variant="bare" onClick={handleRefresh} />}>
+      {!sessionId ? (
+        <PanelEmpty icon="gauge" text={t('panels.noSessionHint')} />
+      ) : (
+        <div className="grow" style={{ overflowY: 'auto', padding: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            <Stat label={t('panels.cpu')} val={mon.cpu[mon.cpu.length - 1]} unit="%" data={mon.cpu} color="var(--signal-blue)" />
+            <Stat label={t('panels.mem')} val={mon.mem[mon.mem.length - 1]} unit="%" data={mon.mem} color="var(--signal-violet)" />
+          </div>
+          <Stat label={t('panels.netIO')} val={mon.net[mon.net.length - 1]} unit=" MB/s" data={mon.net} color="var(--signal-green)" />
 
-        {/* GPU — multi-GPU telemetry */}
-        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', padding: '4px 2px 0' }}>
-          <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.4px', textTransform: 'uppercase', color: 'var(--text-faint)' }}>{t('panels.gpuSection', { count: mon.gpus.length })}</span>
-          <span className="chip mono" style={{ height: 19, fontSize: 9.5 }}>nvidia-smi</span>
-        </div>
-        {mon.gpus.map(g => <GpuCard key={g.idx} g={g} />)}
+          {/* GPU — multi-GPU telemetry */}
+          <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', padding: '4px 2px 0' }}>
+            <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.4px', textTransform: 'uppercase', color: 'var(--text-faint)' }}>{t('panels.gpuSection', { count: mon.gpus.length })}</span>
+            <span className="chip mono" style={{ height: 19, fontSize: 9.5 }}>nvidia-smi</span>
+          </div>
+          {mon.gpus.map(g => <GpuCard key={g.idx} g={g} />)}
 
-        <div className="col" style={{ background: 'var(--surface-subtle)', border: '1px solid var(--border-hairline)', borderRadius: 12, padding: 10, gap: 8 }}>
-          <div className="row" style={{ justifyContent: 'space-between' }}><span style={{ fontSize: 11.5, color: 'var(--text-tertiary)', fontWeight: 500 }}>{t('panels.disk')}</span><span className="mono" style={{ fontSize: 12 }}>{mon.disk}%</span></div>
-          <div style={{ height: 7, borderRadius: 999, background: 'var(--surface-inset)', overflow: 'hidden' }}><div style={{ width: mon.disk + '%', height: '100%', background: mon.disk > 80 ? 'var(--danger-fg)' : 'var(--signal-amber)' }} /></div>
+          <div className="col" style={{ background: 'var(--surface-subtle)', border: '1px solid var(--border-hairline)', borderRadius: 12, padding: 10, gap: 8 }}>
+            <div className="row" style={{ justifyContent: 'space-between' }}><span style={{ fontSize: 11.5, color: 'var(--text-tertiary)', fontWeight: 500 }}>{t('panels.disk')}</span><span className="mono" style={{ fontSize: 12 }}>{mon.disk}%</span></div>
+            <div style={{ height: 7, borderRadius: 999, background: 'var(--surface-inset)', overflow: 'hidden' }}><div style={{ width: mon.disk + '%', height: '100%', background: mon.disk > 80 ? 'var(--danger-fg)' : 'var(--signal-amber)' }} /></div>
+          </div>
+          <div className="col" style={{ gap: 2 }}>
+            <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.4px', textTransform: 'uppercase', color: 'var(--text-faint)', padding: '4px 2px' }}>{t('panels.topProcs')}</span>
+            <div className="row mono" style={{ fontSize: 10, color: 'var(--text-faint)', padding: '0 8px 4px' }}><span style={{ width: 42 }}>{t('panels.procPid')}</span><span className="grow">{t('panels.procCmd')}</span><span style={{ width: 38, textAlign: 'right' }}>{t('panels.procCpu')}</span><span style={{ width: 38, textAlign: 'right' }}>{t('panels.procMem')}</span></div>
+            {mon.procs.map(p => (
+              <div key={p.pid} className="row mono" style={{ fontSize: 11, padding: '5px 8px', borderRadius: 7, color: 'var(--text-secondary)' }}>
+                <span style={{ width: 42, color: 'var(--text-faint)' }}>{p.pid}</span>
+                <span className="grow ell">{p.cmd}</span>
+                <span style={{ width: 38, textAlign: 'right', color: p.cpu > 10 ? 'var(--signal-amber)' : 'var(--text-secondary)' }}>{p.cpu}</span>
+                <span style={{ width: 38, textAlign: 'right' }}>{p.mem}</span>
+              </div>
+            ))}
+          </div>
         </div>
-        <div className="col" style={{ gap: 2 }}>
-          <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.4px', textTransform: 'uppercase', color: 'var(--text-faint)', padding: '4px 2px' }}>{t('panels.topProcs')}</span>
-          <div className="row mono" style={{ fontSize: 10, color: 'var(--text-faint)', padding: '0 8px 4px' }}><span style={{ width: 42 }}>{t('panels.procPid')}</span><span className="grow">{t('panels.procCmd')}</span><span style={{ width: 38, textAlign: 'right' }}>{t('panels.procCpu')}</span><span style={{ width: 38, textAlign: 'right' }}>{t('panels.procMem')}</span></div>
-          {mon.procs.map(p => (
-            <div key={p.pid} className="row mono" style={{ fontSize: 11, padding: '5px 8px', borderRadius: 7, color: 'var(--text-secondary)' }}>
-              <span style={{ width: 42, color: 'var(--text-faint)' }}>{p.pid}</span>
-              <span className="grow ell">{p.cmd}</span>
-              <span style={{ width: 38, textAlign: 'right', color: p.cpu > 10 ? 'var(--signal-amber)' : 'var(--text-secondary)' }}>{p.cpu}</span>
-              <span style={{ width: 38, textAlign: 'right' }}>{p.mem}</span>
-            </div>
-          ))}
-        </div>
-      </div>
+      )}
     </PanelShell>
   )
 }

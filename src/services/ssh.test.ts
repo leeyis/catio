@@ -16,10 +16,12 @@ describe('services/ssh', () => {
     delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
   })
 
-  it('getSftp falls back to mock DATA outside Tauri', async () => {
+  it('getSftp returns empty state outside Tauri (no mock fallback)', async () => {
     const { getSftp } = await import('./ssh')
+    // Outside Tauri (no __TAURI_INTERNALS__), getSftp returns empty regardless of sessionId
     const s = await getSftp('any')
-    expect(s.items.length).toBeGreaterThan(0)
+    expect(s.items.length).toBe(0)
+    expect(s.path).toBe('')
   })
 
   it('sshTest forwards args to invoke under Tauri and returns the result', async () => {

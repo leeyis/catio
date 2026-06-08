@@ -244,7 +244,8 @@
     "fwdDynamic": "Dynamic",
     "fwdBind": "Bind address",
     "fwdTarget": "Target",
-    "fwdAdd": "Add"
+    "fwdAdd": "Add",
+    "noSessionHint": "No active session · connect a host from the Vault to see live data here"
   },
   "modals": {
     "newConnection": "New connection",

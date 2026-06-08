@@ -96,12 +96,12 @@ export async function listen<T>(event: string, cb: (payload: T) => void): Promis
 
 // ---- SFTP ----
 
-export async function getSftp(sessionId: string, path?: string): Promise<Sftp> {
+export async function getSftp(sessionId?: string, path?: string): Promise<Sftp> {
   if (isTauri() && sessionId) {
     const items = await tauriInvoke<SftpItem[]>('sftp_list', { sessionId, path: path ?? '.' })
     return { path: path ?? '.', items }
   }
-  return DATA.sftp
+  return { path: '', items: [] }
 }
 
 export async function sftpUpload(sessionId: string, localPath: string, remotePath: string): Promise<void> {
@@ -152,7 +152,7 @@ export async function getTunnels(sessionId?: string): Promise<Tunnel[]> {
     const list = await tauriInvoke<TunnelStatusWire[]>('tunnel_list')
     return list.map(wireTunnelToFrontend)
   }
-  return DATA.tunnels
+  return []
 }
 
 export async function tunnelOpen(
@@ -166,8 +166,25 @@ export async function tunnelClose(tunnelId: string): Promise<void> {
   return tauriInvoke('tunnel_close', { tunnelId })
 }
 
-export async function getMonitor(_id?: string): Promise<Monitor> {
-  return DATA.monitor
+const EMPTY_MONITOR: Monitor = {
+  host: '',
+  cpu: [],
+  mem: [],
+  net: [],
+  disk: 0,
+  cores: 0,
+  memTotal: '',
+  memUsed: '',
+  gpus: [],
+  procs: [],
+}
+
+export async function getMonitor(sessionId?: string): Promise<Monitor> {
+  if (isTauri() && sessionId) {
+    // Live data arrives via monitor:// events; return empty to seed state
+    return EMPTY_MONITOR
+  }
+  return EMPTY_MONITOR
 }
 
 export async function monitorStart(sessionId: string, intervalMs = 2000): Promise<void> {

@@ -90,21 +90,22 @@ describe('TunnelsPanel (tunnel wiring)', () => {
     })
   })
 
-  it('shows demo content when no sessionId provided', async () => {
-    // Without sessionId getTunnels returns mock data (demo mode)
+  it('shows empty state when no sessionId provided', async () => {
+    // Without sessionId, panel renders PanelEmpty — getTunnels is NOT called
     wrap(<TunnelsPanel onClose={() => {}} />)
     await waitFor(() => {
-      expect(h.getTunnels).toHaveBeenCalledWith(undefined)
+      // Match the noSessionHint text (zh locale in tests)
+      expect(screen.getByText(/无活动会话/)).toBeTruthy()
     })
+    expect(h.getTunnels).not.toHaveBeenCalled()
   })
 
-  it('does not call tunnelClose when no sessionId (demo mode no-op)', async () => {
+  it('does not render tunnel rows when no sessionId', async () => {
     wrap(<TunnelsPanel onClose={() => {}} />)
-    await waitFor(() => expect(screen.getByText('prod-orders')).toBeTruthy())
-
-    const toggles = screen.getAllByRole('switch')
-    fireEvent.click(toggles[0])
-    // In demo mode (no sessionId) tunnelClose should NOT be called
+    // Allow effects to settle
+    await new Promise(r => setTimeout(r, 50))
+    // No tunnel rows — no toggles visible (empty state shown instead)
+    expect(screen.queryByText('prod-orders')).toBeNull()
     expect(h.tunnelClose).not.toHaveBeenCalled()
   })
 })

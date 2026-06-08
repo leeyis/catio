@@ -75,13 +75,14 @@ describe('SftpPanel (SFTP wiring)', () => {
     expect(h.getSftp).toHaveBeenCalledWith('sess-1', expect.anything())
   })
 
-  it('shows demo content when no sessionId provided', async () => {
-    // Without sessionId, getSftp returns mock (demo mode)
-    h.getSftp.mockResolvedValue(MOCK_SFTP)
+  it('shows empty state when no sessionId provided', async () => {
+    // Without sessionId, panel renders PanelEmpty — getSftp is NOT called
     wrap(<SftpPanel onClose={() => {}} />)
     await waitFor(() => {
-      expect(h.getSftp).toHaveBeenCalledWith('', expect.anything())
+      // Match the noSessionHint text (zh locale in tests)
+      expect(screen.getByText(/无活动会话/)).toBeTruthy()
     })
+    expect(h.getSftp).not.toHaveBeenCalled()
   })
 
   it('navigates into a directory when clicking a dir row', async () => {

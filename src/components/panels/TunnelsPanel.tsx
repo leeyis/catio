@@ -6,6 +6,7 @@ import { IconBtn, Toggle, Segmented, Btn } from '../atoms'
 import { useData } from '../../state/DataContext'
 import type { Tunnel } from '../../services/types'
 import { PanelShell } from './PanelShell'
+import { PanelEmpty } from './PanelEmpty'
 import { getTunnels, tunnelOpen, tunnelClose, listen } from '../../services/ssh'
 
 export interface TunnelsPanelProps {
@@ -95,7 +96,7 @@ export function TunnelsPanel({ onClose, sessionId }: TunnelsPanelProps) {
   const D = useData()
   const typeLabel: Record<string, string> = { L: 'Local', R: 'Remote', D: 'Dynamic' }
 
-  const [tunnels, setTunnels] = useState<Tunnel[]>(D.tunnels)
+  const [tunnels, setTunnels] = useState<Tunnel[]>([])
   const [showForm, setShowForm] = useState(false)
   const overlayRef = useRef<HTMLDivElement>(null)
 
@@ -107,7 +108,11 @@ export function TunnelsPanel({ onClose, sessionId }: TunnelsPanelProps) {
 
   // Load on mount and sessionId change
   useEffect(() => {
-    load()
+    if (sessionId) {
+      load()
+    } else {
+      setTunnels([])
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId])
 
@@ -184,44 +189,50 @@ export function TunnelsPanel({ onClose, sessionId }: TunnelsPanelProps) {
         </div>
       }
     >
-      {/* jump chain */}
-      <div className="col" style={{ padding: '12px 12px', borderBottom: '1px solid var(--border-hairline)', gap: 8 }}>
-        <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.4px', textTransform: 'uppercase', color: 'var(--text-faint)' }}>{t('panels.proxyJump')}</span>
-        <div className="row" style={{ gap: 0, flexWrap: 'wrap' }}>
-          {D.jumpChain.map((h, i) => (
-            <React.Fragment key={i}>
-              <div className="row gap6" style={{ padding: '5px 9px', borderRadius: 8, background: h.kind === 'target' ? 'var(--accent-soft)' : 'var(--surface-sunken)' }}>
-                <Icon name={h.kind === 'local' ? 'monitor' : h.kind === 'jump' ? 'shield' : 'database'} size={13} style={{ color: h.kind === 'target' ? 'var(--accent-primary)' : 'var(--text-tertiary)' }} />
-                <span className="mono" style={{ fontSize: 11.5, color: h.kind === 'target' ? 'var(--accent-primary)' : 'var(--text-secondary)', fontWeight: h.kind === 'target' ? 600 : 400 }}>{h.name}</span>
-              </div>
-              {i < D.jumpChain.length - 1 && <Icon name="arrow-right" size={13} style={{ color: 'var(--text-disabled)', margin: '0 4px' }} />}
-            </React.Fragment>
-          ))}
-        </div>
-      </div>
-      <div className="grow" style={{ overflowY: 'auto', padding: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
-        {tunnels.map(t2 => (
-          <div key={t2.id} className="col" style={{ border: '1px solid var(--border-hairline)', borderRadius: 12, padding: 11, gap: 8, background: 'var(--surface-card)' }}>
-            <div className="row" style={{ justifyContent: 'space-between' }}>
-              <div className="row gap8">
-                <div className="icon-badge" style={{ width: 26, height: 26, borderRadius: 7, background: 'var(--surface-sunken)', color: 'var(--text-tertiary)' }}><span className="mono" style={{ fontSize: 11, fontWeight: 700 }}>{t2.type}</span></div>
-                <div className="col" style={{ lineHeight: 1.25 }}>
-                  <span style={{ fontSize: 12.5, fontWeight: 600 }}>{t2.label}</span>
-                  <span style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{typeLabel[t2.type]} · via {t2.via}</span>
-                </div>
-              </div>
-              <Toggle on={t2.status === 'up'} size="sm" onChange={nowOn => handleToggle(t2, nowOn)} />
-            </div>
-            <div className="row mono gap6" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
-              <span style={{ color: 'var(--signal-green)' }}>{t2.local}</span>
-              <Icon name="arrow-right" size={11} />
-              <span>{t2.remote}</span>
-              <span className="grow" />
-              <span style={{ color: 'var(--text-faint)' }}>{t2.bytes}</span>
+      {!sessionId ? (
+        <PanelEmpty icon="link" text={t('panels.noSessionHint')} />
+      ) : (
+        <>
+          {/* jump chain */}
+          <div className="col" style={{ padding: '12px 12px', borderBottom: '1px solid var(--border-hairline)', gap: 8 }}>
+            <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.4px', textTransform: 'uppercase', color: 'var(--text-faint)' }}>{t('panels.proxyJump')}</span>
+            <div className="row" style={{ gap: 0, flexWrap: 'wrap' }}>
+              {D.jumpChain.map((h, i) => (
+                <React.Fragment key={i}>
+                  <div className="row gap6" style={{ padding: '5px 9px', borderRadius: 8, background: h.kind === 'target' ? 'var(--accent-soft)' : 'var(--surface-sunken)' }}>
+                    <Icon name={h.kind === 'local' ? 'monitor' : h.kind === 'jump' ? 'shield' : 'database'} size={13} style={{ color: h.kind === 'target' ? 'var(--accent-primary)' : 'var(--text-tertiary)' }} />
+                    <span className="mono" style={{ fontSize: 11.5, color: h.kind === 'target' ? 'var(--accent-primary)' : 'var(--text-secondary)', fontWeight: h.kind === 'target' ? 600 : 400 }}>{h.name}</span>
+                  </div>
+                  {i < D.jumpChain.length - 1 && <Icon name="arrow-right" size={13} style={{ color: 'var(--text-disabled)', margin: '0 4px' }} />}
+                </React.Fragment>
+              ))}
             </div>
           </div>
-        ))}
-      </div>
+          <div className="grow" style={{ overflowY: 'auto', padding: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {tunnels.map(t2 => (
+              <div key={t2.id} className="col" style={{ border: '1px solid var(--border-hairline)', borderRadius: 12, padding: 11, gap: 8, background: 'var(--surface-card)' }}>
+                <div className="row" style={{ justifyContent: 'space-between' }}>
+                  <div className="row gap8">
+                    <div className="icon-badge" style={{ width: 26, height: 26, borderRadius: 7, background: 'var(--surface-sunken)', color: 'var(--text-tertiary)' }}><span className="mono" style={{ fontSize: 11, fontWeight: 700 }}>{t2.type}</span></div>
+                    <div className="col" style={{ lineHeight: 1.25 }}>
+                      <span style={{ fontSize: 12.5, fontWeight: 600 }}>{t2.label}</span>
+                      <span style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{typeLabel[t2.type]} · via {t2.via}</span>
+                    </div>
+                  </div>
+                  <Toggle on={t2.status === 'up'} size="sm" onChange={nowOn => handleToggle(t2, nowOn)} />
+                </div>
+                <div className="row mono gap6" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+                  <span style={{ color: 'var(--signal-green)' }}>{t2.local}</span>
+                  <Icon name="arrow-right" size={11} />
+                  <span>{t2.remote}</span>
+                  <span className="grow" />
+                  <span style={{ color: 'var(--text-faint)' }}>{t2.bytes}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
     </PanelShell>
   )
 }

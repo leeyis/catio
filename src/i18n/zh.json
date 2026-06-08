@@ -244,7 +244,8 @@
     "fwdDynamic": "动态",
     "fwdBind": "绑定地址",
     "fwdTarget": "目标",
-    "fwdAdd": "添加"
+    "fwdAdd": "添加",
+    "noSessionHint": "无活动会话 · 从 Vault 连接一个主机后这里显示实时数据"
   },
   "modals": {
     "newConnection": "新建连接",
