@@ -37,7 +37,7 @@ export interface SchemaBrowserProps {
   live?: boolean
 }
 
-export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, erActive, sqlActive, disabledSql, disabledEr, schemas, conn, live }: SchemaBrowserProps) {
+export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, schemas, conn, live }: SchemaBrowserProps) {
   const { t } = useTranslation()
   const D = useData()
   // Live path: render every supplied namespace; mock path: the single seeded schema (pixel-identical).
@@ -65,17 +65,7 @@ export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpen
         <Icon name="search" size={13} style={{ color: 'var(--text-faint)' }} />
         <input value={q} onChange={e => setQ(e.target.value)} placeholder={t('workbench.searchTablesViews')} style={{ flex: 1, border: 'none', outline: 'none', background: 'transparent', fontSize: 12, color: 'var(--text-primary)' }} />
       </div>
-      {/* database-level actions */}
-      <div className="row gap6" style={{ padding: '0 10px 8px' }}>
-        <button onClick={onNewQuery} disabled={disabledSql} data-testid="btn-sql-console" className="row gap6" style={{ flex: 1, justifyContent: 'center', height: 30, borderRadius: 9, fontSize: 12, fontWeight: 600,
-          color: sqlActive ? 'var(--accent-primary)' : 'var(--text-secondary)', background: sqlActive ? 'var(--accent-soft)' : 'var(--surface-sunken)', border: sqlActive ? '1px solid var(--accent-border)' : '1px solid transparent' }}>
-          <Icon name="terminal" size={13} /> {t('workbench.newQuery')}
-        </button>
-        <button onClick={() => onOpenER()} disabled={disabledEr} data-testid="btn-er-diagram" className="row gap6" style={{ flex: 1, justifyContent: 'center', height: 30, borderRadius: 9, fontSize: 12, fontWeight: 600,
-          color: erActive ? 'var(--accent-primary)' : 'var(--text-secondary)', background: erActive ? 'var(--accent-soft)' : 'var(--surface-sunken)', border: erActive ? '1px solid var(--accent-border)' : '1px solid transparent' }}>
-          <Icon name="network" size={13} /> {t('workbench.erDiagram')}
-        </button>
-      </div>
+      {/* New query / ER moved into each schema's "⋯" hover menu (see SchemaNode). */}
       {/* tree — one collapsible top-level DB node per schema namespace */}
       <div className="grow" style={{ overflowY: 'auto', padding: '0 6px 10px' }}>
         {namespaces.map(ns => (

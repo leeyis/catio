@@ -21,7 +21,7 @@ export interface SqlConsoleProps {
   initialCode?: string
 }
 
-export function SqlConsole({ density, fresh, queryN, writable = true, connId, initialCode }: SqlConsoleProps) {
+export function SqlConsole({ density, fresh, writable = true, connId, initialCode }: SqlConsoleProps) {
   const { t } = useTranslation()
   const D = useData()
   const [code, setCode] = useState(
@@ -90,6 +90,9 @@ export function SqlConsole({ density, fresh, queryN, writable = true, connId, in
       D.tableStructures[table]?.columns.map(c => c.name) ?? []
     const namespaces = (liveSchema ?? D.schema).schemas
     for (const ns of namespaces) {
+      // Offer the schema name itself as a completion (so users can type
+      // `schema.table` — important while unqualified queries can fail).
+      if (!(ns.name in map)) map[ns.name] = []
       const realCols = connId ? liveColumns[ns.name] : undefined
       for (const tbl of [...ns.tables, ...ns.views]) {
         const cols = connId ? (realCols?.[tbl.name] ?? []) : mockColsFor(tbl.name)
@@ -129,11 +132,9 @@ export function SqlConsole({ density, fresh, queryN, writable = true, connId, in
 
   return (
     <div className="col" style={{ height: '100%', width: '100%', minHeight: 0, minWidth: 0 }}>
-      {/* console toolbar */}
-      <div className="row" style={{ justifyContent: 'space-between', padding: '7px 12px', borderBottom: '1px solid var(--border-hairline)', flex: 'none' }}>
-        <div className="row gap8">
-          <span className="chip" style={{ background: 'var(--surface-sunken)' }}><Icon name="file-code" size={12} /> query-{queryN || 1}.sql</span>
-        </div>
+      {/* console toolbar — the query name lives in the tab strip above, so it's not
+          repeated here; just the editor actions, right-aligned. */}
+      <div className="row" style={{ justifyContent: 'flex-end', padding: '7px 12px', borderBottom: '1px solid var(--border-hairline)', flex: 'none' }}>
         <div className="row gap6">
           <button className="icon-btn bare" title={t('dbviews.format')}><Icon name="wrench" size={15} /></button>
           <button className="icon-btn bare" title={t('dbviews.clear')} onClick={() => setCode('')}><Icon name="eraser" size={15} /></button>

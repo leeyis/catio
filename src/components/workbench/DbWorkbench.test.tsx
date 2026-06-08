@@ -57,12 +57,6 @@ describe('DbWorkbench capability-gating', () => {
 
     // Structure Segmented button should be enabled
     expect(screen.getByTestId('seg-structure')).not.toBeDisabled()
-
-    // SQL console button should be enabled
-    expect(screen.getByTestId('btn-sql-console')).not.toBeDisabled()
-
-    // ER button should be enabled
-    expect(screen.getByTestId('btn-er-diagram')).not.toBeDisabled()
   })
 
   it('disables structure/er/sqlConsole tabs when capabilities are false', () => {
@@ -86,12 +80,6 @@ describe('DbWorkbench capability-gating', () => {
 
     // Structure Segmented button should be disabled
     expect(screen.getByTestId('seg-structure')).toBeDisabled()
-
-    // SQL console button should be disabled
-    expect(screen.getByTestId('btn-sql-console')).toBeDisabled()
-
-    // ER button should be disabled
-    expect(screen.getByTestId('btn-er-diagram')).toBeDisabled()
   })
 
   it('disables only structureEdit=false, leaves er/sqlConsole enabled', () => {
@@ -114,8 +102,6 @@ describe('DbWorkbench capability-gating', () => {
     wrap(<DbWorkbench conn={CONN} />)
 
     expect(screen.getByTestId('seg-structure')).toBeDisabled()
-    expect(screen.getByTestId('btn-sql-console')).not.toBeDisabled()
-    expect(screen.getByTestId('btn-er-diagram')).not.toBeDisabled()
   })
 
   it('all tabs enabled when all capabilities are true', () => {
@@ -138,8 +124,6 @@ describe('DbWorkbench capability-gating', () => {
     wrap(<DbWorkbench conn={CONN} />)
 
     expect(screen.getByTestId('seg-structure')).not.toBeDisabled()
-    expect(screen.getByTestId('btn-sql-console')).not.toBeDisabled()
-    expect(screen.getByTestId('btn-er-diagram')).not.toBeDisabled()
   })
 })
 
