@@ -26,7 +26,7 @@ import { nextTheme, useApplyTheme } from './state/ThemeContext'
 import { useData } from './state/DataContext'
 import { sshConnect, sshDisconnect, sshTrustHost, isTauri, onHistory } from './services/ssh'
 import type { SshConnectArgs } from './services/ssh'
-import { appendHistory, loadHistory } from './state/history'
+import { appendHistory, loadHistory, clearHistory } from './state/history'
 import type { HistoryItem } from './services/types'
 import { loadProfiles, saveProfile, deleteProfile } from './state/connections'
 import type { ConnectionProfile } from './state/connections'
@@ -456,7 +456,7 @@ export default function App() {
               {activePanel === 'monitor' && <MonitorPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} />}
               {activePanel === 'tunnels' && <TunnelsPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} />}
               {activePanel === 'snippets' && <SnippetsPanel onClose={() => setPanelOpen(false)} snippets={snippets} />}
-              {activePanel === 'history' && <HistoryPanel onClose={() => setPanelOpen(false)} onAddSnippet={addSnippet} items={history} />}
+              {activePanel === 'history' && <HistoryPanel onClose={() => setPanelOpen(false)} onAddSnippet={addSnippet} items={history} onClear={() => { clearHistory(); setHistory([]) }} />}
               {activePanel === 'details' && (
                 <DetailsPanel
                   conn={detailConn ?? undefined}
