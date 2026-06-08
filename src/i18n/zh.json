@@ -103,6 +103,8 @@
     "noFks": "该表没有外键约束",
     "erTables": "张表",
     "erRelations": "条关系",
+    "erLoading": "正在加载关系图…",
+    "erEmpty": "该模式下没有可显示的表",
     "zoomOut": "缩小",
     "zoomIn": "放大",
     "zoomReset": "重置",

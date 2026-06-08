@@ -406,4 +406,19 @@ impl Driver for PostgresDriver {
             to_col: r.get::<_, String>(3),
         }).collect())
     }
+
+    async fn list_functions(&self, schema: &str) -> Result<Vec<String>, DbError> {
+        let client = self.pool.get().await
+            .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
+        // p.prokind 'f' = function, 'p' = procedure
+        let rows = client.query(
+            "SELECT p.proname \
+             FROM pg_catalog.pg_proc p \
+             JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+             WHERE n.nspname = $1 AND p.prokind IN ('f','p') \
+             ORDER BY p.proname",
+            &[&schema],
+        ).await.map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        Ok(rows.iter().map(|r| r.get::<_, String>(0)).collect())
+    }
 }

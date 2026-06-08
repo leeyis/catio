@@ -1,5 +1,5 @@
 import { DATA } from './mockData'
-import type { HistoryItem, QueryResult, ResultColumn, Schema, Snippet, TableStructure } from './types'
+import type { ErRelation, HistoryItem, QueryResult, ResultColumn, Schema, Snippet, TableStructure } from './types'
 
 // ---- Tauri guard — function so tests can set window.__TAURI_INTERNALS__ dynamically ----
 const isTauri = (): boolean =>
@@ -183,16 +183,19 @@ export async function getSchema(connId: string): Promise<Schema> {
   if (!isTauri()) return DATA.schema
   // Backend returns [schemaName, tables][] — adapt to frontend Schema shape
   const raw = await tauriInvoke<Array<[string, Array<{ name: string; kind: string }>]>>('db_schema', { connId })
-  return {
-    db: connId,
-    schemas: raw.map(([name, tables]) => ({
-      name,
-      open: false,
-      tables: tables.filter(t => t.kind === 'table').map(t => ({ name: t.name, rows: '', cols: 0 })),
-      views: tables.filter(t => t.kind === 'view').map(t => ({ name: t.name })),
-      functions: [],
-    })),
-  }
+  const schemas = raw.map(([name, tables]) => ({
+    name,
+    open: false,
+    tables: tables.filter(t => t.kind === 'table').map(t => ({ name: t.name, rows: '', cols: 0 })),
+    views: tables.filter(t => t.kind === 'view').map(t => ({ name: t.name })),
+    functions: [] as { name: string }[],
+  }))
+  // Best-effort: fetch stored functions/procedures per schema in parallel. A
+  // failed fetch leaves that schema's functions empty rather than throwing.
+  await Promise.all(schemas.map(async ns => {
+    ns.functions = (await schemaFunctions(connId, ns.name).catch(() => [])).map(name => ({ name }))
+  }))
+  return { db: connId, schemas }
 }
 
 /**
@@ -230,4 +233,24 @@ export async function tableStructure(connId: string, schema: string, table: stri
 export async function schemaColumns(connId: string, schema: string): Promise<[string, string[]][]> {
   if (!isTauri()) return []
   return tauriInvoke<[string, string[]][]>('db_schema_columns', { connId, schema })
+}
+
+/**
+ * Stored function/procedure names in a schema, used to populate the schema
+ * browser's "Functions" section. Outside Tauri returns `[]`.
+ */
+export async function schemaFunctions(connId: string, schema: string): Promise<string[]> {
+  if (!isTauri()) return []
+  return tauriInvoke<string[]>('db_schema_functions', { connId, schema })
+}
+
+/**
+ * Foreign-key relations of a schema, used to draw the ER diagram's edges.
+ * Each relation is `{ from, fromCol, to, toCol }` (table + column names).
+ * Outside Tauri falls back to the seeded mock ER relations so the demo stays
+ * pixel-identical.
+ */
+export async function erRelations(connId: string, schema: string): Promise<ErRelation[]> {
+  if (!isTauri()) return DATA.erModel.relations
+  return tauriInvoke<ErRelation[]>('db_er_model', { connId, schema })
 }

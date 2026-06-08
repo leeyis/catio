@@ -158,6 +158,15 @@ pub async fn db_schema_columns(conn_id: String, schema: String,
     drv.schema_columns(&schema).await
 }
 
+/// List stored functions/procedures in a schema, for the schema browser's
+/// "Functions" section. Best-effort: engines without routine support return [].
+#[tauri::command]
+pub async fn db_schema_functions(conn_id: String, schema: String,
+    mgr: tauri::State<'_, ConnManager>) -> Result<Vec<String>, DbError> {
+    let drv = mgr.get(&conn_id).await.ok_or(DbError::NotFound(conn_id))?;
+    drv.list_functions(&schema).await
+}
+
 #[tauri::command]
 pub async fn db_er_model(conn_id: String, schema: String,
     mgr: tauri::State<'_, ConnManager>) -> Result<Vec<ErRelation>, DbError> {

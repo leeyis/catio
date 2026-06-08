@@ -189,7 +189,7 @@ export function DbWorkbench({ conn, density }: DbWorkbenchProps) {
             </div>
           </>
         )}
-        {obj.type === 'er' && <ERDiagram onOpenTable={(tblName) => setObj({ type: 'table', schema: namespace.name, table: tblName })} />}
+        {obj.type === 'er' && <ERDiagram connId={connId ?? undefined} schema={namespace.name} onOpenTable={(tblName) => setObj({ type: 'table', schema: namespace.name, table: tblName })} />}
         {/* SQL query tabs — every open query stays mounted (display-toggled) so its
             editor + results persist across tab/table switches. */}
         {openQueries.length > 0 && (

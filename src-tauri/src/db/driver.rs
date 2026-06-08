@@ -144,6 +144,12 @@ pub trait Driver: Send + Sync {
         }
         Ok(out)
     }
+
+    /// List stored functions/procedures in a schema. Default is empty so engines
+    /// without routine support (or that haven't overridden) still compile.
+    async fn list_functions(&self, _schema: &str) -> Result<Vec<String>, DbError> {
+        Ok(vec![])
+    }
 }
 
 /// 按 db_type 建立驱动。后续每加一个引擎在此加一臂。

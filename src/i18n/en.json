@@ -103,6 +103,8 @@
     "noFks": "This table has no foreign key constraints",
     "erTables": "tables",
     "erRelations": "relations",
+    "erLoading": "Loading diagram…",
+    "erEmpty": "No tables to display in this schema",
     "zoomOut": "Zoom out",
     "zoomIn": "Zoom in",
     "zoomReset": "Reset zoom",

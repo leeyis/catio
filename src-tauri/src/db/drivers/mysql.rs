@@ -383,6 +383,24 @@ impl Driver for MySqlDriver {
         }
         self.mysql_er_relations(schema).await
     }
+
+    async fn list_functions(&self, schema: &str) -> Result<Vec<String>, DbError> {
+        // information_schema.routines includes both FUNCTION and PROCEDURE routines.
+        let sql = format!(
+            "SELECT routine_name FROM information_schema.routines \
+             WHERE routine_schema = {} ORDER BY routine_name",
+            quote_value(schema),
+        );
+        let mut conn = self.pool.get_conn().await
+            .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
+        let result = conn.query_iter(&sql).await
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        let rows: Vec<mysql_async::Row> = result
+            .collect_and_drop()
+            .await
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        Ok(rows.iter().map(|r| get_str(r, 0)).collect())
+    }
 }
 
 // ── Standard MySQL introspection helpers ────────────────────────────────────
