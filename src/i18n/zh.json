@@ -146,7 +146,16 @@
     "objLoading": "正在加载定义…",
     "objViewKind": "视图",
     "objFunctionKind": "函数",
-    "objProcedureKind": "存储过程"
+    "objProcedureKind": "存储过程",
+    "createTableTitle": "新建表",
+    "createViewTitle": "新建视图",
+    "tableName": "表名",
+    "viewName": "视图名",
+    "selectStatement": "SELECT 语句",
+    "columns": "列",
+    "pkLabel": "主键",
+    "removeColumn": "移除列",
+    "create": "创建"
   },
   "workbench": {
     "newTab": "新建标签",

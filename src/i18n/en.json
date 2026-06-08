@@ -146,7 +146,16 @@
     "objLoading": "Loading definition…",
     "objViewKind": "View",
     "objFunctionKind": "Function",
-    "objProcedureKind": "Procedure"
+    "objProcedureKind": "Procedure",
+    "createTableTitle": "New table",
+    "createViewTitle": "New view",
+    "tableName": "Table name",
+    "viewName": "View name",
+    "selectStatement": "SELECT statement",
+    "columns": "Columns",
+    "pkLabel": "PK",
+    "removeColumn": "Remove column",
+    "create": "Create"
   },
   "workbench": {
     "newTab": "New tab",

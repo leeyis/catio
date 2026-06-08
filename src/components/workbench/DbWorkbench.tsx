@@ -5,10 +5,11 @@ import { Icon } from '../Icon'
 import { Segmented } from '../atoms'
 import { DataGrid, StructureView, SqlConsole, ERDiagram } from '../dbviews'
 import { SqlEditor } from '../dbviews/SqlEditor'
+import { CreateObjectModal } from '../dbviews/CreateObjectModal'
 import { SchemaBrowser } from './SchemaBrowser'
 import { useData } from '../../state/DataContext'
 import { listActiveDbConnections } from '../../state/dbConnections'
-import { getSchema, tablePreview, tableStructure, objectSource, dbErrMsg, type DbCapabilities } from '../../services/db'
+import { getSchema, tablePreview, tableStructure, objectSource, runQuery, dbErrMsg, type DbCapabilities } from '../../services/db'
 import type { Connection, ResultColumn, Schema, SchemaNamespace } from '../../services/types'
 
 /** Initial page size for the live table preview (matches DataGrid's default). */
@@ -63,6 +64,10 @@ export function DbWorkbench({ conn, density }: DbWorkbenchProps) {
   const [queryInitialCode, setQueryInitialCode] = useState<Record<number, string>>({})
   // Schema whose ER diagram is being viewed (null → falls back to current namespace).
   const [erSchema, setErSchema] = useState<string | null>(null)
+  // Open CREATE TABLE/VIEW form modal (null → closed). Carries the target schema + kind.
+  const [createObj, setCreateObj] = useState<{ schema: string; kind: 'table' | 'view' } | null>(null)
+  // Error surfaced when a CREATE statement fails to run.
+  const [createErr, setCreateErr] = useState<string | null>(null)
   // Horizontally-scrollable query tab strip — chevrons scroll it when tabs overflow.
   const tabStripRef = useRef<HTMLDivElement>(null)
   const scrollTabs = (dx: number) => tabStripRef.current?.scrollBy({ left: dx, behavior: 'smooth' })
@@ -194,12 +199,11 @@ export function DbWorkbench({ conn, density }: DbWorkbenchProps) {
     if (seed != null) setQueryInitialCode(m => ({ ...m, [id]: seed }))
     setObj({ type: 'sql', qid: id })
   }
-  /** Open a fresh query tab seeded with a CREATE TABLE/VIEW template for `schema`. */
+  /** Open the CREATE TABLE/VIEW form modal for `schema`. No-op without a live connection. */
   function onNewObjectTemplate(schema: string, kind: 'table' | 'view') {
-    const template = kind === 'table'
-      ? `CREATE TABLE ${schema}.new_table (\n  id bigserial PRIMARY KEY,\n  name text\n);\n`
-      : `CREATE VIEW ${schema}.new_view AS\nSELECT * FROM ${schema}.some_table;\n`
-    newQuery(template)
+    if (!connId) return
+    setCreateErr(null)
+    setCreateObj({ schema, kind })
   }
   function closeQuery(id: number) {
     const next = openQueries.filter(x => x !== id)
@@ -223,7 +227,7 @@ export function DbWorkbench({ conn, density }: DbWorkbenchProps) {
         erActive={obj.type === 'er'} sqlActive={obj.type === 'sql'}
         disabledSql={!caps.sqlConsole} disabledEr={!caps.er}
         schemas={connId ? namespaces : undefined} conn={connId ? conn : undefined} live={!!connId} />
-      <div className="col grow" style={{ minWidth: 0, minHeight: 0, overflow: 'hidden' }}>
+      <div className="col grow" style={{ minWidth: 0, minHeight: 0, overflow: 'hidden', position: 'relative' }}>
         {obj.type === 'table' && (
           <>
             <div className="row" style={{ justifyContent: 'space-between', padding: '8px 12px', borderBottom: '1px solid var(--border-hairline)', flex: 'none', gap: 12 }}>
@@ -316,6 +320,32 @@ export function DbWorkbench({ conn, density }: DbWorkbenchProps) {
                 </div>
               ))}
             </div>
+          </div>
+        )}
+        {/* CREATE TABLE / VIEW form modal — only with a live connection. */}
+        {createObj && connId && (
+          <CreateObjectModal
+            kind={createObj.kind}
+            schema={createObj.schema}
+            engine={conn.engine}
+            onClose={() => { setCreateObj(null); setCreateErr(null) }}
+            onCreate={async sql => {
+              try {
+                await runQuery(connId, sql)
+                setCreateObj(null)
+                setCreateErr(null)
+                refreshSchema()
+              } catch (e) {
+                setCreateErr(dbErrMsg(e))
+              }
+            }}
+          />
+        )}
+        {createErr && (
+          <div className="row gap6" style={{ position: 'absolute', left: 12, bottom: 12, zIndex: 80, maxWidth: 420, padding: '9px 12px', borderRadius: 10, border: '1px solid var(--danger-border)', background: 'var(--danger-soft)', color: 'var(--danger-fg)', fontSize: 12, boxShadow: 'var(--shadow-window)' }}>
+            <Icon name="alert-triangle" size={14} style={{ flex: 'none' }} />
+            <span>{t('dbviews.applyError', { message: createErr })}</span>
+            <button className="icon-btn bare" style={{ width: 20, height: 20, marginLeft: 'auto' }} onClick={() => setCreateErr(null)}><Icon name="x" size={12} /></button>
           </div>
         )}
       </div>
