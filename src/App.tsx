@@ -472,7 +472,7 @@ export default function App() {
           {/* panel slot */}
           {panelOpen && (aiForm === 'side' || activePanel !== 'ai') && (
             <div className="fade-in" style={{ display: 'flex' }}>
-              {activePanel === 'ai' && <AIPanel onClose={() => setPanelOpen(false)} mode={aiMode} conn={curConn ?? undefined} attachment={aiAttachment} onClearAttachment={() => setAiAttachment(null)} />}
+              {activePanel === 'ai' && <AIPanel onClose={() => setPanelOpen(false)} mode={aiMode} conn={curConn ?? undefined} attachment={aiAttachment} onClearAttachment={() => setAiAttachment(null)} onInsert={insertToTerminal} canInsert={canInsert} onOpenSettings={goSettings} />}
               {activePanel === 'sftp' && <SftpPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} />}
               {activePanel === 'monitor' && <MonitorPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} />}
               {activePanel === 'tunnels' && <TunnelsPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} />}
