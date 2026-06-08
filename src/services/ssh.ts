@@ -215,6 +215,7 @@ export async function getTermBuffer(_id: string): Promise<TermLine[]> {
 // ---- History audit event subscription ----
 
 export interface HistoryEvent {
+  id: string
   command: string
   exitCode: number | null
   cwd: string

@@ -24,6 +24,12 @@ use tokio::sync::mpsc;
 use crate::ssh::{ids::IdGen, manager::SessionManager, osc, shell_integration, SshError};
 
 static CHAN_IDS: IdGen = IdGen::new("chan");
+/// Process-wide monotonic id for emitted `history://` events so the frontend can
+/// dedup a single backend command even if multiple listeners observe the event.
+static HIST_IDS: IdGen = IdGen::new("hist");
+/// How long to keep the terminal "muted" if no shell-integration marker arrives
+/// (e.g. a shell without bash/zsh hooks). After this, output is shown unfiltered.
+const MUTE_FALLBACK_MS: u64 = 3000;
 
 /// 发给「拥有 channel 的 owner 任务」的指令。
 pub enum TermCmd {
@@ -86,6 +92,15 @@ pub async fn term_open(
         let mut cur_cmd: Option<String> = None;
         let mut cur_cwd = String::new();
         let mut cur_start = std::time::Instant::now();
+        // Mute phase: from connect we drop visible output until shell integration
+        // is live (first OSC marker arrives = first prompt reached). This swallows
+        // the echoed bootstrap line (the base64 blob + eval) that the remote shell
+        // echoes back before the first prompt. NOTE: any MOTD/banner printed in
+        // these first moments is also suppressed — acceptable tradeoff for hiding
+        // the injected bootstrap. A 3s fallback unmutes shells WITHOUT integration
+        // (no markers ever arrive) so they aren't blank forever.
+        let mut muted = true;
+        let started = std::time::Instant::now();
         loop {
             tokio::select! {
                 msg = channel.wait() => match msg {
@@ -93,12 +108,14 @@ pub async fn term_open(
                         emit_scanned(
                             &app, &evt, &history_evt, &host, &mut scanner, data,
                             &mut cur_cmd, &mut cur_cwd, &mut cur_start,
+                            &mut muted, &started,
                         );
                     }
                     Some(ChannelMsg::ExtendedData { ref data, .. }) => {
                         emit_scanned(
                             &app, &evt, &history_evt, &host, &mut scanner, data,
                             &mut cur_cmd, &mut cur_cwd, &mut cur_start,
+                            &mut muted, &started,
                         );
                     }
                     Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
@@ -134,11 +151,25 @@ fn emit_scanned(
     cur_cmd: &mut Option<String>,
     cur_cwd: &mut String,
     cur_start: &mut std::time::Instant,
+    muted: &mut bool,
+    started: &std::time::Instant,
 ) {
     let (visible, events) = scanner.feed(data);
-    if !visible.is_empty() {
+    // Decide whether to show this batch's visible bytes.
+    if *muted {
+        // The first OSC marker means shell integration is live (first prompt
+        // reached) → unmute and emit this (clean, post-eval) batch. Otherwise a
+        // 3s fallback unmutes shells that never emit markers.
+        if !events.is_empty() {
+            *muted = false;
+        } else if started.elapsed() > std::time::Duration::from_millis(MUTE_FALLBACK_MS) {
+            *muted = false;
+        }
+    }
+    if !*muted && !visible.is_empty() {
         let _ = app.emit(evt, serde_json::json!({ "bytesBase64": B64.encode(&visible) }));
     }
+    // Always process events for the audit state machine regardless of mute.
     for ev in events {
         match ev {
             osc::OscEvent::CommandLine(c) => {
@@ -155,6 +186,7 @@ fn emit_scanned(
                     let _ = app.emit(
                         history_evt,
                         serde_json::json!({
+                            "id": HIST_IDS.next(),
                             "command": cmd,
                             "exitCode": code,
                             "cwd": *cur_cwd,

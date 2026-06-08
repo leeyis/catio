@@ -39,6 +39,8 @@ vi.mock('@xterm/xterm', () => ({
     clearSelection() {}
     clear() {}
     getSelection() { return '' }
+    getSelectionPosition() { return { start: { x: 0, y: 0 }, end: { x: 4, y: 0 } } }
+    buffer = { active: { viewportY: 0 } }
     loadAddon() {}
     dispose() { h.xtermDispose() }
     focus() {}

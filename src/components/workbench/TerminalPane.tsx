@@ -198,10 +198,27 @@ export function TerminalPane({ conn, sessionId, resolveSessionId, onChannel }: T
       const rootRect = root.getBoundingClientRect()
       const hostRect = hostEl.getBoundingClientRect()
       const scale = (rootRect.width / root.offsetWidth) || 1
-      const left = (hostRect.left + hostRect.width / 2 - rootRect.left) / scale
-      // xterm.js exposes no selection pixel coords; toolbar is anchored near the top of
-      // the surface rather than at the selection. Known limitation vs the old DOM renderer.
-      const top = (hostRect.top + 24 - rootRect.top) / scale
+      const pos = term.getSelectionPosition()
+      if (!pos) {
+        // No selection position available — fall back to top-anchored toolbar.
+        const left = (hostRect.left + hostRect.width / 2 - rootRect.left) / scale
+        const top = (hostRect.top + 24 - rootRect.top) / scale
+        setSelBar({ left, top, text: text.trim() })
+        return
+      }
+      // Derive cell size from the xterm container (close enough for placement).
+      const cellW = hostEl.clientWidth / term.cols
+      const cellH = hostEl.clientHeight / term.rows
+      // Visible row of the selection start (clamp if scrolled above the viewport).
+      const viewportY = term.buffer.active.viewportY
+      const rowInView = Math.max(0, pos.start.y - viewportY)
+      // Horizontal center of the selection on its start row; top of that row.
+      const selLeftPx = ((pos.start.x + pos.end.x) / 2) * cellW
+      const selTopPx = rowInView * cellH
+      const left = (hostRect.left + selLeftPx - rootRect.left) / scale
+      // The toolbar sits ABOVE the selection (JSX uses translateY(-100%)); clamp so
+      // it doesn't get clipped off the top of the surface.
+      const top = Math.max((hostRect.top + selTopPx - rootRect.top) / scale, 24)
       setSelBar({ left, top, text: text.trim() })
     })
 

@@ -74,6 +74,9 @@ export default function App() {
   const [history, setHistory] = useState<HistoryItem[]>(() => loadHistory())
   // sessionId -> unlisten fn for history:// subscriptions; avoids re-render on update.
   const historyUnlisteners = useRef<Record<string, () => void>>({})
+  // Per-event idempotency: a single backend command must produce exactly one row
+  // even if multiple listeners observe the same history:// event. Bounded below.
+  const seenHistIds = useRef<Set<string>>(new Set())
   // Connect-flow state machine: collect secret, then (maybe) trust host key.
   // pendingJumpSecret: when a profile has a jump host, collect jump secret first.
   const [pendingJumpSecret, setPendingJumpSecret] = useState<{ args: SshConnectArgs; name: string } | null>(null)
@@ -190,8 +193,17 @@ export default function App() {
     reloadProfiles()
 
     // Subscribe to shell-command audit events for this session (Tauri only).
+    // Reserve the slot SYNCHRONOUSLY before awaiting so a re-entrant call (e.g.
+    // a second openLiveTab for the same session) can't double-subscribe.
     if (sessionId && !historyUnlisteners.current[sessionId]) {
+      historyUnlisteners.current[sessionId] = () => { /* reserve immediately to block re-entry */ }
       void onHistory(sessionId, e => {
+        // Per-event dedup: drop any event id we've already applied so one backend
+        // command yields exactly one history row even with multiple listeners.
+        if (seenHistIds.current.has(e.id)) return
+        seenHistIds.current.add(e.id)
+        // Bound the set so it can't grow without limit on long-lived sessions.
+        if (seenHistIds.current.size > 5000) seenHistIds.current.clear()
         appendHistory({
           kind: 'shell',
           target: e.host || name,
@@ -202,7 +214,10 @@ export default function App() {
         })
         setHistory(loadHistory())
       }).then(unlisten => {
-        historyUnlisteners.current[sessionId] = unlisten
+        // If the session was torn down while subscribing, unlisten now; otherwise
+        // replace the placeholder with the real unlisten fn.
+        if (historyUnlisteners.current[sessionId]) historyUnlisteners.current[sessionId] = unlisten
+        else unlisten()
       })
     }
   }
