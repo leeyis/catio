@@ -350,14 +350,30 @@ export default function App() {
       )
       return
     }
-    // Fallback: mock/live display conns without a saved profile just open a tab.
-    const isHost = conn.kind === 'host'
-    const tabId = (isHost ? 'tab-' : 'tab-') + conn.id
+    // DB connection: if already live, open its SQL workbench tab; otherwise open
+    // the details panel where the connect-with-password flow lives (dbConnect is
+    // never run directly from here because it needs a secret).
+    if (conn.kind === 'db') {
+      const active = listActiveDbConnections().find(a => a.profileId === conn.id)
+      if (active) {
+        const tabId = 'tab-' + conn.id
+        setTabs(prev => prev.some(tb => tb.id === tabId) ? prev : [...prev, {
+          id: tabId, kind: 'sql', connId: conn.id, title: conn.name,
+        }])
+        setActiveTab(tabId)
+        setView('workbench')
+      } else {
+        openDetail(conn)
+      }
+      return
+    }
+    // Fallback: live display host conns without a saved profile just open a tab.
+    const tabId = 'tab-' + conn.id
     setTabs(prev => prev.some(tb => tb.id === tabId) ? prev : [...prev, {
       id: tabId,
-      kind: isHost ? 'terminal' : 'sql',
+      kind: 'terminal',
       connId: conn.id,
-      title: isHost ? conn.name : conn.name + ' · orders',
+      title: conn.name,
     }])
     setActiveTab(tabId)
     setView('workbench')

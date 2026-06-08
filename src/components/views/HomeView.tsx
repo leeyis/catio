@@ -3,9 +3,8 @@ import React from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { BrandMark } from '../BrandMark'
-import { ConnGlyph, IconBadge, SectionHead } from '../atoms'
+import { ConnGlyph, SectionHead } from '../atoms'
 import { useData } from '../../state/DataContext'
-import { useDbConnections, dbProfileToConnection } from '../../state/dbConnections'
 import type { Connection } from '../../services/types'
 
 // ---- Prop types ----
@@ -68,7 +67,7 @@ function InfoRow({ conn, onOpen, onDetail, showGroup }: InfoRowProps) {
       <div className="row gap6" style={{ flexWrap: 'wrap', maxWidth: 200, justifyContent: 'flex-end' }}>
         {(conn.tags || []).slice(0, 2).map(tag => <span key={tag} className="chip mono" style={{ height: 20, fontSize: 10 }}>{tag}</span>)}
       </div>
-      <span style={{ fontSize: 11, color: 'var(--text-faint)', width: 56, textAlign: 'right' }}>{t('home.ago', { time: conn.lastUsed })}</span>
+      <span style={{ fontSize: 11, color: 'var(--text-faint)', width: 56, textAlign: 'right' }}>{conn.lastUsed ? t('home.ago', { time: conn.lastUsed }) : ''}</span>
       {hover ? (
         <div className="row gap4">
           <button className="icon-btn" style={{ width: 30, height: 30 }} onClick={e => { e.stopPropagation(); onDetail && onDetail(conn) }}><Icon name="info" size={14} /></button>
@@ -79,8 +78,7 @@ function InfoRow({ conn, onOpen, onDetail, showGroup }: InfoRowProps) {
   )
 }
 
-export function HomeView({ onOpen, onNew, onVault, owned = true, userName = '', authEnabled = false }: HomeViewProps) {
-  const D = useData()
+export function HomeView({ onOpen, onNew, onVault, owned = true, userName = '', authEnabled = false, conns = [] }: HomeViewProps) {
   const { t, i18n } = useTranslation()
   // Real time-based greeting + live date/time (was a hardcoded mock). Name only
   // when account auth is on (otherwise there is no real user to greet).
@@ -90,21 +88,12 @@ export function HomeView({ onOpen, onNew, onVault, owned = true, userName = '', 
   const greetLine = authEnabled && userName ? t('home.greetingWithName', { greet, name: userName }) : greet
   const lang = i18n.language || 'zh'
   const statusLine = now.toLocaleDateString(lang, { weekday: 'long' }) + ' · ' + now.toLocaleTimeString(lang, { hour: '2-digit', minute: '2-digit', hour12: false })
-  // Real saved DB connections (reactive). Mock DBs are hidden from the home view —
-  // only real saved profiles + mock SSH hosts surface here.
-  const dbProfiles = useDbConnections()
-  const realDbConns = dbProfiles.map(p => dbProfileToConnection(p))
-  const mockDbIds = new Set(D.connections.filter(c => c.kind === 'db').map(c => c.id))
-  // Stats reflect REAL saved connections.
-  const hostCount = D.connections.filter(c => c.kind === 'host').length
-  const dbCount = realDbConns.length
-  // Active tunnels are not yet wired to a real backend in this sub-project → 0.
+  // Everything below is driven by the REAL saved vault connections — no mock data.
+  const hostCount = conns.filter(c => c.kind === 'host').length
+  const dbCount = conns.filter(c => c.kind === 'db').length
+  // Active tunnels + recent-session history are not yet tracked → 0 / empty state.
   const tunnelCount = 0
-  // Recent sessions, minus any that reference a hidden mock DB connection.
-  const recents = D.recent.filter(r => !(r.kind === 'db' && mockDbIds.has(r.ref)))
-  // Quick-connect: two mock hosts + the first real saved DB connection (if any).
-  const quickHosts = D.connections.filter(c => ['h-bastion', 'h-web1'].includes(c.id))
-  const quickConns: Connection[] = [...quickHosts, ...realDbConns.slice(0, 1)]
+  const quickConns: Connection[] = conns
 
   if (!owned) {
     return (
@@ -155,34 +144,11 @@ export function HomeView({ onOpen, onNew, onVault, owned = true, userName = '', 
           </div>
         </div>
 
-        {/* Recent — real session history when present, otherwise an empty state */}
-        <SectionHead title={t('home.recentSessions')} count={recents.length} />
-        {recents.length ? (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16, marginBottom: 32 }}>
-            {recents.map(r => {
-              const conn = D.byId[r.ref]
-              return (
-                <button key={r.id} onClick={() => conn && onOpen(conn)} className="card-surface" style={{ textAlign: 'left', padding: 16, display: 'flex', gap: 12, alignItems: 'center', transition: 'transform .12s, box-shadow .12s' }}
-                  onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = 'var(--shadow-pill)' }}
-                  onMouseLeave={e => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = 'var(--shadow-card)' }}>
-                  {conn ? <ConnGlyph conn={conn} size={42} radius={12} /> : <IconBadge icon={r.icon} />}
-                  <div className="col grow" style={{ lineHeight: 1.3, minWidth: 0 }}>
-                    <span className="ell" style={{ fontSize: 14, fontWeight: 600 }}>{r.title}</span>
-                    <span className="ell" style={{ fontSize: 11.5, color: 'var(--text-faint)' }}>{r.detail}</span>
-                  </div>
-                  <div className="col" style={{ alignItems: 'flex-end', gap: 6 }}>
-                    <Icon name={r.kind === 'db' ? 'table-2' : 'terminal'} size={14} style={{ color: 'var(--text-disabled)' }} />
-                    <span style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{r.when}</span>
-                  </div>
-                </button>
-              )
-            })}
-          </div>
-        ) : (
-          <div style={{ marginBottom: 32 }}>
-            <EmptySection icon="history" text={t('home.recentEmpty')} />
-          </div>
-        )}
+        {/* Recent sessions — not tracked yet, so an honest empty state (no mock cards) */}
+        <SectionHead title={t('home.recentSessions')} count={0} />
+        <div style={{ marginBottom: 32 }}>
+          <EmptySection icon="history" text={t('home.recentEmpty')} />
+        </div>
 
         {/* Automation + quick */}
         <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 16 }}>
