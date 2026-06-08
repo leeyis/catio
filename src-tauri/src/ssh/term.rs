@@ -21,7 +21,7 @@ use russh::ChannelMsg;
 use tauri::Emitter;
 use tokio::sync::mpsc;
 
-use crate::ssh::{ids::IdGen, manager::SessionManager, SshError};
+use crate::ssh::{ids::IdGen, manager::SessionManager, osc, shell_integration, SshError};
 
 static CHAN_IDS: IdGen = IdGen::new("chan");
 
@@ -48,12 +48,14 @@ pub async fn term_open(
         .await
         .ok_or_else(|| SshError::NotFound(session_id.clone()))?;
 
-    let mut channel = {
+    let (mut channel, host) = {
         let s = sess.lock().await;
-        s.handle
+        let channel = s
+            .handle
             .channel_open_session()
             .await
-            .map_err(|e| SshError::Io(e.to_string()))?
+            .map_err(|e| SshError::Io(e.to_string()))?;
+        (channel, s.host.clone())
     };
     channel
         .request_pty(false, "xterm-256color", cols, rows, 0, 0, &[])
@@ -64,19 +66,40 @@ pub async fn term_open(
         .await
         .map_err(|e| SshError::Io(e.to_string()))?;
 
+    // Per-session nonce gates the OSC 633;E sequences so only our injected
+    // shell-integration hooks are trusted as command-audit sources.
+    let nonce = format!("{:016x}", rand::random::<u64>());
+    // Inject the shell-integration bootstrap once into the live shell.
+    channel
+        .data(shell_integration::bootstrap_line(&nonce).as_bytes())
+        .await
+        .ok();
+
     let chan_id = CHAN_IDS.next();
     let evt = format!("term://{chan_id}");
+    let history_evt = format!("history://{session_id}");
     let (tx, mut rx) = mpsc::unbounded_channel::<TermCmd>();
 
     tokio::spawn(async move {
+        let mut scanner = osc::Scanner::new(nonce);
+        // Audit state for the in-flight command.
+        let mut cur_cmd: Option<String> = None;
+        let mut cur_cwd = String::new();
+        let mut cur_start = std::time::Instant::now();
         loop {
             tokio::select! {
                 msg = channel.wait() => match msg {
                     Some(ChannelMsg::Data { ref data }) => {
-                        let _ = app.emit(&evt, serde_json::json!({ "bytesBase64": B64.encode(&data[..]) }));
+                        emit_scanned(
+                            &app, &evt, &history_evt, &host, &mut scanner, data,
+                            &mut cur_cmd, &mut cur_cwd, &mut cur_start,
+                        );
                     }
                     Some(ChannelMsg::ExtendedData { ref data, .. }) => {
-                        let _ = app.emit(&evt, serde_json::json!({ "bytesBase64": B64.encode(&data[..]) }));
+                        emit_scanned(
+                            &app, &evt, &history_evt, &host, &mut scanner, data,
+                            &mut cur_cmd, &mut cur_cwd, &mut cur_start,
+                        );
                     }
                     Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
                         let _ = app.emit(&evt, serde_json::json!({ "closed": true }));
@@ -95,6 +118,54 @@ pub async fn term_open(
 
     sess.lock().await.insert_term(chan_id.clone(), tx);
     Ok(chan_id)
+}
+
+/// Feed server bytes through the OSC scanner: forward the visible (stripped)
+/// bytes to xterm via `term://`, and drive the command-audit state machine,
+/// emitting `history://{sessionId}` on each completed command.
+#[allow(clippy::too_many_arguments)]
+fn emit_scanned(
+    app: &tauri::AppHandle,
+    evt: &str,
+    history_evt: &str,
+    host: &str,
+    scanner: &mut osc::Scanner,
+    data: &[u8],
+    cur_cmd: &mut Option<String>,
+    cur_cwd: &mut String,
+    cur_start: &mut std::time::Instant,
+) {
+    let (visible, events) = scanner.feed(data);
+    if !visible.is_empty() {
+        let _ = app.emit(evt, serde_json::json!({ "bytesBase64": B64.encode(&visible) }));
+    }
+    for ev in events {
+        match ev {
+            osc::OscEvent::CommandLine(c) => {
+                *cur_cmd = Some(c);
+                *cur_start = std::time::Instant::now();
+            }
+            osc::OscEvent::Cwd(d) => {
+                *cur_cwd = d;
+            }
+            osc::OscEvent::ExecStart => {}
+            osc::OscEvent::ExecEnd(code) => {
+                if let Some(cmd) = cur_cmd.take() {
+                    let dur = cur_start.elapsed().as_millis() as u64;
+                    let _ = app.emit(
+                        history_evt,
+                        serde_json::json!({
+                            "command": cmd,
+                            "exitCode": code,
+                            "cwd": *cur_cwd,
+                            "durationMs": dur,
+                            "host": host,
+                        }),
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// 向终端写入字节（base64 编码的击键/粘贴数据）。
