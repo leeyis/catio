@@ -72,6 +72,10 @@ pub struct TestServer {
     /// Root directory served by the sftp subsystem (None → no sftp root;
     /// subsystem_request will still serve a throwaway temp dir per process).
     sftp_root: Option<PathBuf>,
+    /// direct-tcpip behavior. `false` (default) → ECHO (C1/C3 L-forward tests
+    /// rely on this). `true` → FORWARD: dial the requested host:port over real
+    /// TCP and pipe bytes bidirectionally (ProxyJump bastion behavior).
+    forward_direct_tcpip: bool,
 }
 
 pub struct TestHandler {
@@ -81,6 +85,8 @@ pub struct TestHandler {
     pending: HashMap<ChannelId, Channel<Msg>>,
     /// Root dir for the sftp backend on this connection.
     sftp_root: Option<PathBuf>,
+    /// See [`TestServer::forward_direct_tcpip`].
+    forward_direct_tcpip: bool,
 }
 
 impl Server for TestServer {
@@ -91,6 +97,7 @@ impl Server for TestServer {
             shell_on: HashSet::new(),
             pending: HashMap::new(),
             sftp_root: self.sftp_root.clone(),
+            forward_direct_tcpip: self.forward_direct_tcpip,
         }
     }
 }
@@ -285,24 +292,47 @@ impl Handler for TestHandler {
         Ok(true)
     }
 
-    /// direct-tcpip (client L-forward) endpoint: ECHO. We ignore the requested
-    /// host/port and simply pipe the channel's stream back to itself, so any
-    /// bytes the client writes through the tunnel come straight back. Returning
-    /// Ok(true) accepts the channel.
+    /// direct-tcpip (client L-forward / ProxyJump) endpoint. Two behaviors:
+    ///
+    /// * ECHO (default, `forward_direct_tcpip == false`): ignore host/port and
+    ///   pipe the channel's stream back to itself. C1/C3 L-forward tests rely on
+    ///   this — any bytes the client writes through the tunnel come straight back.
+    /// * FORWARD (`forward_direct_tcpip == true`, via [`start_forwarding`]): act
+    ///   as a real bastion — dial the requested host:port over TCP and copy bytes
+    ///   bidirectionally between the inbound channel stream and that socket. This
+    ///   lets a client run a full SSH session to the target THROUGH this jump.
+    ///
+    /// Returning Ok(true) accepts the channel.
     async fn channel_open_direct_tcpip(
         &mut self,
         channel: Channel<Msg>,
-        _host_to_connect: &str,
-        _port_to_connect: u32,
+        host_to_connect: &str,
+        port_to_connect: u32,
         _originator_address: &str,
         _originator_port: u32,
         _session: &mut Session,
     ) -> Result<bool, Self::Error> {
-        tokio::spawn(async move {
-            let s = channel.into_stream();
-            let (mut r, mut w) = tokio::io::split(s);
-            let _ = tokio::io::copy(&mut r, &mut w).await;
-        });
+        if self.forward_direct_tcpip {
+            let host = host_to_connect.to_string();
+            let port = port_to_connect as u16;
+            tokio::spawn(async move {
+                let mut stream = channel.into_stream();
+                match tokio::net::TcpStream::connect((host.as_str(), port)).await {
+                    Ok(mut tcp) => {
+                        let _ = tokio::io::copy_bidirectional(&mut stream, &mut tcp).await;
+                    }
+                    Err(e) => {
+                        eprintln!("[test_server] jump dial {host}:{port} failed: {e}");
+                    }
+                }
+            });
+        } else {
+            tokio::spawn(async move {
+                let s = channel.into_stream();
+                let (mut r, mut w) = tokio::io::split(s);
+                let _ = tokio::io::copy(&mut r, &mut w).await;
+            });
+        }
         Ok(true)
     }
 }
@@ -318,17 +348,26 @@ impl Handler for TestHandler {
 /// unused ones are (benignly) flagged as dead in the others.
 #[allow(dead_code)]
 pub async fn start() -> std::net::SocketAddr {
-    start_inner(None).await
+    start_inner(None, false).await
 }
 
 /// Like [`start`], but the sftp subsystem serves the given `root` directory.
 /// The caller pre-populates `root`; the list test passes that path to `read_dir`.
 #[allow(dead_code)]
 pub async fn start_with_root(root: PathBuf) -> std::net::SocketAddr {
-    start_inner(Some(root)).await
+    start_inner(Some(root), false).await
 }
 
-async fn start_inner(sftp_root: Option<PathBuf>) -> std::net::SocketAddr {
+/// Start a test server that acts as a ProxyJump bastion: its `direct-tcpip`
+/// channel dials the requested host:port over real TCP and pipes bytes both
+/// ways (instead of echoing). Use as the jump host in proxyjump tests; pair
+/// with a normal [`start`] server as the final target.
+#[allow(dead_code)]
+pub async fn start_forwarding() -> std::net::SocketAddr {
+    start_inner(None, true).await
+}
+
+async fn start_inner(sftp_root: Option<PathBuf>, forward_direct_tcpip: bool) -> std::net::SocketAddr {
     let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)
         .expect("generate ed25519 host key");
     let config = Arc::new(Config {
@@ -342,7 +381,10 @@ async fn start_inner(sftp_root: Option<PathBuf>) -> std::net::SocketAddr {
     let addr = listener.local_addr().expect("local_addr");
 
     tokio::spawn(async move {
-        let mut server = TestServer { sftp_root };
+        let mut server = TestServer {
+            sftp_root,
+            forward_direct_tcpip,
+        };
         loop {
             let (socket, peer) = match listener.accept().await {
                 Ok(v) => v,

@@ -1,4 +1,4 @@
-﻿mod common;
+mod common;
 use common::test_server;
 
 use std::sync::atomic::Ordering;
@@ -21,8 +21,9 @@ async fn connect_into_manager() -> (SessionManager, String) {
         user: test_server::TEST_USER.into(),
         auth: AuthMethod::Password,
         secret: Some(test_server::TEST_PW.into()),
+        jump: None,
     };
-    let (handle, _, forwarded) = connect_authenticated(&args).await.unwrap();
+    let (handle, _, forwarded, _) = connect_authenticated(&args).await.unwrap();
     let mgr = SessionManager::default();
     mgr.insert(
         "sess-test".into(),
@@ -32,6 +33,7 @@ async fn connect_into_manager() -> (SessionManager, String) {
             user: args.user.clone(),
             terms: Default::default(),
             forwarded,
+            _jump: None,
         },
     )
     .await;

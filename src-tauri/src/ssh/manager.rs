@@ -17,6 +17,10 @@ pub struct Session {
     /// `远端bind端口 → Sender`，使服务端发起的 forwarded-tcpip channel 能被
     /// 路由到对应隧道任务。非 R 用途的会话此表保持空。
     pub forwarded: ForwardedRoutes,
+    /// ProxyJump 的跳板 handle（若经跳板连接）。仅为**保活**而持有：跳板 handle
+    /// 一旦 drop，目标会话赖以传输的 direct-tcpip 通道随之断开。直连会话为 `None`。
+    /// 字段以 `_` 前缀命名，表示按名字不被使用——存在即维持链路。
+    pub _jump: Option<russh::client::Handle<ClientHandler>>,
 }
 
 impl Session {

@@ -23,8 +23,9 @@ async fn sftp_list_returns_dir_contents() {
         user: test_server::TEST_USER.into(),
         auth: AuthMethod::Password,
         secret: Some(test_server::TEST_PW.into()),
+        jump: None,
     };
-    let (handle, _, _) = connect_authenticated(&args).await.unwrap();
+    let (handle, _, _, _) = connect_authenticated(&args).await.unwrap();
 
     let sftp_sess = sftp::open_sftp(&handle).await.expect("open sftp");
     let root_str = root.to_string_lossy().to_string();
@@ -68,8 +69,9 @@ async fn sftp_upload_download_round_trip() {
         user: test_server::TEST_USER.into(),
         auth: AuthMethod::Password,
         secret: Some(test_server::TEST_PW.into()),
+        jump: None,
     };
-    let (handle, _, _) = connect_authenticated(&args).await.unwrap();
+    let (handle, _, _, _) = connect_authenticated(&args).await.unwrap();
     let sftp_sess = sftp::open_sftp(&handle).await.expect("open sftp");
 
     // 上传（裸文件名 → resolve 到 root）。
@@ -123,8 +125,9 @@ async fn sftp_mkdir_rename_delete() {
         user: test_server::TEST_USER.into(),
         auth: AuthMethod::Password,
         secret: Some(test_server::TEST_PW.into()),
+        jump: None,
     };
-    let (handle, _, _) = connect_authenticated(&args).await.unwrap();
+    let (handle, _, _, _) = connect_authenticated(&args).await.unwrap();
     let sftp_sess = sftp::open_sftp(&handle).await.expect("open sftp");
     let root_str = root.to_string_lossy().to_string();
 

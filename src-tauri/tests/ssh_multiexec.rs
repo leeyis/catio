@@ -26,6 +26,7 @@ fn make_args(addr: std::net::SocketAddr) -> ConnectArgs {
         user: test_server::TEST_USER.into(),
         auth: AuthMethod::Password,
         secret: Some(test_server::TEST_PW.into()),
+        jump: None,
     }
 }
 
@@ -39,7 +40,7 @@ async fn run_on_returns_echoed_output() {
     let addr = test_server::start().await;
     let args = make_args(addr);
 
-    let (handle, _, forwarded) = connect_authenticated(&args).await.unwrap();
+    let (handle, _, forwarded, _) = connect_authenticated(&args).await.unwrap();
 
     let sess = Arc::new(Mutex::new(Session {
         handle,
@@ -47,6 +48,7 @@ async fn run_on_returns_echoed_output() {
         user: args.user.clone(),
         terms: Default::default(),
         forwarded,
+        _jump: None,
     }));
 
     let result = run_on(sess, "whoami-test-marker").await;
@@ -69,24 +71,26 @@ async fn run_on_two_sessions_respond_concurrently() {
 
     // Session 1
     let args1 = make_args(addr);
-    let (handle1, _, forwarded1) = connect_authenticated(&args1).await.unwrap();
+    let (handle1, _, forwarded1, _) = connect_authenticated(&args1).await.unwrap();
     let sess1 = Arc::new(Mutex::new(Session {
         handle: handle1,
         host: args1.host.clone(),
         user: args1.user.clone(),
         terms: Default::default(),
         forwarded: forwarded1,
+        _jump: None,
     }));
 
     // Session 2 (independent connection)
     let args2 = make_args(addr);
-    let (handle2, _, forwarded2) = connect_authenticated(&args2).await.unwrap();
+    let (handle2, _, forwarded2, _) = connect_authenticated(&args2).await.unwrap();
     let sess2 = Arc::new(Mutex::new(Session {
         handle: handle2,
         host: args2.host.clone(),
         user: args2.user.clone(),
         terms: Default::default(),
         forwarded: forwarded2,
+        _jump: None,
     }));
 
     // Run concurrently via tokio::join!
@@ -130,7 +134,7 @@ async fn run_on_via_session_manager() {
     // Insert two sessions
     for i in 0..2usize {
         let args = make_args(addr);
-        let (handle, _, forwarded) = connect_authenticated(&args).await.unwrap();
+        let (handle, _, forwarded, _) = connect_authenticated(&args).await.unwrap();
         mgr.insert(
             format!("sess-me-{i}"),
             Session {
@@ -139,6 +143,7 @@ async fn run_on_via_session_manager() {
                 user: args.user.clone(),
                 terms: Default::default(),
                 forwarded,
+                _jump: None,
             },
         )
         .await;

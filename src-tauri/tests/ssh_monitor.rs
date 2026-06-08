@@ -19,8 +19,9 @@ async fn sample_reflects_canned_monitor_data() {
         user: test_server::TEST_USER.into(),
         auth: AuthMethod::Password,
         secret: Some(test_server::TEST_PW.into()),
+        jump: None,
     };
-    let (handle, _, _) = connect_authenticated(&args).await.unwrap();
+    let (handle, _, _, _) = connect_authenticated(&args).await.unwrap();
 
     let m = sample(&handle, "testhost", Duration::from_millis(50))
         .await
@@ -61,8 +62,9 @@ async fn run_cmd_nonzero_exit_returns_empty_ok() {
         user: test_server::TEST_USER.into(),
         auth: AuthMethod::Password,
         secret: Some(test_server::TEST_PW.into()),
+        jump: None,
     };
-    let (handle, _, _) = connect_authenticated(&args).await.unwrap();
+    let (handle, _, _, _) = connect_authenticated(&args).await.unwrap();
 
     // nvidia-smi → test server: no stdout, exit 9
     let out = run_cmd(
