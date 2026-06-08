@@ -42,11 +42,17 @@ function fmtDate(epoch: number): string {
   const p = (n: number) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
+function fmtSpeed(bytesPerSec: number): string {
+  if (!bytesPerSec || bytesPerSec < 1) return ''
+  return `${fmtSize(bytesPerSec)}/s`
+}
 
 interface ActiveTransfer {
   id: string
   filename: string
   percent: number
+  /** Instantaneous transfer rate in bytes/sec (derived from progress deltas). */
+  speed: number
   status: 'active' | 'error'
   kind: 'up' | 'down'
 }
@@ -80,6 +86,8 @@ export function SftpPanel({ onClose, conn, sessionId }: SftpPanelProps) {
   const sessionRef = useRef(sessionId)
   sessionRef.current = sessionId
   const pathRef = useRef('')
+  // last progress sample per transfer, for computing speed.
+  const sampleRef = useRef<Record<string, { bytes: number; time: number }>>({})
 
   const load = useCallback((p: string) => {
     const sid = sessionRef.current
@@ -114,11 +122,16 @@ export function SftpPanel({ onClose, conn, sessionId }: SftpPanelProps) {
 
   // ---- transfers ----
   const trackTransfer = useCallback(async (id: string, filename: string, kind: 'up' | 'down') => {
-    setTransfers(prev => [...prev, { id, filename, percent: 0, status: 'active', kind }])
+    setTransfers(prev => [...prev, { id, filename, percent: 0, speed: 0, status: 'active', kind }])
     const offs: Array<() => void> = []
-    const cleanup = () => offs.forEach(f => f())
+    const cleanup = () => { offs.forEach(f => f()); delete sampleRef.current[id] }
     offs.push(await listen<TransferProgress>(`transfer-progress-${id}`, p => {
-      setTransfers(prev => prev.map(x => (x.id === id ? { ...x, percent: p.percent } : x)))
+      const now = Date.now()
+      const prev = sampleRef.current[id]
+      let speed = 0
+      if (prev && now > prev.time) speed = (p.bytesTransferred - prev.bytes) / ((now - prev.time) / 1000)
+      sampleRef.current[id] = { bytes: p.bytesTransferred, time: now }
+      setTransfers(prevT => prevT.map(x => (x.id === id ? { ...x, percent: p.percent, speed: speed > 0 ? speed : x.speed } : x)))
     }))
     offs.push(await listen(`transfer-complete-${id}`, () => {
       cleanup()
@@ -252,6 +265,9 @@ export function SftpPanel({ onClose, conn, sessionId }: SftpPanelProps) {
                   <div className="row gap6" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
                     <Icon name={tr.kind === 'up' ? 'upload' : 'download'} size={11} />
                     <span className="ell" style={{ flex: 1 }}>{tr.filename}</span>
+                    {tr.status !== 'error' && tr.speed > 0 && (
+                      <span className="mono" style={{ color: 'var(--text-faint)' }}>{fmtSpeed(tr.speed)}</span>
+                    )}
                     <span className="mono">{tr.status === 'error' ? '!' : `${Math.round(tr.percent)}%`}</span>
                   </div>
                   <div style={{ height: 4, borderRadius: 4, background: 'var(--surface-sunken)', overflow: 'hidden' }}>
