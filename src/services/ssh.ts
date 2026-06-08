@@ -135,6 +135,11 @@ export async function sftpTouch(sessionId: string, path: string): Promise<void> 
   return tauriInvoke('sftp_touch', { sessionId, path })
 }
 
+/** Request cancellation of an in-flight upload/download by its transfer id. */
+export async function sftpTransferCancel(transferId: string): Promise<void> {
+  return tauriInvoke('sftp_transfer_cancel', { transferId })
+}
+
 export async function sftpMkdir(sessionId: string, path: string): Promise<void> {
   return tauriInvoke('sftp_mkdir', { sessionId, path })
 }

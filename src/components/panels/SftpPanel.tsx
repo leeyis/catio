@@ -5,7 +5,7 @@ import { IconBtn } from '../atoms'
 import type { Connection, SftpItem, TransferProgress } from '../../services/types'
 import { PanelShell } from './PanelShell'
 import { PanelEmpty } from './PanelEmpty'
-import { sftpList, sftpRealpath, sftpUpload, sftpDownload, sftpMkdir, sftpTouch, sftpRename, sftpDelete, listen } from '../../services/ssh'
+import { sftpList, sftpRealpath, sftpUpload, sftpDownload, sftpMkdir, sftpTouch, sftpRename, sftpDelete, sftpTransferCancel, listen } from '../../services/ssh'
 
 function isTauriEnv(): boolean {
   return (
@@ -94,6 +94,8 @@ export function SftpPanel({ onClose, conn, sessionId }: SftpPanelProps) {
   const pathRef = useRef('')
   // last progress sample per transfer, for computing speed.
   const sampleRef = useRef<Record<string, { bytes: number; time: number }>>({})
+  // per-transfer listener cleanup, so cancel can stop listening immediately.
+  const transferCleanup = useRef<Record<string, () => void>>({})
 
   const load = useCallback((p: string) => {
     const sid = sessionRef.current
@@ -130,7 +132,8 @@ export function SftpPanel({ onClose, conn, sessionId }: SftpPanelProps) {
   const trackTransfer = useCallback(async (id: string, filename: string, kind: 'up' | 'down') => {
     setTransfers(prev => [...prev, { id, filename, percent: 0, speed: 0, status: 'active', kind }])
     const offs: Array<() => void> = []
-    const cleanup = () => { offs.forEach(f => f()); delete sampleRef.current[id] }
+    const cleanup = () => { offs.forEach(f => f()); delete sampleRef.current[id]; delete transferCleanup.current[id] }
+    transferCleanup.current[id] = cleanup
     offs.push(await listen<TransferProgress>(`transfer-progress-${id}`, p => {
       const now = Date.now()
       const prev = sampleRef.current[id]
@@ -152,6 +155,11 @@ export function SftpPanel({ onClose, conn, sessionId }: SftpPanelProps) {
       setTransfers(prev => prev.filter(x => x.id !== id))
       load(pathRef.current)
     }))
+    offs.push(await listen(`transfer-cancelled-${id}`, () => {
+      cleanup()
+      setTransfers(prev => prev.filter(x => x.id !== id))
+      load(pathRef.current)
+    }))
     offs.push(await listen<string>(`transfer-error-${id}`, msg => {
       cleanup()
       setTransfers(prev => prev.map(x => (x.id === id ? { ...x, status: 'error' } : x)))
@@ -159,6 +167,15 @@ export function SftpPanel({ onClose, conn, sessionId }: SftpPanelProps) {
       // drop the errored row after a short delay
       setTimeout(() => setTransfers(prev => prev.filter(x => x.id !== id)), 4000)
     }))
+  }, [load])
+
+  // Cancel an in-flight transfer: tell the backend to stop, stop listening, and
+  // drop the row immediately (the backend's cancelled event is then ignored).
+  const cancelTransfer = useCallback((id: string) => {
+    sftpTransferCancel(id).catch(() => { /* best-effort */ })
+    transferCleanup.current[id]?.()
+    setTransfers(prev => prev.filter(x => x.id !== id))
+    load(pathRef.current)
   }, [load])
 
   const uploadLocal = useCallback(async (localPath: string) => {
@@ -331,6 +348,9 @@ export function SftpPanel({ onClose, conn, sessionId }: SftpPanelProps) {
                       <span className="mono" style={{ color: 'var(--text-faint)' }}>{fmtSpeed(tr.speed)}</span>
                     )}
                     <span className="mono">{tr.status === 'error' ? '!' : `${Math.round(tr.percent)}%`}</span>
+                    {tr.status === 'active' && (
+                      <IconBtn name="x" size={12} variant="bare" title={t('panels.sftpCancelTransfer')} onClick={() => cancelTransfer(tr.id)} />
+                    )}
                   </div>
                   <div style={{ height: 4, borderRadius: 4, background: 'var(--surface-sunken)', overflow: 'hidden' }}>
                     <div style={{ height: '100%', width: `${tr.percent}%`, background: tr.status === 'error' ? 'var(--signal-red, #e5484d)' : 'var(--accent-primary)', transition: 'width .15s' }} />

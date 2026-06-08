@@ -206,6 +206,7 @@
     "sftpDropToUpload": "Release to upload to the current directory",
     "sftpUploading": "Uploading",
     "sftpDownloading": "Downloading",
+    "sftpCancelTransfer": "Cancel transfer",
     "sftpTipModified": "Modified",
     "sftpTipSize": "Size",
     "sftpTipPerms": "Permissions",

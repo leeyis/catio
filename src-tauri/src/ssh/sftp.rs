@@ -10,13 +10,14 @@
 //! 选择 exec 而非 SFTP 子系统，与 Reach 一致：吞吐更高、`ls -lA` 直接给到
 //! tooltip 所需的属主/属组/权限/时间，且无需为每次操作另开子系统。
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
 use base64::Engine;
 use russh::client::Msg;
 use russh::{Channel, ChannelMsg};
 use serde::Serialize;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 use crate::ssh::manager::SessionManager;
 use crate::ssh::monitor::run_cmd;
@@ -234,6 +235,7 @@ async fn open_exec_channel(
 // ─── 流式传输 ────────────────────────────────────────────────────────────────
 
 /// 上传：本地文件 → 远端 `base64 -d > path`，48KiB 原始块流式 base64。
+/// 返回 `Ok(true)` 表示被取消，`Ok(false)` 表示正常完成。
 async fn upload_stream(
     mut channel: Channel<Msg>,
     local_path: &str,
@@ -241,7 +243,8 @@ async fn upload_stream(
     filename: &str,
     transfer_id: &str,
     app: &tauri::AppHandle,
-) -> Result<(), SshError> {
+    cancel: Arc<AtomicBool>,
+) -> Result<bool, SshError> {
     use tokio::io::AsyncReadExt;
 
     emit_progress(app, transfer_id, filename, 0, total_bytes);
@@ -254,6 +257,10 @@ async fn upload_stream(
     let mut sent: u64 = 0;
     let mut last_emit: u64 = 0;
     loop {
+        if cancel.load(Ordering::Relaxed) {
+            let _ = channel.eof().await;
+            return Ok(true);
+        }
         // 尽量填满 CHUNK（除最后一块外保证为 48KiB 的整块 → base64 无中段填充）。
         let mut filled = 0;
         while filled < CHUNK {
@@ -291,10 +298,11 @@ async fn upload_stream(
         .map_err(|e| SshError::Sftp(e.to_string()))?;
     wait_exit(&mut channel).await?;
     emit_progress(app, transfer_id, filename, total_bytes, total_bytes);
-    Ok(())
+    Ok(false)
 }
 
 /// 下载：远端 `base64 path` → 本地文件，按完整 base64 行解码写入。
+/// 返回 `Ok(true)` 表示被取消，`Ok(false)` 表示正常完成。
 async fn download_stream(
     mut channel: Channel<Msg>,
     local_path: &str,
@@ -302,7 +310,8 @@ async fn download_stream(
     filename: &str,
     transfer_id: &str,
     app: &tauri::AppHandle,
-) -> Result<(), SshError> {
+    cancel: Arc<AtomicBool>,
+) -> Result<bool, SshError> {
     use tokio::io::AsyncWriteExt;
 
     emit_progress(app, transfer_id, filename, 0, total_bytes);
@@ -319,7 +328,17 @@ async fn download_stream(
     let mut got_exit = false;
 
     loop {
-        match channel.wait().await {
+        if cancel.load(Ordering::Relaxed) {
+            drop(file);
+            let _ = tokio::fs::remove_file(local_path).await; // 删除不完整的本地文件
+            return Ok(true);
+        }
+        // 500ms 超时轮询，使取消即使在数据停滞时也能及时响应。
+        let msg = match tokio::time::timeout(std::time::Duration::from_millis(500), channel.wait()).await {
+            Ok(m) => m,
+            Err(_) => continue, // 超时 → 回到循环顶部重新检查取消标志
+        };
+        match msg {
             Some(ChannelMsg::Data { ref data }) => {
                 b64_buf.push_str(&String::from_utf8_lossy(data));
                 while let Some(nl) = b64_buf.find('\n') {
@@ -377,7 +396,7 @@ async fn download_stream(
     }
     file.flush().await.map_err(|e| SshError::Io(e.to_string()))?;
     emit_progress(app, transfer_id, filename, written, total_bytes);
-    Ok(())
+    Ok(false)
 }
 
 /// 等待远端命令结束并校验退出码（上传用）。
@@ -496,16 +515,14 @@ pub async fn sftp_upload(
     let cmd = format!("base64 -d > {}", shell_escape(&remote_path));
     let channel = open_exec_channel(&mgr, &session_id, &cmd).await?;
 
+    let cancel = Arc::new(AtomicBool::new(false));
+    mgr.register_transfer(id.clone(), cancel.clone()).await;
+
     let tid = id.clone();
     tauri::async_runtime::spawn(async move {
-        match upload_stream(channel, &local_path, total_bytes, &filename, &tid, &app).await {
-            Ok(()) => {
-                let _ = app.emit(&format!("transfer-complete-{}", tid), ());
-            }
-            Err(e) => {
-                let _ = app.emit(&format!("transfer-error-{}", tid), e.to_string());
-            }
-        }
+        let result = upload_stream(channel, &local_path, total_bytes, &filename, &tid, &app, cancel).await;
+        app.state::<SessionManager>().unregister_transfer(&tid).await;
+        dispatch_outcome(&app, &tid, result);
     });
     Ok(id)
 }
@@ -543,18 +560,35 @@ pub async fn sftp_download(
     let cmd = format!("base64 {}", shell_escape(&remote_path));
     let channel = open_exec_channel(&mgr, &session_id, &cmd).await?;
 
+    let cancel = Arc::new(AtomicBool::new(false));
+    mgr.register_transfer(id.clone(), cancel.clone()).await;
+
     let tid = id.clone();
     tauri::async_runtime::spawn(async move {
-        match download_stream(channel, &local_path, total_bytes, &filename, &tid, &app).await {
-            Ok(()) => {
-                let _ = app.emit(&format!("transfer-complete-{}", tid), ());
-            }
-            Err(e) => {
-                let _ = app.emit(&format!("transfer-error-{}", tid), e.to_string());
-            }
-        }
+        let result = download_stream(channel, &local_path, total_bytes, &filename, &tid, &app, cancel).await;
+        app.state::<SessionManager>().unregister_transfer(&tid).await;
+        dispatch_outcome(&app, &tid, result);
     });
     Ok(id)
+}
+
+/// 根据传输结果发出对应的终态事件：完成 / 取消 / 出错。
+fn dispatch_outcome(app: &tauri::AppHandle, tid: &str, result: Result<bool, SshError>) {
+    match result {
+        Ok(false) => { let _ = app.emit(&format!("transfer-complete-{}", tid), ()); }
+        Ok(true) => { let _ = app.emit(&format!("transfer-cancelled-{}", tid), ()); }
+        Err(e) => { let _ = app.emit(&format!("transfer-error-{}", tid), e.to_string()); }
+    }
+}
+
+/// 取消一个进行中的传输（置取消标志；流循环会尽快停止）。
+#[tauri::command]
+pub async fn sftp_transfer_cancel(
+    transfer_id: String,
+    mgr: tauri::State<'_, SessionManager>,
+) -> Result<(), SshError> {
+    mgr.cancel_transfer(&transfer_id).await;
+    Ok(())
 }
 
 /// 新建远端目录。

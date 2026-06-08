@@ -14,6 +14,7 @@ const h = vi.hoisted(() => ({
   sftpTouch: vi.fn(),
   sftpRename: vi.fn(),
   sftpDelete: vi.fn(),
+  sftpTransferCancel: vi.fn(),
   listen: vi.fn().mockResolvedValue(() => {}),
 }))
 
@@ -26,6 +27,7 @@ vi.mock('../../services/ssh', () => ({
   sftpTouch: h.sftpTouch,
   sftpRename: h.sftpRename,
   sftpDelete: h.sftpDelete,
+  sftpTransferCancel: h.sftpTransferCancel,
   listen: h.listen,
 }))
 
@@ -70,6 +72,7 @@ describe('SftpPanel (SFTP wiring)', () => {
     h.sftpTouch.mockResolvedValue(undefined)
     h.sftpRename.mockResolvedValue(undefined)
     h.sftpDelete.mockResolvedValue(undefined)
+    h.sftpTransferCancel.mockResolvedValue(undefined)
     h.listen.mockResolvedValue(() => {})
     ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
   })
@@ -141,6 +144,22 @@ describe('SftpPanel (SFTP wiring)', () => {
     fireEvent.change(input, { target: { value: 'b.txt' } })
     fireEvent.keyDown(input, { key: 'Enter' })
     await waitFor(() => expect(h.sftpRename).toHaveBeenCalledWith('sess-1', '/srv/a.txt', '/srv/b.txt'))
+  })
+
+  it('can cancel an in-flight upload', async () => {
+    const { open } = await import('@tauri-apps/plugin-dialog')
+    ;(open as ReturnType<typeof vi.fn>).mockResolvedValueOnce(['/local/big.bin'])
+    h.sftpUpload.mockResolvedValueOnce('xfer-9')
+
+    wrap(<SftpPanel onClose={() => {}} sessionId="sess-1" />)
+    await waitFor(() => expect(screen.getByText('a.txt')).toBeTruthy())
+
+    fireEvent.click(screen.getByTitle('上传'))
+    // the active transfer row (and its cancel button) appears
+    await waitFor(() => expect(screen.getByTitle('取消传输')).toBeTruthy())
+
+    fireEvent.click(screen.getByTitle('取消传输'))
+    await waitFor(() => expect(h.sftpTransferCancel).toHaveBeenCalledWith('xfer-9'))
   })
 
   it('deletes an entry via context menu + confirm', async () => {

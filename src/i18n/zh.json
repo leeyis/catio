@@ -206,6 +206,7 @@
     "sftpDropToUpload": "松开以上传到当前目录",
     "sftpUploading": "上传中",
     "sftpDownloading": "下载中",
+    "sftpCancelTransfer": "取消传输",
     "sftpTipModified": "修改时间",
     "sftpTipSize": "大小",
     "sftpTipPerms": "权限",

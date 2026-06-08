@@ -21,6 +21,7 @@ pub fn run() {
             ssh::sftp::sftp_realpath,
             ssh::sftp::sftp_download,
             ssh::sftp::sftp_upload,
+            ssh::sftp::sftp_transfer_cancel,
             ssh::sftp::sftp_mkdir,
             ssh::sftp::sftp_rename,
             ssh::sftp::sftp_delete,

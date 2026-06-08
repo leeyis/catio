@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::AbortHandle;
@@ -80,6 +80,8 @@ pub struct SessionManager {
     tunnels: Mutex<HashMap<String, TunnelEntry>>,
     /// 周期监控任务注册表：会话 id → 任务 AbortHandle。
     monitors: Mutex<HashMap<String, AbortHandle>>,
+    /// 进行中的 SFTP 传输取消标志：transfer id → flag。置 true 即请求取消。
+    transfers: Mutex<HashMap<String, Arc<AtomicBool>>>,
 }
 
 impl SessionManager {
@@ -150,5 +152,28 @@ impl SessionManager {
         if let Some(abort) = self.monitors.lock().await.remove(session_id) {
             abort.abort();
         }
+    }
+
+    // ─── SFTP 传输取消注册表 ─────────────────────────────────────────────────
+
+    /// 登记一个传输的取消标志。
+    pub async fn register_transfer(&self, id: String, flag: Arc<AtomicBool>) {
+        self.transfers.lock().await.insert(id, flag);
+    }
+
+    /// 请求取消一个传输（置标志为 true）。返回是否找到该传输。
+    pub async fn cancel_transfer(&self, id: &str) -> bool {
+        match self.transfers.lock().await.get(id) {
+            Some(flag) => {
+                flag.store(true, Ordering::Relaxed);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 移除一个传输的取消标志（完成/出错/取消后清理）。
+    pub async fn unregister_transfer(&self, id: &str) {
+        self.transfers.lock().await.remove(id);
     }
 }
