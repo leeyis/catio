@@ -28,6 +28,7 @@ pub fn run() {
             ssh::tunnel::tunnel_list,
             ssh::monitor::monitor_start,
             ssh::monitor::monitor_stop,
+            ssh::monitor::ssh_sysinfo,
             ssh::multiexec::multiexec_run
         ])
         .run(tauri::generate_context!())

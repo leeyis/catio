@@ -208,6 +208,13 @@ export async function multiexecRun(sessionIds: string[], cmd: string): Promise<s
   return tauriInvoke<string>('multiexec_run', { sessionIds, cmd })
 }
 
+/** Gather a compact host summary (OS/time/CPU/mem/disk/GPU) via SSH.
+ *  Returns an empty string outside Tauri (no SSH stack available). */
+export async function sshSysinfo(sessionId: string): Promise<string> {
+  if (!isTauri()) return ''
+  return tauriInvoke<string>('ssh_sysinfo', { sessionId })
+}
+
 export async function getTermBuffer(_id: string): Promise<TermLine[]> {
   return DATA.termLines
 }

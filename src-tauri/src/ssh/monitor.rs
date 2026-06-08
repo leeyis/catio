@@ -320,6 +320,52 @@ pub async fn monitor_stop(
 }
 
 // ────────────────────────────────────────────────
+// 6. Tauri 命令：ssh_sysinfo
+// ────────────────────────────────────────────────
+
+/// 通过 SSH 一次性采集主机紧凑摘要（OS/时间/CPU/内存/磁盘/GPU），
+/// 以纯文本返回给调用方（前端注入 Agent 系统提示词）。
+///
+/// 仅运行一条组合 shell 命令，复用 `run_cmd`；锁仅在 exec 期间持有。
+/// 对非 Linux/Bash 主机，命令中各段可能无输出，但仍返回 Ok（内容可能为空或稀疏）。
+#[tauri::command]
+pub async fn ssh_sysinfo(
+    session_id: String,
+    mgr: tauri::State<'_, SessionManager>,
+) -> Result<String, SshError> {
+    let sess = mgr
+        .get(&session_id)
+        .await
+        .ok_or_else(|| SshError::NotFound(session_id.clone()))?;
+
+    const SYSINFO_CMD: &str = concat!(
+        "{ ",
+        "echo '## OS'; ",
+        "(cat /etc/os-release 2>/dev/null | grep -E '^(PRETTY_NAME|VERSION)='); ",
+        "uname -srm; ",
+        "echo '## Time'; ",
+        "date '+%Y-%m-%d %H:%M:%S %Z (%z)'; ",
+        "echo '## CPU'; ",
+        "echo \"cores: $(nproc 2>/dev/null)\"; ",
+        "(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2-); ",
+        "echo '## Memory'; ",
+        "(free -h 2>/dev/null | awk 'NR==1||/^Mem:/'); ",
+        "echo '## Disk'; ",
+        "(df -h / 2>/dev/null | awk 'NR==1||NR==2'); ",
+        "echo '## GPU'; ",
+        "(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null || echo 'none'); ",
+        "}",
+    );
+
+    // 仅在 exec 期间持有锁，run_cmd 完成即释放。
+    let out = {
+        let s = sess.lock().await;
+        run_cmd(&s.handle, SYSINFO_CMD).await?
+    };
+    Ok(out.trim().to_string())
+}
+
+// ────────────────────────────────────────────────
 // 单元测试（assemble_monitor 纯函数）
 // ────────────────────────────────────────────────
 

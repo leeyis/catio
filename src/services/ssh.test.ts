@@ -42,4 +42,24 @@ describe('services/ssh', () => {
     expect(r.error).toBe('desktop-only')
     expect(invokeMock).not.toHaveBeenCalled()
   })
+
+  it('sshSysinfo returns empty string outside Tauri', async () => {
+    // Ensure no Tauri environment is present.
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+    delete (window as unknown as Record<string, unknown>).__TAURI__
+    const { sshSysinfo } = await import('./ssh')
+    const result = await sshSysinfo('sess-1')
+    expect(result).toBe('')
+    expect(invokeMock).not.toHaveBeenCalled()
+  })
+
+  it('sshSysinfo invokes ssh_sysinfo under Tauri and returns the result', async () => {
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+    invokeMock.mockResolvedValue('## OS\nUbuntu 22.04')
+    const { sshSysinfo } = await import('./ssh')
+    const result = await sshSysinfo('sess-2')
+    expect(invokeMock).toHaveBeenCalledWith('ssh_sysinfo', { sessionId: 'sess-2' })
+    expect(result).toBe('## OS\nUbuntu 22.04')
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
 })

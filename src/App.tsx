@@ -24,7 +24,7 @@ import { Btn } from './components/atoms'
 import { useTweaks, TWEAK_DEFAULTS } from './state/useTweaks'
 import { nextTheme, useApplyTheme } from './state/ThemeContext'
 import { useData } from './state/DataContext'
-import { sshConnect, sshDisconnect, sshTrustHost, isTauri, onHistory } from './services/ssh'
+import { sshConnect, sshDisconnect, sshTrustHost, isTauri, onHistory, sshSysinfo } from './services/ssh'
 import type { SshConnectArgs } from './services/ssh'
 import { appendHistory, loadHistory, clearHistory } from './state/history'
 import type { HistoryItem } from './services/types'
@@ -78,6 +78,8 @@ export default function App() {
   const agentAborts = useRef<Record<string, AbortController>>({})
   // convIds with a live in-flight stream (drives the panel's busy state).
   const [busyConvs, setBusyConvs] = useState<Record<string, boolean>>({})
+  // sessionId -> cached sysinfo string (fetched once per session on first agent send).
+  const sysinfoCache = useRef<Record<string, string>>({})
 
   // Upsert into both local state (live render) and localStorage (persistence).
   function upsertConversation(conv: Conversation) {
@@ -517,6 +519,23 @@ export default function App() {
     if (updated) saveConversation(updated)
   }
 
+  // Fetch sysinfo for a session once and cache it; subsequent calls return the
+  // cached string immediately. If the fetch fails, '' is cached so we don't retry
+  // on every message (the LLM just won't have that context for this session).
+  async function getSysinfo(sessionId: string): Promise<string> {
+    if (sessionId in sysinfoCache.current) {
+      return sysinfoCache.current[sessionId]
+    }
+    try {
+      const info = await sshSysinfo(sessionId)
+      sysinfoCache.current[sessionId] = info
+      return info
+    } catch {
+      sysinfoCache.current[sessionId] = ''
+      return ''
+    }
+  }
+
   async function sendAgentMessage(tabId: string, text: string) {
     const tab = tabs.find(tb => tb.id === tabId)
     if (!tab) return
@@ -533,12 +552,18 @@ export default function App() {
       messages: [...c.messages, { role: 'user', content: text }, { role: 'assistant', content: '' }],
     }))
 
-    // ---- P3 SEAM: enrich this system prompt with host sysinfo (OS/uptime/etc.).
-    // The active tab's `tabConn` (name/host) is already available here; P3 will
-    // inject collected system info into this message before sending. ----
+    // ---- P3 SEAM: enrich the system prompt with host sysinfo (OS/time/CPU/mem/disk/GPU).
+    // Fetch once per session (cached); await before building outgoing payload so the
+    // system message is complete. If the tab has no live session or fetch fails, the
+    // prompt falls back to the base shell-assistant instruction unchanged.
+    const liveSessionId = tab.sessionId
+    const sysinfo = liveSessionId ? await getSysinfo(liveSessionId) : ''
+    const sysinfoBlock = sysinfo
+      ? `\n\n系统会话上下文（当前连接的主机信息，供参考）:\n${sysinfo}\n回答时可据此结合该主机的实际环境（操作系统/时间/CPU/内存/磁盘/GPU）。`
+      : ''
     const system: ChatMsg = {
       role: 'system',
-      content: `You are a terminal/shell assistant for host "${hostName}". When you suggest a shell command, put it in a fenced code block.`,
+      content: `You are a terminal/shell assistant for host "${hostName}". When you suggest a shell command, put it in a fenced code block.${sysinfoBlock}`,
     }
     const outgoing: ChatMsg[] = [
       system,
