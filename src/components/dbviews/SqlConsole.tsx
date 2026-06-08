@@ -1,11 +1,11 @@
 /* ported from ref-ui/_extract/blob5.txt — verbatim per plan T1-T7; E6 wires the live query path */
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn } from '../atoms'
 import { useData } from '../../state/DataContext'
-import { runQuery } from '../../services/db'
-import type { ResultColumn } from '../../services/types'
+import { runQuery, getSchema } from '../../services/db'
+import type { ResultColumn, Schema } from '../../services/types'
 import { SqlEditor } from './SqlEditor'
 import { DataGrid } from './DataGrid'
 
@@ -31,6 +31,37 @@ export function SqlConsole({ density, fresh, queryN, writable = true, connId }: 
   // Live result of the last successful run (only used when connId is set).
   const [result, setResult] = useState<{ columns: ResultColumn[]; rows: unknown[][]; sql: string } | null>(null)
   const [runErr, setRunErr] = useState<string | null>(null)
+  // Live schema (table names) fetched from the backend when connected.
+  const [liveSchema, setLiveSchema] = useState<Schema | null>(null)
+
+  useEffect(() => {
+    if (!connId) { setLiveSchema(null); return }
+    let alive = true
+    getSchema(connId).then(s => { if (alive) setLiveSchema(s) }).catch(() => {})
+    return () => { alive = false }
+  }, [connId])
+
+  /**
+   * Completion schema map for the SQL editor: `table → [columns]`, with both a
+   * bare and `schema.table`-qualified key so lang-sql matches either form.
+   * Columns come from the mock `tableStructures` when known (best-effort); the
+   * live backend's getSchema only yields table names, so unknown tables get an
+   * empty column list (still enables table-name completion).
+   */
+  const editorSchema = useMemo<Record<string, string[]>>(() => {
+    const map: Record<string, string[]> = {}
+    const colsFor = (table: string): string[] =>
+      D.tableStructures[table]?.columns.map(c => c.name) ?? []
+    const namespaces = (liveSchema ?? D.schema).schemas
+    for (const ns of namespaces) {
+      for (const tbl of [...ns.tables, ...ns.views]) {
+        const cols = colsFor(tbl.name)
+        map[tbl.name] = cols
+        map[`${ns.name}.${tbl.name}`] = cols
+      }
+    }
+    return map
+  }, [liveSchema, D.schema, D.tableStructures])
 
   function run() {
     setRunErr(null)
@@ -77,7 +108,7 @@ export function SqlConsole({ density, fresh, queryN, writable = true, connId }: 
       </div>
       {/* editor */}
       <div style={{ flex: 'none', height: 188, borderBottom: '1px solid var(--border-hairline)' }}>
-        <SqlEditor code={code} onChange={setCode} />
+        <SqlEditor code={code} onChange={setCode} schema={editorSchema} onRun={run} />
       </div>
       {/* results */}
       <div className="grow" style={{ minHeight: 0 }}>
