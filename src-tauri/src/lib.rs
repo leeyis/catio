@@ -24,6 +24,7 @@ pub fn run() {
             db::commands::db_disconnect,
             db::commands::db_query,
             db::commands::db_schema,
+            db::commands::db_schema_columns,
             db::commands::db_table_structure,
             db::commands::db_er_model,
             db::commands::db_preview_dml,

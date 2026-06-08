@@ -122,6 +122,28 @@ pub trait Driver: Send + Sync {
     async fn table_structure(&self, schema: &str, table: &str) -> Result<TableStructure, DbError>;
     /// ER：该 schema 下所有 FK 关系。不支持的引擎返回 Unsupported。
     async fn er_relations(&self, schema: &str) -> Result<Vec<ErRelation>, DbError>;
+
+    /// 批量列名：为 schema 下每张表收集列名，供编辑器补全用。
+    ///
+    /// Default is engine-agnostic and best-effort: it reuses `list_tables` +
+    /// `table_structure`, so all drivers get it for free. Relational drivers MAY
+    /// override later with a single information_schema query for efficiency.
+    /// Per-table failures (e.g. Redis `table_structure` → Unsupported) degrade to
+    /// an empty column list rather than failing the whole call. Capped at the
+    /// first 200 tables to avoid pathological stalls on huge schemas (this is a
+    /// completion aid, so a silent cap is acceptable).
+    async fn schema_columns(&self, schema: &str) -> Result<Vec<(String, Vec<String>)>, DbError> {
+        const MAX_TABLES: usize = 200;
+        let tables = self.list_tables(schema).await?;
+        let mut out = Vec::new();
+        for t in tables.into_iter().take(MAX_TABLES) {
+            match self.table_structure(schema, &t.name).await {
+                Ok(st) => out.push((t.name, st.columns.into_iter().map(|c| c.name).collect())),
+                Err(_) => out.push((t.name, Vec::new())), // best-effort: skip columns on per-table failure
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// 按 db_type 建立驱动。后续每加一个引擎在此加一臂。

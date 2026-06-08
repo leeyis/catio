@@ -149,6 +149,15 @@ pub async fn db_table_structure(conn_id: String, schema: String, table: String,
     drv.table_structure(&schema, &table).await
 }
 
+/// Bulk column names for autocomplete: for each table in `schema`, its column
+/// names. Reuses the driver's default `schema_columns` (best-effort, capped).
+#[tauri::command]
+pub async fn db_schema_columns(conn_id: String, schema: String,
+    mgr: tauri::State<'_, ConnManager>) -> Result<Vec<(String, Vec<String>)>, DbError> {
+    let drv = mgr.get(&conn_id).await.ok_or(DbError::NotFound(conn_id))?;
+    drv.schema_columns(&schema).await
+}
+
 #[tauri::command]
 pub async fn db_er_model(conn_id: String, schema: String,
     mgr: tauri::State<'_, ConnManager>) -> Result<Vec<ErRelation>, DbError> {

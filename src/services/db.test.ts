@@ -70,6 +70,23 @@ describe('services/db', () => {
     expect(invokeMock).not.toHaveBeenCalled()
   })
 
+  it('schemaColumns returns [] outside Tauri (mock fallback)', async () => {
+    const { schemaColumns } = await import('./db')
+    const r = await schemaColumns('any', 'public')
+    expect(r).toEqual([])
+    expect(invokeMock).not.toHaveBeenCalled()
+  })
+
+  it('schemaColumns forwards to db_schema_columns under Tauri', async () => {
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+    invokeMock.mockResolvedValue([['orders', ['id', 'status']], ['customers', ['id', 'name']]])
+    const { schemaColumns } = await import('./db')
+    const r = await schemaColumns('conn-1', 'public')
+    expect(invokeMock).toHaveBeenCalledWith('db_schema_columns', { connId: 'conn-1', schema: 'public' })
+    expect(r).toEqual([['orders', ['id', 'status']], ['customers', ['id', 'name']]])
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
+
   it('getHistory forwards to db_history under Tauri', async () => {
     ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
     invokeMock.mockResolvedValue([{ id: 'hist-1', kind: 'sql', target: 'conn-1', text: 'SELECT 1', when: '0', dur: '1ms' }])

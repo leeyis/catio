@@ -178,3 +178,13 @@ export async function getSchema(connId: string): Promise<Schema> {
     })),
   }
 }
+
+/**
+ * Bulk column names for a schema: `[table, columns][]`, used to feed live
+ * column-name autocomplete in the SQL editor. Outside Tauri returns `[]`
+ * (the mock path derives columns from DATA.tableStructures instead).
+ */
+export async function schemaColumns(connId: string, schema: string): Promise<[string, string[]][]> {
+  if (!isTauri()) return []
+  return tauriInvoke<[string, string[]][]>('db_schema_columns', { connId, schema })
+}

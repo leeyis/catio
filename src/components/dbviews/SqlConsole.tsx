@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn } from '../atoms'
 import { useData } from '../../state/DataContext'
-import { runQuery, getSchema } from '../../services/db'
+import { runQuery, getSchema, schemaColumns } from '../../services/db'
 import type { ResultColumn, Schema } from '../../services/types'
 import { SqlEditor } from './SqlEditor'
 import { DataGrid } from './DataGrid'
@@ -33,6 +33,8 @@ export function SqlConsole({ density, fresh, queryN, writable = true, connId }: 
   const [runErr, setRunErr] = useState<string | null>(null)
   // Live schema (table names) fetched from the backend when connected.
   const [liveSchema, setLiveSchema] = useState<Schema | null>(null)
+  // Live columns per schema namespace: { [schemaName]: { [table]: columns } }.
+  const [liveColumns, setLiveColumns] = useState<Record<string, Record<string, string[]>>>({})
 
   useEffect(() => {
     if (!connId) { setLiveSchema(null); return }
@@ -41,27 +43,60 @@ export function SqlConsole({ density, fresh, queryN, writable = true, connId }: 
     return () => { alive = false }
   }, [connId])
 
+  // Stable identity of the schema namespaces (names only) so the column fetch
+  // re-runs when connId or the schema list changes, but NOT on every keystroke.
+  const namespaceNames = useMemo(
+    () => (liveSchema ? liveSchema.schemas.map(ns => ns.name) : []),
+    [liveSchema],
+  )
+  const namespaceKey = namespaceNames.join(',')
+
+  // Fetch REAL column names for each schema namespace from the live backend.
+  // Best-effort: on rejection we leave that namespace out (editor falls back to
+  // table-names-only). Re-runs only when connId or the namespace list changes.
+  useEffect(() => {
+    if (!connId || namespaceNames.length === 0) { setLiveColumns({}); return }
+    let alive = true
+    Promise.all(
+      namespaceNames.map(name =>
+        schemaColumns(connId, name)
+          .then(pairs => [name, Object.fromEntries(pairs)] as const)
+          .catch(() => [name, {} as Record<string, string[]>] as const),
+      ),
+    )
+      .then(entries => { if (alive) setLiveColumns(Object.fromEntries(entries)) })
+      .catch(() => { if (alive) setLiveColumns({}) })
+    return () => { alive = false }
+    // namespaceKey captures the namespace-name identity; intentionally not on liveSchema object.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connId, namespaceKey])
+
   /**
    * Completion schema map for the SQL editor: `table → [columns]`, with both a
    * bare and `schema.table`-qualified key so lang-sql matches either form.
-   * Columns come from the mock `tableStructures` when known (best-effort); the
-   * live backend's getSchema only yields table names, so unknown tables get an
-   * empty column list (still enables table-name completion).
+   *
+   * Connected (live) path: columns come from the REAL backend via
+   * `schemaColumns` (stored in `liveColumns`), merged across namespaces. A table
+   * still in flight (columns not yet fetched, or the fetch failed) falls back to
+   * an empty list — table-name completion still works.
+   *
+   * Mock path: columns come from `tableStructures` when known (best-effort).
    */
   const editorSchema = useMemo<Record<string, string[]>>(() => {
     const map: Record<string, string[]> = {}
-    const colsFor = (table: string): string[] =>
+    const mockColsFor = (table: string): string[] =>
       D.tableStructures[table]?.columns.map(c => c.name) ?? []
     const namespaces = (liveSchema ?? D.schema).schemas
     for (const ns of namespaces) {
+      const realCols = connId ? liveColumns[ns.name] : undefined
       for (const tbl of [...ns.tables, ...ns.views]) {
-        const cols = colsFor(tbl.name)
+        const cols = connId ? (realCols?.[tbl.name] ?? []) : mockColsFor(tbl.name)
         map[tbl.name] = cols
         map[`${ns.name}.${tbl.name}`] = cols
       }
     }
     return map
-  }, [liveSchema, D.schema, D.tableStructures])
+  }, [connId, liveSchema, liveColumns, D.schema, D.tableStructures])
 
   function run() {
     setRunErr(null)
