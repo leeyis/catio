@@ -405,8 +405,15 @@ export function SftpPanel({ onClose, conn, sessionId }: SftpPanelProps) {
                     <Icon name={it.type === 'dir' ? 'folder' : it.type === 'link' ? 'file-code' : 'file'}
                       size={15} style={{ color: it.type === 'dir' ? 'var(--signal-amber)' : 'var(--text-tertiary)', flex: 'none' }} />
                     <span className="ell mono" style={{ fontSize: 12.5, color: 'var(--text-secondary)', flex: 1 }}>{it.name}</span>
-                    {it.type === 'file' && (
-                      <IconBtn name="download" size={13} variant="bare" title={t('panels.sftpDownload')} onClick={e => { e.stopPropagation(); downloadItem(it) }} />
+                    {/* row actions — visible on hover/select so they are discoverable (no right-click needed) */}
+                    {(hover?.item.path === it.path || selected === it.path) && (
+                      <div className="row gap4" style={{ flex: 'none' }} onMouseDown={e => e.stopPropagation()}>
+                        {it.type === 'file' && (
+                          <IconBtn name="download" size={13} variant="bare" title={t('panels.sftpDownload')} onClick={e => { e.stopPropagation(); downloadItem(it) }} />
+                        )}
+                        <IconBtn name="pencil" size={13} variant="bare" title={t('panels.sftpRename')} onClick={e => { e.stopPropagation(); startRename(it) }} />
+                        <IconBtn name="trash-2" size={13} variant="bare" title={t('panels.sftpDelete')} onClick={e => { e.stopPropagation(); setHover(null); setDeleteConfirm(it) }} />
+                      </div>
                     )}
                   </div>
                 )
