@@ -288,9 +288,13 @@ export function ConnRow({ conn, active, onOpen, onDetail, nested }: ConnRowProps
   const { t } = useTranslation()
   const D = useData()
   const [hover, setHover] = useState(false)
+  // DB cards open the details panel on click (no workbench, no detail icon).
+  // Host/SSH cards keep the original behavior: click → workbench, hover → detail icon.
+  const isDb = conn.kind === 'db'
+  const handlePrimary = () => (isDb ? onDetail(conn) : onOpen(conn))
   return (
     <div onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
-      onClick={() => onOpen(conn)} onDoubleClick={() => onOpen(conn)}
+      onClick={handlePrimary} onDoubleClick={handlePrimary}
       style={{
         display: 'flex', alignItems: 'center', gap: 9, padding: nested ? '6px 9px' : '7px 9px', borderRadius: 10, cursor: 'pointer',
         background: active ? 'var(--accent-soft)' : hover ? 'var(--surface-sunken)' : 'transparent',
@@ -304,7 +308,7 @@ export function ConnRow({ conn, active, onOpen, onDetail, nested }: ConnRowProps
         </div>
         <span className="ell mono" style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{nested ? (D.engineMeta[conn.engine ?? ''] || {}).label : conn.sub}</span>
       </div>
-      {hover ? (
+      {hover && !isDb ? (
         <button className="icon-btn bare" style={{ width: 22, height: 22 }} onClick={(e) => { e.stopPropagation(); onDetail(conn) }} title={t('shell.details')}>
           <Icon name="info" size={14} />
         </button>

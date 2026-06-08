@@ -1,15 +1,29 @@
-/* ported from ref-ui/_extract/blob9.txt — verbatim per plan T1-T7 */
+/* ported from ref-ui/_extract/blob9.txt — verbatim per plan T1-T7 (DB path reworked for real data + actions) */
 import type { ReactNode } from 'react'
+import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { IconBtn, ConnGlyph, Btn } from '../atoms'
 import { Icon } from '../Icon'
 import { useData } from '../../state/DataContext'
 import type { Connection } from '../../services/types'
 import { PanelShell } from './PanelShell'
+import { ConnectSecretPrompt } from '../modals/ConnectSecretPrompt'
+import {
+  listDbConnections,
+  listActiveDbConnections,
+  type DbProfile,
+} from '../../state/dbConnections'
 
 export interface DetailsPanelProps {
   onClose: () => void
   conn?: Connection
+  /** Open the edit modal pre-filled with this DB profile. */
+  onEdit?: (profile: DbProfile) => void
+  /** Confirmed delete (caller removes profile + active conn, then closes the panel). */
+  onDelete?: (profile: DbProfile) => void
+  /** Connect to the DB profile with the supplied secret (empty/already-active → open
+   *  workbench directly without re-prompting). Caller drives dbConnect + navigation. */
+  onConnect?: (profile: DbProfile, secret: string) => Promise<void>
 }
 
 interface RowProps {
@@ -18,19 +32,27 @@ interface RowProps {
   mono?: boolean
 }
 
-export function DetailsPanel({ conn, onClose }: DetailsPanelProps) {
+function Row({ k, v, mono }: RowProps) {
+  return (
+    <div className="row" style={{ justifyContent: 'space-between', padding: '8px 0', borderBottom: '1px solid var(--border-hairline)' }}>
+      <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>{k}</span>
+      <span className={mono ? 'mono' : ''} style={{ fontSize: 12, color: 'var(--text-primary)', fontWeight: 500 }}>{v}</span>
+    </div>
+  )
+}
+
+export function DetailsPanel({ conn, onClose, onEdit, onDelete, onConnect }: DetailsPanelProps) {
+  const isDb = conn?.kind === 'db'
+  if (isDb && conn) return <DbDetails conn={conn} onClose={onClose} onEdit={onEdit} onDelete={onDelete} onConnect={onConnect} />
+  return <HostDetails conn={conn} onClose={onClose} />
+}
+
+// ---- Host / SSH details (mock content, unchanged) ----
+
+function HostDetails({ conn, onClose }: { conn?: Connection; onClose: () => void }) {
   const { t } = useTranslation()
   const D = useData()
   const c = conn || D.byId['d-orders']
-
-  function Row({ k, v, mono }: RowProps) {
-    return (
-      <div className="row" style={{ justifyContent: 'space-between', padding: '8px 0', borderBottom: '1px solid var(--border-hairline)' }}>
-        <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>{k}</span>
-        <span className={mono ? 'mono' : ''} style={{ fontSize: 12, color: 'var(--text-primary)', fontWeight: 500 }}>{v}</span>
-      </div>
-    )
-  }
 
   return (
     <PanelShell icon="info" title={t('panels.detailsTitle')} sub={c.name} onClose={onClose} actions={<IconBtn name="pencil" size={15} variant="bare" />}>
@@ -46,7 +68,7 @@ export function DetailsPanel({ conn, onClose }: DetailsPanelProps) {
           {(c.tags || []).map(tag => <span key={tag} className="chip mono">{tag}</span>)}
         </div>
         <div className="col">
-          <Row k={t('panels.detailType')} v={c.kind === 'db' ? (D.engineMeta[c.engine ?? ''] || {}).label ?? '' : t('panels.hostProto', { proto: (c.proto || 'ssh').toUpperCase() })} />
+          <Row k={t('panels.detailType')} v={t('panels.hostProto', { proto: (c.proto || 'ssh').toUpperCase() })} />
           <Row k={t('panels.detailStatus')} v={c.status === 'up' ? t('panels.statusOnline') : c.status === 'idle' ? t('panels.statusIdle') : t('panels.statusOffline')} />
           {c.tunnel && <Row k={t('panels.detailViaTunnel')} v={D.byId[c.tunnel].name} mono />}
           {c.stats && <Row k={t('panels.detailCpuMem')} v={`${c.stats.cpu}% · ${c.stats.mem}%`} mono />}
@@ -60,5 +82,179 @@ export function DetailsPanel({ conn, onClose }: DetailsPanelProps) {
         </div>
       </div>
     </PanelShell>
+  )
+}
+
+// ---- DB details (real saved profile + working actions) ----
+
+function DbDetails({ conn, onClose, onEdit, onDelete, onConnect }: {
+  conn: Connection
+  onClose: () => void
+  onEdit?: (profile: DbProfile) => void
+  onDelete?: (profile: DbProfile) => void
+  onConnect?: (profile: DbProfile, secret: string) => Promise<void>
+}) {
+  const { t } = useTranslation()
+  const D = useData()
+  // Look up the real saved profile by the connection id.
+  const profile = listDbConnections().find(p => p.id === conn.id)
+  const [copied, setCopied] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  const [promptConnect, setPromptConnect] = useState(false)
+  const [connectError, setConnectError] = useState<string | null>(null)
+  const [connecting, setConnecting] = useState(false)
+
+  // No matching saved profile → empty state (no mock fallback for DB).
+  if (!profile) {
+    return (
+      <PanelShell icon="info" title={t('panels.detailsTitle')} onClose={onClose}>
+        <div className="col" style={{ alignItems: 'center', gap: 8, padding: '28px 16px', textAlign: 'center', color: 'var(--text-faint)' }}>
+          <Icon name="database" size={22} />
+          <span style={{ fontSize: 12.5 }}>{t('shell.noMatchingConns')}</span>
+        </div>
+      </PanelShell>
+    )
+  }
+
+  const isActive = listActiveDbConnections().some(a => a.profileId === profile.id)
+  const engineLabel = (D.engineMeta[profile.dbType] || {}).label ?? profile.dbType
+
+  const descriptor = `${profile.dbType}://${profile.user}@${profile.host}:${profile.port}/${profile.database ?? ''}`
+
+  async function handleCopy() {
+    try {
+      await navigator.clipboard.writeText(descriptor)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1400)
+    } catch (e) {
+      console.error('[details] copy failed:', e)
+    }
+  }
+
+  function handleConnectClick() {
+    setConnectError(null)
+    // Already active → open workbench directly, no password prompt.
+    if (isActive) {
+      void onConnect?.(profile!, '')
+      return
+    }
+    setPromptConnect(true)
+  }
+
+  async function handleSubmitSecret(secret: string) {
+    setConnectError(null)
+    setConnecting(true)
+    try {
+      await onConnect?.(profile!, secret)
+      setConnecting(false)
+      setPromptConnect(false)
+    } catch (err) {
+      setConnecting(false)
+      setConnectError(err instanceof Error ? err.message : String(err))
+      // keep the prompt open so the user can retry
+    }
+  }
+
+  return (
+    <PanelShell icon="info" title={t('panels.detailsTitle')} sub={profile.name} onClose={onClose}
+      actions={<IconBtn name="pencil" size={15} variant="bare" title={t('panels.edit')} onClick={() => onEdit?.(profile)} />}>
+      <div className="grow" style={{ overflowY: 'auto', padding: 14 }}>
+        <div className="row gap10" style={{ marginBottom: 14 }}>
+          <ConnGlyph conn={conn} size={48} radius={14} />
+          <div className="col" style={{ lineHeight: 1.3 }}>
+            <span style={{ fontSize: 16, fontWeight: 700, letterSpacing: '-0.3px' }}>{profile.name}</span>
+            <span className="mono" style={{ fontSize: 11.5, color: 'var(--text-faint)' }}>{profile.dbType} · {profile.host}:{profile.port}</span>
+          </div>
+        </div>
+        <div className="col">
+          <Row k={t('panels.detailEngine')} v={engineLabel} />
+          <Row k={t('panels.detailStatus')} v={isActive ? t('panels.statusConnected') : t('panels.statusNotConnected')} />
+          <Row k={t('panels.detailHost')} v={profile.host} mono />
+          <Row k={t('panels.detailPort')} v={profile.port} mono />
+          <Row k={t('panels.detailUser')} v={profile.user} mono />
+          {profile.database && <Row k={t('panels.detailDatabase')} v={profile.database} mono />}
+        </div>
+
+        {copied && (
+          <div style={{ marginTop: 12, fontSize: 12, color: 'var(--signal-green)' }}>{t('panels.copied')}</div>
+        )}
+
+        <div className="row gap8" style={{ marginTop: 16 }}>
+          <Btn variant="cta" icon="play" style={{ flex: 1 }} onClick={handleConnectClick}>{t('panels.connect')}</Btn>
+          <Btn variant="secondary" icon="copy" onClick={handleCopy}>{copied ? t('panels.copied') : t('panels.copy')}</Btn>
+        </div>
+        <div className="row gap8" style={{ marginTop: 8 }}>
+          <Btn variant="secondary" icon="pencil" style={{ flex: 1 }} onClick={() => onEdit?.(profile)}>{t('panels.edit')}</Btn>
+          <Btn variant="danger" icon="trash-2" style={{ flex: 1 }} onClick={() => setConfirmDelete(true)}>{t('panels.delete')}</Btn>
+        </div>
+        <div className="row gap8" style={{ marginTop: 8 }}>
+          <Btn variant="ghost" icon="x" style={{ flex: 1 }} onClick={onClose}>{t('panels.close')}</Btn>
+        </div>
+      </div>
+
+      {confirmDelete && (
+        <DeleteConfirm name={profile.name}
+          onCancel={() => setConfirmDelete(false)}
+          onConfirm={() => { setConfirmDelete(false); onDelete?.(profile) }} />
+      )}
+
+      {promptConnect && (
+        <ConnectSecretPrompt
+          title={t('panels.connectPromptTitle', { name: profile.name })}
+          label={t('panels.connectPromptLabel')}
+          onSubmit={(s) => { if (!connecting) void handleSubmitSecret(s) }}
+          onCancel={() => { if (!connecting) { setPromptConnect(false); setConnectError(null) } }}
+        />
+      )}
+      {promptConnect && connectError && (
+        <div style={{ position: 'absolute', inset: 0, zIndex: 71, pointerEvents: 'none', display: 'grid', placeItems: 'center' }}>
+          <div style={{ marginTop: 150, fontSize: 12, color: 'var(--danger-fg)', background: 'var(--surface-card)', padding: '6px 12px', borderRadius: 8, border: '1px solid var(--border-hairline)', boxShadow: 'var(--shadow-window)' }}>
+            {connectError}
+          </div>
+        </div>
+      )}
+    </PanelShell>
+  )
+}
+
+// ---- Delete confirm dialog (mirrors the modal-overlay styling) ----
+
+function DeleteConfirm({ name, onCancel, onConfirm }: { name: string; onCancel: () => void; onConfirm: () => void }) {
+  const { t } = useTranslation()
+  return (
+    <div
+      onClick={onCancel}
+      style={{
+        position: 'absolute', inset: 0, zIndex: 70,
+        background: 'color-mix(in srgb, var(--cta-bg) 42%, transparent)',
+        backdropFilter: 'blur(3px)',
+        display: 'grid', placeItems: 'center',
+      }}>
+      <div
+        onClick={e => e.stopPropagation()}
+        className="pop-in"
+        style={{
+          width: 340,
+          background: 'var(--surface-card)',
+          borderRadius: 18,
+          border: '1px solid var(--border-hairline)',
+          boxShadow: 'var(--shadow-window)',
+          overflow: 'hidden',
+          display: 'flex',
+          flexDirection: 'column',
+        }}>
+        <div className="row" style={{ justifyContent: 'space-between', padding: '18px 20px 14px', borderBottom: '1px solid var(--border-hairline)' }}>
+          <span style={{ fontSize: 15, fontWeight: 700, letterSpacing: '-0.2px' }}>{t('panels.deleteConfirmTitle')}</span>
+          <IconBtn name="x" size={16} variant="bare" onClick={onCancel} />
+        </div>
+        <div className="col" style={{ gap: 14, padding: '16px 20px 20px' }}>
+          <span style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.5 }}>{t('panels.deleteConfirmBody', { name })}</span>
+          <div className="row gap8" style={{ justifyContent: 'flex-end' }}>
+            <Btn variant="ghost" onClick={onCancel}>{t('panels.deleteCancel')}</Btn>
+            <Btn variant="danger" icon="trash-2" onClick={onConfirm}>{t('panels.deleteConfirm')}</Btn>
+          </div>
+        </div>
+      </div>
+    </div>
   )
 }

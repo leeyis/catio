@@ -19,6 +19,9 @@ export interface NewConnectionModalProps {
   /** Called on a successful live DB connect (Tauri) with the saved profile, so the
    *  caller can immediately open the workbench for it. Not called in non-Tauri dev. */
   onConnected?: (profile: DbProfile) => void
+  /** When set, the modal opens in EDIT mode pre-filled with this DB profile. Saving
+   *  upserts under the SAME id (update, not a new entry). */
+  editProfile?: DbProfile
 }
 
 interface FieldProps {
@@ -77,16 +80,17 @@ function shortVersion(v: string): string {
 
 // ---- Component ----
 
-export function NewConnectionModal({ onClose, initialKind = 'db', onConnected }: NewConnectionModalProps) {
+export function NewConnectionModal({ onClose, initialKind = 'db', onConnected, editProfile }: NewConnectionModalProps) {
   const D = useData()
   const { t } = useTranslation()
+  const isEdit = !!editProfile
   const PROTOS = [
     { id: 'ssh', label: 'SSH' }, { id: 'mosh', label: 'Mosh' },
     { id: 'telnet', label: 'Telnet' }, { id: 'serial', label: 'Serial' },
     { id: 'local', label: t('modals.protoLocal') },
   ]
-  const [kind, setKind] = useState<string>(initialKind)
-  const [engine, setEngine] = useState<DbType>('postgres')
+  const [kind, setKind] = useState<string>(editProfile ? 'db' : initialKind)
+  const [engine, setEngine] = useState<DbType>(editProfile?.dbType ?? 'postgres')
   const [engineOpen, setEngineOpen] = useState(false)
   const engineRef = useRef<HTMLDivElement>(null)
   const [proto, setProto] = useState('ssh')
@@ -101,12 +105,12 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnected }:
   const [color, setColor] = useState('var(--signal-rose)')
   const hosts = D.connections.filter(c => c.kind === 'host' && c.proto !== 'local')
 
-  // DB-specific controlled state — empty by default; placeholders guide the user.
-  const [dbName, setDbName] = useState('')
-  const [dbHost, setDbHost] = useState('')
-  const [dbPort, setDbPort] = useState('5432')
-  const [dbUser, setDbUser] = useState('')
-  const [dbDatabase, setDbDatabase] = useState('')
+  // DB-specific controlled state — empty by default (or pre-filled from editProfile).
+  const [dbName, setDbName] = useState(editProfile?.name ?? '')
+  const [dbHost, setDbHost] = useState(editProfile?.host ?? '')
+  const [dbPort, setDbPort] = useState(editProfile ? String(editProfile.port) : '5432')
+  const [dbUser, setDbUser] = useState(editProfile?.user ?? '')
+  const [dbDatabase, setDbDatabase] = useState(editProfile?.database ?? '')
   const [dbSecret, setDbSecret] = useState('')
   const [dbConnecting, setDbConnecting] = useState(false)
   const [dbError, setDbError] = useState<string | null>(null)
@@ -173,9 +177,12 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnected }:
   const handleDbSaveAndConnect = async () => {
     setDbError(null)
     setDbConnecting(true)
-    const id = generateProfileId()
+    // EDIT mode reuses the existing profile id so saveDbConnection upserts (updates)
+    // the same entry instead of creating a new one.
+    const id = editProfile ? editProfile.id : generateProfileId()
     const profile = {
       id,
+      ...(editProfile?.group ? { group: editProfile.group } : {}),
       name: dbName,
       dbType: engine,
       host: dbHost,
@@ -221,7 +228,7 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnected }:
         {/* header */}
         <div className="row" style={{ justifyContent: 'space-between', padding: '18px 20px 14px', borderBottom: '1px solid var(--border-hairline)' }}>
           <div className="col" style={{ gap: 2 }}>
-            <span style={{ fontSize: 17, fontWeight: 700, letterSpacing: '-0.3px' }}>{t('modals.newConnection')}</span>
+            <span style={{ fontSize: 17, fontWeight: 700, letterSpacing: '-0.3px' }}>{isEdit ? t('modals.editConnection') : t('modals.newConnection')}</span>
             <span style={{ fontSize: 12, color: 'var(--text-faint)' }}>{t('modals.newConnectionSub')}</span>
           </div>
           <IconBtn name="x" size={16} variant="bare" onClick={onClose} />
@@ -450,7 +457,7 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnected }:
             <Btn variant="ghost" onClick={onClose}>{t('modals.cancel')}</Btn>
             {kind === 'db'
               ? <Btn variant="primary" icon="check" onClick={handleDbSaveAndConnect} disabled={dbConnecting}>
-                  {dbConnecting ? t('modals.connecting') ?? 'Connecting…' : t('modals.saveAndConnect')}
+                  {dbConnecting ? t('modals.connecting') ?? 'Connecting…' : isEdit ? t('modals.save') : t('modals.saveAndConnect')}
                 </Btn>
               : <Btn variant="primary" icon="check">{t('modals.saveAndConnect')}</Btn>}
           </div>

@@ -21,7 +21,12 @@ import { Btn } from './components/atoms'
 import { useTweaks, TWEAK_DEFAULTS } from './state/useTweaks'
 import { nextTheme, useApplyTheme } from './state/ThemeContext'
 import { useData } from './state/DataContext'
-import { useDbConnections, dbProfileToConnection, listActiveDbConnections } from './state/dbConnections'
+import { dbConnect } from './services/db'
+import {
+  useDbConnections, dbProfileToConnection, listActiveDbConnections,
+  setActiveDbConnection, removeDbConnection, removeActiveDbConnection,
+  type DbProfile,
+} from './state/dbConnections'
 import type { Tab, Connection, Snippet } from './services/types'
 import type { AuthUser } from './components/auth/AuthGate'
 import type { Attachment } from './components/panels/AIPanel'
@@ -47,6 +52,7 @@ export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false)
   const [detailConn, setDetailConn] = useState<Connection | null>(null)
   const [showNew, setShowNew] = useState<boolean>(false)
+  const [editProfile, setEditProfile] = useState<DbProfile | null>(null)
   const [sidebarFilter, setSidebarFilter] = useState<string>('all') // all | host | db
   const [aiAttachment, setAiAttachment] = useState<Attachment | null>(null)
   const [snippets, setSnippets] = useState<Snippet[]>(() => D.snippets)
@@ -171,6 +177,43 @@ export default function App() {
     setActivePanel('details')
     setPanelOpen(true)
   }
+  // ---- DB details-panel actions ----
+  function editDbProfile(profile: DbProfile) {
+    // Open the New Connection modal in EDIT mode pre-filled with this profile.
+    setEditProfile(profile)
+    setShowNew(true)
+  }
+  function deleteDbProfile(profile: DbProfile) {
+    // Drop any active live connection for this profile, then remove the profile.
+    listActiveDbConnections()
+      .filter(a => a.profileId === profile.id)
+      .forEach(a => removeActiveDbConnection(a.connId))
+    removeDbConnection(profile.id)
+    // The reactive store updates the list; close the details panel.
+    setPanelOpen(false)
+    setDetailConn(null)
+  }
+  async function connectDbProfile(profile: DbProfile, secret: string) {
+    // If a live connection already exists for this profile, open the workbench directly.
+    const existing = listActiveDbConnections().find(a => a.profileId === profile.id)
+    if (existing) {
+      openConn(dbProfileToConnection(profile, true))
+      setView('workbench')
+      return
+    }
+    // Real connect (Tauri). Throws outside Tauri / on failure — DetailsPanel surfaces it.
+    const result = await dbConnect({
+      dbType: profile.dbType,
+      host: profile.host,
+      port: profile.port,
+      user: profile.user,
+      ...(profile.database ? { database: profile.database } : {}),
+      secret: secret || undefined,
+    })
+    setActiveDbConnection(result, profile)
+    openConn(dbProfileToConnection(profile, true))
+    setView('workbench')
+  }
   function selectPanel(id: string) {
     if (activePanel === id && panelOpen) { setPanelOpen(false) }
     else { setActivePanel(id); setPanelOpen(true) }
@@ -239,7 +282,8 @@ export default function App() {
               {activePanel === 'tunnels' && <TunnelsPanel onClose={() => setPanelOpen(false)} />}
               {activePanel === 'snippets' && <SnippetsPanel onClose={() => setPanelOpen(false)} snippets={snippets} />}
               {activePanel === 'history' && <HistoryPanel onClose={() => setPanelOpen(false)} onAddSnippet={addSnippet} />}
-              {activePanel === 'details' && <DetailsPanel conn={detailConn ?? undefined} onClose={() => setPanelOpen(false)} />}
+              {activePanel === 'details' && <DetailsPanel conn={detailConn ?? undefined} onClose={() => setPanelOpen(false)}
+                onEdit={editDbProfile} onDelete={deleteDbProfile} onConnect={connectDbProfile} />}
             </div>
           )}
 
@@ -248,7 +292,8 @@ export default function App() {
         </div>
       )}
 
-      {showNew && <NewConnectionModal onClose={() => setShowNew(false)} initialKind={sidebarFilter === 'host' ? 'host' : 'db'}
+      {showNew && <NewConnectionModal onClose={() => { setShowNew(false); setEditProfile(null) }} initialKind={sidebarFilter === 'host' ? 'host' : 'db'}
+        editProfile={editProfile ?? undefined}
         onConnected={(profile) => openConn(dbProfileToConnection(profile, true))} />}
 
       {locked && <AuthGate users={users} onLogin={loginUser} onCreate={createUser} />}
