@@ -58,6 +58,11 @@ export function DbWorkbench({ conn, density }: DbWorkbenchProps) {
   // Open SQL query tabs (ids). Each click of 新建查询 appends one; consoles stay
   // mounted so each tab's editor + results persist across switches.
   const [openQueries, setOpenQueries] = useState<number[]>([])
+  // Optional seed SQL per query tab (qid → template), used to pre-fill a fresh
+  // console opened via 新建表 / 新建视图. Tabs without an entry start empty.
+  const [queryInitialCode, setQueryInitialCode] = useState<Record<number, string>>({})
+  // Schema whose ER diagram is being viewed (null → falls back to current namespace).
+  const [erSchema, setErSchema] = useState<string | null>(null)
   // Horizontally-scrollable query tab strip — chevrons scroll it when tabs overflow.
   const tabStripRef = useRef<HTMLDivElement>(null)
   const scrollTabs = (dx: number) => tabStripRef.current?.scrollBy({ left: dx, behavior: 'smooth' })
@@ -73,6 +78,14 @@ export function DbWorkbench({ conn, density }: DbWorkbenchProps) {
       .catch(() => { if (!cancelled) setLiveSchema(null) })
     return () => { cancelled = true }
   }, [connId])
+
+  // Re-introspect the live schema on demand (schema "刷新" action). No-op on the mock path.
+  function refreshSchema() {
+    if (!connId) return
+    getSchema(connId)
+      .then(sc => setLiveSchema(sc))
+      .catch(() => {})
+  }
 
   const selectedTable = obj.type === 'table' ? obj.table : null
 
@@ -157,12 +170,20 @@ export function DbWorkbench({ conn, density }: DbWorkbenchProps) {
   function pickObject(schema: string, name: string, kind: 'view' | 'function' | 'procedure') {
     setObj({ type: 'object', schema, name, kind })
   }
-  function newQuery() {
+  function newQuery(seed?: string) {
     if (!caps.sqlConsole) return
     const id = queryN + 1
     setQueryN(id)
     setOpenQueries(q => [...q, id])
+    if (seed != null) setQueryInitialCode(m => ({ ...m, [id]: seed }))
     setObj({ type: 'sql', qid: id })
+  }
+  /** Open a fresh query tab seeded with a CREATE TABLE/VIEW template for `schema`. */
+  function onNewObjectTemplate(schema: string, kind: 'table' | 'view') {
+    const template = kind === 'table'
+      ? `CREATE TABLE ${schema}.new_table (\n  id bigserial PRIMARY KEY,\n  name text\n);\n`
+      : `CREATE VIEW ${schema}.new_view AS\nSELECT * FROM ${schema}.some_table;\n`
+    newQuery(template)
   }
   function closeQuery(id: number) {
     const next = openQueries.filter(x => x !== id)
@@ -173,15 +194,17 @@ export function DbWorkbench({ conn, density }: DbWorkbenchProps) {
         : { type: 'table', schema: selectedSchema ?? namespace.name, table: selectedTable ?? namespace.tables[0]?.name ?? 'orders' })
     }
   }
-  function openER() {
+  function openER(schema?: string) {
     if (!caps.er) return
+    setErSchema(schema ?? null)
     setObj({ type: 'er' })
   }
 
   return (
     <div style={{ display: 'flex', alignItems: 'stretch', height: '100%', width: '100%', flex: 1, minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
       <SchemaBrowser onPick={pickTable} onPickObject={pickObject} active={obj.type === 'table' ? { schema: obj.schema, table: obj.table } : null}
-        onNewQuery={newQuery} onOpenER={openER} erActive={obj.type === 'er'} sqlActive={obj.type === 'sql'}
+        onNewQuery={() => newQuery()} onOpenER={openER} onNewObjectTemplate={onNewObjectTemplate} onRefresh={refreshSchema}
+        erActive={obj.type === 'er'} sqlActive={obj.type === 'sql'}
         disabledSql={!caps.sqlConsole} disabledEr={!caps.er}
         schemas={connId ? namespaces : undefined} conn={connId ? conn : undefined} live={!!connId} />
       <div className="col grow" style={{ minWidth: 0, minHeight: 0, overflow: 'hidden' }}>
@@ -244,7 +267,10 @@ export function DbWorkbench({ conn, density }: DbWorkbenchProps) {
             </div>
           </>
         )}
-        {obj.type === 'er' && <ERDiagram connId={connId ?? undefined} schema={namespace.name} onOpenTable={(tblName) => setObj({ type: 'table', schema: namespace.name, table: tblName })} />}
+        {obj.type === 'er' && (() => {
+          const erName = erSchema ?? namespace.name
+          return <ERDiagram connId={connId ?? undefined} schema={erName} onOpenTable={(tblName) => setObj({ type: 'table', schema: erName, table: tblName })} />
+        })()}
         {/* SQL query tabs — every open query stays mounted (display-toggled) so its
             editor + results persist across tab/table switches. */}
         {openQueries.length > 0 && (
@@ -265,12 +291,12 @@ export function DbWorkbench({ conn, density }: DbWorkbenchProps) {
                 })}
               </div>
               <button className="icon-btn bare" style={{ width: 24, height: 24, flex: 'none' }} title={t('workbench.scrollRight')} onClick={() => scrollTabs(160)}><Icon name="chevron-right" size={14} /></button>
-              <button className="icon-btn bare" style={{ width: 24, height: 24, flex: 'none' }} title={t('workbench.newQuery')} onClick={newQuery}><Icon name="plus" size={14} /></button>
+              <button className="icon-btn bare" style={{ width: 24, height: 24, flex: 'none' }} title={t('workbench.newQuery')} onClick={() => newQuery()}><Icon name="plus" size={14} /></button>
             </div>
             <div className="grow" style={{ minHeight: 0, minWidth: 0, width: '100%', display: 'flex', flexDirection: 'column' }}>
               {openQueries.map(id => (
                 <div key={id} style={{ flex: 1, minHeight: 0, width: '100%', display: obj.type === 'sql' && obj.qid === id ? 'flex' : 'none', flexDirection: 'column' }}>
-                  <SqlConsole density={density} fresh queryN={id} writable={caps.writable} connId={connId ?? undefined} />
+                  <SqlConsole density={density} fresh queryN={id} writable={caps.writable} connId={connId ?? undefined} initialCode={queryInitialCode[id]} />
                 </div>
               ))}
             </div>

@@ -17,15 +17,17 @@ export interface SqlConsoleProps {
   writable?: boolean
   /** When set, Run executes the typed SQL against the live backend instead of mock. */
   connId?: string
+  /** Seed text for a fresh console (e.g. a CREATE TABLE/VIEW template). Falls back to empty. */
+  initialCode?: string
 }
 
-export function SqlConsole({ density, fresh, queryN, writable = true, connId }: SqlConsoleProps) {
+export function SqlConsole({ density, fresh, queryN, writable = true, connId, initialCode }: SqlConsoleProps) {
   const { t } = useTranslation()
   const D = useData()
   const [code, setCode] = useState(
-    // A fresh query starts EMPTY (no hardcoded sample SQL). The editor shows its
-    // own placeholder hint instead.
-    fresh ? '' : D.sampleSQL
+    // A fresh query starts with its optional seed template (or EMPTY when none).
+    // The editor shows its own placeholder hint when empty.
+    fresh ? (initialCode ?? '') : D.sampleSQL
   )
   const [phase, setPhase] = useState<'idle' | 'running' | 'done'>(fresh ? 'idle' : 'done')
   // Live result of the last successful run (only used when connId is set).

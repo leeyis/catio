@@ -1,5 +1,5 @@
 /* ported from ref-ui/_extract/blob7.txt — verbatim per plan T1-T7; live multi-schema tree wired in E-series */
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { ConnGlyph, StatusDot } from '../atoms'
@@ -14,7 +14,12 @@ export interface SchemaBrowserProps {
   /** Currently-selected object as schema+table, or null when not viewing a table. */
   active: { schema: string; table: string } | null
   onNewQuery: () => void
-  onOpenER: () => void
+  /** Open the ER diagram. With no arg → current namespace; with a schema name → that schema's ER. */
+  onOpenER: (schema?: string) => void
+  /** Open a fresh query tab seeded with a CREATE TABLE/VIEW template for the given schema. */
+  onNewObjectTemplate?: (schema: string, kind: 'table' | 'view') => void
+  /** Re-introspect the schema tree (drives both the header refresh button and the per-schema 刷新). */
+  onRefresh?: () => void
   erActive: boolean
   sqlActive: boolean
   disabledSql?: boolean
@@ -32,7 +37,7 @@ export interface SchemaBrowserProps {
   live?: boolean
 }
 
-export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpenER, erActive, sqlActive, disabledSql, disabledEr, schemas, conn, live }: SchemaBrowserProps) {
+export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, erActive, sqlActive, disabledSql, disabledEr, schemas, conn, live }: SchemaBrowserProps) {
   const { t } = useTranslation()
   const D = useData()
   // Live path: render every supplied namespace; mock path: the single seeded schema (pixel-identical).
@@ -52,7 +57,7 @@ export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpen
         <div className="row gap6" style={{ minWidth: 0 }}><ConnGlyph conn={headerGlyph} size={24} radius={7} /><div className="col" style={{ lineHeight: 1.2, minWidth: 0 }}><span className="ell" style={{ fontSize: 12.5, fontWeight: 700 }}>{headerName}</span><span className="mono ell" style={{ fontSize: 9.5, color: 'var(--text-faint)' }}>{headerEngine}</span></div></div>
         <div className="row gap2">
           <button className="icon-btn bare" style={{ width: 26, height: 26 }} title={t('workbench.newQuery')} onClick={onNewQuery}><Icon name="plus" size={14} /></button>
-          <button className="icon-btn bare" style={{ width: 26, height: 26 }} title={t('workbench.refresh')}><Icon name="refresh-cw" size={13} /></button>
+          <button className="icon-btn bare" style={{ width: 26, height: 26 }} title={t('workbench.refresh')} onClick={onRefresh}><Icon name="refresh-cw" size={13} /></button>
         </div>
       </div>
       {/* search */}
@@ -66,7 +71,7 @@ export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpen
           color: sqlActive ? 'var(--accent-primary)' : 'var(--text-secondary)', background: sqlActive ? 'var(--accent-soft)' : 'var(--surface-sunken)', border: sqlActive ? '1px solid var(--accent-border)' : '1px solid transparent' }}>
           <Icon name="terminal" size={13} /> {t('workbench.newQuery')}
         </button>
-        <button onClick={onOpenER} disabled={disabledEr} data-testid="btn-er-diagram" className="row gap6" style={{ flex: 1, justifyContent: 'center', height: 30, borderRadius: 9, fontSize: 12, fontWeight: 600,
+        <button onClick={() => onOpenER()} disabled={disabledEr} data-testid="btn-er-diagram" className="row gap6" style={{ flex: 1, justifyContent: 'center', height: 30, borderRadius: 9, fontSize: 12, fontWeight: 600,
           color: erActive ? 'var(--accent-primary)' : 'var(--text-secondary)', background: erActive ? 'var(--accent-soft)' : 'var(--surface-sunken)', border: erActive ? '1px solid var(--accent-border)' : '1px solid transparent' }}>
           <Icon name="network" size={13} /> {t('workbench.erDiagram')}
         </button>
@@ -74,7 +79,8 @@ export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpen
       {/* tree — one collapsible top-level DB node per schema namespace */}
       <div className="grow" style={{ overflowY: 'auto', padding: '0 6px 10px' }}>
         {namespaces.map(ns => (
-          <SchemaNode key={ns.name} ns={ns} query={query} active={active} onPick={onPick} onPickObject={onPickObject} live={!!live} />
+          <SchemaNode key={ns.name} ns={ns} query={query} active={active} onPick={onPick} onPickObject={onPickObject} live={!!live}
+            onNewQuery={onNewQuery} onOpenER={onOpenER} onNewObjectTemplate={onNewObjectTemplate} onRefresh={onRefresh} />
         ))}
       </div>
       {/* footer */}
@@ -93,21 +99,77 @@ interface SchemaNodeProps {
   onPick: (schema: string, name: string) => void
   onPickObject?: (schema: string, name: string, kind: 'view' | 'function' | 'procedure') => void
   live: boolean
+  onNewQuery: () => void
+  onOpenER: (schema?: string) => void
+  onNewObjectTemplate?: (schema: string, kind: 'table' | 'view') => void
+  onRefresh?: () => void
 }
 
 /** One schema namespace rendered as a collapsible DB tree node (Tables / Views / Functions). */
-function SchemaNode({ ns, query, active, onPick, onPickObject, live }: SchemaNodeProps) {
+function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh }: SchemaNodeProps) {
   const { t } = useTranslation()
   const D = useData()
   // Default-open the first schema's section so a freshly-connected DB shows tables immediately.
   const [open, setOpen] = useState({ schema: true, tables: true, views: false, fns: false })
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+  // Hover reveals the "..." action button; the schema-management dropdown opens from it.
+  const [hover, setHover] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
   const tables: SchemaTable[] = ns.tables.filter(tbl => tbl.name.toLowerCase().includes(query))
   const keyTone: Record<string, string> = { PK: 'var(--signal-amber)', FK: 'var(--signal-blue)', UNI: 'var(--signal-violet)' }
 
+  // Close the menu on any outside mousedown.
+  useEffect(() => {
+    if (!menuOpen) return
+    function onDown(e: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [menuOpen])
+
+  const menuItems: { icon: string; label: string; action: () => void }[] = [
+    { icon: 'terminal', label: t('workbench.newQuery'), action: () => onNewQuery() },
+    { icon: 'network', label: t('workbench.erDiagram'), action: () => onOpenER(ns.name) },
+    ...(onNewObjectTemplate ? [
+      { icon: 'table-2', label: t('workbench.newTable'), action: () => onNewObjectTemplate(ns.name, 'table') },
+      { icon: 'eye', label: t('workbench.newView'), action: () => onNewObjectTemplate(ns.name, 'view') },
+    ] : []),
+    ...(onRefresh ? [{ icon: 'refresh-cw', label: t('workbench.refresh'), action: () => onRefresh() }] : []),
+  ]
+
   return (
     <>
-      <TreeNode icon="database" iconColor="var(--signal-blue)" label={ns.name} count={ns.tables.length + ' tables'} open={open.schema} onToggle={() => setOpen(o => ({ ...o, schema: !o.schema }))} depth={0} />
+      <div className="row" style={{ position: 'relative', alignItems: 'center' }}
+        onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <TreeNode icon="database" iconColor="var(--signal-blue)" label={ns.name} count={ns.tables.length + ' tables'} open={open.schema} onToggle={() => setOpen(o => ({ ...o, schema: !o.schema }))} depth={0} />
+        </div>
+        <button className="icon-btn bare" title={t('workbench.schemaMenu')} aria-label={t('workbench.schemaMenu')}
+          onClick={e => { e.stopPropagation(); setMenuOpen(o => !o) }}
+          style={{ width: 22, height: 22, flex: 'none', marginRight: 4, opacity: hover || menuOpen ? 1 : 0, transition: 'opacity .12s' }}>
+          <Icon name="more-horizontal" size={14} />
+        </button>
+        {menuOpen && (
+          <div ref={menuRef} onClick={e => e.stopPropagation()}
+            style={{ position: 'absolute', top: '100%', right: 4, zIndex: 200, marginTop: 2,
+              background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', borderRadius: 10,
+              boxShadow: 'var(--shadow-dropdown)', padding: '4px 0', minWidth: 150 }}>
+            {menuItems.map(item => (
+              <button key={item.label} onClick={() => { item.action(); setMenuOpen(false) }}
+                className="row gap8"
+                style={{ width: '100%', textAlign: 'left', padding: '7px 12px', border: 'none', background: 'transparent',
+                  fontSize: 12.5, color: 'var(--text-primary)', cursor: 'pointer', alignItems: 'center' }}
+                onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = 'var(--accent-soft)' }}
+                onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}>
+                <Icon name={item.icon} size={13} style={{ color: 'var(--text-tertiary)', flex: 'none' }} />
+                <span className="ell">{item.label}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
       {open.schema && <>
         <TreeNode icon="folder" label={t('workbench.tables')} count={tables.length} open={open.tables} onToggle={() => setOpen(o => ({ ...o, tables: !o.tables }))} depth={1} />
         {open.tables && tables.map(tbl => {
