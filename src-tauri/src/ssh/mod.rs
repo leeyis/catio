@@ -5,6 +5,7 @@ pub mod knownhosts;
 pub mod manager;
 pub mod monitor;
 pub mod multiexec;
+pub mod osc;
 pub mod parse;
 pub mod sftp;
 pub mod term;
