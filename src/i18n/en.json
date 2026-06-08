@@ -25,6 +25,8 @@
     "newConnToStart": "New connection to get started",
     "localLoginIsolated": "Local login · Isolated",
     "activeStatus": "3 active · 1 tunnel",
+    "authDisabled": "Account auth disabled",
+    "enableAuth": "Enable auth",
     "railAi": "Catio Agent · Cross-terminal & database",
     "railSftp": "SFTP Files",
     "railMonitor": "System Monitor",

@@ -29,6 +29,7 @@ export interface SidebarProps {
   currentUser?: string
   authEnabled?: boolean
   onLock?: React.MouseEventHandler<HTMLButtonElement>
+  onEnableAuth?: () => void
 }
 
 export interface ConnRowProps {
@@ -142,7 +143,7 @@ export function TitleBar({ theme, onToggleTheme, onOpenSettings, settingsActive 
 
 // ---- Sidebar ----
 
-export function Sidebar({ activeId, onOpen, onNew, collapsed, onToggleCollapse, conns: vaultConns, currentUser, authEnabled, onLock }: SidebarProps) {
+export function Sidebar({ activeId, onOpen, onNew, collapsed, onToggleCollapse, conns: vaultConns, currentUser, authEnabled, onLock, onEnableAuth }: SidebarProps) {
   const { t } = useTranslation()
   const D = useData()
   const allConns = vaultConns || D.connections
@@ -285,15 +286,24 @@ export function Sidebar({ activeId, onOpen, onNew, collapsed, onToggleCollapse, 
       {/* footer status */}
       <div className="row" style={{ padding: '10px 12px', borderTop: '1px solid var(--border-hairline)', gap: 8 }}>
         <div className="icon-badge" style={{ width: 26, height: 26, borderRadius: 8, background: 'var(--accent-soft)', color: 'var(--accent-primary)' }}>
-          <Icon name="user" size={14} />
+          <Icon name={authEnabled ? 'user' : 'shield'} size={14} />
         </div>
-        <div className="col grow" style={{ lineHeight: 1.2, minWidth: 0 }}>
-          <span className="ell" style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>{currentUser || 'skyler'}</span>
-          <span style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{authEnabled ? t('shell.localLoginIsolated') : t('shell.activeStatus')}</span>
-        </div>
-        {authEnabled
-          ? <button className="icon-btn bare" title={t('shell.lockWorkspace')} onClick={onLock}><Icon name="lock" size={15} /></button>
-          : <StatusDot status="up" size={7} />}
+        {authEnabled ? (
+          <>
+            <div className="col grow" style={{ lineHeight: 1.2, minWidth: 0 }}>
+              <span className="ell" style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>{currentUser}</span>
+              <span style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{t('shell.localLoginIsolated')}</span>
+            </div>
+            <button className="icon-btn bare" title={t('shell.lockWorkspace')} onClick={onLock}><Icon name="lock" size={15} /></button>
+          </>
+        ) : (
+          <>
+            <div className="col grow" style={{ lineHeight: 1.2, minWidth: 0 }}>
+              <span className="ell" style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>{t('shell.authDisabled')}</span>
+              <button className="icon-btn bare" style={{ height: 'auto', padding: 0, fontSize: 10.5, color: 'var(--text-faint)', justifyContent: 'flex-start' }} onClick={() => onEnableAuth?.()}>{t('shell.enableAuth')}</button>
+            </div>
+          </>
+        )}
       </div>
     </div>
   )

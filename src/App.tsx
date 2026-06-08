@@ -469,7 +469,7 @@ export default function App() {
         <div className="body">
           <Sidebar activeId={detailConn ? detailConn.id : (cur ? cur.connId : undefined)} onOpen={openDetail} onNew={() => setShowNew(true)}
             collapsed={sidebarCollapsed} onToggleCollapse={() => setSidebarCollapsed(c => !c)}
-            conns={vaultConns} currentUser={currentName} authEnabled={authEnabled} onLock={lockApp} />
+            conns={vaultConns} currentUser={currentName} authEnabled={authEnabled} onLock={lockApp} onEnableAuth={goSettings} />
 
           {/* main */}
           <div className="card-surface grow col" style={{ overflow: 'hidden', position: 'relative' }}>
