@@ -21,23 +21,27 @@ import { Btn } from './components/atoms'
 import { useTweaks, TWEAK_DEFAULTS } from './state/useTweaks'
 import { nextTheme, useApplyTheme } from './state/ThemeContext'
 import { useData } from './state/DataContext'
+import { useDbConnections, dbProfileToConnection, listActiveDbConnections } from './state/dbConnections'
 import type { Tab, Connection, Snippet } from './services/types'
 import type { AuthUser } from './components/auth/AuthGate'
 import type { Attachment } from './components/panels/AIPanel'
 
 export default function App() {
   const D = useData()
+  const dbProfiles = useDbConnections()
   const hash = (location.hash || '').replace('#', '')
   const initTheme = hash.includes('amber') ? 'amber' : hash.includes('grove') ? 'grove' : ((localStorage.getItem('catio-theme') || 'dawn') as 'dawn' | 'amber' | 'grove')
   const initView = (['home', 'workbench', 'settings'] as const).find(v => hash.includes(v)) || 'home'
   const [tweaks, setTweak] = useTweaks({ ...TWEAK_DEFAULTS, theme: initTheme })
   const [view, setView] = useState<string>(initView)
   const [prevView, setPrevView] = useState<string>('home')
+  // Seed only the (real, mock-host) bastion terminal tab. The previous mock DB
+  // tab ('d-orders') referenced a now-hidden mock connection, so it's dropped and
+  // the app lands on 'home' by default (clean, no auto-opened mock db).
   const [tabs, setTabs] = useState<Tab[]>([
     { id: 'tab-bastion', kind: 'terminal', connId: 'h-bastion', title: 'db-bastion' },
-    { id: 'tab-orders', kind: 'sql', connId: 'd-orders', title: 'prod-orders · orders' },
   ])
-  const [activeTab, setActiveTab] = useState<string>(hash.includes('term') ? 'tab-bastion' : 'tab-orders')
+  const [activeTab, setActiveTab] = useState<string>('tab-bastion')
   const [activePanel, setActivePanel] = useState<string>('ai')
   const [panelOpen, setPanelOpen] = useState<boolean>(true)
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false)
@@ -66,7 +70,12 @@ export default function App() {
   const locked = authEnabled && !sessionUser
   // the first account created owns the seed vault; other users get an isolated (empty) vault
   const ownsVault = !authEnabled || sessionUser === ownerUser || sessionUser === '__open'
-  const vaultConns = ownsVault ? D.connections : []
+  // Connection list = real saved DB connections (reactive) + mock SSH hosts.
+  // Mock DB connections are excluded — only real saved profiles drive DB rows now.
+  const activeProfileIds = new Set(listActiveDbConnections().map(a => a.profileId))
+  const realDbConns = dbProfiles.map(p => dbProfileToConnection(p, activeProfileIds.has(p.id)))
+  const mockHostConns = D.connections.filter(c => c.kind === 'host')
+  const vaultConns = ownsVault ? [...mockHostConns, ...realDbConns] : []
   const currentName = authEnabled && sessionUser && sessionUser !== '__open' ? sessionUser : 'skyler'
 
   function enableAuth() {
@@ -172,7 +181,10 @@ export default function App() {
   }
 
   const cur = tabs.find(t => t.id === activeTab)
-  const curConn = cur ? D.byId[cur.connId] : null
+  // Resolve the active tab's connection: prefer the live vault list (real saved DB
+  // connections + mock hosts), falling back to the mock byId index. This lets a
+  // workbench tab opened for a real saved DB profile resolve to its Connection.
+  const curConn = cur ? (vaultConns.find(c => c.id === cur.connId) ?? D.byId[cur.connId] ?? null) : null
   const aiMode = cur && cur.kind === 'terminal' ? 'shell' : 'sql'
 
   return (
@@ -236,7 +248,8 @@ export default function App() {
         </div>
       )}
 
-      {showNew && <NewConnectionModal onClose={() => setShowNew(false)} initialKind={sidebarFilter === 'host' ? 'host' : 'db'} />}
+      {showNew && <NewConnectionModal onClose={() => setShowNew(false)} initialKind={sidebarFilter === 'host' ? 'host' : 'db'}
+        onConnected={(profile) => openConn(dbProfileToConnection(profile, true))} />}
 
       {locked && <AuthGate users={users} onLogin={loginUser} onCreate={createUser} />}
     </div>

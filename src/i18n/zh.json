@@ -256,6 +256,7 @@
     "fieldHost": "主机",
     "fieldPort": "端口",
     "fieldUser": "用户",
+    "fieldUserPlaceholder": "用户名",
     "fieldDatabase": "数据库（可选）",
     "fieldUsername": "用户名",
     "fieldPasswordKey": "密码 / 密钥",

@@ -8,6 +8,7 @@ import type { AuthMethod } from '../../services/ssh'
 import type { DbType } from '../../services/db'
 import { dbConnect, testConnection } from '../../services/db'
 import { saveDbConnection, setActiveDbConnection, generateProfileId } from '../../state/dbConnections'
+import type { DbProfile } from '../../state/dbConnections'
 
 // ---- Prop types ----
 
@@ -15,6 +16,9 @@ export interface NewConnectionModalProps {
   onClose: () => void
   /** Default connection kind, derived from the sidebar's active filter tab. */
   initialKind?: 'host' | 'db'
+  /** Called on a successful live DB connect (Tauri) with the saved profile, so the
+   *  caller can immediately open the workbench for it. Not called in non-Tauri dev. */
+  onConnected?: (profile: DbProfile) => void
 }
 
 interface FieldProps {
@@ -73,7 +77,7 @@ function shortVersion(v: string): string {
 
 // ---- Component ----
 
-export function NewConnectionModal({ onClose, initialKind = 'db' }: NewConnectionModalProps) {
+export function NewConnectionModal({ onClose, initialKind = 'db', onConnected }: NewConnectionModalProps) {
   const D = useData()
   const { t } = useTranslation()
   const PROTOS = [
@@ -179,25 +183,36 @@ export function NewConnectionModal({ onClose, initialKind = 'db' }: NewConnectio
       user: dbUser,
       ...(dbDatabase ? { database: dbDatabase } : {}),
     }
-    // Persist profile WITHOUT secret
+    // Persist profile WITHOUT secret. Triggers the reactive store's notify(), so the
+    // sidebar / home connection list updates immediately — the connection never
+    // silently vanishes.
     saveDbConnection(profile)
     // Attempt live connection (only works in Tauri runtime; throws outside)
     try {
       const result = await dbConnect({ ...profile, secret: dbSecret || undefined })
       // Store connId + capabilities for D3 (capabilities-gated UI) to consume
       setActiveDbConnection(result, profile)
+      setDbSecret('') // discard secret from memory
+      setDbConnecting(false)
+      // Success: hand the saved profile back so the caller opens its workbench with
+      // real data, then close the modal.
+      onConnected?.(profile)
+      onClose()
+      return
     } catch (err) {
-      // Outside Tauri: expected "requires the Tauri runtime" — treat as non-fatal in dev
       const msg = err instanceof Error ? err.message : String(err)
       if (!msg.includes('Tauri runtime')) {
+        // Real connection failure: keep the modal OPEN and surface the error.
         setDbError(msg)
         setDbConnecting(false)
         return
       }
+      // Non-Tauri dev ("requires the Tauri runtime"): the profile is saved and now
+      // appears in the list; there is no active backend connection (fine in dev).
+      setDbSecret('')
+      setDbConnecting(false)
+      onClose()
     }
-    setDbSecret('') // discard secret from memory
-    setDbConnecting(false)
-    onClose()
   }
 
   return (
@@ -307,7 +322,7 @@ export function NewConnectionModal({ onClose, initialKind = 'db' }: NewConnectio
             </div>
             <div className="row gap10">
               {kind === 'db'
-                ? <Field label={t('modals.fieldUser')} value={dbUser} onChange={setDbUser} placeholder="postgres" mono />
+                ? <Field label={t('modals.fieldUser')} value={dbUser} onChange={setDbUser} placeholder={t('modals.fieldUserPlaceholder')} mono />
                 : <Field label={t('modals.fieldUsername')} value="deploy" onChange={() => undefined} mono />}
               {kind === 'db' ? (
                 <label className="col" style={{ gap: 5, flex: 1 }}>

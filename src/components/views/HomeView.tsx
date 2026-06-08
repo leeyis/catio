@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { ConnGlyph, IconBadge, SectionHead } from '../atoms'
 import { useData } from '../../state/DataContext'
+import { useDbConnections, dbProfileToConnection } from '../../state/dbConnections'
 import type { Connection } from '../../services/types'
 
 // ---- Prop types ----
@@ -76,8 +77,18 @@ function InfoRow({ conn, onOpen, onDetail, showGroup }: InfoRowProps) {
 export function HomeView({ onOpen, onNew, onVault, owned = true, userName = 'skyler' }: HomeViewProps) {
   const D = useData()
   const { t } = useTranslation()
+  // Real saved DB connections (reactive). Mock DBs are hidden from the home view —
+  // only real saved profiles + mock SSH hosts surface here.
+  const dbProfiles = useDbConnections()
+  const realDbConns = dbProfiles.map(p => dbProfileToConnection(p))
+  const mockDbIds = new Set(D.connections.filter(c => c.kind === 'db').map(c => c.id))
   const hostCount = D.connections.filter(c => c.kind === 'host').length
-  const dbCount = D.connections.filter(c => c.kind === 'db').length
+  const dbCount = realDbConns.length
+  // Recent sessions, minus any that reference a hidden mock DB connection.
+  const recents = D.recent.filter(r => !(r.kind === 'db' && mockDbIds.has(r.ref)))
+  // Quick-connect: two mock hosts + the first real saved DB connection (if any).
+  const quickHosts = D.connections.filter(c => ['h-bastion', 'h-web1'].includes(c.id))
+  const quickConns: Connection[] = [...quickHosts, ...realDbConns.slice(0, 1)]
 
   if (!owned) {
     return (
@@ -129,9 +140,9 @@ export function HomeView({ onOpen, onNew, onVault, owned = true, userName = 'sky
         </div>
 
         {/* Recent */}
-        <SectionHead title={t('home.recentSessions')} count={D.recent.length} />
+        <SectionHead title={t('home.recentSessions')} count={recents.length} />
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 16, marginBottom: 32 }}>
-          {D.recent.map(r => {
+          {recents.map(r => {
             const conn = D.byId[r.ref]
             return (
               <button key={r.id} onClick={() => conn && onOpen(conn)} className="card-surface" style={{ textAlign: 'left', padding: 16, display: 'flex', gap: 12, alignItems: 'center', transition: 'transform .12s, box-shadow .12s' }}
@@ -156,7 +167,7 @@ export function HomeView({ onOpen, onNew, onVault, owned = true, userName = 'sky
           <div>
             <SectionHead title={t('home.quickConnect')} hint={t('home.quickConnectHint')} />
             <div className="col gap8">
-              {D.connections.filter(c => ['h-bastion', 'd-orders', 'h-web1'].includes(c.id)).map(c => (
+              {quickConns.map(c => (
                 <InfoRow key={c.id} conn={c} onOpen={onOpen} />
               ))}
             </div>

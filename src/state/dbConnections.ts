@@ -1,6 +1,12 @@
+import { useSyncExternalStore } from 'react'
 import type { DbConnectArgs, DbConnectResult, DbCapabilities } from '../services/db'
+import type { Connection } from '../services/types'
 
 const KEY = 'catio-db-connections'
+
+/** Group id all real saved DB connections render under (an existing mock group so
+ *  the sidebar/home group headers stay intact). DbProfile may override via `group`. */
+const DEFAULT_DB_GROUP = 'prod'
 
 // ---- Profile generation ----
 
@@ -15,7 +21,12 @@ export function generateProfileId(): string {
 // ---- Persisted connection profiles (localStorage) ----
 
 /** Connection profile = connect args minus the secret (never persisted). */
-export type DbProfile = Omit<DbConnectArgs, 'secret'> & { id: string; name: string }
+export type DbProfile = Omit<DbConnectArgs, 'secret'> & {
+  id: string
+  name: string
+  /** Optional vault group id; defaults to DEFAULT_DB_GROUP when rendered. */
+  group?: string
+}
 
 export function listDbConnections(): DbProfile[] {
   if (typeof localStorage === 'undefined') return []
@@ -31,11 +42,57 @@ export function saveDbConnection(p: DbProfile): void {
   const all = listDbConnections().filter(x => x.id !== p.id)
   all.push(p)
   localStorage.setItem(KEY, JSON.stringify(all))
+  notify()
 }
 
 export function removeDbConnection(id: string): void {
   if (typeof localStorage === 'undefined') return
   localStorage.setItem(KEY, JSON.stringify(listDbConnections().filter(x => x.id !== id)))
+  notify()
+}
+
+// ---- Reactive layer (pub/sub + useSyncExternalStore) ----
+
+const _listeners = new Set<() => void>()
+
+/** Cached snapshot — useSyncExternalStore requires getSnapshot to return a stable
+ *  reference between notifies, so we rebuild the array only on mutation. */
+let _snapshot: DbProfile[] = listDbConnections()
+
+function subscribe(fn: () => void): () => void {
+  _listeners.add(fn)
+  return () => { _listeners.delete(fn) }
+}
+
+function getSnapshot(): DbProfile[] {
+  return _snapshot
+}
+
+/** Rebuild the cached snapshot and notify subscribers. Called on every write. */
+function notify(): void {
+  _snapshot = listDbConnections()
+  _listeners.forEach(fn => fn())
+}
+
+/** React hook: the current list of saved DB connection profiles, reactive to
+ *  save/remove. Returns a stable array reference between mutations. */
+export function useDbConnections(): DbProfile[] {
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+}
+
+/** Map a saved DB profile to the shared Connection shape used by the sidebar / home /
+ *  workbench. Includes engine + kind + icon so ConnGlyph renders identically. */
+export function dbProfileToConnection(p: DbProfile, active = false): Connection {
+  return {
+    id: p.id,
+    group: p.group ?? DEFAULT_DB_GROUP,
+    kind: 'db',
+    name: p.name,
+    sub: `${p.dbType} · ${p.host}:${p.port}`,
+    icon: 'database',
+    engine: p.dbType,
+    status: active ? 'up' : 'idle',
+  }
 }
 
 // ---- In-memory active connection store (NOT persisted — holds live backend connIds) ----
