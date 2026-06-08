@@ -9,6 +9,8 @@ import type { Connection, SchemaNamespace, SchemaTable } from '../../services/ty
 export interface SchemaBrowserProps {
   /** Pick a table/view — carries BOTH the schema namespace and the object name (names are ambiguous across schemas). */
   onPick: (schema: string, name: string) => void
+  /** Pick a view / function / procedure to show its definition (DDL/source) in the main panel. */
+  onPickObject?: (schema: string, name: string, kind: 'view' | 'function' | 'procedure') => void
   /** Currently-selected object as schema+table, or null when not viewing a table. */
   active: { schema: string; table: string } | null
   onNewQuery: () => void
@@ -30,7 +32,7 @@ export interface SchemaBrowserProps {
   live?: boolean
 }
 
-export function SchemaBrowser({ onPick, active, onNewQuery, onOpenER, erActive, sqlActive, disabledSql, disabledEr, schemas, conn, live }: SchemaBrowserProps) {
+export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpenER, erActive, sqlActive, disabledSql, disabledEr, schemas, conn, live }: SchemaBrowserProps) {
   const { t } = useTranslation()
   const D = useData()
   // Live path: render every supplied namespace; mock path: the single seeded schema (pixel-identical).
@@ -72,7 +74,7 @@ export function SchemaBrowser({ onPick, active, onNewQuery, onOpenER, erActive, 
       {/* tree — one collapsible top-level DB node per schema namespace */}
       <div className="grow" style={{ overflowY: 'auto', padding: '0 6px 10px' }}>
         {namespaces.map(ns => (
-          <SchemaNode key={ns.name} ns={ns} query={query} active={active} onPick={onPick} live={!!live} />
+          <SchemaNode key={ns.name} ns={ns} query={query} active={active} onPick={onPick} onPickObject={onPickObject} live={!!live} />
         ))}
       </div>
       {/* footer */}
@@ -89,11 +91,12 @@ interface SchemaNodeProps {
   query: string
   active: { schema: string; table: string } | null
   onPick: (schema: string, name: string) => void
+  onPickObject?: (schema: string, name: string, kind: 'view' | 'function' | 'procedure') => void
   live: boolean
 }
 
 /** One schema namespace rendered as a collapsible DB tree node (Tables / Views / Functions). */
-function SchemaNode({ ns, query, active, onPick, live }: SchemaNodeProps) {
+function SchemaNode({ ns, query, active, onPick, onPickObject, live }: SchemaNodeProps) {
   const { t } = useTranslation()
   const D = useData()
   // Default-open the first schema's section so a freshly-connected DB shows tables immediately.
@@ -146,16 +149,16 @@ function SchemaNode({ ns, query, active, onPick, live }: SchemaNodeProps) {
         {open.views && ns.views.map(v => {
           const isActive = active != null && active.schema === ns.name && active.table === v.name
           return (
-            <button key={v.name} onClick={() => onPick(ns.name, v.name)} className="treeleaf" style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 7, padding: '5px 8px 5px 40px', borderRadius: 8, background: isActive ? 'var(--accent-soft)' : 'transparent', color: isActive ? 'var(--accent-primary)' : 'var(--text-tertiary)' }}>
+            <button key={v.name} onClick={() => onPickObject?.(ns.name, v.name, 'view')} className="treeleaf" style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 7, padding: '5px 8px 5px 40px', borderRadius: 8, background: isActive ? 'var(--accent-soft)' : 'transparent', color: isActive ? 'var(--accent-primary)' : 'var(--text-tertiary)' }}>
               <Icon name="eye" size={12} style={{ color: 'var(--signal-violet)' }} /><span className="ell mono" style={{ fontSize: 12 }}>{v.name}</span>
             </button>
           )
         })}
         <TreeNode icon="function-square" label={t('workbench.functions')} count={ns.functions.length} open={open.fns} onToggle={() => setOpen(o => ({ ...o, fns: !o.fns }))} depth={1} />
         {open.fns && ns.functions.map(f => (
-          <div key={f.name} className="row gap7" style={{ padding: '5px 8px 5px 40px', color: 'var(--text-tertiary)' }}>
+          <button key={f.name} onClick={() => onPickObject?.(ns.name, f.name, 'function')} className="treeleaf" style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 7, padding: '5px 8px 5px 40px', borderRadius: 8, background: 'transparent', color: 'var(--text-tertiary)' }}>
             <Icon name="function-square" size={12} style={{ color: 'var(--signal-green)' }} /><span className="ell mono" style={{ fontSize: 12 }}>{f.name}()</span>
-          </div>
+          </button>
         ))}
       </>}
     </>

@@ -130,7 +130,13 @@
     "pageSize": "行数",
     "truncated": "已截断",
     "applyError": "应用失败：{{message}}",
-    "loadError": "加载数据失败：{{message}}"
+    "loadError": "加载数据失败：{{message}}",
+    "objectDefinition": "定义",
+    "noDefinition": "无可显示的定义",
+    "objLoading": "正在加载定义…",
+    "objViewKind": "视图",
+    "objFunctionKind": "函数",
+    "objProcedureKind": "存储过程"
   },
   "workbench": {
     "newTab": "新建标签",

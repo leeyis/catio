@@ -149,6 +149,16 @@ pub async fn db_table_structure(conn_id: String, schema: String, table: String,
     drv.table_structure(&schema, &table).await
 }
 
+/// Source/DDL of a view, function, or procedure. `kind` is one of
+/// "view" | "function" | "procedure". Best-effort: engines without DDL
+/// introspection return "" (the UI shows a "no definition" state).
+#[tauri::command]
+pub async fn db_object_source(conn_id: String, schema: String, name: String, kind: String,
+    mgr: tauri::State<'_, ConnManager>) -> Result<String, DbError> {
+    let drv = mgr.get(&conn_id).await.ok_or(DbError::NotFound(conn_id))?;
+    drv.object_source(&schema, &name, &kind).await
+}
+
 /// Bulk column names for autocomplete: for each table in `schema`, its column
 /// names. Reuses the driver's default `schema_columns` (best-effort, capped).
 #[tauri::command]

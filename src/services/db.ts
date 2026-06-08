@@ -245,6 +245,16 @@ export async function schemaFunctions(connId: string, schema: string): Promise<s
 }
 
 /**
+ * Source/DDL of a view, function, or procedure — used by the definition viewer.
+ * `kind` is one of 'view' | 'function' | 'procedure'. Outside Tauri returns ''
+ * (the viewer shows a "no definition" state on the mock/demo path).
+ */
+export async function objectSource(connId: string, schema: string, name: string, kind: 'view' | 'function' | 'procedure'): Promise<string> {
+  if (!isTauri()) return ''
+  return tauriInvoke<string>('db_object_source', { connId, schema, name, kind })
+}
+
+/**
  * Foreign-key relations of a schema, used to draw the ER diagram's edges.
  * Each relation is `{ from, fromCol, to, toCol }` (table + column names).
  * Outside Tauri falls back to the seeded mock ER relations so the demo stays

@@ -4,10 +4,11 @@ import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Segmented } from '../atoms'
 import { DataGrid, StructureView, SqlConsole, ERDiagram } from '../dbviews'
+import { SqlEditor } from '../dbviews/SqlEditor'
 import { SchemaBrowser } from './SchemaBrowser'
 import { useData } from '../../state/DataContext'
 import { listActiveDbConnections } from '../../state/dbConnections'
-import { getSchema, tablePreview, dbErrMsg, type DbCapabilities } from '../../services/db'
+import { getSchema, tablePreview, objectSource, dbErrMsg, type DbCapabilities } from '../../services/db'
 import type { Connection, ResultColumn, Schema, SchemaNamespace } from '../../services/types'
 
 /** Initial page size for the live table preview (matches DataGrid's default). */
@@ -46,6 +47,7 @@ export function DbWorkbench({ conn, density }: DbWorkbenchProps) {
   // A table carries BOTH its schema namespace and name (names are ambiguous across schemas).
   const [obj, setObj] = useState<
     | { type: 'table'; schema: string; table: string }
+    | { type: 'object'; schema: string; name: string; kind: 'view' | 'function' | 'procedure' }
     | { type: 'sql'; qid: number }
     | { type: 'er' }
   >({ type: 'table', schema: 'public', table: 'orders' })
@@ -129,7 +131,32 @@ export function DbWorkbench({ conn, density }: DbWorkbenchProps) {
     return () => { cancelled = true }
   }, [connId, selectedTable, selectedSchema])
 
+  // ---- Object definition (view / function / procedure source) ----
+  // Fetched only when an object is selected AND there is a live backend connection.
+  const [objSource, setObjSource] = useState<string>('')
+  const [objLoading, setObjLoading] = useState(false)
+  const [objErr, setObjErr] = useState<string | null>(null)
+  const objSig = obj.type === 'object' ? `${obj.kind}:${obj.schema}.${obj.name}` : null
+
+  useEffect(() => {
+    if (!connId || obj.type !== 'object') { setObjSource(''); setObjErr(null); setObjLoading(false); return }
+    let cancelled = false
+    setObjLoading(true)
+    setObjErr(null)
+    setObjSource('')
+    objectSource(connId, obj.schema, obj.name, obj.kind)
+      .then(src => { if (!cancelled) setObjSource(src) })
+      .catch(e => { if (!cancelled) setObjErr(dbErrMsg(e)) })
+      .finally(() => { if (!cancelled) setObjLoading(false) })
+    return () => { cancelled = true }
+    // obj.kind/schema/name captured via objSig; re-run only when the selection changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connId, objSig])
+
   function pickTable(schema: string, name: string) { setObj({ type: 'table', schema, table: name }) }
+  function pickObject(schema: string, name: string, kind: 'view' | 'function' | 'procedure') {
+    setObj({ type: 'object', schema, name, kind })
+  }
   function newQuery() {
     if (!caps.sqlConsole) return
     const id = queryN + 1
@@ -153,7 +180,7 @@ export function DbWorkbench({ conn, density }: DbWorkbenchProps) {
 
   return (
     <div style={{ display: 'flex', alignItems: 'stretch', height: '100%', width: '100%', flex: 1, minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
-      <SchemaBrowser onPick={pickTable} active={obj.type === 'table' ? { schema: obj.schema, table: obj.table } : null}
+      <SchemaBrowser onPick={pickTable} onPickObject={pickObject} active={obj.type === 'table' ? { schema: obj.schema, table: obj.table } : null}
         onNewQuery={newQuery} onOpenER={openER} erActive={obj.type === 'er'} sqlActive={obj.type === 'sql'}
         disabledSql={!caps.sqlConsole} disabledEr={!caps.er}
         schemas={connId ? namespaces : undefined} conn={connId ? conn : undefined} live={!!connId} />
@@ -186,6 +213,34 @@ export function DbWorkbench({ conn, density }: DbWorkbenchProps) {
                     rows={D.ordersRows.map(r => D.ordersColumns.map(c => (r as unknown as Record<string, unknown>)[c.name]))}
                     statusTones={D.statusTones} density={density} key={obj.table} />)}
               {effectiveTableTab === 'structure' && <StructureView table={obj.table} schema={selectedSchema} connId={connId ?? undefined} key={`${selectedSchema ?? ''}.${obj.table}`} />}
+            </div>
+          </>
+        )}
+        {obj.type === 'object' && (
+          <>
+            <div className="row" style={{ justifyContent: 'space-between', padding: '8px 12px', borderBottom: '1px solid var(--border-hairline)', flex: 'none', gap: 12 }}>
+              <div className="row gap7" style={{ minWidth: 0 }}>
+                <div className="icon-badge" style={{ width: 28, height: 28, borderRadius: 8, background: 'var(--accent-soft)', color: 'var(--accent-primary)' }}>
+                  <Icon name={obj.kind === 'view' ? 'eye' : 'function-square'} size={15} />
+                </div>
+                <div className="col" style={{ lineHeight: 1.25, minWidth: 0 }}>
+                  <span className="mono ell" style={{ fontSize: 13.5, fontWeight: 700 }}>{`${obj.schema}.${obj.name}`}</span>
+                  <span className="mono" style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{t('dbviews.objectDefinition')}</span>
+                </div>
+              </div>
+              <span className="mono" style={{ flex: 'none', alignSelf: 'center', height: 22, lineHeight: '22px', padding: '0 9px', borderRadius: 7, fontSize: 11, fontWeight: 600,
+                color: 'var(--accent-primary)', background: 'var(--accent-soft)', border: '1px solid var(--accent-border)' }}>
+                {obj.kind === 'view' ? t('dbviews.objViewKind') : obj.kind === 'function' ? t('dbviews.objFunctionKind') : t('dbviews.objProcedureKind')}
+              </span>
+            </div>
+            <div className="grow" style={{ minHeight: 0, position: 'relative', display: 'flex', flexDirection: 'column' }}>
+              {objLoading
+                ? <div className="grow" style={{ display: 'grid', placeItems: 'center', color: 'var(--text-faint)', fontSize: 12 }}>{t('dbviews.objLoading')}</div>
+                : objErr
+                  ? <div className="grow" style={{ display: 'grid', placeItems: 'center', color: 'var(--signal-red)', fontSize: 12, padding: 16, textAlign: 'center' }}>{t('dbviews.loadError', { message: objErr })}</div>
+                  : objSource
+                    ? <SqlEditor code={objSource} onChange={() => {}} />
+                    : <div className="grow" style={{ display: 'grid', placeItems: 'center', color: 'var(--text-faint)', fontSize: 12 }}>{t('dbviews.noDefinition')}</div>}
             </div>
           </>
         )}

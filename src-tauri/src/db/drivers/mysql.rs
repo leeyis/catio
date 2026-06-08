@@ -401,6 +401,35 @@ impl Driver for MySqlDriver {
             .map_err(|e| DbError::QueryFailed(e.to_string()))?;
         Ok(rows.iter().map(|r| get_str(r, 0)).collect())
     }
+
+    async fn object_source(&self, schema: &str, name: &str, kind: &str) -> Result<String, DbError> {
+        // SHOW CREATE {VIEW|FUNCTION|PROCEDURE} `schema`.`name` — the create text is
+        // in the 2nd column of the returned row. Best-effort: any error → "".
+        let stmt = match kind {
+            "view" => "VIEW",
+            "function" => "FUNCTION",
+            "procedure" => "PROCEDURE",
+            _ => return Ok(String::new()),
+        };
+        // For SHOW CREATE VIEW the create text is column index 1; for FUNCTION /
+        // PROCEDURE the routine name is col 0 and the create text is col 2.
+        let text_idx = if kind == "view" { 1 } else { 2 };
+        let sql = format!(
+            "SHOW CREATE {} `{}`.`{}`",
+            stmt,
+            schema.replace('`', "``"),
+            name.replace('`', "``"),
+        );
+        let mut conn = match self.pool.get_conn().await {
+            Ok(c) => c,
+            Err(_) => return Ok(String::new()),
+        };
+        let row: Option<mysql_async::Row> = match conn.query_first(&sql).await {
+            Ok(r) => r,
+            Err(_) => return Ok(String::new()),
+        };
+        Ok(row.map(|r| get_str(&r, text_idx)).unwrap_or_default())
+    }
 }
 
 // ── Standard MySQL introspection helpers ────────────────────────────────────

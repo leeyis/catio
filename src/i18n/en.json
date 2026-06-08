@@ -130,7 +130,13 @@
     "pageSize": "Rows",
     "truncated": "truncated",
     "applyError": "Apply failed: {{message}}",
-    "loadError": "Failed to load rows: {{message}}"
+    "loadError": "Failed to load rows: {{message}}",
+    "objectDefinition": "Definition",
+    "noDefinition": "No definition to display",
+    "objLoading": "Loading definition…",
+    "objViewKind": "View",
+    "objFunctionKind": "Function",
+    "objProcedureKind": "Procedure"
   },
   "workbench": {
     "newTab": "New tab",

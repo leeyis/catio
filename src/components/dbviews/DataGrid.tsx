@@ -1,5 +1,5 @@
 /* ported from ref-ui/_extract/blob6.txt — verbatim per plan T1-T7; E3 adds edit→preview→apply + pagination */
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn, IconBtn, Segmented } from '../atoms'
@@ -65,6 +65,14 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   // server-side page rows (when connId set); null → use client-side slice of `rows`
   const [serverRows, setServerRows] = useState<unknown[][] | null>(null)
   const [serverTruncated, setServerTruncated] = useState(false)
+  // toolbar: refresh / filter / sort / export UI state
+  const [refreshing, setRefreshing] = useState(false)
+  const [filterOpen, setFilterOpen] = useState(false)
+  const [filterText, setFilterText] = useState('')
+  const [sortMenuOpen, setSortMenuOpen] = useState(false)
+  const [exportMenuOpen, setExportMenuOpen] = useState(false)
+  const sortMenuRef = useRef<HTMLDivElement>(null)
+  const exportMenuRef = useRef<HTMLDivElement>(null)
   // preview gate
   const [preview, setPreview] = useState<{ reqs: EditRequest[]; sql: string } | null>(null)
   const [applying, setApplying] = useState(false)
@@ -89,20 +97,33 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   // Tag each row with its original (unsorted) index so keys and edits are stable under sort.
   const tagged = useMemo(() => baseRows.map((row, i) => ({ row, origIdx: i })), [baseRows])
 
+  // Client-side text filter: keep rows where ANY cell's string value contains the
+  // (case-insensitive) filter text. Empty / closed filter → all rows.
+  const filtered = useMemo(() => {
+    const q = filterOpen ? filterText.trim().toLowerCase() : ''
+    if (!q) return tagged
+    return tagged.filter(({ row }) =>
+      row.some(v => v != null && String(v).toLowerCase().includes(q)),
+    )
+  }, [tagged, filterOpen, filterText])
+
   const sorted = useMemo(() => {
-    if (!sortCol || sortColIdx < 0) return tagged
+    if (!sortCol || sortColIdx < 0) return filtered
     const idx = sortColIdx
-    return [...tagged].sort((a, b) => {
+    return [...filtered].sort((a, b) => {
       const av = a.row[idx]
       const bv = b.row[idx]
       if (av === bv) return 0
       return ((av as string | number) > (bv as string | number) ? 1 : -1) * (sortDir === 'asc' ? 1 : -1)
     })
-  }, [tagged, sortCol, sortColIdx, sortDir])
+  }, [filtered, sortCol, sortColIdx, sortDir])
 
   // When serverRows is set, the rows are already the current page → no client slice.
-  const pageRows = serverRows ? sorted : sorted.slice((page - 1) * PAGE, page * PAGE)
-  const pages = serverRows ? page + (serverTruncated ? 1 : 0) : Math.max(1, Math.ceil(baseRows.length / PAGE))
+  // Filtering applies to the displayed rows; with a filter active we render the
+  // filtered set directly (no client paging math on a partial page).
+  const filterActive = filterOpen && filterText.trim().length > 0
+  const pageRows = (serverRows || filterActive) ? sorted : sorted.slice((page - 1) * PAGE, page * PAGE)
+  const pages = serverRows ? page + (serverTruncated ? 1 : 0) : Math.max(1, Math.ceil(filtered.length / PAGE))
   const showTruncated = serverRows ? serverTruncated : !!truncated
 
   // Fetch one server page. Prefer the dialect-correct tablePreview (schema/table)
@@ -141,6 +162,60 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   function toggleSort(name: string) {
     if (sortCol === name) { setSortDir(d => d === 'asc' ? 'desc' : 'asc') }
     else { setSortCol(name); setSortDir('asc') }
+  }
+
+  // Refresh: re-fetch the current page from the server when possible, else ask the
+  // parent to refresh. Brief spinner while the fetch is in flight.
+  async function refresh() {
+    if (refreshing) return
+    if (fetchPage) {
+      setRefreshing(true)
+      try {
+        const res = await fetchPage(PAGE, (page - 1) * PAGE)
+        setServerRows(res.rows)
+        setServerTruncated(!!res.truncated)
+      } finally {
+        setRefreshing(false)
+      }
+    } else {
+      onRefresh?.()
+    }
+  }
+
+  // CSV-escape a single value: empty for null/undefined; quote+double-quote when the
+  // value contains a comma, quote, or newline.
+  function csvEscape(v: unknown): string {
+    if (v == null) return ''
+    const s = String(v)
+    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+  }
+
+  function triggerDownload(text: string, type: string, filename: string) {
+    const blob = new Blob([text], { type })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  // Export the CURRENTLY displayed rows (after filter + sort) and columns.
+  function exportAs(format: 'csv' | 'json') {
+    setExportMenuOpen(false)
+    const displayRows = pageRows.map(({ row }) => row)
+    if (format === 'csv') {
+      const header = columns.map(c => csvEscape(c.name)).join(',')
+      const lines = displayRows.map(row => columns.map((_, ci) => csvEscape(row[ci])).join(','))
+      triggerDownload([header, ...lines].join('\n'), 'text/csv', 'export.csv')
+    } else {
+      const objs = displayRows.map(row => {
+        const o: Record<string, unknown> = {}
+        columns.forEach((c, ci) => { o[c.name] = row[ci] ?? null })
+        return o
+      })
+      triggerDownload(JSON.stringify(objs, null, 2), 'application/json', 'export.json')
+    }
   }
   function cellKey(rowIdx: number, col: string) { return `${rowIdx}-${col}` }
   function startEdit(rIdx: number, cIdx: number, _rowIdx: number, _col: string, val: unknown) {
@@ -209,12 +284,25 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
     }
   }
 
+  // Close the sort/export dropdowns on an outside click.
+  useEffect(() => {
+    if (!sortMenuOpen && !exportMenuOpen) return
+    function onDocClick(e: MouseEvent) {
+      const tgt = e.target as Node
+      if (sortMenuOpen && sortMenuRef.current && !sortMenuRef.current.contains(tgt)) setSortMenuOpen(false)
+      if (exportMenuOpen && exportMenuRef.current && !exportMenuRef.current.contains(tgt)) setExportMenuOpen(false)
+    }
+    document.addEventListener('mousedown', onDocClick)
+    return () => document.removeEventListener('mousedown', onDocClick)
+  }, [sortMenuOpen, exportMenuOpen])
+
   const editCount = Object.keys(edits).length
   // Toolbar table chip: live path uses the real schema/table (no bogus `public.`);
   // mock/demo path keeps the original `public.orders` label for pixel parity.
   const toolbarLabel = resultLabel ?? (connId ? (schema ? `${schema}.${table}` : table) : 'public.orders')
-  // Row count shown in the toolbar: live path reflects the loaded page rows; mock keeps rows.length.
-  const rowCount = connId ? baseRows.length : rows.length
+  // Row count shown in the toolbar: when a filter is active, reflect the filtered
+  // count; otherwise live path reflects the loaded page rows, mock keeps rows.length.
+  const rowCount = filterActive ? filtered.length : (connId ? baseRows.length : rows.length)
   // Fixed per-column widths so the row is exactly as wide as the sum of its
   // columns and the grid scrolls horizontally — no flex/1fr stretch that would
   // blow up a couple of columns to fill the viewport and hide the rest.
@@ -237,13 +325,67 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
         </div>
         <div className="row gap6">
           {canEdit && editCount > 0 && <Btn size="sm" variant="primary" icon="save" onClick={openPreview}>{t('dbviews.saveEdits')}</Btn>}
-          <button className="icon-btn bare" title={t('dbviews.filter')}><Icon name="filter" size={15} /></button>
-          <button className="icon-btn bare" title={t('dbviews.sort')}><Icon name="arrow-up-down" size={15} /></button>
-          <button className="icon-btn bare" title={t('dbviews.refresh')} onClick={() => gotoPage(page)}><Icon name="refresh-cw" size={15} /></button>
+          <button className="icon-btn bare" title={t('dbviews.filter')} data-active={filterOpen ? '1' : undefined}
+            onClick={() => setFilterOpen(o => !o)}><Icon name="filter" size={15} /></button>
+          <div ref={sortMenuRef} style={{ position: 'relative' }}>
+            <button className="icon-btn bare" title={t('dbviews.sort')} data-active={sortMenuOpen || sortCol ? '1' : undefined}
+              onClick={() => { setSortMenuOpen(o => !o); setExportMenuOpen(false) }}><Icon name="arrow-up-down" size={15} /></button>
+            {sortMenuOpen && (
+              <div className="pop-in" style={{ position: 'absolute', top: 'calc(100% + 6px)', right: 0, zIndex: 60, minWidth: 180, maxHeight: 320, overflow: 'auto', background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', borderRadius: 10, boxShadow: 'var(--shadow-window)', padding: 4 }}>
+                {columns.map(col => {
+                  const isActive = sortCol === col.name
+                  return (
+                    <button key={col.name} className="row" onClick={() => { toggleSort(col.name); setSortMenuOpen(false) }}
+                      style={{ width: '100%', justifyContent: 'space-between', gap: 8, padding: '6px 10px', borderRadius: 7, border: 'none', background: isActive ? 'var(--accent-soft)' : 'transparent', color: isActive ? 'var(--accent-primary)' : 'var(--text-secondary)', cursor: 'pointer', fontSize: 12.5, textAlign: 'left' }}>
+                      <span className="ell">{col.name}</span>
+                      {isActive && <Icon name={sortDir === 'asc' ? 'chevron-up' : 'chevron-down'} size={13} />}
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+          <button className="icon-btn bare" title={t('dbviews.refresh')} disabled={refreshing} onClick={refresh}>
+            <Icon name="refresh-cw" size={15} style={refreshing ? { animation: 'spin 0.8s linear infinite' } : undefined} />
+          </button>
           <div style={{ width: 1, height: 18, background: 'var(--border-hairline)' }} />
-          <Btn size="sm" variant="secondary" icon="download" iconR="chevron-down">{t('dbviews.export')}</Btn>
+          <div ref={exportMenuRef} style={{ position: 'relative' }}>
+            <Btn size="sm" variant="secondary" icon="download" iconR="chevron-down"
+              onClick={() => { setExportMenuOpen(o => !o); setSortMenuOpen(false) }}>{t('dbviews.export')}</Btn>
+            {exportMenuOpen && (
+              <div className="pop-in" style={{ position: 'absolute', top: 'calc(100% + 6px)', right: 0, zIndex: 60, minWidth: 120, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', borderRadius: 10, boxShadow: 'var(--shadow-window)', padding: 4 }}>
+                {(['csv', 'json'] as const).map(fmt => (
+                  <button key={fmt} className="row" onClick={() => exportAs(fmt)}
+                    style={{ width: '100%', gap: 8, padding: '6px 10px', borderRadius: 7, border: 'none', background: 'transparent', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 12.5, textAlign: 'left' }}>
+                    <Icon name={fmt === 'csv' ? 'table-2' : 'file-code'} size={13} />
+                    {fmt.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       </div>
+
+      {/* client-side filter row (toggled by the funnel button) */}
+      {filterOpen && (
+        <div className="row gap8" style={{ padding: '7px 12px', borderBottom: '1px solid var(--border-hairline)', background: 'var(--surface-subtle)' }}>
+          <Icon name="filter" size={13} style={{ color: 'var(--text-faint)' }} />
+          <input autoFocus value={filterText} onChange={e => setFilterText(e.target.value)}
+            placeholder={t('dbviews.filter')}
+            onKeyDown={e => { if (e.key === 'Escape') { setFilterText(''); setFilterOpen(false) } }}
+            style={{ flex: 1, border: '1px solid var(--border-hairline)', borderRadius: 7, padding: '4px 8px', background: 'var(--surface-card)', color: 'var(--text-primary)', font: 'inherit', fontSize: 12.5, outline: 'none' }} />
+          {filterActive && (
+            <span style={{ fontSize: 11.5, color: 'var(--text-tertiary)' }}>
+              <b className="mono" style={{ color: 'var(--text-secondary)' }}>{filtered.length}</b> {t('dbviews.rows')}
+            </span>
+          )}
+          <button className="icon-btn bare" style={{ width: 22, height: 22 }}
+            title={t('dbviews.cancel')} onClick={() => { setFilterText(''); setFilterOpen(false) }}>
+            <Icon name="x" size={14} />
+          </button>
+        </div>
+      )}
 
       {/* grid */}
       <div className="grow mono" style={{ overflow: 'auto', fontSize: 12.5 }}>

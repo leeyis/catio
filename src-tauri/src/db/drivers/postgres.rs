@@ -439,4 +439,45 @@ impl Driver for PostgresDriver {
         ).await.map_err(|e| pg_query_err(&e))?;
         Ok(rows.iter().map(|r| r.get::<_, String>(0)).collect())
     }
+
+    async fn object_source(&self, schema: &str, name: &str, kind: &str) -> Result<String, DbError> {
+        let client = self.pool.get().await
+            .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
+        if kind == "view" {
+            // pg_get_viewdef returns just the SELECT body; prefix a CREATE header for readability.
+            let rows = client.query(
+                "SELECT pg_get_viewdef(c.oid, 0) \
+                 FROM pg_catalog.pg_class c \
+                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('v','m') \
+                 ORDER BY c.oid LIMIT 1",
+                &[&schema, &name],
+            ).await.map_err(|e| pg_query_err(&e))?;
+            match rows.first() {
+                Some(r) => {
+                    let body: String = r.try_get::<_, Option<String>>(0).ok().flatten().unwrap_or_default();
+                    if body.is_empty() {
+                        Ok(String::new())
+                    } else {
+                        Ok(format!("CREATE OR REPLACE VIEW {}.{} AS\n{}", schema, name, body))
+                    }
+                }
+                None => Ok(String::new()),
+            }
+        } else {
+            // function/procedure: pg_get_functiondef returns the full CREATE text.
+            let rows = client.query(
+                "SELECT pg_get_functiondef(p.oid) \
+                 FROM pg_catalog.pg_proc p \
+                 JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+                 WHERE n.nspname = $1 AND p.proname = $2 \
+                 ORDER BY p.oid LIMIT 1",
+                &[&schema, &name],
+            ).await.map_err(|e| pg_query_err(&e))?;
+            match rows.first() {
+                Some(r) => Ok(r.try_get::<_, Option<String>>(0).ok().flatten().unwrap_or_default()),
+                None => Ok(String::new()),
+            }
+        }
+    }
 }

@@ -150,6 +150,14 @@ pub trait Driver: Send + Sync {
     async fn list_functions(&self, _schema: &str) -> Result<Vec<String>, DbError> {
         Ok(vec![])
     }
+
+    /// Source/DDL of a view, function, or procedure. `kind` is one of
+    /// "view" | "function" | "procedure". Default returns an empty string so
+    /// engines without DDL introspection (or that haven't overridden) still
+    /// compile and degrade to a "no definition" state in the UI.
+    async fn object_source(&self, _schema: &str, _name: &str, _kind: &str) -> Result<String, DbError> {
+        Ok(String::new())
+    }
 }
 
 /// 按 db_type 建立驱动。后续每加一个引擎在此加一臂。
