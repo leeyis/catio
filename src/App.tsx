@@ -771,7 +771,10 @@ export default function App() {
               {tabs.length > 0 && (
                 <div className="grow" style={{ minHeight: 0, position: 'relative', display: view === 'workbench' ? 'block' : 'none' }}>
                   {tabs.map(tab => {
-                    const tabConn = D.byId[tab.connId] ?? liveConns[tab.connId] ?? null
+                    // Resolve the tab's display connection. liveConns first (live SSH
+                    // status), then the real saved vault connections (incl. DB — without
+                    // this a DB SQL tab gets a null conn and renders blank), then mock.
+                    const tabConn = liveConns[tab.connId] ?? vaultConns.find(c => c.id === tab.connId) ?? D.byId[tab.connId] ?? null
                     const isShown = view === 'workbench' && tab.id === activeTab
                     return (
                       <div key={tab.id} style={{ height: '100%', display: isShown ? 'flex' : 'none', position: 'absolute', inset: 0 }}>
