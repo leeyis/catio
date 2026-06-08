@@ -134,10 +134,18 @@ export function SftpPanel({ onClose, conn, sessionId }: SftpPanelProps) {
     offs.push(await listen<TransferProgress>(`transfer-progress-${id}`, p => {
       const now = Date.now()
       const prev = sampleRef.current[id]
-      let speed = 0
-      if (prev && now > prev.time) speed = (p.bytesTransferred - prev.bytes) / ((now - prev.time) / 1000)
-      sampleRef.current[id] = { bytes: p.bytesTransferred, time: now }
-      setTransfers(prevT => prevT.map(x => (x.id === id ? { ...x, percent: p.percent, speed: speed > 0 ? speed : x.speed } : x)))
+      // Refresh the displayed speed at most once per second (otherwise it flickers
+      // on every 256KiB progress event). The bar/percent still update every event.
+      let nextSpeed: number | undefined
+      if (!prev) {
+        sampleRef.current[id] = { bytes: p.bytesTransferred, time: now }
+      } else if (now - prev.time >= 1000) {
+        nextSpeed = (p.bytesTransferred - prev.bytes) / ((now - prev.time) / 1000)
+        sampleRef.current[id] = { bytes: p.bytesTransferred, time: now }
+      }
+      setTransfers(prevT => prevT.map(x => (x.id === id
+        ? { ...x, percent: p.percent, speed: nextSpeed !== undefined ? nextSpeed : x.speed }
+        : x)))
     }))
     offs.push(await listen(`transfer-complete-${id}`, () => {
       cleanup()
