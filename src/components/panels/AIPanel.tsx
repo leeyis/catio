@@ -314,7 +314,10 @@ export function AIPanel({ onClose, mode = 'sql', conn, attachment, onClearAttach
   const { t } = useTranslation()
   const { config: cfg } = useAgentConfig()
   const isSql = mode !== 'shell'
-  const target = conn ? conn.name : (isSql ? 'prod-orders' : 'prod-web-01')
+  // Strictly follows the active workbench tab — no mock fallback. When there is
+  // no active host/db tab, the panel shows a connect-first empty state instead.
+  const hasTarget = !!conn
+  const target = conn?.name ?? ''
   const accent = isSql ? 'var(--signal-blue)' : 'var(--signal-amber)'
   const [draft, setDraft] = useState('')
   const [histOpen, setHistOpen] = useState(false)
@@ -348,20 +351,34 @@ export function AIPanel({ onClose, mode = 'sql', conn, attachment, onClearAttach
 
   return (
     <PanelShell icon="wand" title="Catio Agent"
-      sub={isSql ? t('panels.sqlAssistantSub', { target }) : t('panels.shellAssistantSub', { target })}
+      sub={hasTarget ? (isSql ? t('panels.sqlAssistantSub', { target }) : t('panels.shellAssistantSub', { target })) : t('panels.agentNeedConnSub')}
       onClose={onClose}
-      actions={
-        <>
-          <IconBtn name="plus" size={15} variant="bare" title={t('panels.newConversation')} onClick={() => onNewConversation?.()} />
-          <div style={{ position: 'relative' }}>
-            <IconBtn name="history" size={15} variant="bare" title={t('panels.conversationHistory')} active={histOpen} onClick={() => setHistOpen(o => !o)} />
-            {histOpen && (
-              <HistoryDropdown history={history} currentId={conversation?.id} onClose={() => setHistOpen(false)}
-                onRestore={onRestoreConversation} onDelete={onDeleteConversation} />
-            )}
-          </div>
-        </>
+      actions={hasTarget
+        ? (
+          <>
+            <IconBtn name="plus" size={15} variant="bare" title={t('panels.newConversation')} onClick={() => onNewConversation?.()} />
+            <div style={{ position: 'relative' }}>
+              <IconBtn name="history" size={15} variant="bare" title={t('panels.conversationHistory')} active={histOpen} onClick={() => setHistOpen(o => !o)} />
+              {histOpen && (
+                <HistoryDropdown history={history} currentId={conversation?.id} onClose={() => setHistOpen(false)}
+                  onRestore={onRestoreConversation} onDelete={onDeleteConversation} />
+              )}
+            </div>
+          </>
+        )
+        : undefined
       }>
+      {/* No active host/db tab → connect-first empty state; hide banner + composer. */}
+      {!hasTarget ? (
+        <div className="grow col" style={{ alignItems: 'center', justifyContent: 'center', gap: 14, padding: '24px 28px', textAlign: 'center' }}>
+          <div className="icon-badge" style={{ width: 48, height: 48, borderRadius: 14, background: 'var(--surface-sunken)', color: 'var(--text-faint)' }}><Icon name="plug" size={22} /></div>
+          <div className="col" style={{ gap: 6 }}>
+            <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-secondary)' }}>{t('panels.agentNeedConnTitle')}</span>
+            <span style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--text-faint)', maxWidth: 280 }}>{t('panels.agentNeedConnHint')}</span>
+          </div>
+        </div>
+      ) : (
+        <>
       {/* scope banner — strictly follows the active workbench tab */}
       <div className="row gap8" style={{ padding: '8px 12px', borderBottom: '1px solid var(--border-hairline)' }}>
         <span className="chip" style={{ background: `color-mix(in srgb, ${accent} 15%, transparent)`, color: accent, fontWeight: 600 }}>
@@ -421,6 +438,8 @@ export function AIPanel({ onClose, mode = 'sql', conn, attachment, onClearAttach
           </div>
         </div>
       </div>
+        </>
+      )}
     </PanelShell>
   )
 }
