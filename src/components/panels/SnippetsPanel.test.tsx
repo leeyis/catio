@@ -43,9 +43,15 @@ describe('SnippetsPanel', () => {
     expect(onInsert).toHaveBeenCalledWith('ls -la')
   })
 
-  it('does not render insert button when canInsert is false', () => {
+  it('dispatches catio-insert when canInsert is false (no active terminal)', () => {
+    const handler = vi.fn()
+    window.addEventListener('catio-insert', handler)
     wrap(<SnippetsPanel onClose={() => {}} snippets={SNIPS} onInsert={vi.fn()} canInsert={false} />)
-    expect(screen.queryByTitle('插入终端')).toBeNull()
+    const row = screen.getByText('list files').closest('.col') as HTMLElement
+    fireEvent.mouseEnter(row)
+    fireEvent.click(screen.getByTitle('插入终端'))
+    expect(handler).toHaveBeenCalled()
+    window.removeEventListener('catio-insert', handler)
   })
 
   it('opens the editor via + and saves a new snippet', () => {

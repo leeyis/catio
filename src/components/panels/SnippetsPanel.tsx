@@ -34,7 +34,6 @@ function SnippetRow({ s, onInsert, canInsert, onEdit, onDelete }: SnippetRowProp
   const [copied, setCopied] = useState(false)
   const isShell = s.scope === 'Shell'
   const code = s.code || ''
-  const insertEnabled = !!onInsert && !!canInsert
   function copy(e: React.MouseEvent) {
     e.stopPropagation()
     if (navigator.clipboard) navigator.clipboard.writeText(code).catch(() => {})
@@ -44,6 +43,13 @@ function SnippetRow({ s, onInsert, canInsert, onEdit, onDelete }: SnippetRowProp
   function run(e: React.MouseEvent) {
     e.stopPropagation()
     window.dispatchEvent(new CustomEvent('catio-run', { detail: { kind: isShell ? 'shell' : 'sql', text: code } }))
+  }
+  // Insert routes by kind via the event bus (shell → terminal, SQL → editor).
+  // Always shown; a no-op when there's no matching active target, like run.
+  function insert(e: React.MouseEvent) {
+    e.stopPropagation()
+    if (onInsert && isShell && canInsert) onInsert(code)
+    else window.dispatchEvent(new CustomEvent('catio-insert', { detail: { kind: isShell ? 'shell' : 'sql', text: code } }))
   }
   return (
     <div onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
@@ -58,11 +64,9 @@ function SnippetRow({ s, onInsert, canInsert, onEdit, onDelete }: SnippetRowProp
           <button className="icon-btn bare" style={{ width: 24, height: 24 }} title={copied ? t('panels.copied') : t('panels.copy')} onClick={copy}>
             <Icon name={copied ? 'check' : 'copy'} size={13} style={copied ? { color: 'var(--signal-green)' } : undefined} />
           </button>
-          {insertEnabled && (
-            <button className="icon-btn bare" style={{ width: 24, height: 24 }} title={isShell ? t('panels.insertTerminal') : t('panels.insertEditor')} onClick={e => { e.stopPropagation(); onInsert(code) }}>
-              <Icon name={isShell ? 'terminal' : 'arrow-right-to-line'} size={13} />
-            </button>
-          )}
+          <button className="icon-btn bare" style={{ width: 24, height: 24 }} title={isShell ? t('panels.insertTerminal') : t('panels.insertEditor')} onClick={insert}>
+            <Icon name={isShell ? 'terminal' : 'arrow-right-to-line'} size={13} />
+          </button>
           <button className="icon-btn bare" style={{ width: 24, height: 24 }} title={t('panels.runItem')} onClick={run}>
             <Icon name="play" size={13} />
           </button>

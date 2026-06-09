@@ -70,7 +70,14 @@ function HistoryRow({ h, onSave, onInsert, canInsert, onDelete }: HistoryRowProp
     e.stopPropagation()
     window.dispatchEvent(new CustomEvent('catio-run', { detail: { kind: h.kind, text: h.text } }))
   }
-  const insertEnabled = !!onInsert && !!canInsert
+  // Insert routes by kind via the same event bus as run: SQL → active SQL editor,
+  // shell → active terminal. Always shown (no canInsert gate); a no-op if there's
+  // no matching active target, exactly like the run action.
+  function insert(e: React.MouseEvent) {
+    e.stopPropagation()
+    if (onInsert && !isSql && canInsert) onInsert(h.text)
+    else window.dispatchEvent(new CustomEvent('catio-insert', { detail: { kind: h.kind, text: h.text } }))
+  }
   return (
     <div onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
       className="col" style={{ padding: '9px 10px', borderRadius: 10, gap: 6, cursor: 'pointer', background: hover ? 'var(--surface-sunken)' : 'transparent' }}>
@@ -93,11 +100,9 @@ function HistoryRow({ h, onSave, onInsert, canInsert, onDelete }: HistoryRowProp
           <button className="icon-btn bare" style={{ width: 22, height: 22, color: copied ? 'var(--signal-green)' : 'var(--text-tertiary)' }} title={copied ? t('panels.copied') : t('panels.copy')} onClick={copy}>
             <Icon name={copied ? 'check' : 'copy'} size={13} />
           </button>
-          {insertEnabled && (
-            <button className="icon-btn bare" style={{ width: 22, height: 22 }} title={isSql ? t('panels.insertEditor') : t('panels.insertTerminal')} onClick={e => { e.stopPropagation(); onInsert(h.text) }}>
-              <Icon name="arrow-right-to-line" size={13} />
-            </button>
-          )}
+          <button className="icon-btn bare" style={{ width: 22, height: 22 }} title={isSql ? t('panels.insertEditor') : t('panels.insertTerminal')} onClick={insert}>
+            <Icon name={isSql ? 'arrow-right-to-line' : 'terminal'} size={13} />
+          </button>
           <button className="icon-btn bare" style={{ width: 22, height: 22 }} title={isSql ? t('panels.execSql') : t('panels.runItem')} onClick={run}>
             <Icon name="play" size={13} />
           </button>

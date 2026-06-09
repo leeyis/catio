@@ -66,14 +66,18 @@ describe('HistoryPanel', () => {
     expect(onInsert).toHaveBeenCalledWith('ls -la')
   })
 
-  it('does not render insert button when onInsert is not provided', () => {
+  it('always renders the insert button (event-routed) even without onInsert', () => {
     wrap(<HistoryPanel onClose={() => {}} items={ITEMS} />)
-    expect(screen.queryByTitle('插入终端')).toBeNull()
+    expect(screen.getAllByTitle('插入终端').length).toBeGreaterThan(0)
   })
 
-  it('does not render insert button when canInsert is false', () => {
+  it('dispatches catio-insert when canInsert is false (no active terminal)', () => {
+    const handler = vi.fn()
+    window.addEventListener('catio-insert', handler)
     wrap(<HistoryPanel onClose={() => {}} items={ITEMS} onInsert={vi.fn()} canInsert={false} />)
-    expect(screen.queryByTitle('插入终端')).toBeNull()
+    fireEvent.click(screen.getAllByTitle('插入终端')[0])
+    expect(handler).toHaveBeenCalled()
+    window.removeEventListener('catio-insert', handler)
   })
 
   it('opens ConfirmModal when clear history button is clicked', () => {
