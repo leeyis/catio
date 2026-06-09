@@ -180,13 +180,14 @@ export default function App() {
   // Real saved SSH host profiles (localStorage) → host Connection rows.
   const profileConns: Connection[] = profiles.map(p => ({
     id: p.id,
-    group: '',
+    group: p.group ?? '',
     kind: 'host',
     name: p.name,
     sub: `${p.user}@${p.host}:${p.port}`,
     icon: 'server',
     status: 'idle',
     proto: 'ssh',
+    ...(p.os ? { os: p.os } : {}),
   }))
   // Real saved DB connections (reactive) → db Connection rows.
   const activeProfileIds = new Set(listActiveDbConnections().map(a => a.profileId))

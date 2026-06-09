@@ -2,6 +2,7 @@
 import React from 'react'
 import { Icon } from './Icon'
 import { useData } from '../state/DataContext'
+import { dbLogo, osLogo } from '../services/logos'
 import type { Connection } from '../services/types'
 
 // ---- Keyframes injected once ----
@@ -166,21 +167,42 @@ export function StatusDot({ status, size = 7 }: StatusDotProps) {
   )
 }
 
-/* Connection glyph: db engine short code or OS-tinted host icon */
+/* Connection glyph: real brand LOGO when available, else a tinted fallback.
+   - DB: full-colour engine logo on a clean tile; falls back to the engine short code.
+   - Host: OS logo tinted to the brand colour (CSS mask); falls back to the OS-tinted
+     generic icon until the backend detects the real OS post-connect. */
 export function ConnGlyph({ conn, size = 42, radius = 10 }: ConnGlyphProps) {
   const D = useData()
+  const small = size <= 32
   if (conn.kind === 'db') {
     const m = D.engineMeta[conn.engine ?? ''] || { short: 'DB', color: 'var(--text-tertiary)' }
+    const logo = dbLogo(conn.engine)
+    if (logo) {
+      return (
+        <div className="icon-badge" style={{ width: size, height: size, borderRadius: radius, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', padding: small ? 4 : 6 }}>
+          <img src={logo} alt={m.short} style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+        </div>
+      )
+    }
     return (
       <div className="icon-badge" style={{ width: size, height: size, borderRadius: radius, background: `color-mix(in srgb, ${m.color} 14%, var(--surface-card))`, color: m.color, border: `1px solid color-mix(in srgb, ${m.color} 26%, transparent)` }}>
-        <span className="mono" style={{ fontSize: size <= 32 ? 9 : 10, fontWeight: 700, letterSpacing: '.02em' }}>{m.short}</span>
+        <span className="mono" style={{ fontSize: small ? 9 : 10, fontWeight: 700, letterSpacing: '.02em' }}>{m.short}</span>
+      </div>
+    )
+  }
+  const ol = osLogo(conn.os)
+  if (ol) {
+    const m = small ? 4 : 6
+    return (
+      <div className="icon-badge" style={{ width: size, height: size, borderRadius: radius, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)' }}>
+        <span style={{ display: 'block', width: size - m * 2, height: size - m * 2, backgroundColor: ol.color, WebkitMaskImage: `url(${ol.url})`, maskImage: `url(${ol.url})`, WebkitMaskRepeat: 'no-repeat', maskRepeat: 'no-repeat', WebkitMaskPosition: 'center', maskPosition: 'center', WebkitMaskSize: 'contain', maskSize: 'contain' }} />
       </div>
     )
   }
   const om = D.osMeta[conn.os ?? ''] || { color: 'var(--text-tertiary)' }
   return (
     <div className="icon-badge" style={{ width: size, height: size, borderRadius: radius, background: `color-mix(in srgb, ${om.color} 12%, var(--surface-card))`, color: om.color, border: `1px solid color-mix(in srgb, ${om.color} 22%, transparent)` }}>
-      <Icon name={conn.icon || 'server'} size={size <= 32 ? 15 : 18} />
+      <Icon name={conn.icon || 'server'} size={small ? 15 : 18} />
     </div>
   )
 }

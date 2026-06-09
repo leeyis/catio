@@ -4,9 +4,9 @@ import type { Connection } from '../services/types'
 
 const KEY = 'catio-db-connections'
 
-/** Group id all real saved DB connections render under (an existing mock group so
- *  the sidebar/home group headers stay intact). DbProfile may override via `group`. */
-const DEFAULT_DB_GROUP = 'prod'
+/** Real saved DB connections are ungrouped by default — they surface under the
+ *  sidebar's "未分组" section until the user assigns a group. DbProfile.group overrides. */
+const DEFAULT_DB_GROUP = ''
 
 // ---- Profile generation ----
 

@@ -808,6 +808,11 @@ input, textarea { font-family: inherit; }
 .structrow:hover .structrow-actions,
 .structrow:focus-within .structrow-actions { opacity: 1; }
 
+/* Sidebar group header: delete action reveals on hover */
+.group-del { opacity: 0; transition: opacity .12s; }
+.group-head-row:hover .group-del,
+.group-head-row:focus-within .group-del { opacity: 1; }
+
 /* chips & badges */
 .chip {
   display: inline-flex; align-items: center; gap: 5px;

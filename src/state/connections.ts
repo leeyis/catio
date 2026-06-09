@@ -17,6 +17,11 @@ export interface ConnectionProfile {
   auth: AuthMethod
   /** ProxyJump bastion config — secrets are never stored here. */
   jump?: JumpProfile
+  /** Vault group id (from state/groups). Absent → renders under "未分组". */
+  group?: string
+  /** Detected OS id (ubuntu/debian/alpine/…), set after a successful connect so
+   *  the sidebar glyph shows the real OS logo. Absent → generic host icon. */
+  os?: string
 }
 
 const KEY = 'catio-connections'

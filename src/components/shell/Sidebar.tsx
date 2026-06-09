@@ -5,6 +5,7 @@ import { Icon } from '../Icon'
 import { BrandMark } from '../BrandMark'
 import { IconBtn, StatusDot, ConnGlyph, Segmented } from '../atoms'
 import { useData } from '../../state/DataContext'
+import { useGroups, addGroup, removeGroup } from '../../state/groups'
 import type { Connection } from '../../services/types'
 
 // ---- Prop types ----
@@ -154,9 +155,19 @@ export function TitleBar({ theme, onToggleTheme, onOpenSettings, settingsActive 
 export function Sidebar({ activeId, onOpen, onDetail, onNew, collapsed, onToggleCollapse, conns: vaultConns, currentUser, authEnabled, onLock, onEnableAuth, filter: filterProp, onFilterChange }: SidebarProps) {
   const { t } = useTranslation()
   const D = useData()
+  const groups = useGroups()
   const allConns = vaultConns || D.connections
   const [query, setQuery] = useState('')
-  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({ prod: true, staging: true, local: true })
+  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({})
+  // Inline "new group" composer — toggled by the header folder-plus button.
+  const [addingGroup, setAddingGroup] = useState(false)
+  const [newGroupName, setNewGroupName] = useState('')
+  const commitNewGroup = () => {
+    const name = newGroupName.trim()
+    if (name) { const g = addGroup(name); setOpenGroups(s => ({ ...s, [g.id]: true })) }
+    setNewGroupName('')
+    setAddingGroup(false)
+  }
   // Controlled when the parent supplies `filter`; otherwise self-managed.
   const [filterState, setFilterState] = useState('all') // all | host | db
   const filter = filterProp ?? filterState
@@ -196,7 +207,7 @@ export function Sidebar({ activeId, onOpen, onDetail, onNew, collapsed, onToggle
             <span className="badge-accent">{allConns.length}</span>
           </div>
           <div className="row gap4">
-            <IconBtn name="plus" size={15} variant="bare" title={t('common.newConnection')} onClick={onNew} />
+            <IconBtn name="folder-plus" size={15} variant="bare" title={t('shell.newGroup')} onClick={() => { setAddingGroup(true); setNewGroupName('') }} />
             <IconBtn name="panel-left" size={15} variant="bare" title={t('shell.collapseSidebar')} onClick={onToggleCollapse} />
           </div>
         </div>
@@ -219,10 +230,20 @@ export function Sidebar({ activeId, onOpen, onDetail, onNew, collapsed, onToggle
 
       {/* list */}
       <div className="grow" style={{ overflowY: 'auto', padding: '2px 8px 10px' }}>
-        {/* Saved profiles carry no preset group ('') — surface them under a SAVED section
-            so the real vault renders even without the mock group taxonomy. */}
+        {/* inline "new group" composer */}
+        {addingGroup && (
+          <div className="row gap6" style={{ padding: '6px 8px', marginBottom: 4 }}>
+            <Icon name="folder-plus" size={14} style={{ color: 'var(--text-faint)' }} />
+            <input autoFocus value={newGroupName} onChange={e => setNewGroupName(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') commitNewGroup(); else if (e.key === 'Escape') { setAddingGroup(false); setNewGroupName('') } }}
+              onBlur={commitNewGroup} placeholder={t('shell.newGroupPlaceholder')}
+              style={{ flex: 1, height: 26, padding: '0 8px', border: '1px solid var(--accent-border)', borderRadius: 8, background: 'var(--surface-sunken)', fontSize: 12.5, color: 'var(--text-primary)', outline: 'none' }} />
+          </div>
+        )}
+        {/* Connections with no group (or whose group was deleted) surface under a
+            "未分组" section so the vault always renders. */}
         {(() => {
-          const groupIds = new Set(D.groups.map(g => g.id))
+          const groupIds = new Set(groups.map(g => g.id))
           const ungrouped = conns.filter(c => !groupIds.has(c.group))
           if (!ungrouped.length) return null
           const open = openGroups.__saved !== false
@@ -231,33 +252,51 @@ export function Sidebar({ activeId, onOpen, onDetail, onNew, collapsed, onToggle
               <button onClick={() => setOpenGroups(s => ({ ...s, __saved: s.__saved === false }))}
                 style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 7, padding: '7px 8px', color: 'var(--text-tertiary)' }}>
                 <Icon name="chevron-right" size={13} style={{ transition: 'transform .15s', transform: open ? 'rotate(90deg)' : 'none' }} />
-                <span className="dot" style={{ background: 'var(--accent-primary)' }} />
-                <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.4px', textTransform: 'uppercase' }}>{t('shell.saved')}</span>
+                <span className="dot" style={{ background: 'var(--text-faint)' }} />
+                <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.4px', textTransform: 'uppercase' }}>{t('shell.ungrouped')}</span>
                 <span className="mono" style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--text-faint)' }}>{ungrouped.length}</span>
               </button>
               {open && (
                 <div className="col" style={{ gap: 1 }}>
-                  {ungrouped.map(c => (
-                    <ConnRow key={c.id} conn={c} active={activeId === c.id} onOpen={onOpen} onDetail={onDetail} />
+                  {buildSidebarTree(ungrouped, filter).map(node => (
+                    node.nested ? (
+                      <div key={node.host.id} className="col" style={{ gap: 1 }}>
+                        <ConnRow conn={node.host} active={activeId === node.host.id} onOpen={onOpen} onDetail={onDetail} />
+                        <div className="col" style={{ gap: 1, marginLeft: 19, paddingLeft: 11, borderLeft: '1.5px solid var(--border-hairline)' }}>
+                          {node.dbs.map((c) => (
+                            <div key={c.id} style={{ position: 'relative' }}>
+                              <span style={{ position: 'absolute', left: -11, top: 18, width: 8, height: 1.5, background: 'var(--border-hairline)' }} />
+                              <ConnRow conn={c} active={activeId === c.id} onOpen={onOpen} onDetail={onDetail} nested />
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <ConnRow key={node.conn.id} conn={node.conn} active={activeId === node.conn.id} onOpen={onOpen} onDetail={onDetail} />
+                    )
                   ))}
                 </div>
               )}
             </div>
           )
         })()}
-        {D.groups.map(g => {
+        {groups.map(g => {
           const items = conns.filter(c => c.group === g.id)
-          if (!items.length) return null
-          const open = openGroups[g.id]
+          // Show every user group even when empty, so it's a real drop target the
+          // modal's group dropdown can assign into. Default open.
+          const open = openGroups[g.id] !== false
           return (
-            <div key={g.id} style={{ marginBottom: 6 }}>
-              <button onClick={() => setOpenGroups(s => ({ ...s, [g.id]: !s[g.id] }))}
-                style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 7, padding: '7px 8px', color: 'var(--text-tertiary)' }}>
+            <div key={g.id} className="group-head-row" style={{ marginBottom: 6 }}>
+              <div className="row" style={{ alignItems: 'center', gap: 7, padding: '7px 8px', color: 'var(--text-tertiary)', cursor: 'pointer' }}
+                onClick={() => setOpenGroups(s => ({ ...s, [g.id]: s[g.id] === false }))}>
                 <Icon name="chevron-right" size={13} style={{ transition: 'transform .15s', transform: open ? 'rotate(90deg)' : 'none' }} />
                 <span className="dot" style={{ background: g.color }} />
                 <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.4px', textTransform: 'uppercase' }}>{g.name}</span>
                 <span className="mono" style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--text-faint)' }}>{items.length}</span>
-              </button>
+                <button className="icon-btn bare group-del" title={t('shell.deleteGroup')}
+                  onClick={e => { e.stopPropagation(); removeGroup(g.id) }}
+                  style={{ width: 20, height: 20 }}><Icon name="trash-2" size={12} /></button>
+              </div>
               {open && (
                 <div className="col" style={{ gap: 1 }}>
                   {buildSidebarTree(items, filter).map(node => (

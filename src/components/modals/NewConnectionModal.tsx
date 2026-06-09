@@ -8,10 +8,12 @@ import type { AuthMethod, SshConnectArgs, SshTestResult } from '../../services/s
 import { sshTest } from '../../services/ssh'
 import type { DbType } from '../../services/db'
 import { dbConnect, testConnection, dbErrMsg } from '../../services/db'
+import { dbLogo } from '../../services/logos'
 import { saveProfile } from '../../state/connections'
 import type { ConnectionProfile, JumpProfile } from '../../state/connections'
 import { saveDbConnection, setActiveDbConnection, generateProfileId } from '../../state/dbConnections'
 import type { DbProfile } from '../../state/dbConnections'
+import { useGroups } from '../../state/groups'
 
 // ---- Prop types ----
 
@@ -75,6 +77,19 @@ function Field({ label, value, onChange, placeholder, w, mono, type, numeric, in
         className={mono ? 'mono' : ''}
         style={{ height: 36, padding: '0 12px', borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }} />
     </label>
+  )
+}
+
+// Engine glyph: real brand logo when bundled, else the colour-coded short code.
+// Fixed width so the dropdown rows stay aligned regardless of which form shows.
+function EngineGlyph({ id, short, color }: { id: string; short: string; color: string }) {
+  const logo = dbLogo(id)
+  return (
+    <span style={{ width: 24, display: 'inline-flex', justifyContent: 'center', flex: 'none' }}>
+      {logo
+        ? <img src={logo} alt={short} style={{ width: 18, height: 18, objectFit: 'contain' }} />
+        : <span className="mono" style={{ fontSize: 10, fontWeight: 700, color }}>{short}</span>}
+    </span>
   )
 }
 
@@ -157,7 +172,11 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
   const [canTest, setCanTest] = useState(editHost ? !!editHost.host && !!editHost.user : false)
   const recomputeCanTest = () =>
     setCanTest(!!(hostRef.current?.value || '').trim() && !!(userRef.current?.value || '').trim())
-  const [color, setColor] = useState('var(--signal-rose)')
+  // Vault group selection — persisted to the profile (SSH + DB). '' = 未分组.
+  const groups = useGroups()
+  const [group, setGroup] = useState<string>(
+    (isEdit ? (editDb ? editDbProfile?.group : editHost?.group) : '') ?? ''
+  )
   const hosts = D.connections.filter(c => c.kind === 'host' && c.proto !== 'local')
 
   // DB-specific controlled state — empty by default (or pre-filled from editProfile).
@@ -268,10 +287,10 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
       const port = Number(portRef.current?.value) || 22
       const name = (nameRef.current?.value || '').trim() || host
       const auth = currentAuth()
-      // Persist jump WITHOUT secret.
+      // Persist jump WITHOUT secret. Preserve the detected OS across edits.
       const jump = currentJumpProfile()
       try {
-        saveProfile({ id: editHost.id, name, host, port, user, auth, jump })
+        saveProfile({ id: editHost.id, name, host, port, user, auth, jump, ...(group ? { group } : {}), ...(editHost.os ? { os: editHost.os } : {}) })
       } catch { /* localStorage unavailable — ignore */ }
       onSaved?.()
       onClose()
@@ -290,7 +309,7 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
       // Persist the NON-secret profile only (best-effort). Secret never leaves memory.
       const jump = currentJumpProfile()
       try {
-        saveProfile({ id: `live-${host}:${port}-${user}`, name, host, port, user, auth, jump })
+        saveProfile({ id: `live-${host}:${port}-${user}`, name, host, port, user, auth, jump, ...(group ? { group } : {}) })
       } catch { /* localStorage unavailable — ignore */ }
       onConnect(args, { name })
     }
@@ -341,7 +360,7 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
     const id = editDbProfile ? editDbProfile.id : generateProfileId()
     const profile = {
       id,
-      ...(editDbProfile?.group ? { group: editDbProfile.group } : {}),
+      ...(group ? { group } : {}),
       name: dbName,
       dbType: engine,
       host: dbHost,
@@ -431,7 +450,7 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
                     const m = D.engineMeta[sel.id] || {}
                     return (
                       <>
-                        <span className="mono" style={{ fontSize: 10, fontWeight: 700, color: m.color, minWidth: 28 }}>{sel.short}</span>
+                        <EngineGlyph id={sel.id} short={sel.short} color={m.color} />
                         <span style={{ flex: 1, fontSize: 13, color: 'var(--text-primary)' }}>{sel.label}</span>
                         <Icon name="chevron-down" size={14} style={{ color: 'var(--text-faint)', transform: engineOpen ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform .14s' }} />
                       </>
@@ -448,7 +467,7 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
                         <button key={e.id}
                           onClick={() => handleEngineChange(e.id)}
                           style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', border: 'none', background: active ? 'var(--accent-soft)' : 'transparent', cursor: 'pointer', textAlign: 'left' }}>
-                          <span className="mono" style={{ fontSize: 10, fontWeight: 700, color: m.color, minWidth: 28 }}>{e.short}</span>
+                          <EngineGlyph id={e.id} short={e.short} color={m.color} />
                           <span style={{ flex: 1, fontSize: 13, fontWeight: active ? 600 : 400, color: active ? 'var(--accent-primary)' : 'var(--text-primary)' }}>{e.label}</span>
                           {active && <Icon name="check" size={13} style={{ color: 'var(--accent-primary)' }} />}
                         </button>
@@ -473,9 +492,11 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
                 : <Field key={`name-${kind}`} label={t('modals.fieldName')} value={editHost ? editHost.name : ''} w={1.4} inputRef={nameRef} />}
               <label className="col" style={{ gap: 5, flex: 1 }}>
                 <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.fieldGroup')}</span>
-                <div className="row gap6" style={{ height: 36 }}>
-                  {D.groups.map(g => <button key={g.id} onClick={() => setColor(g.color)} style={{ width: 28, height: 28, borderRadius: 8, background: 'var(--surface-sunken)', border: color === g.color ? `2px solid ${g.color}` : '1px solid var(--border-hairline)', display: 'grid', placeItems: 'center' }}><span className="dot" style={{ background: g.color, width: 9, height: 9 }} /></button>)}
-                </div>
+                <select value={group} onChange={e => setGroup(e.target.value)} aria-label={t('modals.fieldGroup')}
+                  style={{ height: 36, padding: '0 10px', borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', fontSize: 13, color: 'var(--text-primary)', outline: 'none', cursor: 'pointer' }}>
+                  <option value="">{t('modals.groupNone')}</option>
+                  {groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+                </select>
               </label>
             </div>
             <div className="row gap10">
