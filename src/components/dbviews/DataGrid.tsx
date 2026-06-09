@@ -530,6 +530,10 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   const pendingTotal = editedCount + newCount + deletedCount
   // Kept for the in-toolbar "unsaved edits" chip wording (cell-level count).
   const editCount = pendingTotal
+  // The trailing action column now exists ONLY to host the remove-X on pending
+  // new rows. Existing-row deletion moved to the toolbar (删除行), so per-row
+  // trash icons are gone; the column collapses entirely when there are no new rows.
+  const showActionCol = canEdit && newRows.length > 0
   // Toolbar table chip: live path uses the real schema/table (no bogus `public.`);
   // mock/demo path keeps the original `public.orders` label for pixel parity.
   const toolbarLabel = resultLabel ?? (connId ? (schema ? `${schema}.${table}` : table) : 'public.orders')
@@ -539,7 +543,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   // Fixed per-column widths so the row is exactly as wide as the sum of its
   // columns and the grid scrolls horizontally — no flex/1fr stretch that would
   // blow up a couple of columns to fill the viewport and hide the rest.
-  const gridTemplate = '46px ' + columns.map(c => c.name === 'channel' || c.name === 'currency' ? '92px' : c.name === 'created_at' || c.name === 'updated_at' ? '150px' : c.name === 'customer_id' ? '150px' : '160px').join(' ') + (canEdit ? ' 44px' : '')
+  const gridTemplate = '46px ' + columns.map(c => c.name === 'channel' || c.name === 'currency' ? '92px' : c.name === 'created_at' || c.name === 'updated_at' ? '150px' : c.name === 'customer_id' ? '150px' : '160px').join(' ') + (showActionCol ? ' 44px' : '')
 
   return (
     <div className="col" style={{ height: '100%', minHeight: 0, position: 'relative' }}>
@@ -643,7 +647,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
                 {sortCol === col.name && <Icon name={sortDir === 'asc' ? 'chevron-up' : 'chevron-down'} size={12} style={{ color: 'var(--accent-primary)', marginLeft: 'auto' }} />}
               </div>
             ))}
-            {canEdit && <div style={{ ...thStyle, justifyContent: 'center', borderRight: 'none' }} />}
+            {showActionCol && <div style={{ ...thStyle, justifyContent: 'center', borderRight: 'none' }} />}
           </div>
           {/* body */}
           {pageRows.map(({ row, origIdx }, ri) => {
@@ -699,16 +703,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
                     </div>
                   )
                 })}
-                {canEdit && (
-                  <div style={{ ...tdStyle, justifyContent: 'center', borderRight: 'none', textDecoration: 'none' }}>
-                    <button className="icon-btn bare" style={{ width: 22, height: 22 }}
-                      title={isDel ? t('dbviews.undoDelete') : t('dbviews.deleteRow')}
-                      onClick={() => toggleDelete(origIdx)}>
-                      <Icon name={isDel ? 'rotate-ccw' : 'trash-2'} size={13}
-                        style={{ color: isDel ? 'var(--text-faint)' : 'var(--danger-fg)' }} />
-                    </button>
-                  </div>
-                )}
+                {showActionCol && <div style={{ ...tdStyle, justifyContent: 'center', borderRight: 'none', textDecoration: 'none' }} />}
               </div>
             )
           })}
