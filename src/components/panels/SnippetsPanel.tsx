@@ -16,19 +16,22 @@ export interface SnippetsPanelProps {
   onChange?: () => void
   /** Insert the snippet code into the active terminal. */
   onInsert?: (text: string) => void
-  /** Whether insert is currently possible (an active live terminal exists). */
+  /** Whether the focused tab is an active SSH terminal (gates 插入终端). */
   canInsert?: boolean
+  /** Whether the focused tab is an active DB workbench (gates 插入编辑器). */
+  canInsertEditor?: boolean
 }
 
 interface SnippetRowProps {
   s: Snippet
   onInsert?: (text: string) => void
   canInsert?: boolean
+  canInsertEditor?: boolean
   onEdit: (s: Snippet) => void
   onDelete: (s: Snippet) => void
 }
 
-function SnippetRow({ s, onInsert, canInsert, onEdit, onDelete }: SnippetRowProps) {
+function SnippetRow({ s, onInsert, canInsert, canInsertEditor, onEdit, onDelete }: SnippetRowProps) {
   const { t } = useTranslation()
   const [hover, setHover] = useState(false)
   const [copied, setCopied] = useState(false)
@@ -45,10 +48,12 @@ function SnippetRow({ s, onInsert, canInsert, onEdit, onDelete }: SnippetRowProp
     window.dispatchEvent(new CustomEvent('catio-run', { detail: { kind: isShell ? 'shell' : 'sql', text: code } }))
   }
   // Insert routes by kind via the event bus (shell → terminal, SQL → editor).
-  // Always shown; a no-op when there's no matching active target, like run.
+  // Only shown when the FOCUSED tab matches the snippet's kind (canInsert for
+  // shell, canInsertEditor for SQL).
+  const showInsert = isShell ? !!canInsert : !!canInsertEditor
   function insert(e: React.MouseEvent) {
     e.stopPropagation()
-    if (onInsert && isShell && canInsert) onInsert(code)
+    if (isShell && onInsert) onInsert(code)
     else window.dispatchEvent(new CustomEvent('catio-insert', { detail: { kind: isShell ? 'shell' : 'sql', text: code } }))
   }
   return (
@@ -64,9 +69,11 @@ function SnippetRow({ s, onInsert, canInsert, onEdit, onDelete }: SnippetRowProp
           <button className="icon-btn bare" style={{ width: 24, height: 24 }} title={copied ? t('panels.copied') : t('panels.copy')} onClick={copy}>
             <Icon name={copied ? 'check' : 'copy'} size={13} style={copied ? { color: 'var(--signal-green)' } : undefined} />
           </button>
-          <button className="icon-btn bare" style={{ width: 24, height: 24 }} title={isShell ? t('panels.insertTerminal') : t('panels.insertEditor')} onClick={insert}>
-            <Icon name={isShell ? 'terminal' : 'arrow-right-to-line'} size={13} />
-          </button>
+          {showInsert && (
+            <button className="icon-btn bare" style={{ width: 24, height: 24 }} title={isShell ? t('panels.insertTerminal') : t('panels.insertEditor')} onClick={insert}>
+              <Icon name={isShell ? 'terminal' : 'arrow-right-to-line'} size={13} />
+            </button>
+          )}
           <button className="icon-btn bare" style={{ width: 24, height: 24 }} title={t('panels.runItem')} onClick={run}>
             <Icon name="play" size={13} />
           </button>
@@ -150,7 +157,7 @@ function SnippetEditor({ snippet, onClose, onSaved }: SnippetEditorProps) {
   )
 }
 
-export function SnippetsPanel({ onClose, snippets, onChange, onInsert, canInsert }: SnippetsPanelProps) {
+export function SnippetsPanel({ onClose, snippets, onChange, onInsert, canInsert, canInsertEditor }: SnippetsPanelProps) {
   const { t } = useTranslation()
   // null = closed; { snippet: null } = create; { snippet } = edit.
   const [editor, setEditor] = useState<{ snippet: Snippet | null } | null>(null)
@@ -160,7 +167,7 @@ export function SnippetsPanel({ onClose, snippets, onChange, onInsert, canInsert
       actions={<IconBtn name="plus" size={15} variant="bare" title={t('panels.newSnippet')} onClick={() => setEditor({ snippet: null })} />}>
       <div className="grow" style={{ overflowY: 'auto', padding: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
         {snippets.map(s => (
-          <SnippetRow key={s.id} s={s} onInsert={onInsert} canInsert={canInsert}
+          <SnippetRow key={s.id} s={s} onInsert={onInsert} canInsert={canInsert} canInsertEditor={canInsertEditor}
             onEdit={sn => setEditor({ snippet: sn })} onDelete={sn => setPendingDelete(sn)} />
         ))}
       </div>

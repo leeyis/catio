@@ -607,6 +607,11 @@ export default function App() {
     await termWrite(sid, chan, btoa(unescape(encodeURIComponent(code))))
   }
   const canInsert = !!(cur?.sessionId && chanMap[cur.sessionId])
+  // Whether the focused tab is an active DB workbench — gates the SQL editor
+  // insert affordance (mirrors `canInsert` for terminals). A DB tab has kind
+  // 'sql'; the SqlConsole catio-insert listener lands the text in its active
+  // query editor.
+  const canInsertEditor = view === 'workbench' && cur?.kind === 'sql'
 
   // ---- Agent conversation controller (P2) ----
 
@@ -837,7 +842,7 @@ export default function App() {
               {activePanel === 'sftp' && <SftpPanel onClose={() => setPanelOpen(false)} conn={curConn ?? undefined} sessionId={cur?.sessionId} />}
               {activePanel === 'monitor' && <MonitorPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} />}
               {activePanel === 'tunnels' && <TunnelsPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} activeConnId={cur?.connId} profiles={profiles} />}
-              {activePanel === 'snippets' && <SnippetsPanel onClose={() => setPanelOpen(false)} snippets={snippets} onChange={() => setSnippets(loadSnippets())} onInsert={insertToTerminal} canInsert={canInsert} />}
+              {activePanel === 'snippets' && <SnippetsPanel onClose={() => setPanelOpen(false)} snippets={snippets} onChange={() => setSnippets(loadSnippets())} onInsert={insertToTerminal} canInsert={canInsert} canInsertEditor={canInsertEditor} />}
               {activePanel === 'history' && <HistoryPanel onClose={() => setPanelOpen(false)} onAddSnippet={addSnippet} items={mergedHistory} onClear={() => { clearHistory(); setHistory([]); setDbHistory([]); void clearDbHistory() }}
                 onDelete={h => {
                   // Route the delete to the right store by kind: SQL queries live in
@@ -845,7 +850,7 @@ export default function App() {
                   if (h.kind === 'sql') { setDbHistory(prev => prev.filter(x => x.id !== h.id)); void deleteDbHistory(h.id) }
                   else { deleteHistory(h.id); setHistory(loadHistory()) }
                 }}
-                onInsert={insertToTerminal} canInsert={canInsert} />}
+                onInsert={insertToTerminal} canInsert={canInsert} canInsertEditor={canInsertEditor} />}
               {/* DetailsPanel branches internally on conn.kind === 'db': DB conns use the
                   onEditDb/onDeleteDb/onConnectDb handlers; host conns use the SSH handlers. */}
               {activePanel === 'details' && (

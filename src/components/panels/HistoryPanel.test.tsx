@@ -66,18 +66,25 @@ describe('HistoryPanel', () => {
     expect(onInsert).toHaveBeenCalledWith('ls -la')
   })
 
-  it('always renders the insert button (event-routed) even without onInsert', () => {
-    wrap(<HistoryPanel onClose={() => {}} items={ITEMS} />)
-    expect(screen.getAllByTitle('插入终端').length).toBeGreaterThan(0)
+  it('hides 插入终端 for shell rows when no active terminal (canInsert false)', () => {
+    wrap(<HistoryPanel onClose={() => {}} items={ITEMS} onInsert={vi.fn()} canInsert={false} />)
+    expect(screen.queryByTitle('插入终端')).toBeNull()
   })
 
-  it('dispatches catio-insert when canInsert is false (no active terminal)', () => {
+  it('shows 插入编辑器 for SQL rows when a DB tab is focused and dispatches catio-insert', () => {
+    const sqlItems: HistoryItem[] = [{ id: 's1', kind: 'sql', target: 'pg', text: 'select 1', when: '10:00', dur: '2ms' }]
     const handler = vi.fn()
     window.addEventListener('catio-insert', handler)
-    wrap(<HistoryPanel onClose={() => {}} items={ITEMS} onInsert={vi.fn()} canInsert={false} />)
-    fireEvent.click(screen.getAllByTitle('插入终端')[0])
+    wrap(<HistoryPanel onClose={() => {}} items={sqlItems} canInsertEditor />)
+    fireEvent.click(screen.getByTitle('插入编辑器'))
     expect(handler).toHaveBeenCalled()
     window.removeEventListener('catio-insert', handler)
+  })
+
+  it('hides 插入编辑器 for SQL rows when no DB tab is focused', () => {
+    const sqlItems: HistoryItem[] = [{ id: 's1', kind: 'sql', target: 'pg', text: 'select 1', when: '10:00', dur: '2ms' }]
+    wrap(<HistoryPanel onClose={() => {}} items={sqlItems} />)
+    expect(screen.queryByTitle('插入编辑器')).toBeNull()
   })
 
   it('opens ConfirmModal when clear history button is clicked', () => {

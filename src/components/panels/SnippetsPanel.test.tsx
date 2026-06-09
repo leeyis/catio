@@ -43,13 +43,19 @@ describe('SnippetsPanel', () => {
     expect(onInsert).toHaveBeenCalledWith('ls -la')
   })
 
-  it('dispatches catio-insert when canInsert is false (no active terminal)', () => {
+  it('hides 插入终端 for shell snippets when no active terminal (canInsert false)', () => {
+    wrap(<SnippetsPanel onClose={() => {}} snippets={SNIPS} onInsert={vi.fn()} canInsert={false} />)
+    expect(screen.queryByTitle('插入终端')).toBeNull()
+  })
+
+  it('shows 插入编辑器 for SQL snippets when a DB tab is focused and dispatches catio-insert', () => {
+    const sqlSnips: Snippet[] = [{ id: 'q1', scope: 'SQL', desc: 'count', icon: 'database', code: 'select 1' }]
     const handler = vi.fn()
     window.addEventListener('catio-insert', handler)
-    wrap(<SnippetsPanel onClose={() => {}} snippets={SNIPS} onInsert={vi.fn()} canInsert={false} />)
-    const row = screen.getByText('list files').closest('.col') as HTMLElement
+    wrap(<SnippetsPanel onClose={() => {}} snippets={sqlSnips} canInsertEditor />)
+    const row = screen.getByText('count').closest('.col') as HTMLElement
     fireEvent.mouseEnter(row)
-    fireEvent.click(screen.getByTitle('插入终端'))
+    fireEvent.click(screen.getByTitle('插入编辑器'))
     expect(handler).toHaveBeenCalled()
     window.removeEventListener('catio-insert', handler)
   })
