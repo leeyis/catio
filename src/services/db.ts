@@ -172,7 +172,16 @@ export async function exportFile(path: string, contents: string): Promise<void> 
 /** Execution history for a connection (most-recent first). Falls back to mock outside Tauri. */
 export async function getHistory(connId: string): Promise<HistoryItem[]> {
   if (!isTauri()) return DATA.history
-  return tauriInvoke<HistoryItem[]>('db_history', { connId })
+  // The backend stores `when` as unix-epoch seconds (a string). Convert it to a
+  // sortable `ts` and a readable time-of-day so DB rows interleave with the SSH
+  // command history in the unified panel.
+  const raw = await tauriInvoke<HistoryItem[]>('db_history', { connId })
+  return raw.map(h => {
+    const secs = Number(h.when)
+    return Number.isFinite(secs) && secs > 0
+      ? { ...h, ts: secs, when: new Date(secs * 1000).toLocaleTimeString() }
+      : h
+  })
 }
 
 /** Saved SQL snippets. Falls back to mock outside Tauri. */

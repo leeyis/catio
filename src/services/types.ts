@@ -362,6 +362,8 @@ export interface HistoryItem {
   when: string
   dur: string
   exitCode?: number
+  /** Absolute epoch seconds — used to interleave SSH + DB history into one timeline. */
+  ts?: number
 }
 
 // ---- Automation ----
