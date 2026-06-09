@@ -34,8 +34,8 @@ import {
   setActiveDbConnection, removeDbConnection, removeActiveDbConnection,
   type DbProfile,
 } from './state/dbConnections'
-import { sshConnect, sshDisconnect, sshTrustHost, isTauri, onHistory, sshSysinfo, sshDetectOs } from './services/ssh'
-import type { SshConnectArgs } from './services/ssh'
+import { sshConnect, sshDisconnect, sshTrustHost, isTauri, onHistory, sshSysinfo, sshDetectOs, importSshConfig } from './services/ssh'
+import type { SshConnectArgs, AuthMethod } from './services/ssh'
 import { appendHistory, loadHistory, clearHistory, deleteHistory } from './state/history'
 import { loadRecentSessions, recordRecentSession } from './state/recentSessions'
 import type { HistoryItem } from './services/types'
@@ -633,6 +633,30 @@ export default function App() {
     reloadProfiles()
   }
 
+  // Import hosts from the local ~/.ssh/config into the vault (idempotent by alias).
+  // Returns counts so the Settings UI can report the result.
+  async function importHostsFromSshConfig(): Promise<{ added: number; total: number }> {
+    const hosts = await importSshConfig()
+    const existingIds = new Set(loadProfiles().map(p => p.id))
+    let added = 0
+    for (const h of hosts) {
+      const id = `ssh-config-${h.alias}`
+      if (existingIds.has(id)) continue
+      const auth: AuthMethod = h.identityFile ? { method: 'keyFile', path: h.identityFile } : { method: 'password' }
+      const jump = h.jump
+        ? {
+            host: h.jump.host, port: h.jump.port, user: h.jump.user,
+            auth: (h.jump.identityFile ? { method: 'keyFile', path: h.jump.identityFile } : { method: 'password' }) as AuthMethod,
+          }
+        : undefined
+      saveProfile({ id, name: h.alias, host: h.host, port: h.port, user: h.user, auth, ...(jump ? { jump } : {}) })
+      existingIds.add(id)
+      added += 1
+    }
+    if (added > 0) reloadProfiles()
+    return { added, total: hosts.length }
+  }
+
   // Tear down a live session for a connId (disconnect + drop maps + close its tab).
   function teardownSession(connId: string) {
     const sid = sessionMap[connId]
@@ -969,6 +993,7 @@ export default function App() {
         {view === 'settings' && (
           <div style={{ position: 'absolute', inset: 0, zIndex: 50, display: 'flex', background: 'var(--bg-canvas)' }}>
             <SettingsView theme={theme_} onTheme={setThemeBoth} onClose={() => setView(prevView)} initialSection={settingsSection}
+              onImportSshConfig={importHostsFromSshConfig}
               authEnabled={authEnabled} users={users} currentUser={currentName} ownerUser={ownerUser}
               onEnableAuth={enableAuth} onDisableAuth={disableAuth} onLock={lockApp} onRemoveUser={(name: string) => {
                 const next = users.filter(x => x.username !== name)

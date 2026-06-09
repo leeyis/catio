@@ -75,6 +75,30 @@ export async function sshTrustHost(hostPort: string, fingerprint: string): Promi
   return tauriInvoke('ssh_trust_host', { hostPort, fingerprint })
 }
 
+// ---- ~/.ssh/config import ----
+
+export interface ImportedJump {
+  host: string
+  port: number
+  user: string
+  identityFile?: string | null
+}
+
+export interface ImportedHost {
+  alias: string
+  host: string
+  port: number
+  user: string
+  identityFile?: string | null
+  jump?: ImportedJump | null
+}
+
+// Parse the local ~/.ssh/config (Tauri-only; returns [] in the browser demo).
+export async function importSshConfig(): Promise<ImportedHost[]> {
+  if (!isTauri()) return []
+  return tauriInvoke<ImportedHost[]>('import_ssh_config')
+}
+
 // ---- Terminal channel ----
 
 export async function termOpen(sessionId: string, cols: number, rows: number): Promise<string> {

@@ -1,5 +1,6 @@
 //! Catio SSH backend (sub-project 2). russh-based.
 pub mod conn;
+pub mod import;
 pub mod ids;
 pub mod knownhosts;
 pub mod manager;

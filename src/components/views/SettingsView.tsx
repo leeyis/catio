@@ -33,6 +33,8 @@ export interface SettingsViewProps {
   onDisableAuth?: () => void
   onLock?: () => void
   onRemoveUser?: (username: string) => void
+  /** Import hosts from ~/.ssh/config; resolves with how many were added. */
+  onImportSshConfig?: () => Promise<{ added: number; total: number }>
 }
 
 // ---- Subcomponent prop types ----
@@ -523,11 +525,37 @@ function AISettings() {
   )
 }
 
-function ConnDefaults() {
+function ConnDefaults({ onImportSshConfig }: { onImportSshConfig?: () => Promise<{ added: number; total: number }> }) {
   const { t } = useTranslation()
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<{ kind: 'ok' | 'none' | 'error'; text: string } | null>(null)
+
+  async function handleImport() {
+    if (!onImportSshConfig || busy) return
+    setBusy(true)
+    setResult(null)
+    try {
+      const { added, total } = await onImportSshConfig()
+      if (total === 0) setResult({ kind: 'none', text: t('settings.importNone') })
+      else setResult({ kind: 'ok', text: t('settings.importResult', { added, total }) })
+    } catch (err) {
+      const message = (err as { message?: string } | null)?.message ?? String(err)
+      setResult({ kind: 'error', text: t('settings.importError', { message }) })
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <Block title={t('settings.connDefaultsTitle')} hint={t('settings.connDefaultsHint')}>
-      <SettingRow icon="git-branch" title={t('settings.importSshConfig')} desc={t('settings.importSshConfigDesc')} control={<Btn variant="secondary" size="sm" icon="download">{t('settings.importBtn')}</Btn>} />
+      <SettingRow icon="git-branch" title={t('settings.importSshConfig')} desc={t('settings.importSshConfigDesc')}
+        control={<Btn variant="secondary" size="sm" icon={busy ? 'loader' : 'download'} disabled={busy} onClick={() => { void handleImport() }}>{busy ? t('settings.importing') : t('settings.importBtn')}</Btn>} />
+      {result && (
+        <div className="row gap6" style={{ marginTop: 2, fontSize: 11.5, color: result.kind === 'error' ? 'var(--danger-fg)' : result.kind === 'none' ? 'var(--text-faint)' : 'var(--signal-green)' }}>
+          {result.kind !== 'error' && result.kind === 'ok' && <Icon name="check" size={12} />}
+          <span>{result.text}</span>
+        </div>
+      )}
     </Block>
   )
 }
@@ -562,7 +590,7 @@ function AboutSettings() {
   )
 }
 
-export function SettingsView({ theme, onTheme, onClose, authEnabled, users, currentUser, ownerUser, onEnableAuth, onDisableAuth, onLock, onRemoveUser, initialSection }: SettingsViewProps) {
+export function SettingsView({ theme, onTheme, onClose, authEnabled, users, currentUser, ownerUser, onEnableAuth, onDisableAuth, onLock, onRemoveUser, initialSection, onImportSshConfig }: SettingsViewProps) {
   const { t } = useTranslation()
   // 'theme' is folded into 'appearance' — normalise any legacy section id.
   const [nav, setNav] = React.useState(initialSection === 'theme' ? 'appearance' : (initialSection || 'appearance'))
@@ -599,7 +627,7 @@ export function SettingsView({ theme, onTheme, onClose, authEnabled, users, curr
           {nav === 'appearance' && <><ThemeSettings theme={theme} onTheme={onTheme} /><AppearanceSettings /></>}
           {nav === 'security' && <SecuritySettings authEnabled={authEnabled} users={users} currentUser={currentUser} ownerUser={ownerUser} onEnableAuth={onEnableAuth} onDisableAuth={onDisableAuth} onLock={onLock} onRemoveUser={onRemoveUser} />}
           {nav === 'ai' && <AISettings />}
-          {nav === 'connections' && <ConnDefaults />}
+          {nav === 'connections' && <ConnDefaults onImportSshConfig={onImportSshConfig} />}
           {nav === 'mcp' && <MCPSettings />}
           {nav === 'about' && <AboutSettings />}
         </div>
