@@ -243,10 +243,6 @@ function SecuritySettings({ authEnabled, users = [], currentUser, ownerUser, onE
         )}
       </div>
 
-      <SettingRow icon="lock" title={t('settings.vaultEncryption')} desc={t('settings.vaultEncryptionDesc')} control={<span className="chip" style={{ background: 'color-mix(in srgb, var(--signal-green) 13%, transparent)', color: 'var(--signal-green)' }}><Icon name="check" size={11} /> {t('settings.vaultEncryptionEnabled')}</span>} />
-      <SettingRow icon="key" title={t('settings.keystoreUnlock')} desc={t('settings.keystoreUnlockDesc')} control={<Toggle on={true} />} />
-      <SettingRow icon="shield" title={t('settings.aiSafetyCheck')} desc={t('settings.aiSafetyCheckDesc')} control={<Toggle on={true} />} />
-      <SettingRow icon="globe" title={t('settings.vaultSync')} desc={t('settings.vaultSyncDesc')} control={<Toggle on={false} />} />
       <SettingRow icon="trash-2" title={t('settings.clearCredentials')} desc={t('settings.clearCredentialsDesc')} danger control={<Btn variant="danger" size="sm">{t('settings.clearBtn')}</Btn>} />
     </Block>
   )
@@ -488,9 +484,6 @@ function AISettings() {
     <Block title={t('settings.aiSettingsTitle')} hint={t('settings.aiSettingsHint')}>
       <AgentConfigBlock />
       <SettingRow icon="terminal" title={t('settings.aiTermBuffer')} desc={t('settings.aiTermBufferDesc')} control={<Toggle on={true} />} />
-      <SettingRow icon="database" title={t('settings.aiDbSchema')} desc={t('settings.aiDbSchemaDesc')} control={<Toggle on={true} />} />
-      <SettingRow icon="radar" title={t('settings.aiMultiHost')} desc={t('settings.aiMultiHostDesc')} control={<Toggle on={true} />} />
-      <SettingRow icon="shield" title={t('settings.aiReadonly')} desc={t('settings.aiReadonlyDesc')} control={<Toggle on={false} />} />
     </Block>
   )
 }
@@ -500,9 +493,6 @@ function ConnDefaults() {
   return (
     <Block title={t('settings.connDefaultsTitle')} hint={t('settings.connDefaultsHint')}>
       <SettingRow icon="git-branch" title={t('settings.importSshConfig')} desc={t('settings.importSshConfigDesc')} control={<Btn variant="secondary" size="sm" icon="download">{t('settings.importBtn')}</Btn>} />
-      <SettingRow icon="link" title={t('settings.savePortForwarding')} desc={t('settings.savePortForwardingDesc')} control={<Toggle on={true} />} />
-      <SettingRow icon="refresh-cw" title={t('settings.sessionRestore')} desc={t('settings.sessionRestoreDesc')} control={<Toggle on={true} />} />
-      <SettingRow icon="circle-dot" title={t('settings.connColorLabel')} desc={t('settings.connColorDesc')} control={<Toggle on={true} />} />
     </Block>
   )
 }
