@@ -139,7 +139,35 @@ fn pg_value_to_json(
                 _ => Value::Null,
             }
         },
-        // Fallback (includes temporal types TIMESTAMP/DATE/TIME/INTERVAL etc.): try String, then Null
+        // Temporal types: tokio_postgres has NO `String` FromSql for DATE/TIME/
+        // TIMESTAMP/TIMESTAMPTZ, so the old String fallback always yielded Null
+        // (every date/timestamp column rendered blank). Decode via chrono (the
+        // `with-chrono-0_4` feature is enabled) and format as an ISO-ish, SQL-
+        // round-trippable string the grid's date/datetime editors can parse back.
+        &Type::DATE => match row.try_get::<_, Option<chrono::NaiveDate>>(idx) {
+            Ok(Some(v)) => Value::String(v.format("%Y-%m-%d").to_string()),
+            _ => Value::Null,
+        },
+        &Type::TIME => match row.try_get::<_, Option<chrono::NaiveTime>>(idx) {
+            Ok(Some(v)) => Value::String(v.format("%H:%M:%S").to_string()),
+            _ => Value::Null,
+        },
+        &Type::TIMESTAMP => match row.try_get::<_, Option<chrono::NaiveDateTime>>(idx) {
+            Ok(Some(v)) => Value::String(v.format("%Y-%m-%d %H:%M:%S").to_string()),
+            _ => Value::Null,
+        },
+        &Type::TIMESTAMPTZ => match row.try_get::<_, Option<chrono::DateTime<chrono::Utc>>>(idx) {
+            Ok(Some(v)) => Value::String(v.format("%Y-%m-%d %H:%M:%S%:z").to_string()),
+            _ => Value::Null,
+        },
+        // NUMERIC / DECIMAL: likewise no `String` FromSql — decode via rust_decimal
+        // (the `db-tokio-postgres` feature) and stringify so values aren't lost.
+        // Out-of-Decimal-range values degrade to Null rather than failing the query.
+        &Type::NUMERIC => match row.try_get::<_, Option<rust_decimal::Decimal>>(idx) {
+            Ok(Some(v)) => Value::String(v.to_string()),
+            _ => Value::Null,
+        },
+        // Fallback (other / unrecognised types): try String, then Null
         _ => match row.try_get::<_, Option<String>>(idx) {
             Ok(Some(v)) => Value::String(v),
             _ => Value::Null,
