@@ -34,8 +34,9 @@ import {
   setActiveDbConnection, removeDbConnection, removeActiveDbConnection,
   type DbProfile,
 } from './state/dbConnections'
-import { sshConnect, sshDisconnect, sshTrustHost, isTauri, onHistory, sshSysinfo, sshDetectOs, importSshConfig } from './services/ssh'
+import { sshConnect, sshDisconnect, sshTrustHost, isTauri, onHistory, sshSysinfo, sshDetectOs, importSshConfig, listen } from './services/ssh'
 import type { SshConnectArgs, AuthMethod } from './services/ssh'
+import { mcpSyncConnections } from './services/mcp'
 import { appendHistory, loadHistory, clearHistory, deleteHistory } from './state/history'
 import { loadRecentSessions, recordRecentSession } from './state/recentSessions'
 import type { HistoryItem } from './services/types'
@@ -249,6 +250,27 @@ export default function App() {
     window.addEventListener('catio-ask-ai', handler)
     return () => window.removeEventListener('catio-ask-ai', handler)
   }, [])
+
+  // ---- MCP server: mirror active DB connections to the backend registry (so its
+  // tools resolve connections by name), and honor the open_table tool by opening
+  // the matching DB workbench tab. ----
+  function syncMcpConnections() {
+    void mcpSyncConnections(
+      listActiveDbConnections().map(a => ({ connId: a.connId, name: a.name, dbType: a.dbType })),
+    )
+  }
+  useEffect(() => {
+    syncMcpConnections()
+    let un: (() => void) | undefined
+    void listen<{ connId: string }>('mcp://open-table', p => {
+      const active = listActiveDbConnections().find(a => a.connId === p.connId)
+      if (!active) return
+      const prof = dbProfiles.find(d => d.id === active.profileId)
+      if (prof) openConn(dbProfileToConnection(prof, true))
+    }).then(u => { un = u })
+    return () => { if (un) un() }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dbProfiles])
 
   const theme_ = tweaks.theme
   const aiForm = tweaks.aiForm
@@ -546,6 +568,7 @@ export default function App() {
       .filter(a => a.profileId === profile.id)
       .forEach(a => removeActiveDbConnection(a.connId))
     removeDbConnection(profile.id)
+    syncMcpConnections()
     // The reactive store updates the list; close the details panel.
     setPanelOpen(false)
     setDetailConn(null)
@@ -569,6 +592,7 @@ export default function App() {
       secret: secret || undefined,
     })
     setActiveDbConnection(result, profile)
+    syncMcpConnections()
     openConn(dbProfileToConnection(profile, true))
     setView('workbench')
     // Success → auto-hide the connection details panel.

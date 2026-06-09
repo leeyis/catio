@@ -1,5 +1,6 @@
 pub mod ssh;
 pub mod db;
+pub mod mcp;
 
 use ssh::manager::SessionManager;
 use db::manager::ConnManager;
@@ -11,6 +12,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(SessionManager::default())
         .manage(ConnManager::default())
+        .manage(mcp::McpState::default())
         .invoke_handler(tauri::generate_handler![
             ssh::conn::ssh_connect,
             ssh::conn::ssh_disconnect,
@@ -57,7 +59,12 @@ pub fn run() {
             db::commands::db_delete_history,
             db::commands::db_snippets,
             db::commands::db_save_snippet,
-            db::commands::export_file
+            db::commands::export_file,
+            mcp::mcp_start,
+            mcp::mcp_stop,
+            mcp::mcp_status,
+            mcp::mcp_set_allow_open_window,
+            mcp::mcp_sync_connections
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

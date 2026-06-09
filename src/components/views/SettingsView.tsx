@@ -11,6 +11,9 @@ import { usePrefs, UI_FONTS, MONO_FONTS, TERM_FONT_SIZES, TERM_BUFFER_LINE_OPTIO
 import type { UiFontKey, MonoFontKey, Density } from '../../state/preferences'
 import { fetchModels, testModel } from '../../services'
 import type { ModelTestResult } from '../../services'
+import { isTauri } from '../../services/ssh'
+import { mcpStart, mcpStop, mcpStatus, mcpSetAllowOpenWindow } from '../../services/mcp'
+import type { McpInfo } from '../../services/mcp'
 
 // ---- Prop types ----
 
@@ -562,14 +565,99 @@ function ConnDefaults({ onImportSshConfig }: { onImportSshConfig?: () => Promise
 
 function MCPSettings() {
   const { t } = useTranslation()
+  const { prefs, update } = usePrefs()
+  const tauri = isTauri()
+  const [info, setInfo] = useState<McpInfo>({ running: false, url: null, port: null })
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [copied, setCopied] = useState(false)
+
+  useEffect(() => {
+    void mcpStatus().then(setInfo).catch(() => {})
+  }, [])
+
+  async function toggleServer() {
+    if (busy) return
+    setBusy(true)
+    setError('')
+    try {
+      const next = info.running ? await mcpStop() : await mcpStart(prefs.mcpAllowOpenWindow)
+      setInfo(next)
+    } catch (err) {
+      setError(t('settings.mcpStartError', { message: (err as { message?: string } | null)?.message ?? String(err) }))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function setAllowOpenWindow(v: boolean) {
+    update({ mcpAllowOpenWindow: v })
+    void mcpSetAllowOpenWindow(v)
+  }
+
+  // The address the server is (or will be) reachable at.
+  const url = info.url ?? 'http://127.0.0.1:8765/sse'
+  const claudeCmd = `claude mcp add --transport sse catio ${url}`
+  const clientJson = `{
+  "mcpServers": {
+    "catio": { "url": "${url}" }
+  }
+}`
+
+  function copy(text: string) {
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(text).then(() => {
+        setCopied(true)
+        setTimeout(() => setCopied(false), 1500)
+      }).catch(() => {})
+    }
+  }
+
   return (
     <Block title={t('settings.mcpTitle')} hint={t('settings.mcpHint')}>
       <div style={{ padding: 16, border: '1px solid var(--border-hairline)', borderRadius: 14, background: 'var(--surface-subtle)', marginBottom: 12 }}>
-        <div className="row gap8" style={{ marginBottom: 10 }}><Icon name="command" size={15} style={{ color: 'var(--accent-primary)' }} /><span style={{ fontSize: 13, fontWeight: 600 }}>{t('settings.mcpServerLabel')}</span><span className="chip" style={{ background: 'color-mix(in srgb, var(--signal-green) 13%, transparent)', color: 'var(--signal-green)', marginLeft: 'auto' }}><span className="dot" style={{ background: 'var(--signal-green)' }} /> {t('settings.mcpRunning')}</span></div>
-        <p style={{ margin: '0 0 10px', fontSize: 12, color: 'var(--text-tertiary)', lineHeight: 1.5 }}>{t('settings.mcpDesc')}</p>
-        <pre className="mono" style={{ margin: 0, padding: '10px 12px', background: 'var(--term-bg)', color: 'var(--term-fg)', borderRadius: 10, fontSize: 11.5, overflow: 'auto' }}>{`$ npm install -g @catio-app/cli\n$ catio connections list --json\n$ catio query prod-orders "select 1" --json`}</pre>
+        <div className="row gap8" style={{ marginBottom: 10 }}>
+          <Icon name="command" size={15} style={{ color: 'var(--accent-primary)' }} />
+          <span style={{ fontSize: 13, fontWeight: 600 }}>{t('settings.mcpServerLabel')}</span>
+          <span className="chip" style={{ marginLeft: 'auto', background: info.running ? 'color-mix(in srgb, var(--signal-green) 13%, transparent)' : 'var(--surface-sunken)', color: info.running ? 'var(--signal-green)' : 'var(--text-faint)' }}>
+            <span className="dot" style={{ background: info.running ? 'var(--signal-green)' : 'var(--text-faint)' }} /> {info.running ? t('settings.mcpRunning') : t('settings.mcpStopped')}
+          </span>
+        </div>
+        <p style={{ margin: '0 0 12px', fontSize: 12, color: 'var(--text-tertiary)', lineHeight: 1.5 }}>{t('settings.mcpDesc')}</p>
+
+        {!tauri ? (
+          <div className="row gap6" style={{ fontSize: 11.5, color: 'var(--text-faint)' }}>
+            <Icon name="info" size={12} /> {t('settings.mcpDesktopOnly')}
+          </div>
+        ) : (
+          <>
+            <div className="row gap8" style={{ marginBottom: info.running ? 12 : 0 }}>
+              <Btn variant={info.running ? 'secondary' : 'cta'} size="sm" icon={busy ? 'loader' : info.running ? 'square' : 'play'} disabled={busy} onClick={() => { void toggleServer() }}>
+                {info.running ? t('settings.mcpStopBtn') : t('settings.mcpStartBtn')}
+              </Btn>
+              {error && <span style={{ fontSize: 11.5, color: 'var(--danger-fg)', alignSelf: 'center' }}>{error}</span>}
+            </div>
+
+            {info.running && (
+              <div className="col" style={{ gap: 8 }}>
+                <div className="col gap4">
+                  <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('settings.mcpEndpoint')}</span>
+                  <div className="row gap6" style={{ alignItems: 'center' }}>
+                    <code className="mono" style={{ flex: 1, padding: '8px 10px', background: 'var(--term-bg)', color: 'var(--term-fg)', borderRadius: 8, fontSize: 11.5, overflow: 'auto' }}>{url}</code>
+                    <Btn variant="secondary" size="sm" icon={copied ? 'check' : 'copy'} onClick={() => copy(url)}>{copied ? t('settings.mcpCopied') : t('settings.mcpCopy')}</Btn>
+                  </div>
+                </div>
+                <div className="col gap4">
+                  <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('settings.mcpConfigHint')}</span>
+                  <pre className="mono" style={{ margin: 0, padding: '10px 12px', background: 'var(--term-bg)', color: 'var(--term-fg)', borderRadius: 8, fontSize: 11.5, overflow: 'auto' }}>{`# Claude Code\n${claudeCmd}\n\n# Cursor / Windsurf (mcp.json)\n${clientJson}`}</pre>
+                </div>
+              </div>
+            )}
+          </>
+        )}
       </div>
-      <SettingRow icon="plug" title={t('settings.mcpOpenWindow')} desc={t('settings.mcpOpenWindowDesc')} control={<Toggle on={true} />} />
+      <SettingRow icon="plug" title={t('settings.mcpOpenWindow')} desc={t('settings.mcpOpenWindowDesc')}
+        control={<Toggle on={prefs.mcpAllowOpenWindow} onChange={setAllowOpenWindow} />} />
     </Block>
   )
 }
