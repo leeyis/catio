@@ -385,7 +385,8 @@
       "distributed": "分布式 / NewSQL",
       "analytics": "分析型 / OLAP",
       "domestic": "国产数据库",
-      "document": "文档 / KV / 搜索"
+      "document": "文档 / KV / 搜索",
+      "jdbc": "JDBC（需驱动 JAR）"
     },
     "protocol": "协议",
     "fieldName": "名称",

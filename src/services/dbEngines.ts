@@ -20,6 +20,7 @@ export type EngineGroup =
   | 'analytics'
   | 'domestic'
   | 'document'
+  | 'jdbc'
 
 export interface DbEngine {
   /** Unique catalog key (also the logo lookup key). */
@@ -76,11 +77,42 @@ export const DB_ENGINES: DbEngine[] = [
   { id: 'redis',         dbType: 'redis',         label: 'Redis',         short: 'RDS', defaultPort: 6379,  group: 'document' },
   { id: 'elasticsearch', dbType: 'elasticsearch', label: 'Elasticsearch', short: 'ES',  defaultPort: 9200,  group: 'document' },
   { id: 'rqlite',        dbType: 'rqlite',        label: 'rqlite',        short: 'RQL', defaultPort: 4001,  group: 'document' },
+
+  // ── JDBC sidecar (engines with no native Rust driver) ──────────────
+  // dbType 'jdbc' routes through the Java plugin; driverProfile selects the
+  // JDBC URL + driver class (see src-tauri/.../jdbc_config.rs). These need a
+  // user-supplied driver JAR (dir: CATIO_JDBC_DRIVERS_DIR) — except H2, bundled.
+  { id: 'oracle',     dbType: 'jdbc', driverProfile: 'oracle',     label: 'Oracle',        short: 'ORA',  defaultPort: 1521,  group: 'jdbc' },
+  { id: 'db2',        dbType: 'jdbc', driverProfile: 'db2',        label: 'IBM Db2',       short: 'DB2',  defaultPort: 50000, group: 'jdbc' },
+  { id: 'snowflake',  dbType: 'jdbc', driverProfile: 'snowflake',  label: 'Snowflake',     short: 'SNOW', defaultPort: 443,   group: 'jdbc' },
+  { id: 'hive',       dbType: 'jdbc', driverProfile: 'hive',       label: 'Apache Hive',   short: 'HIVE', defaultPort: 10000, group: 'jdbc' },
+  { id: 'trino',      dbType: 'jdbc', driverProfile: 'trino',      label: 'Trino',         short: 'TRINO',defaultPort: 8080,  group: 'jdbc' },
+  { id: 'cassandra',  dbType: 'jdbc', driverProfile: 'cassandra',  label: 'Cassandra',     short: 'CASS', defaultPort: 9042,  group: 'jdbc' },
+  { id: 'neo4j',      dbType: 'jdbc', driverProfile: 'neo4j',      label: 'Neo4j',         short: 'NEO',  defaultPort: 7687,  group: 'jdbc' },
+  { id: 'saphana',    dbType: 'jdbc', driverProfile: 'saphana',    label: 'SAP HANA',      short: 'HANA', defaultPort: 30015, group: 'jdbc' },
+  { id: 'teradata',   dbType: 'jdbc', driverProfile: 'teradata',   label: 'Teradata',      short: 'TD',   defaultPort: 1025,  group: 'jdbc' },
+  { id: 'vertica',    dbType: 'jdbc', driverProfile: 'vertica',    label: 'Vertica',       short: 'VRT',  defaultPort: 5433,  group: 'jdbc' },
+  { id: 'firebird',   dbType: 'jdbc', driverProfile: 'firebird',   label: 'Firebird',      short: 'FB',   defaultPort: 3050,  group: 'jdbc' },
+  { id: 'exasol',     dbType: 'jdbc', driverProfile: 'exasol',     label: 'Exasol',        short: 'EXA',  defaultPort: 8563,  group: 'jdbc' },
+  { id: 'informix',   dbType: 'jdbc', driverProfile: 'informix',   label: 'Informix',      short: 'IFX',  defaultPort: 9088,  group: 'jdbc' },
+  { id: 'dameng',     dbType: 'jdbc', driverProfile: 'dameng',     label: '达梦 DM',        short: 'DM',   defaultPort: 5236,  group: 'jdbc' },
+  { id: 'yashandb',   dbType: 'jdbc', driverProfile: 'yashandb',   label: 'YashanDB',      short: 'YAS',  defaultPort: 1688,  group: 'jdbc' },
+  { id: 'gbase8s',    dbType: 'jdbc', driverProfile: 'gbase8s',    label: 'GBase 8s',      short: 'G8S',  defaultPort: 9088,  group: 'jdbc' },
+  { id: 'xugu',       dbType: 'jdbc', driverProfile: 'xugu',       label: 'XuguDB',        short: 'XG',   defaultPort: 5138,  group: 'jdbc' },
+  { id: 'kylin',      dbType: 'jdbc', driverProfile: 'kylin',      label: 'Apache Kylin',  short: 'KYL',  defaultPort: 7070,  group: 'jdbc' },
+  { id: 'iotdb',      dbType: 'jdbc', driverProfile: 'iotdb',      label: 'Apache IoTDB',  short: 'IOT',  defaultPort: 6667,  group: 'jdbc' },
+  { id: 'tdengine',   dbType: 'jdbc', driverProfile: 'tdengine',   label: 'TDengine',      short: 'TAOS', defaultPort: 6041,  group: 'jdbc' },
+  { id: 'iris',       dbType: 'jdbc', driverProfile: 'iris',       label: 'InterSystems IRIS', short: 'IRIS', defaultPort: 1972, group: 'jdbc' },
+  { id: 'databricks', dbType: 'jdbc', driverProfile: 'databricks', label: 'Databricks',    short: 'DBX',  defaultPort: 443,   group: 'jdbc' },
+  { id: 'bigquery',   dbType: 'jdbc', driverProfile: 'bigquery',   label: 'Google BigQuery', short: 'BQ', defaultPort: 443,   group: 'jdbc' },
+  { id: 'sundb',      dbType: 'jdbc', driverProfile: 'sundb',      label: 'SUNDB',         short: 'SUN',  defaultPort: 22581, group: 'jdbc' },
+  { id: 'access',     dbType: 'jdbc', driverProfile: 'access',     label: 'MS Access',     short: 'ACC',  defaultPort: 0,     group: 'jdbc' },
+  { id: 'h2',         dbType: 'jdbc', driverProfile: 'h2',         label: 'H2 Database',   short: 'H2',   defaultPort: 0,     group: 'jdbc' },
 ]
 
 /** i18n key suffix per group (resolved as `modals.engineGroup.<key>`). */
 export const ENGINE_GROUP_ORDER: EngineGroup[] = [
-  'relational', 'distributed', 'analytics', 'domestic', 'document',
+  'relational', 'distributed', 'analytics', 'domestic', 'document', 'jdbc',
 ]
 
 /** Look up a catalog entry by its id. */

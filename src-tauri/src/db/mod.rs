@@ -63,4 +63,7 @@ pub enum DatabaseType {
     Rqlite,
     Mongodb,
     Redis,
+    /// Generic JDBC, served by the Java sidecar plugin. The concrete engine
+    /// (Oracle/DB2/Snowflake/Hive/…) is carried in `driver_profile`.
+    Jdbc,
 }

@@ -32,6 +32,8 @@ export function dbErrMsg(e: unknown): string {
 export type DbType =
   | 'postgres' | 'mysql' | 'sqlite' | 'duckdb' | 'sqlserver'
   | 'clickhouse' | 'elasticsearch' | 'rqlite' | 'mongodb' | 'redis'
+  // Generic JDBC family (Oracle/DB2/Snowflake/…), served by the Java sidecar.
+  | 'jdbc'
 
 export interface DbConnectArgs {
   dbType: DbType

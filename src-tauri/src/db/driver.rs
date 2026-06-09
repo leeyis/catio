@@ -183,5 +183,7 @@ pub async fn connect(args: &ConnectArgs) -> Result<Arc<dyn Driver>, DbError> {
             Ok(Arc::new(crate::db::drivers::mongo::MongoDriver::connect(args).await?)),
         DatabaseType::Redis =>
             Ok(Arc::new(crate::db::drivers::redis::RedisDriver::connect(args).await?)),
+        DatabaseType::Jdbc =>
+            Ok(Arc::new(crate::db::drivers::jdbc::JdbcDriver::connect(args).await?)),
     }
 }

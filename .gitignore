@@ -1,6 +1,8 @@
 node_modules/
 dist/
 src-tauri/target/
+# JDBC sidecar Maven build output (regenerable via `mvn package`)
+src-tauri/jdbc-plugin/target/
 .DS_Store
 # decoded reference scratch (regenerable from ref-ui HTML)
 ref-ui/_extract/

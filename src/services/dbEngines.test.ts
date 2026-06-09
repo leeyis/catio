@@ -7,12 +7,18 @@ describe('DB_ENGINES catalog', () => {
     expect(new Set(ids).size).toBe(ids.length)
   })
 
-  it('only references the 10 backend protocol families', () => {
+  it('only references known backend protocol families', () => {
     const families = new Set([
       'postgres', 'mysql', 'sqlite', 'duckdb', 'sqlserver',
-      'clickhouse', 'elasticsearch', 'rqlite', 'mongodb', 'redis',
+      'clickhouse', 'elasticsearch', 'rqlite', 'mongodb', 'redis', 'jdbc',
     ])
     for (const e of DB_ENGINES) expect(families.has(e.dbType)).toBe(true)
+  })
+
+  it('all JDBC-family engines carry a driverProfile (the engine selector)', () => {
+    for (const e of DB_ENGINES.filter(e => e.dbType === 'jdbc')) {
+      expect(e.driverProfile, `${e.id} needs a driverProfile`).toBeTruthy()
+    }
   })
 
   it('every engine belongs to a known group', () => {

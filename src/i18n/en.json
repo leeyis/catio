@@ -385,7 +385,8 @@
       "distributed": "Distributed / NewSQL",
       "analytics": "Analytics / OLAP",
       "domestic": "Domestic",
-      "document": "Document / KV / Search"
+      "document": "Document / KV / Search",
+      "jdbc": "JDBC (driver JAR required)"
     },
     "protocol": "Protocol",
     "fieldName": "Name",

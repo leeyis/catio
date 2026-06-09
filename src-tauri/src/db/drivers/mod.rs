@@ -9,3 +9,5 @@ pub mod rqlite;
 pub mod elasticsearch;
 pub mod mongo;
 pub mod redis;
+pub mod jdbc;
+pub mod jdbc_config;

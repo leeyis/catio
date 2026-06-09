@@ -37,6 +37,13 @@ pub fn capabilities_for(db: DatabaseType) -> Capabilities {
             writable: true, transactions: false, schemas: true,
             sql_console: false, er: false, structure_edit: false,
         },
+        // JDBC sidecar: SQL console + writes work; the simple plugin protocol
+        // exposes columns but no FK/index introspection, so ER and structure
+        // editing are off. Schemas on (most JDBC engines are schema-aware).
+        Jdbc => Capabilities {
+            writable: true, transactions: false, schemas: true,
+            sql_console: true, er: false, structure_edit: false,
+        },
     }
 }
 
