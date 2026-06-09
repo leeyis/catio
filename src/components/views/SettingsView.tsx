@@ -5,7 +5,8 @@ import { Icon } from '../Icon'
 import { BrandMark } from '../BrandMark'
 import { Btn, IconBtn, Toggle, Segmented } from '../atoms'
 import { useLang } from '../../state/LanguageContext'
-import { useAgentConfig } from '../../state/agentConfig'
+import { useAgentConfig, clearStoredCredentials } from '../../state/agentConfig'
+import { ConfirmModal } from '../modals/ConfirmModal'
 import { usePrefs, UI_FONTS, MONO_FONTS, TERM_FONT_SIZES } from '../../state/preferences'
 import type { UiFontKey, MonoFontKey, Density } from '../../state/preferences'
 import { fetchModels, testModel } from '../../services'
@@ -201,6 +202,8 @@ function AppearanceSettings() {
 
 function SecuritySettings({ authEnabled, users = [], currentUser, ownerUser, onEnableAuth, onDisableAuth, onLock, onRemoveUser }: SecuritySettingsProps) {
   const { t } = useTranslation()
+  const [confirmClear, setConfirmClear] = useState(false)
+  const [cleared, setCleared] = useState(false)
   return (
     <Block title={t('settings.securityTitle')} hint={t('settings.securityHint')}>
       {/* multi-user identity gate */}
@@ -243,7 +246,23 @@ function SecuritySettings({ authEnabled, users = [], currentUser, ownerUser, onE
         )}
       </div>
 
-      <SettingRow icon="trash-2" title={t('settings.clearCredentials')} desc={t('settings.clearCredentialsDesc')} danger control={<Btn variant="danger" size="sm">{t('settings.clearBtn')}</Btn>} />
+      <SettingRow icon="trash-2" title={t('settings.clearCredentials')} desc={t('settings.clearCredentialsDesc')} danger
+        control={<Btn variant="danger" size="sm" onClick={() => setConfirmClear(true)}>{t('settings.clearBtn')}</Btn>} />
+      {cleared && (
+        <div className="row gap6" style={{ marginTop: 2, fontSize: 11.5, color: 'var(--signal-green)' }}>
+          <Icon name="check" size={12} /> {t('settings.clearedNote')}
+        </div>
+      )}
+      {confirmClear && (
+        <ConfirmModal
+          title={t('settings.clearConfirmTitle')}
+          message={t('settings.clearConfirmMsg')}
+          confirmLabel={t('settings.clearBtn')}
+          danger
+          onConfirm={() => { clearStoredCredentials(); setConfirmClear(false); setCleared(true) }}
+          onCancel={() => setConfirmClear(false)}
+        />
+      )}
     </Block>
   )
 }

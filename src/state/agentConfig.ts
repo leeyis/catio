@@ -41,6 +41,18 @@ function writeToStorage(cfg: AgentConfig): void {
   } catch { /* ignore quota errors */ }
 }
 
+/**
+ * Clear every secret persisted on this machine. SSH/DB passwords are never
+ * stored (they are prompted per-connect and held only in memory), so the only
+ * at-rest credential is the Agent API key — blank it while keeping the rest of
+ * the agent config (provider / endpoints / model) intact.
+ */
+export function clearStoredCredentials(): void {
+  if (typeof localStorage === 'undefined') return
+  const next: AgentConfig = { ...readFromStorage(), openaiKey: '' }
+  writeToStorage(next)
+}
+
 // ---- Hook ----
 
 import { useState, useCallback } from 'react'
