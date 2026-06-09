@@ -27,6 +27,8 @@ export interface DetailsPanelProps {
   /** Connect to the DB profile with the supplied secret (empty/already-active → open
    *  workbench directly without re-prompting). Caller drives dbConnect + navigation. */
   onConnectDb?: (profile: DbProfile, secret: string) => Promise<void>
+  /** Disconnect the active live connection(s) for this DB profile. */
+  onDisconnectDb?: (profile: DbProfile) => void
 
   // ---- Host / SSH actions (operate on the Connection) ----
   /** Run the real connect flow for this connection. */
@@ -64,6 +66,7 @@ export function DetailsPanel({
   onEditDb,
   onDeleteDb,
   onConnectDb,
+  onDisconnectDb,
   onConnect,
   onEdit,
   onCopy,
@@ -73,7 +76,7 @@ export function DetailsPanel({
 }: DetailsPanelProps) {
   const isDb = conn?.kind === 'db'
   if (isDb && conn) {
-    return <DbDetails conn={conn} onClose={onClose} onEdit={onEditDb} onDelete={onDeleteDb} onConnect={onConnectDb} />
+    return <DbDetails conn={conn} onClose={onClose} onEdit={onEditDb} onDelete={onDeleteDb} onConnect={onConnectDb} onDisconnect={onDisconnectDb} />
   }
   return (
     <HostDetails
@@ -173,12 +176,13 @@ function HostDetails({
 
 // ---- DB details (real saved profile + working actions) ----
 
-function DbDetails({ conn, onClose, onEdit, onDelete, onConnect }: {
+function DbDetails({ conn, onClose, onEdit, onDelete, onConnect, onDisconnect }: {
   conn: Connection
   onClose: () => void
   onEdit?: (profile: DbProfile) => void
   onDelete?: (profile: DbProfile) => void
   onConnect?: (profile: DbProfile, secret: string) => Promise<void>
+  onDisconnect?: (profile: DbProfile) => void
 }) {
   const { t } = useTranslation()
   const D = useData()
@@ -245,7 +249,7 @@ function DbDetails({ conn, onClose, onEdit, onDelete, onConnect }: {
 
   return (
     <PanelShell icon="info" title={t('panels.detailsTitle')} sub={profile.name} onClose={onClose}
-      actions={<IconBtn name="pencil" size={15} variant="bare" title={t('panels.edit')} onClick={() => onEdit?.(profile)} />}>
+      actions={isActive ? undefined : <IconBtn name="pencil" size={15} variant="bare" title={t('panels.edit')} onClick={() => onEdit?.(profile)} />}>
       <div className="grow" style={{ overflowY: 'auto', padding: 14 }}>
         <div className="row gap10" style={{ marginBottom: 14 }}>
           <ConnGlyph conn={conn} size={48} radius={14} />
@@ -268,16 +272,26 @@ function DbDetails({ conn, onClose, onEdit, onDelete, onConnect }: {
         )}
 
         <div className="row gap8" style={{ marginTop: 16 }}>
-          <Btn variant="cta" icon="play" style={{ flex: 1 }} onClick={handleConnectClick}>{t('panels.connect')}</Btn>
+          {isActive ? (
+            <Btn variant="danger" icon="x" style={{ flex: 1 }} onClick={() => onDisconnect?.(profile!)}>{t('panels.closeConnection')}</Btn>
+          ) : (
+            <Btn variant="cta" icon="play" style={{ flex: 1 }} onClick={handleConnectClick}>{t('panels.connect')}</Btn>
+          )}
           <Btn variant="secondary" icon="copy" onClick={handleCopy}>{copied ? t('panels.copied') : t('panels.copy')}</Btn>
         </div>
-        <div className="row gap8" style={{ marginTop: 8 }}>
-          <Btn variant="secondary" icon="pencil" style={{ flex: 1 }} onClick={() => onEdit?.(profile)}>{t('panels.edit')}</Btn>
-          <Btn variant="danger" icon="trash-2" style={{ flex: 1 }} onClick={() => setConfirmDelete(true)}>{t('panels.delete')}</Btn>
-        </div>
-        <div className="row gap8" style={{ marginTop: 8 }}>
-          <Btn variant="ghost" icon="x" style={{ flex: 1 }} onClick={onClose}>{t('panels.close')}</Btn>
-        </div>
+        {/* Profile-management actions are hidden while a live connection is open
+            (editing/deleting an in-use connection is disallowed). */}
+        {!isActive && (
+          <>
+            <div className="row gap8" style={{ marginTop: 8 }}>
+              <Btn variant="secondary" icon="pencil" style={{ flex: 1 }} onClick={() => onEdit?.(profile)}>{t('panels.edit')}</Btn>
+              <Btn variant="danger" icon="trash-2" style={{ flex: 1 }} onClick={() => setConfirmDelete(true)}>{t('panels.delete')}</Btn>
+            </div>
+            <div className="row gap8" style={{ marginTop: 8 }}>
+              <Btn variant="ghost" icon="x" style={{ flex: 1 }} onClick={onClose}>{t('panels.close')}</Btn>
+            </div>
+          </>
+        )}
       </div>
 
       {confirmDelete && (

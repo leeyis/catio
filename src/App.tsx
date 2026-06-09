@@ -28,7 +28,7 @@ import { nextTheme, useApplyTheme } from './state/ThemeContext'
 import { usePrefs, uiFontStack, monoFontStack } from './state/preferences'
 import { readTermBufferTail } from './services/termBuffers'
 import { useData } from './state/DataContext'
-import { dbConnect, getHistory as getDbHistory, clearDbHistory, deleteDbHistory, dbErrMsg } from './services/db'
+import { dbConnect, dbDisconnect, getHistory as getDbHistory, clearDbHistory, deleteDbHistory, dbErrMsg } from './services/db'
 import {
   useDbConnections, dbProfileToConnection, listActiveDbConnections,
   setActiveDbConnection, removeDbConnection, removeActiveDbConnection,
@@ -61,6 +61,11 @@ import type { Attachment } from './components/panels/AIPanel'
 export default function App() {
   const D = useData()
   const dbProfiles = useDbConnections()
+  // Active DB connections live in a module-level Map (not React state). Bump this
+  // to force a re-render when a connection is opened/closed so the vault status
+  // and the details panel reflect the change.
+  const [, setDbActiveRev] = useState(0)
+  const bumpDbActive = () => setDbActiveRev(x => x + 1)
   const { t } = useTranslation()
   const hash = (location.hash || '').replace('#', '')
   const initTheme = hash.includes('amber') ? 'amber' : hash.includes('grove') ? 'grove' : ((localStorage.getItem('catio-theme') || 'dawn') as 'dawn' | 'amber' | 'grove')
@@ -592,11 +597,26 @@ export default function App() {
       secret: secret || undefined,
     })
     setActiveDbConnection(result, profile)
+    bumpDbActive()
     syncMcpConnections()
     openConn(dbProfileToConnection(profile, true))
     setView('workbench')
     // Success → auto-hide the connection details panel.
     closeDetailPanel()
+  }
+
+  // Disconnect every live connection for a DB profile (details panel "关闭连接").
+  async function disconnectDbProfile(profile: DbProfile) {
+    const actives = listActiveDbConnections().filter(a => a.profileId === profile.id)
+    for (const a of actives) {
+      try { await dbDisconnect(a.connId) } catch { /* best-effort */ }
+      removeActiveDbConnection(a.connId)
+    }
+    closeTab('tab-' + profile.id)
+    bumpDbActive()
+    syncMcpConnections()
+    // Reflect the new (disconnected) status in the open details panel.
+    setDetailConn(prev => (prev && prev.id === profile.id ? { ...prev, status: 'idle' } : prev))
   }
 
   // Submit handler for the direct DB connect prompt (opened from a DB card).
@@ -997,6 +1017,7 @@ export default function App() {
                   onEditDb={editDbProfile}
                   onDeleteDb={deleteDbProfile}
                   onConnectDb={connectDbProfile}
+                  onDisconnectDb={disconnectDbProfile}
                   // Host / SSH actions (operate on the Connection)
                   onConnect={connectFromDetail}
                   onEdit={editConn}
