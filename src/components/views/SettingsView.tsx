@@ -6,6 +6,8 @@ import { BrandMark } from '../BrandMark'
 import { Btn, IconBtn, Toggle, Segmented } from '../atoms'
 import { useLang } from '../../state/LanguageContext'
 import { useAgentConfig } from '../../state/agentConfig'
+import { usePrefs, UI_FONTS, MONO_FONTS, TERM_FONT_SIZES } from '../../state/preferences'
+import type { UiFontKey, MonoFontKey, Density } from '../../state/preferences'
 import { fetchModels, testModel } from '../../services'
 import type { ModelTestResult } from '../../services'
 
@@ -146,22 +148,42 @@ function ThemeSettings({ theme, onTheme }: ThemeSettingsProps) {
           )
         })}
       </div>
-      <SettingRow icon="monitor" title={t('settings.followSystem')} desc={t('settings.followSystemDesc')} control={<Toggle on={false} />} />
-      <SettingRow icon="palette" title={t('settings.accentSubtle')} desc={t('settings.accentSubtleDesc')} control={<Toggle on={true} />} />
     </Block>
+  )
+}
+
+// Compact −/＋ stepper for discrete numeric prefs (e.g. terminal font size).
+function Stepper({ value, onDec, onInc, atMin, atMax }: { value: string; onDec: () => void; onInc: () => void; atMin: boolean; atMax: boolean }) {
+  const btn: React.CSSProperties = { width: 28, height: 28, borderRadius: 8, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', color: 'var(--text-secondary)', fontSize: 16, lineHeight: 1, display: 'grid', placeItems: 'center' }
+  return (
+    <div className="row gap6" style={{ alignItems: 'center' }}>
+      <button style={{ ...btn, opacity: atMin ? 0.4 : 1, cursor: atMin ? 'default' : 'pointer' }} disabled={atMin} onClick={onDec}>−</button>
+      <span className="chip mono" style={{ minWidth: 58, justifyContent: 'center' }}>{value}</span>
+      <button style={{ ...btn, opacity: atMax ? 0.4 : 1, cursor: atMax ? 'default' : 'pointer' }} disabled={atMax} onClick={onInc}>＋</button>
+    </div>
   )
 }
 
 function AppearanceSettings() {
   const { t } = useTranslation()
   const { lang, setLang } = useLang()
+  const { prefs, update } = usePrefs()
+  const sizes = TERM_FONT_SIZES
+  const curIdx = Math.max(0, sizes.indexOf(prefs.termFontPx as typeof sizes[number]))
+  const stepSize = (dir: number) => {
+    const next = Math.min(sizes.length - 1, Math.max(0, curIdx + dir))
+    update({ termFontPx: sizes[next] })
+  }
   return (
     <Block title={t('settings.appearanceTitle')} hint={t('settings.appearanceHint')}>
-      <SettingRow icon="type" title={t('settings.uiFont')} desc={t('settings.uiFontDesc')} control={<span className="chip">Inter</span>} />
-      <SettingRow icon="code" title={t('settings.monoFont')} desc={t('settings.monoFontDesc')} control={<span className="chip mono">Geist Mono</span>} />
-      <SettingRow icon="terminal" title={t('settings.termFontSize')} desc={t('settings.termFontSizeDesc')} control={<span className="chip mono">12.5 px</span>} />
-      <SettingRow icon="sliders" title={t('settings.density')} desc={t('settings.densityDesc')} control={<Toggle on={false} />} />
-      <SettingRow icon="zap" title={t('settings.webgl')} desc={t('settings.webglDesc')} control={<Toggle on={true} />} />
+      <SettingRow icon="type" title={t('settings.uiFont')} desc={t('settings.uiFontDesc')}
+        control={<Segmented value={prefs.uiFont} onChange={v => update({ uiFont: v as UiFontKey })} options={UI_FONTS.map(f => ({ value: f.key, label: f.label }))} />} />
+      <SettingRow icon="code" title={t('settings.monoFont')} desc={t('settings.monoFontDesc')}
+        control={<Segmented value={prefs.monoFont} onChange={v => update({ monoFont: v as MonoFontKey })} options={MONO_FONTS.map(f => ({ value: f.key, label: f.label }))} />} />
+      <SettingRow icon="terminal" title={t('settings.termFontSize')} desc={t('settings.termFontSizeDesc')}
+        control={<Stepper value={`${prefs.termFontPx} px`} onDec={() => stepSize(-1)} onInc={() => stepSize(1)} atMin={curIdx === 0} atMax={curIdx === sizes.length - 1} />} />
+      <SettingRow icon="sliders" title={t('settings.density')} desc={t('settings.densityDesc')}
+        control={<Segmented value={prefs.density} onChange={v => update({ density: v as Density })} options={[{ value: 'comfortable', label: t('settings.densityComfortable') }, { value: 'compact', label: t('settings.densityCompact') }]} />} />
       <SettingRow
         icon="globe"
         title={t('settings.language')}

@@ -25,6 +25,7 @@ import { Icon } from './components/Icon'
 import { Btn } from './components/atoms'
 import { useTweaks, TWEAK_DEFAULTS } from './state/useTweaks'
 import { nextTheme, useApplyTheme } from './state/ThemeContext'
+import { usePrefs, uiFontStack, monoFontStack } from './state/preferences'
 import { useData } from './state/DataContext'
 import { dbConnect, getHistory as getDbHistory, clearDbHistory, deleteDbHistory, dbErrMsg } from './services/db'
 import {
@@ -249,9 +250,17 @@ export default function App() {
   }, [])
 
   const theme_ = tweaks.theme
-  const density = tweaks.density
   const aiForm = tweaks.aiForm
   const panelW = tweaks.panelW
+
+  // Appearance prefs (fonts / terminal size / density) — persisted + live across
+  // components via the subscribable store, so a change in Settings applies at once.
+  const { prefs } = usePrefs()
+  const density = prefs.density
+  useEffect(() => {
+    document.documentElement.style.setProperty('--ui-font', uiFontStack(prefs.uiFont))
+    document.documentElement.style.setProperty('--font-mono', monoFontStack(prefs.monoFont))
+  }, [prefs.uiFont, prefs.monoFont])
 
   useApplyTheme(theme_, panelW)
 

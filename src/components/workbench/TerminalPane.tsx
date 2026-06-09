@@ -8,6 +8,7 @@ import { Icon } from '../Icon'
 import { ConnGlyph, StatusDot } from '../atoms'
 import { useData } from '../../state/DataContext'
 import { termOpen, termWrite, termResize, termClose, listen, getTermBuffer, multiexecRun } from '../../services/ssh'
+import { usePrefs, monoFontStack } from '../../state/preferences'
 import type { Connection, TermLine as TermLineType, MultiExecTarget } from '../../services/types'
 
 export interface TerminalPaneProps {
@@ -85,6 +86,7 @@ type MxRunState = Record<string, MultiExecTarget>
 export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChannel }: TerminalPaneProps) {
   const { t } = useTranslation()
   const D = useData()
+  const { prefs } = usePrefs()
   const [broadcast, setBroadcast] = useState(false)
   const [mxOpen, setMxOpen] = useState(false)
   const selfId = conn ? conn.id : 'h-bastion'
@@ -190,8 +192,8 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
 
     const term = new Terminal({
       theme: { background: cssVar('--term-bg', '#0B1020'), foreground: cssVar('--term-fg', '#E2E8F0') },
-      fontFamily: "'Geist Mono', monospace",
-      fontSize: 12.5,
+      fontFamily: monoFontStack(prefs.monoFont),
+      fontSize: prefs.termFontPx,
       cursorBlink: true,
     })
     termRef.current = term
@@ -291,6 +293,20 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
     }
     // re-init when the session/chan identity changes
   }, [sessionId, live, conn])
+
+  // Live-apply terminal font prefs WITHOUT recreating the terminal (which would
+  // drop the scrollback). Update xterm options, refit, and push the new size to
+  // the live PTY so the remote `$COLUMNS/$LINES` stay correct.
+  useEffect(() => {
+    const term = termRef.current
+    if (!term || !term.options) return
+    term.options.fontSize = prefs.termFontPx
+    term.options.fontFamily = monoFontStack(prefs.monoFont)
+    try { fitAddonRef.current?.fit() } catch { /* no layout */ }
+    if (live && sessionId && chanIdRef.current) {
+      try { termResize(sessionId, chanIdRef.current, term.cols, term.rows) } catch { /* best-effort */ }
+    }
+  }, [prefs.termFontPx, prefs.monoFont, live, sessionId])
 
   // ---- Snippet / history / AI "insert" + "run" into the live PTY ----
   // Only the ACTIVE pane handles these window events so the command goes to the
@@ -442,7 +458,7 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
 
       {/* terminal surface — xterm.js host */}
       <div ref={xtermHost} className="grow" onMouseDown={() => setSelBar(null)}
-        style={{ overflow: 'hidden', background: 'var(--term-bg)', padding: '12px 14px', fontFamily: "'Geist Mono', monospace", fontSize: 12.5, lineHeight: 1.65, minHeight: 0 }} />
+        style={{ overflow: 'hidden', background: 'var(--term-bg)', padding: '12px 14px', fontFamily: monoFontStack(prefs.monoFont), fontSize: prefs.termFontPx, lineHeight: 1.65, minHeight: 0 }} />
 
       {/* selection toolbar — copy / ask AI */}
       {selBar && (
