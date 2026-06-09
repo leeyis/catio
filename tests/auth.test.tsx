@@ -9,5 +9,5 @@ it('NewConnectionModal renders title', () => {
   expect(screen.getByText('新建连接')).toBeTruthy()
 })
 it('AuthGate renders (first-run or lock)', () => {
-  wrap(<AuthGate users={[]} onCreate={() => {}} onLogin={() => {}} />)
+  wrap(<AuthGate users={[]} onCreate={() => {}} onLogin={async () => false} />)
 })

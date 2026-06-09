@@ -6,6 +6,7 @@ import { BrandMark } from '../BrandMark'
 import { Btn, IconBtn, Toggle, Segmented } from '../atoms'
 import { useLang } from '../../state/LanguageContext'
 import { useAgentConfig, clearStoredCredentials } from '../../state/agentConfig'
+import { forgetAllSecrets } from '../../state/vault'
 import { ConfirmModal } from '../modals/ConfirmModal'
 import { usePrefs, UI_FONTS, MONO_FONTS, TERM_FONT_SIZES, TERM_BUFFER_LINE_OPTIONS } from '../../state/preferences'
 import type { UiFontKey, MonoFontKey, Density } from '../../state/preferences'
@@ -264,7 +265,7 @@ function SecuritySettings({ authEnabled, users = [], currentUser, ownerUser, onE
           message={t('settings.clearConfirmMsg')}
           confirmLabel={t('settings.clearBtn')}
           danger
-          onConfirm={() => { clearStoredCredentials(); setConfirmClear(false); setCleared(true) }}
+          onConfirm={() => { clearStoredCredentials(); forgetAllSecrets(); setConfirmClear(false); setCleared(true) }}
           onCancel={() => setConfirmClear(false)}
         />
       )}

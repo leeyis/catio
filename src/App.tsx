@@ -37,6 +37,7 @@ import {
 import { sshConnect, sshDisconnect, sshTrustHost, isTauri, onHistory, sshSysinfo, sshDetectOs, importSshConfig } from './services/ssh'
 import type { SshConnectArgs, AuthMethod } from './services/ssh'
 import { mcpSyncTargets } from './services/mcp'
+import { createVaultCredential, unlockVault, lockVault, isVaultUnlocked, recallSecret, rememberSecret } from './state/vault'
 import { appendHistory, loadHistory, clearHistory, deleteHistory } from './state/history'
 import { loadRecentSessions, recordRecentSession } from './state/recentSessions'
 import type { HistoryItem } from './services/types'
@@ -160,8 +161,8 @@ export default function App() {
   const seenHistIds = useRef<Set<string>>(new Set())
   // Connect-flow state machine: collect secret, then (maybe) trust host key.
   // pendingJumpSecret: when a profile has a jump host, collect jump secret first.
-  const [pendingJumpSecret, setPendingJumpSecret] = useState<{ args: SshConnectArgs; name: string } | null>(null)
-  const [pendingConnect, setPendingConnect] = useState<{ args: SshConnectArgs; name: string } | null>(null)
+  const [pendingJumpSecret, setPendingJumpSecret] = useState<{ args: SshConnectArgs; name: string; profileId?: string } | null>(null)
+  const [pendingConnect, setPendingConnect] = useState<{ args: SshConnectArgs; name: string; profileId?: string } | null>(null)
   const [pendingTrust, setPendingTrust] = useState<{ args: SshConnectArgs; name: string; sessionId: string; fingerprint: string } | null>(null)
   // Connect feedback: host name while a connect is in flight (shows an overlay so
   // there's immediate feedback instead of a 1–2s silent gap), and a styled in-app
@@ -222,19 +223,42 @@ export default function App() {
     sessionStorage.removeItem('catio-session')
   }
   function disableAuth() {
+    lockVault()
     localStorage.removeItem('catio-auth')
     setAuthEnabled(false)
     setSessionUser('__open')
   }
   function lockApp() {
+    lockVault()
     setSessionUser(null)
     sessionStorage.removeItem('catio-session')
   }
-  function loginUser(name: string) {
+  // Verify the password, unlock the encrypted secret vault, and start a session.
+  // Legacy plaintext-password records are migrated to an encrypted credential
+  // on first successful login. Returns false on a wrong password.
+  async function loginUser(name: string, password: string): Promise<boolean> {
+    const found = users.find(x => x.username === name)
+    if (!found) return false
+    if (found.salt && found.verifier && found.iv) {
+      const ok = await unlockVault(password, { salt: found.salt, verifier: found.verifier, iv: found.iv })
+      if (!ok) return false
+    } else if (found.pass !== undefined) {
+      if (found.pass !== password) return false
+      const cred = await createVaultCredential(password)
+      const upgraded: AuthUser = { username: found.username, hint: found.hint, ...cred }
+      const next = users.map(x => (x.username === found.username ? upgraded : x))
+      setUsers(next)
+      localStorage.setItem('catio-users', JSON.stringify(next))
+    } else {
+      return false
+    }
     setSessionUser(name)
     sessionStorage.setItem('catio-session', name)
+    return true
   }
-  function createUser(user: AuthUser) {
+  async function createUser(input: { username: string; password: string; hint: string }) {
+    const cred = await createVaultCredential(input.password)
+    const user: AuthUser = { username: input.username, hint: input.hint, ...cred }
     const next = [...users, user]
     setUsers(next)
     localStorage.setItem('catio-users', JSON.stringify(next))
@@ -242,7 +266,20 @@ export default function App() {
       setOwnerUser(user.username)
       localStorage.setItem('catio-owner', user.username)
     }
-    loginUser(user.username)
+    setSessionUser(user.username)
+    sessionStorage.setItem('catio-session', user.username)
+  }
+
+  // ---- encrypted connection-secret cache (auth-gated) ----
+  // Recall a cached secret only when auth is on AND the vault is unlocked.
+  async function cachedSecret(profileId: string): Promise<string | null> {
+    if (!authEnabled || !sessionUser || sessionUser === '__open' || !isVaultUnlocked()) return null
+    return recallSecret(sessionUser, profileId)
+  }
+  function rememberConnSecret(profileId: string, secret: string) {
+    if (authEnabled && sessionUser && sessionUser !== '__open' && isVaultUnlocked() && secret) {
+      void rememberSecret(sessionUser, profileId, secret)
+    }
   }
 
   useEffect(() => {
@@ -363,7 +400,7 @@ export default function App() {
   // ORCH connect entrypoint — invoked by NewConnectionModal's onConnect and by
   // reconnect actions. `args.secret` may carry an in-memory secret typed in the
   // modal; when present we connect straight away (no second prompt).
-  function connectProfile(args: SshConnectArgs, display: { name: string }) {
+  async function connectProfile(args: SshConnectArgs, display: { name: string; profileId?: string }) {
     if (!isTauri()) {
       // Demo path: no IPC, just open a demo terminal tab (no sessionId).
       openLiveTab(args, display.name)
@@ -372,26 +409,37 @@ export default function App() {
     // If the modal already supplied a target secret, the jump secret (if any) also
     // came from the form — connect directly (skip all prompts).
     if (args.secret && args.secret.length > 0) {
-      void performConnect(args, display.name, args.secret)
+      void performConnect(args, display.name, args.secret, display.profileId)
       return
+    }
+    // Auth-gated cache: reuse a remembered secret (no prompt). Skipped when a jump
+    // host still needs its own secret (we only cache the target secret).
+    if (display.profileId && (!args.jump || args.jump.secret)) {
+      const cached = await cachedSecret(display.profileId)
+      if (cached) {
+        void performConnect(args, display.name, cached, display.profileId)
+        return
+      }
     }
     // Reconnect path: collect secrets interactively.
     // If a jump host is configured AND it has no secret yet, collect jump secret first.
     if (args.jump && !args.jump.secret) {
-      setPendingJumpSecret({ args, name: display.name })
+      setPendingJumpSecret({ args, name: display.name, profileId: display.profileId })
       return
     }
     // Otherwise collect target secret.
-    setPendingConnect({ args, name: display.name })
+    setPendingConnect({ args, name: display.name, profileId: display.profileId })
   }
 
   // Secret collected → call sshConnect; route to trust prompt / success / error.
   // args.jump (with its secret) is forwarded intact to sshConnect.
-  async function performConnect(args: SshConnectArgs, name: string, secret: string) {
+  async function performConnect(args: SshConnectArgs, name: string, secret: string, profileId?: string) {
     // Immediate feedback: show the connecting overlay before the (1–2s) await.
     setConnecting(name)
     try {
       const result = await sshConnect({ ...args, secret, jump: args.jump })
+      // Auth succeeded → the secret is valid; cache it (when auth + vault allow).
+      if (profileId) rememberConnSecret(profileId, secret)
       if (result.hostKeyTrusted === false) {
         setPendingTrust({ args, name, sessionId: result.sessionId, fingerprint: result.hostKeyFingerprint })
         return
@@ -427,7 +475,7 @@ export default function App() {
     setPendingTrust(null)
   }
 
-  function openConn(conn: Connection) {
+  async function openConn(conn: Connection) {
     // Record this as a recent session (newest-first) for the home screen.
     recordRecentSession(conn.id)
     setRecentSessions(loadRecentSessions())
@@ -435,14 +483,14 @@ export default function App() {
     // (collects the secret, verifies host key, opens a live session/tab).
     const profile = profiles.find(p => p.id === conn.id)
     if (profile) {
-      connectProfile(
+      void connectProfile(
         { host: profile.host, port: profile.port, user: profile.user, auth: profile.auth, jump: profile.jump },
-        { name: profile.name },
+        { name: profile.name, profileId: profile.id },
       )
       return
     }
-    // DB connection: if already live, open its SQL workbench tab; otherwise prompt
-    // for the password right here and connect (dbConnect needs a secret). Falls back
+    // DB connection: if already live, open its SQL workbench tab; otherwise reuse a
+    // cached secret (auth-gated) or prompt for the password and connect. Falls back
     // to the details panel only if the saved profile can't be resolved.
     if (conn.kind === 'db') {
       const active = listActiveDbConnections().find(a => a.profileId === conn.id)
@@ -455,8 +503,13 @@ export default function App() {
         setView('workbench')
       } else {
         const dbp = dbProfiles.find(p => p.id === conn.id)
-        if (dbp) { setDbPromptError(null); setPendingDbConnect(dbp) }
-        else openDetail(conn)
+        if (dbp) {
+          const cached = await cachedSecret(dbp.id)
+          if (cached) {
+            try { await connectDbProfile(dbp, cached); return } catch { /* fall through to prompt */ }
+          }
+          setDbPromptError(null); setPendingDbConnect(dbp)
+        } else openDetail(conn)
       }
       return
     }
@@ -590,12 +643,22 @@ export default function App() {
       secret: secret || undefined,
     })
     setActiveDbConnection(result, profile)
+    // Auth succeeded → cache the secret (when auth + vault allow).
+    rememberConnSecret(profile.id, secret)
     bumpDbActive()
     syncMcpTargets()
-    openConn(dbProfileToConnection(profile, true))
+    void openConn(dbProfileToConnection(profile, true))
     setView('workbench')
     // Success → auto-hide the connection details panel.
     closeDetailPanel()
+  }
+
+  // DetailsPanel "连接": try a cached secret first; returns true if it connected
+  // (so the panel can skip its password prompt).
+  async function tryConnectDbCached(profile: DbProfile): Promise<boolean> {
+    const cached = await cachedSecret(profile.id)
+    if (!cached) return false
+    try { await connectDbProfile(profile, cached); return true } catch { return false }
   }
 
   // Disconnect every live connection for a DB profile (details panel "关闭连接").
@@ -641,9 +704,9 @@ export default function App() {
   function connectFromDetail(conn: Connection) {
     const profile = profiles.find(p => p.id === conn.id)
     if (!profile) return
-    connectProfile(
+    void connectProfile(
       { host: profile.host, port: profile.port, user: profile.user, auth: profile.auth, jump: profile.jump },
-      { name: profile.name },
+      { name: profile.name, profileId: profile.id },
     )
     // Auto-hide the details panel once the connect is initiated.
     closeDetailPanel()
@@ -1011,6 +1074,7 @@ export default function App() {
                   onDeleteDb={deleteDbProfile}
                   onConnectDb={connectDbProfile}
                   onDisconnectDb={disconnectDbProfile}
+                  onTryConnectDb={tryConnectDbCached}
                   // Host / SSH actions (operate on the Connection)
                   onConnect={connectFromDetail}
                   onEdit={editConn}
@@ -1054,7 +1118,12 @@ export default function App() {
           onSaved={reloadProfiles}
           onClose={() => { setShowNew(false); setEditing(null); setEditProfile(null) }}
           onConnect={connectProfile}
-          onConnected={(profile) => openConn(dbProfileToConnection(profile, true))}
+          onConnected={(profile, secret) => {
+            if (secret) rememberConnSecret(profile.id, secret)
+            bumpDbActive()
+            syncMcpTargets()
+            void openConn(dbProfileToConnection(profile, true))
+          }}
         />
       )}
 
@@ -1080,7 +1149,7 @@ export default function App() {
               ...p.args,
               jump: p.args.jump ? { ...p.args.jump, secret: jumpSec } : undefined,
             }
-            setPendingConnect({ args: argsWithJump, name: p.name })
+            setPendingConnect({ args: argsWithJump, name: p.name, profileId: p.profileId })
           }}
           onCancel={() => setPendingJumpSecret(null)}
         />
@@ -1092,7 +1161,7 @@ export default function App() {
           onSubmit={secret => {
             const p = pendingConnect
             setPendingConnect(null)
-            void performConnect(p.args, p.name, secret)
+            void performConnect(p.args, p.name, secret, p.profileId)
           }}
           onCancel={() => setPendingConnect(null)}
         />

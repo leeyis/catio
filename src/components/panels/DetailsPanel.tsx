@@ -29,6 +29,8 @@ export interface DetailsPanelProps {
   onConnectDb?: (profile: DbProfile, secret: string) => Promise<void>
   /** Disconnect the active live connection(s) for this DB profile. */
   onDisconnectDb?: (profile: DbProfile) => void
+  /** Try connecting with a cached secret; resolves true if it connected (skip prompt). */
+  onTryConnectDb?: (profile: DbProfile) => Promise<boolean>
 
   // ---- Host / SSH actions (operate on the Connection) ----
   /** Run the real connect flow for this connection. */
@@ -67,6 +69,7 @@ export function DetailsPanel({
   onDeleteDb,
   onConnectDb,
   onDisconnectDb,
+  onTryConnectDb,
   onConnect,
   onEdit,
   onCopy,
@@ -76,7 +79,7 @@ export function DetailsPanel({
 }: DetailsPanelProps) {
   const isDb = conn?.kind === 'db'
   if (isDb && conn) {
-    return <DbDetails conn={conn} onClose={onClose} onEdit={onEditDb} onDelete={onDeleteDb} onConnect={onConnectDb} onDisconnect={onDisconnectDb} />
+    return <DbDetails conn={conn} onClose={onClose} onEdit={onEditDb} onDelete={onDeleteDb} onConnect={onConnectDb} onDisconnect={onDisconnectDb} onTryConnect={onTryConnectDb} />
   }
   return (
     <HostDetails
@@ -159,7 +162,7 @@ function HostDetails({
           {c.stats && <Row k={t('panels.detailCpuMem')} v={`${c.stats.cpu}% · ${c.stats.mem}%`} mono />}
           {c.stats && <Row k={t('panels.detailUptime')} v={c.stats.up} mono />}
           {c.lastUsed && <Row k={t('panels.detailLastUsed')} v={t('panels.lastUsedAgo', { time: c.lastUsed })} />}
-          <Row k={t('panels.detailCredentials')} v={<span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}><Icon name="lock" size={12} style={{ color: 'var(--text-faint)' }} />keychain · XChaCha20</span>} />
+          <Row k={t('panels.detailCredentials')} v={<span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}><Icon name="lock" size={12} style={{ color: 'var(--text-faint)' }} />{t('panels.credentialsValue')}</span>} />
         </div>
         <div className="row gap8" style={{ marginTop: 16 }}>
           {connected ? (
@@ -176,13 +179,14 @@ function HostDetails({
 
 // ---- DB details (real saved profile + working actions) ----
 
-function DbDetails({ conn, onClose, onEdit, onDelete, onConnect, onDisconnect }: {
+function DbDetails({ conn, onClose, onEdit, onDelete, onConnect, onDisconnect, onTryConnect }: {
   conn: Connection
   onClose: () => void
   onEdit?: (profile: DbProfile) => void
   onDelete?: (profile: DbProfile) => void
   onConnect?: (profile: DbProfile, secret: string) => Promise<void>
   onDisconnect?: (profile: DbProfile) => void
+  onTryConnect?: (profile: DbProfile) => Promise<boolean>
 }) {
   const { t } = useTranslation()
   const D = useData()
@@ -221,13 +225,15 @@ function DbDetails({ conn, onClose, onEdit, onDelete, onConnect, onDisconnect }:
     }
   }
 
-  function handleConnectClick() {
+  async function handleConnectClick() {
     setConnectError(null)
     // Already active → open workbench directly, no password prompt.
     if (isActive) {
       void onConnect?.(profile!, '')
       return
     }
+    // Auth-gated cached secret → connect without prompting.
+    if (onTryConnect && (await onTryConnect(profile!))) return
     setPromptConnect(true)
   }
 

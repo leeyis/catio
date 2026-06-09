@@ -342,6 +342,7 @@
     "detailLastUsed": "最近使用",
     "lastUsedAgo": "{{time}} 前",
     "detailCredentials": "凭据",
+    "credentialsValue": "启用身份校验后 AES-GCM 加密缓存",
     "connect": "连接",
     "detailEngine": "引擎",
     "detailHost": "主机",

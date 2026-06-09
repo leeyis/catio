@@ -342,6 +342,7 @@
     "detailLastUsed": "Last used",
     "lastUsedAgo": "{{time}} ago",
     "detailCredentials": "Credentials",
+    "credentialsValue": "AES-GCM cached when identity verification is on",
     "connect": "Connect",
     "detailEngine": "Engine",
     "detailHost": "Host",

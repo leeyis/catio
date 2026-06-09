@@ -8,14 +8,22 @@ import { BrandMark } from '../BrandMark'
 
 export interface AuthUser {
   username: string
-  pass: string
+  /** Per-user vault salt (base64). Absent on legacy records (see `pass`). */
+  salt?: string
+  /** Encrypted verifier blob (base64) used to check the password on unlock. */
+  verifier?: string
+  /** IV for the verifier (base64). */
+  iv?: string
+  /** Legacy plaintext password (pre-encryption); migrated on next login. */
+  pass?: string
   hint?: string
 }
 
 export interface AuthGateProps {
   users: AuthUser[]
-  onLogin: (username: string) => void
-  onCreate: (user: { username: string; pass: string; hint: string }) => void
+  /** Verify the password and unlock the vault; resolves true on success. */
+  onLogin: (username: string, password: string) => Promise<boolean>
+  onCreate: (user: { username: string; password: string; hint: string }) => void | Promise<void>
   /** Cancel/exit setup. Offered only on first-run (no accounts yet) — backing out
    *  there reverts the accidental auth-enable. Not shown when accounts exist (a
    *  returning user must log in; we don't let cancel bypass the lock). */
@@ -37,18 +45,18 @@ export function AuthGate({ users, onLogin, onCreate, onCancel }: AuthGateProps) 
   const [err, setErr] = useState('')
   const userObj = users.find(x => x.username === u)
 
-  function submitLogin() {
+  async function submitLogin() {
     const found = users.find(x => x.username.toLowerCase() === u.trim().toLowerCase())
     if (!found) { setErr(t('auth.errUserNotFound')); return }
-    if (found.pass !== p) { setErr(t('auth.errWrongPass')); return }
-    onLogin(found.username)
+    const ok = await onLogin(found.username, p)
+    if (!ok) { setErr(t('auth.errWrongPass')); return }
   }
-  function submitInit() {
+  async function submitInit() {
     if (!u.trim()) { setErr(t('auth.errNoUsername')); return }
     if (p.length < 4) { setErr(t('auth.errPassTooShort')); return }
     if (p !== p2) { setErr(t('auth.errPassMismatch')); return }
     if (users.some(x => x.username.toLowerCase() === u.trim().toLowerCase())) { setErr(t('auth.errUserExists')); return }
-    onCreate({ username: u.trim(), pass: p, hint: hint.trim() })
+    await onCreate({ username: u.trim(), password: p, hint: hint.trim() })
   }
   const isInit = screen === 'init'
   const field: React.CSSProperties = { height: 40, padding: '0 12px', borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', fontSize: 13.5, color: 'var(--text-primary)', outline: 'none', width: '100%' }

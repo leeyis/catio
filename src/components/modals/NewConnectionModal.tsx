@@ -23,10 +23,10 @@ export interface NewConnectionModalProps {
   /** Default connection kind, derived from the sidebar's active filter tab. */
   initialKind?: 'host' | 'db'
   /** ORCH: emit a live connect request for a HOST/SSH connection. */
-  onConnect?: (args: SshConnectArgs, display: { name: string }) => void
+  onConnect?: (args: SshConnectArgs, display: { name: string; profileId?: string }) => void
   /** Called on a successful live DB connect (Tauri) with the saved profile, so the
    *  caller can immediately open the workbench for it. Not called in non-Tauri dev. */
-  onConnected?: (profile: DbProfile) => void
+  onConnected?: (profile: DbProfile, secret?: string) => void
   /** When set, the modal opens in EDIT mode pre-filled with this profile. A
    *  ConnectionProfile edits an SSH/host connection; a DbProfile edits a DB
    *  connection. Saving upserts under the SAME id (update, not a new entry). */
@@ -309,10 +309,11 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
       const args = currentArgs()
       // Persist the NON-secret profile only (best-effort). Secret never leaves memory.
       const jump = currentJumpProfile()
+      const profileId = `live-${host}:${port}-${user}`
       try {
-        saveProfile({ id: `live-${host}:${port}-${user}`, name, host, port, user, auth, jump, ...(group ? { group } : {}) })
+        saveProfile({ id: profileId, name, host, port, user, auth, jump, ...(group ? { group } : {}) })
       } catch { /* localStorage unavailable — ignore */ }
-      onConnect(args, { name })
+      onConnect(args, { name, profileId })
     }
     onClose()
   }
@@ -378,11 +379,12 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
       const result = await dbConnect({ ...profile, secret: dbSecret || undefined })
       // Store connId + capabilities for D3 (capabilities-gated UI) to consume
       setActiveDbConnection(result, profile)
+      const usedSecret = dbSecret
       setDbSecret('') // discard secret from memory
       setDbConnecting(false)
-      // Success: hand the saved profile back so the caller opens its workbench with
-      // real data, then close the modal.
-      onConnected?.(profile)
+      // Success: hand the saved profile (and the secret, so it can be cached) back
+      // so the caller opens its workbench with real data, then close the modal.
+      onConnected?.(profile, usedSecret)
       onClose()
       return
     } catch (err) {
