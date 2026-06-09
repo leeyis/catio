@@ -36,6 +36,9 @@ export const MONO_FONTS: FontOption<MonoFontKey>[] = [
 /** Selectable terminal font sizes (px). */
 export const TERM_FONT_SIZES = [11, 12, 12.5, 13, 14, 16] as const
 
+/** Selectable line counts for the agent terminal-buffer context. */
+export const TERM_BUFFER_LINE_OPTIONS = [20, 50, 100, 200] as const
+
 export const uiFontStack = (k: UiFontKey): string => (UI_FONTS.find(f => f.key === k) ?? UI_FONTS[0]).stack
 export const monoFontStack = (k: MonoFontKey): string => (MONO_FONTS.find(f => f.key === k) ?? MONO_FONTS[0]).stack
 

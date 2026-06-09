@@ -9,6 +9,7 @@ import { ConnGlyph, StatusDot } from '../atoms'
 import { useData } from '../../state/DataContext'
 import { termOpen, termWrite, termResize, termClose, listen, getTermBuffer, multiexecRun } from '../../services/ssh'
 import { usePrefs, monoFontStack } from '../../state/preferences'
+import { registerTermBuffer, unregisterTermBuffer } from '../../services/termBuffers'
 import type { Connection, TermLine as TermLineType, MultiExecTarget } from '../../services/types'
 
 export interface TerminalPaneProps {
@@ -58,6 +59,23 @@ function base64ToBytes(b64: string): Uint8Array {
   const out = new Uint8Array(bin.length)
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
   return out
+}
+
+// Dump the full xterm scrollback + viewport to plain text (newline-joined),
+// trimming trailing blank lines. Used to feed the Catio Agent recent output.
+function dumpTermBuffer(term: Terminal): string {
+  try {
+    const buf = term.buffer.active
+    const out: string[] = []
+    for (let i = 0; i < buf.length; i++) {
+      const line = buf.getLine(i)
+      out.push(line ? line.translateToString(true) : '')
+    }
+    while (out.length && out[out.length - 1].trim() === '') out.pop()
+    return out.join('\n')
+  } catch {
+    return ''
+  }
 }
 
 function cssVar(name: string, fallback: string): string {
@@ -236,6 +254,8 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
     })
 
     if (live && sessionId) {
+      // Expose this session's buffer to the Catio Agent (read-terminal-buffer pref).
+      registerTermBuffer(sessionId, () => dumpTermBuffer(term))
       // ---- LIVE: wire to term_* IPC ----
       ;(async () => {
         const openedChanId = await termOpen(sessionId, term.cols, term.rows)
@@ -286,7 +306,7 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
       if (unlisten) unlisten()
       // Only call termClose if the channel is still live (not already closed by server).
       if (live && sessionId && chanIdRef.current) { termClose(sessionId, chanIdRef.current); chanIdRef.current = null }
-      if (live && sessionId) onChannelRef.current?.(sessionId, null)
+      if (live && sessionId) { onChannelRef.current?.(sessionId, null); unregisterTermBuffer(sessionId) }
       term.dispose()
       termRef.current = null
       fitAddonRef.current = null

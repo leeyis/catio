@@ -7,7 +7,7 @@ import { Btn, IconBtn, Toggle, Segmented } from '../atoms'
 import { useLang } from '../../state/LanguageContext'
 import { useAgentConfig, clearStoredCredentials } from '../../state/agentConfig'
 import { ConfirmModal } from '../modals/ConfirmModal'
-import { usePrefs, UI_FONTS, MONO_FONTS, TERM_FONT_SIZES } from '../../state/preferences'
+import { usePrefs, UI_FONTS, MONO_FONTS, TERM_FONT_SIZES, TERM_BUFFER_LINE_OPTIONS } from '../../state/preferences'
 import type { UiFontKey, MonoFontKey, Density } from '../../state/preferences'
 import { fetchModels, testModel } from '../../services'
 import type { ModelTestResult } from '../../services'
@@ -499,10 +499,26 @@ function AgentConfigBlock() {
 
 function AISettings() {
   const { t } = useTranslation()
+  const { prefs, update } = usePrefs()
+  const opts = TERM_BUFFER_LINE_OPTIONS
+  const lineIdx = Math.max(0, opts.indexOf(prefs.termBufferLines as typeof opts[number]))
+  const stepLines = (dir: number) => {
+    const next = Math.min(opts.length - 1, Math.max(0, lineIdx + dir))
+    update({ termBufferLines: opts[next] })
+  }
   return (
     <Block title={t('settings.aiSettingsTitle')} hint={t('settings.aiSettingsHint')}>
       <AgentConfigBlock />
-      <SettingRow icon="terminal" title={t('settings.aiTermBuffer')} desc={t('settings.aiTermBufferDesc')} control={<Toggle on={true} />} />
+      <SettingRow icon="terminal" title={t('settings.aiTermBuffer')} desc={t('settings.aiTermBufferDesc', { count: prefs.termBufferLines })}
+        control={
+          <div className="row gap8" style={{ alignItems: 'center' }}>
+            {prefs.termBufferEnabled && (
+              <Stepper value={t('settings.aiTermBufferLines', { count: prefs.termBufferLines })}
+                onDec={() => stepLines(-1)} onInc={() => stepLines(1)} atMin={lineIdx === 0} atMax={lineIdx === opts.length - 1} />
+            )}
+            <Toggle on={prefs.termBufferEnabled} onChange={v => update({ termBufferEnabled: v })} />
+          </div>
+        } />
     </Block>
   )
 }

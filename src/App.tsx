@@ -26,6 +26,7 @@ import { Btn } from './components/atoms'
 import { useTweaks, TWEAK_DEFAULTS } from './state/useTweaks'
 import { nextTheme, useApplyTheme } from './state/ThemeContext'
 import { usePrefs, uiFontStack, monoFontStack } from './state/preferences'
+import { readTermBufferTail } from './services/termBuffers'
 import { useData } from './state/DataContext'
 import { dbConnect, getHistory as getDbHistory, clearDbHistory, deleteDbHistory, dbErrMsg } from './services/db'
 import {
@@ -761,9 +762,17 @@ export default function App() {
     const sysinfoBlock = sysinfo
       ? `\n\n系统会话上下文（当前连接的主机信息，供参考）:\n${sysinfo}\n回答时可据此结合该主机的实际环境（操作系统/时间/CPU/内存/磁盘/GPU）。`
       : ''
+    // ---- Read terminal buffer (opt-in pref): feed the agent the active
+    // terminal's most recent output so it can reason about what just happened.
+    const termTail = prefs.termBufferEnabled && liveSessionId
+      ? readTermBufferTail(liveSessionId, prefs.termBufferLines)
+      : ''
+    const termBlock = termTail
+      ? `\n\n当前终端最近输出（最多 ${prefs.termBufferLines} 行，供参考）:\n\`\`\`\n${termTail}\n\`\`\``
+      : ''
     const system: ChatMsg = {
       role: 'system',
-      content: `You are a terminal/shell assistant for host "${hostName}". When you suggest a shell command, put it in a fenced code block.${sysinfoBlock}`,
+      content: `You are a terminal/shell assistant for host "${hostName}". When you suggest a shell command, put it in a fenced code block.${sysinfoBlock}${termBlock}`,
     }
     const outgoing: ChatMsg[] = [
       system,
