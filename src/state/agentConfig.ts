@@ -1,6 +1,12 @@
 // Agent configuration state with localStorage persistence.
 // NOTE: openaiKey is stored in localStorage in plaintext for this UI-shell stage.
 // Real OS keychain encryption (Tauri stronghold / Windows Credential Manager) is a later sub-project.
+//
+// Backed by a tiny subscribable store (module-level state + listeners) so every
+// consumer shares one source of truth: changing the provider/model in Settings
+// reaches App's send-path live, without a reload. Mirrors state/preferences.ts.
+
+import { useSyncExternalStore } from 'react'
 
 export type ModelProvider = 'ollama' | 'openai'
 
@@ -41,6 +47,38 @@ function writeToStorage(cfg: AgentConfig): void {
   } catch { /* ignore quota errors */ }
 }
 
+// ---- Subscribable store ----
+
+let state: AgentConfig = readFromStorage()
+const listeners = new Set<() => void>()
+
+export function getAgentConfig(): AgentConfig {
+  return state
+}
+
+export function setAgentConfig(patch: Partial<AgentConfig>): void {
+  state = { ...state, ...patch }
+  writeToStorage(state)
+  listeners.forEach(l => l())
+}
+
+function subscribe(cb: () => void): () => void {
+  listeners.add(cb)
+  // When the store goes idle → active (first mount), re-sync from localStorage so
+  // a fresh mount reflects the current persisted value. This preserves the old
+  // "read on mount" semantics (and test isolation under localStorage.clear())
+  // while keeping a single live store between mounts. At runtime App is always
+  // mounted, so this never clobbers in-session edits.
+  if (listeners.size === 1) {
+    const fresh = readFromStorage()
+    if (JSON.stringify(fresh) !== JSON.stringify(state)) {
+      state = fresh
+      listeners.forEach(l => l())
+    }
+  }
+  return () => { listeners.delete(cb) }
+}
+
 /**
  * Clear every secret persisted on this machine. SSH/DB passwords are never
  * stored (they are prompted per-connect and held only in memory), so the only
@@ -48,25 +86,12 @@ function writeToStorage(cfg: AgentConfig): void {
  * the agent config (provider / endpoints / model) intact.
  */
 export function clearStoredCredentials(): void {
-  if (typeof localStorage === 'undefined') return
-  const next: AgentConfig = { ...readFromStorage(), openaiKey: '' }
-  writeToStorage(next)
+  setAgentConfig({ openaiKey: '' })
 }
 
 // ---- Hook ----
 
-import { useState, useCallback } from 'react'
-
 export function useAgentConfig(): { config: AgentConfig; update: (patch: Partial<AgentConfig>) => void } {
-  const [config, setConfig] = useState<AgentConfig>(readFromStorage)
-
-  const update = useCallback((patch: Partial<AgentConfig>) => {
-    setConfig(prev => {
-      const next: AgentConfig = { ...prev, ...patch }
-      writeToStorage(next)
-      return next
-    })
-  }, [])
-
-  return { config, update }
+  const config = useSyncExternalStore(subscribe, getAgentConfig, getAgentConfig)
+  return { config, update: setAgentConfig }
 }
