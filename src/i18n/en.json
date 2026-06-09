@@ -51,7 +51,7 @@
     "greetingWithName": "{{greet}}, {{name}}",
     "heroTitle": "Servers & databases,",
     "heroTitleLine2": "one workbench.",
-    "heroDesc": "SSH into hosts, tunnel straight to private databases, run SQL and commands; generate shell commands from plain language, ask AI about terminal errors in one click, and let Catio Agent write and optimize your SQL — all in one workbench, no more tool-hopping.",
+    "heroDesc": "SSH into hosts, tunnel to private databases, run SQL and commands; generate shell from plain language, ask AI about errors, and let Catio Agent write and optimize SQL — no more tool-hopping.",
     "statHosts": "Hosts",
     "statDatabases": "Databases",
     "statActiveTunnels": "Active tunnels",
