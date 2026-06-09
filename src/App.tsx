@@ -24,7 +24,7 @@ import { Btn } from './components/atoms'
 import { useTweaks, TWEAK_DEFAULTS } from './state/useTweaks'
 import { nextTheme, useApplyTheme } from './state/ThemeContext'
 import { useData } from './state/DataContext'
-import { dbConnect, getHistory as getDbHistory, clearDbHistory } from './services/db'
+import { dbConnect, getHistory as getDbHistory, clearDbHistory, deleteDbHistory } from './services/db'
 import {
   useDbConnections, dbProfileToConnection, listActiveDbConnections,
   setActiveDbConnection, removeDbConnection, removeActiveDbConnection,
@@ -32,7 +32,7 @@ import {
 } from './state/dbConnections'
 import { sshConnect, sshDisconnect, sshTrustHost, isTauri, onHistory, sshSysinfo } from './services/ssh'
 import type { SshConnectArgs } from './services/ssh'
-import { appendHistory, loadHistory, clearHistory } from './state/history'
+import { appendHistory, loadHistory, clearHistory, deleteHistory } from './state/history'
 import type { HistoryItem } from './services/types'
 import { loadProfiles, saveProfile, deleteProfile } from './state/connections'
 import { loadSnippets, saveSnippet, newSnippetId } from './state/snippets'
@@ -838,7 +838,14 @@ export default function App() {
               {activePanel === 'monitor' && <MonitorPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} />}
               {activePanel === 'tunnels' && <TunnelsPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} activeConnId={cur?.connId} profiles={profiles} />}
               {activePanel === 'snippets' && <SnippetsPanel onClose={() => setPanelOpen(false)} snippets={snippets} onChange={() => setSnippets(loadSnippets())} onInsert={insertToTerminal} canInsert={canInsert} />}
-              {activePanel === 'history' && <HistoryPanel onClose={() => setPanelOpen(false)} onAddSnippet={addSnippet} items={mergedHistory} onClear={() => { clearHistory(); setHistory([]); setDbHistory([]); void clearDbHistory() }} onInsert={insertToTerminal} canInsert={canInsert} />}
+              {activePanel === 'history' && <HistoryPanel onClose={() => setPanelOpen(false)} onAddSnippet={addSnippet} items={mergedHistory} onClear={() => { clearHistory(); setHistory([]); setDbHistory([]); void clearDbHistory() }}
+                onDelete={h => {
+                  // Route the delete to the right store by kind: SQL queries live in
+                  // the backend history file; shell commands live in localStorage.
+                  if (h.kind === 'sql') { setDbHistory(prev => prev.filter(x => x.id !== h.id)); void deleteDbHistory(h.id) }
+                  else { deleteHistory(h.id); setHistory(loadHistory()) }
+                }}
+                onInsert={insertToTerminal} canInsert={canInsert} />}
               {/* DetailsPanel branches internally on conn.kind === 'db': DB conns use the
                   onEditDb/onDeleteDb/onConnectDb handlers; host conns use the SSH handlers. */}
               {activePanel === 'details' && (

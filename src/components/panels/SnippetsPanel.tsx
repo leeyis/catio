@@ -53,17 +53,18 @@ function SnippetRow({ s, onInsert, canInsert, onEdit, onDelete }: SnippetRowProp
         <span className="ell" style={{ fontSize: 11.5, color: 'var(--text-faint)', flex: 1 }}>{s.desc || (isShell ? t('panels.shellCommand') : t('panels.sqlCode'))}</span>
         <span className="chip" style={{ height: 18, fontSize: 9.5, flex: 'none' }}>{s.scope}</span>
         {/* hover actions */}
+        {/* action order (per spec): 复制 / 插入 / 运行 / 编辑 / 删除 */}
         <div className="row gap2" style={{ flex: 'none', width: hover ? 'auto' : 0, overflow: 'hidden', opacity: hover ? 1 : 0, transition: 'opacity .12s' }}>
-          <button className="icon-btn bare" style={{ width: 24, height: 24 }} title={t('panels.runItem')} onClick={run}>
-            <Icon name="play" size={13} />
+          <button className="icon-btn bare" style={{ width: 24, height: 24 }} title={copied ? t('panels.copied') : t('panels.copy')} onClick={copy}>
+            <Icon name={copied ? 'check' : 'copy'} size={13} style={copied ? { color: 'var(--signal-green)' } : undefined} />
           </button>
           {insertEnabled && (
             <button className="icon-btn bare" style={{ width: 24, height: 24 }} title={isShell ? t('panels.insertTerminal') : t('panels.insertEditor')} onClick={e => { e.stopPropagation(); onInsert(code) }}>
               <Icon name={isShell ? 'terminal' : 'arrow-right-to-line'} size={13} />
             </button>
           )}
-          <button className="icon-btn bare" style={{ width: 24, height: 24 }} title={copied ? t('panels.copied') : t('panels.copy')} onClick={copy}>
-            <Icon name={copied ? 'check' : 'copy'} size={13} style={copied ? { color: 'var(--signal-green)' } : undefined} />
+          <button className="icon-btn bare" style={{ width: 24, height: 24 }} title={t('panels.runItem')} onClick={run}>
+            <Icon name="play" size={13} />
           </button>
           <button className="icon-btn bare" style={{ width: 24, height: 24 }} title={t('panels.editSnippet')} onClick={e => { e.stopPropagation(); onEdit(s) }}>
             <Icon name="pencil" size={13} />

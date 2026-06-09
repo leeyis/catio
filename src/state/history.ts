@@ -24,3 +24,9 @@ export function appendHistory(h: Omit<HistoryItem, 'id'>): void {
 export function clearHistory(): void {
   localStorage.removeItem(KEY)
 }
+
+/** Delete a single (shell) history entry by id. */
+export function deleteHistory(id: string): void {
+  const next = loadHistory().filter(h => h.id !== id)
+  localStorage.setItem(KEY, JSON.stringify(next))
+}

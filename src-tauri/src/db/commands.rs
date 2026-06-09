@@ -114,6 +114,17 @@ pub async fn db_clear_history(app: tauri::AppHandle) -> Result<(), DbError> {
     history::save_history(&dir, &[]).map_err(|e| DbError::Io(e.to_string()))
 }
 
+/// Delete a single persisted DB history entry by id (no-op if not found).
+#[tauri::command]
+pub async fn db_delete_history(id: String, app: tauri::AppHandle) -> Result<(), DbError> {
+    let dir = app_data_dir(&app)?;
+    let list: Vec<HistoryEntry> = history::load_history(&dir)
+        .into_iter()
+        .filter(|h| h.id != id)
+        .collect();
+    history::save_history(&dir, &list).map_err(|e| DbError::Io(e.to_string()))
+}
+
 /// Read saved SQL snippets.
 #[tauri::command]
 pub async fn db_snippets(app: tauri::AppHandle) -> Result<Vec<SnippetEntry>, DbError> {

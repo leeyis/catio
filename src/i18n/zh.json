@@ -308,6 +308,8 @@
     "clearHistoryTitle": "清空命令历史",
     "clearHistoryMsg": "确定清空全部命令历史吗？此操作不可撤销。",
     "saveToSnippets": "保存到片段库",
+    "saveToCodeLib": "保存到代码库",
+    "deleteHistoryItem": "删除记录",
     "saveToSnippetsTitle": "保存到片段库",
     "saveFromTarget": "来自 {{target}}",
     "sqlCodeLabel": "SQL 代码",

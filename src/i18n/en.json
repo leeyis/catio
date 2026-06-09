@@ -308,6 +308,8 @@
     "clearHistoryTitle": "Clear command history",
     "clearHistoryMsg": "Are you sure you want to clear all command history? This action cannot be undone.",
     "saveToSnippets": "Save to snippets",
+    "saveToCodeLib": "Save to library",
+    "deleteHistoryItem": "Delete entry",
     "saveToSnippetsTitle": "Save to snippets",
     "saveFromTarget": "from {{target}}",
     "sqlCodeLabel": "SQL code",

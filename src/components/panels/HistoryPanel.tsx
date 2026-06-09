@@ -19,6 +19,8 @@ export interface HistoryPanelProps {
   onInsert?: (text: string) => void
   /** Whether insert is currently possible (e.g. an active terminal exists). */
   canInsert?: boolean
+  /** Called when the user deletes a single history row. */
+  onDelete?: (h: HistoryItem) => void
 }
 
 interface MenuItemProps {
@@ -49,12 +51,14 @@ interface HistoryRowProps {
   onSave: (h: HistoryItem) => void
   onInsert?: (text: string) => void
   canInsert?: boolean
+  onDelete?: (h: HistoryItem) => void
 }
 
-function HistoryRow({ h, onSave, onInsert, canInsert }: HistoryRowProps) {
+function HistoryRow({ h, onSave, onInsert, canInsert, onDelete }: HistoryRowProps) {
   const { t } = useTranslation()
   const [hover, setHover] = useState(false)
   const [copied, setCopied] = useState(false)
+  const isSql = h.kind === 'sql'
   const hasFailed = h.exitCode != null && h.exitCode !== 0
   function copy(e: React.MouseEvent) {
     e.stopPropagation()
@@ -84,21 +88,27 @@ function HistoryRow({ h, onSave, onInsert, canInsert }: HistoryRowProps) {
             exit {h.exitCode}
           </span>
         )}
+        {/* action order (per spec): 复制 / 插入 / 执行(运行) / 保存 / 删除 */}
         <div className="row gap2" style={{ flex: 'none', opacity: hover || copied ? 1 : 0, transition: 'opacity .12s' }}>
-          <button className="icon-btn bare" style={{ width: 22, height: 22 }} title={t('panels.runItem')} onClick={run}>
-            <Icon name="play" size={13} />
-          </button>
           <button className="icon-btn bare" style={{ width: 22, height: 22, color: copied ? 'var(--signal-green)' : 'var(--text-tertiary)' }} title={copied ? t('panels.copied') : t('panels.copy')} onClick={copy}>
             <Icon name={copied ? 'check' : 'copy'} size={13} />
           </button>
           {insertEnabled && (
-            <button className="icon-btn bare" style={{ width: 22, height: 22 }} title={h.kind === 'sql' ? t('panels.insertEditor') : t('panels.insertTerminal')} onClick={e => { e.stopPropagation(); onInsert(h.text) }}>
+            <button className="icon-btn bare" style={{ width: 22, height: 22 }} title={isSql ? t('panels.insertEditor') : t('panels.insertTerminal')} onClick={e => { e.stopPropagation(); onInsert(h.text) }}>
               <Icon name="arrow-right-to-line" size={13} />
             </button>
           )}
-          <button className="icon-btn bare" style={{ width: 22, height: 22 }} title={t('panels.saveToSnippets')} onClick={e => { e.stopPropagation(); onSave && onSave(h) }}>
+          <button className="icon-btn bare" style={{ width: 22, height: 22 }} title={isSql ? t('panels.execSql') : t('panels.runItem')} onClick={run}>
+            <Icon name="play" size={13} />
+          </button>
+          <button className="icon-btn bare" style={{ width: 22, height: 22 }} title={isSql ? t('panels.saveToSnippets') : t('panels.saveToCodeLib')} onClick={e => { e.stopPropagation(); onSave && onSave(h) }}>
             <Icon name="snippet" size={13} />
           </button>
+          {onDelete && (
+            <button className="icon-btn bare" style={{ width: 22, height: 22, color: 'var(--danger-fg)' }} title={t('panels.deleteHistoryItem')} onClick={e => { e.stopPropagation(); onDelete(h) }}>
+              <Icon name="trash-2" size={13} />
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -150,7 +160,7 @@ function SaveSnippetModal({ row, onClose, onSave }: SaveSnippetModalProps) {
   )
 }
 
-export function HistoryPanel({ onClose, onAddSnippet, items, onClear, onInsert, canInsert }: HistoryPanelProps) {
+export function HistoryPanel({ onClose, onAddSnippet, items, onClear, onInsert, canInsert, onDelete }: HistoryPanelProps) {
   const { t } = useTranslation()
   const D = useData()
   const [q, setQ] = useState('')
@@ -219,7 +229,7 @@ export function HistoryPanel({ onClose, onAddSnippet, items, onClear, onInsert, 
       </div>
       {/* list */}
       <div className="grow" style={{ overflowY: 'auto', padding: 10, display: 'flex', flexDirection: 'column', gap: 4 }}>
-        {rows.length ? rows.map(h => <HistoryRow key={h.id} h={h} onSave={setSaveRow} onInsert={onInsert} canInsert={canInsert} />) : (
+        {rows.length ? rows.map(h => <HistoryRow key={h.id} h={h} onSave={setSaveRow} onInsert={onInsert} canInsert={canInsert} onDelete={onDelete} />) : (
           <div className="col" style={{ alignItems: 'center', justifyContent: 'center', padding: '30px 0', gap: 8, color: 'var(--text-faint)' }}>
             <Icon name="search" size={22} /><span style={{ fontSize: 12.5 }}>{t('panels.noHistory')}</span>
           </div>
