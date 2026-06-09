@@ -236,7 +236,9 @@ function DbDetails({ conn, onClose, onEdit, onDelete, onConnect }: {
       setPromptConnect(false)
     } catch (err) {
       setConnecting(false)
-      setConnectError(dbErrMsg(err))
+      const msg = dbErrMsg(err)
+      // Humanise the common auth failure (i18n), mirroring the connect modals.
+      setConnectError(/auth|password/i.test(msg) ? t('modals.connectErrorAuth') : msg)
       // keep the prompt open so the user can retry
     }
   }
@@ -288,16 +290,10 @@ function DbDetails({ conn, onClose, onEdit, onDelete, onConnect }: {
         <ConnectSecretPrompt
           title={t('panels.connectPromptTitle', { name: profile.name })}
           label={t('panels.connectPromptLabel')}
+          error={connectError}
           onSubmit={(s) => { if (!connecting) void handleSubmitSecret(s) }}
           onCancel={() => { if (!connecting) { setPromptConnect(false); setConnectError(null) } }}
         />
-      )}
-      {promptConnect && connectError && (
-        <div style={{ position: 'absolute', inset: 0, zIndex: 71, pointerEvents: 'none', display: 'grid', placeItems: 'center' }}>
-          <div style={{ marginTop: 150, fontSize: 12, color: 'var(--danger-fg)', background: 'var(--surface-card)', padding: '6px 12px', borderRadius: 8, border: '1px solid var(--border-hairline)', boxShadow: 'var(--shadow-window)' }}>
-            {connectError}
-          </div>
-        </div>
       )}
     </PanelShell>
   )

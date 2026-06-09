@@ -1,15 +1,18 @@
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Btn, IconBtn } from '../atoms'
+import { Icon } from '../Icon'
 
 export interface ConnectSecretPromptProps {
   title?: string
   label: string
+  /** Inline error (e.g. auth failure) shown below the field; keeps the prompt open. */
+  error?: string | null
   onSubmit: (secret: string) => void
   onCancel: () => void
 }
 
-export function ConnectSecretPrompt({ title, label, onSubmit, onCancel }: ConnectSecretPromptProps) {
+export function ConnectSecretPrompt({ title, label, error, onSubmit, onCancel }: ConnectSecretPromptProps) {
   const { t } = useTranslation()
   const [value, setValue] = useState('')
 
@@ -78,6 +81,12 @@ export function ConnectSecretPrompt({ title, label, onSubmit, onCancel }: Connec
               />
             </div>
           </label>
+          {error && (
+            <div className="row gap6" style={{ alignItems: 'flex-start', fontSize: 12, color: 'var(--danger-fg)', lineHeight: 1.45 }}>
+              <Icon name="alert-triangle" size={13} style={{ flex: 'none', marginTop: 1 }} />
+              <span>{error}</span>
+            </div>
+          )}
           <div className="row gap8" style={{ justifyContent: 'flex-end', marginTop: 4 }}>
             <Btn variant="ghost" onClick={handleCancel}>{t('modals.secretPromptCancel')}</Btn>
             <Btn variant="primary" icon="check" onClick={handleSubmit}>{t('modals.secretPromptSubmit')}</Btn>
