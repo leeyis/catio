@@ -267,6 +267,12 @@ export default function App() {
     setView('workbench')
     // Surface any newly-saved profile in the vault (saveProfile ran in the modal).
     reloadProfiles()
+    // Record this as a recent session for the home screen. SSH vault entries are
+    // keyed by the saved PROFILE id (not the live `live-…` connId), so resolve the
+    // matching profile by host/port/user from the freshest store — this is what the
+    // home resolves against, and it persists across restarts.
+    const pid = loadProfiles().find(p => p.host === args.host && p.port === args.port && p.user === args.user)?.id
+    if (pid) { recordRecentSession(pid); setRecentSessions(loadRecentSessions()) }
 
     // Subscribe to shell-command audit events for this session (Tauri only).
     // Reserve the slot SYNCHRONOUSLY before awaiting so a re-entrant call (e.g.
