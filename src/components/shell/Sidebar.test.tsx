@@ -56,9 +56,9 @@ describe('Sidebar footer auth state', () => {
       />
     )
     // Shows the auth-disabled label (zh locale default)
-    expect(screen.getByText('未启用账户鉴权')).toBeTruthy()
+    expect(screen.getByText('未设登录密码')).toBeTruthy()
     // Enable affordance is present
-    const enableBtn = screen.getByText('开启鉴权')
+    const enableBtn = screen.getByText('立即设置')
     expect(enableBtn).toBeTruthy()
     // Clicking enable calls onEnableAuth
     fireEvent.click(enableBtn)
@@ -96,6 +96,6 @@ describe('Sidebar footer auth state', () => {
     fireEvent.click(lockBtn)
     expect(onLock).toHaveBeenCalledTimes(1)
     // Auth-disabled text must not appear
-    expect(screen.queryByText('未启用账户鉴权')).toBeNull()
+    expect(screen.queryByText('未设登录密码')).toBeNull()
   })
 })
