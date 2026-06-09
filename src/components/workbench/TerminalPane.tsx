@@ -358,10 +358,10 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
   const displayConn = conn || D.byId['h-bastion']
 
   return (
-    <div ref={rootRef} className="col" style={{ height: '100%', minHeight: 0, position: 'relative' }}>
+    <div ref={rootRef} className="col" style={{ height: '100%', minHeight: 0, flex: 1, width: '100%', minWidth: 0, overflow: 'hidden', position: 'relative' }}>
       {/* term toolbar */}
-      <div className="row" style={{ justifyContent: 'space-between', padding: '7px 12px', borderBottom: '1px solid var(--border-hairline)' }}>
-        <div className="row gap8">
+      <div className="row" style={{ justifyContent: 'space-between', padding: '7px 12px', borderBottom: '1px solid var(--border-hairline)', minWidth: 0, gap: 10 }}>
+        <div className="row gap8" style={{ minWidth: 0, overflow: 'hidden' }}>
           <ConnGlyph conn={displayConn} size={26} radius={7} />
           <div className="col" style={{ lineHeight: 1.2 }}>
             <span className="row gap6" style={{ fontSize: 13, fontWeight: 600 }}>{conn ? conn.name : 'db-bastion'} <span className="mono" style={{ fontSize: 10, color: 'var(--text-faint)', fontWeight: 400 }}>ssh-ed25519</span></span>
@@ -369,7 +369,7 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
           </div>
           <span className="chip" style={{ background: 'color-mix(in srgb, var(--signal-green) 13%, transparent)', color: 'var(--signal-green)' }}><span className="dot" style={{ background: 'var(--signal-green)' }} /> connected</span>
         </div>
-        <div className="row gap6">
+        <div className="row gap6" style={{ flex: 'none' }}>
           <div style={{ position: 'relative' }}>
             <button onClick={() => setMxOpen(o => !o)}
               className="chip" style={{ cursor: 'pointer', height: 28, background: broadcast ? 'var(--accent-soft)' : 'var(--surface-sunken)', color: broadcast ? 'var(--accent-primary)' : 'var(--text-tertiary)', fontWeight: 600 }}>
