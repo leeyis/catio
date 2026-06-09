@@ -41,6 +41,10 @@ function SnippetRow({ s, onInsert, canInsert, onEdit, onDelete }: SnippetRowProp
     setCopied(true)
     setTimeout(() => setCopied(false), 1400)
   }
+  function run(e: React.MouseEvent) {
+    e.stopPropagation()
+    window.dispatchEvent(new CustomEvent('catio-run', { detail: { kind: isShell ? 'shell' : 'sql', text: code } }))
+  }
   return (
     <div onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
       className="col" style={{ padding: '9px 10px', borderRadius: 10, border: '1px solid var(--border-hairline)', gap: 6, background: hover ? 'var(--surface-sunken)' : 'transparent', transition: 'background .12s' }}>
@@ -50,6 +54,9 @@ function SnippetRow({ s, onInsert, canInsert, onEdit, onDelete }: SnippetRowProp
         <span className="chip" style={{ height: 18, fontSize: 9.5, flex: 'none' }}>{s.scope}</span>
         {/* hover actions */}
         <div className="row gap2" style={{ flex: 'none', width: hover ? 'auto' : 0, overflow: 'hidden', opacity: hover ? 1 : 0, transition: 'opacity .12s' }}>
+          <button className="icon-btn bare" style={{ width: 24, height: 24 }} title={t('panels.runItem')} onClick={run}>
+            <Icon name="play" size={13} />
+          </button>
           {insertEnabled && (
             <button className="icon-btn bare" style={{ width: 24, height: 24 }} title={isShell ? t('panels.insertTerminal') : t('panels.insertEditor')} onClick={e => { e.stopPropagation(); onInsert(code) }}>
               <Icon name={isShell ? 'terminal' : 'arrow-right-to-line'} size={13} />

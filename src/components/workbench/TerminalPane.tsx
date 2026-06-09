@@ -292,6 +292,40 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
     // re-init when the session/chan identity changes
   }, [sessionId, live, conn])
 
+  // ---- Snippet / history / AI "insert" + "run" into the live PTY ----
+  // Only the ACTIVE pane handles these window events so the command goes to the
+  // focused terminal (panes stay mounted while hidden). `catio-insert` writes the
+  // text into the PTY without executing; `catio-run` writes it then sends a
+  // carriage-return (\r) — exactly what pressing Enter does — so it executes.
+  useEffect(() => {
+    if (!active) return
+    const writeToPty = (text: string) => {
+      if (!live || !sessionId) return false
+      const chanId = chanIdRef.current
+      if (!chanId) return false
+      termWrite(sessionId, chanId, bytesToBase64(text))
+      try { termRef.current?.focus() } catch { /* best-effort */ }
+      return true
+    }
+    const onInsert = (e: Event) => {
+      const ce = e as CustomEvent<{ kind?: string; text?: string }>
+      if (!ce.detail || ce.detail.kind !== 'shell' || typeof ce.detail.text !== 'string') return
+      writeToPty(ce.detail.text)
+    }
+    const onRun = (e: Event) => {
+      const ce = e as CustomEvent<{ kind?: string; text?: string }>
+      if (!ce.detail || ce.detail.kind !== 'shell' || typeof ce.detail.text !== 'string') return
+      // Insert the command, then send \r so the PTY executes it (same as Enter).
+      if (writeToPty(ce.detail.text)) writeToPty('\r')
+    }
+    window.addEventListener('catio-insert', onInsert)
+    window.addEventListener('catio-run', onRun)
+    return () => {
+      window.removeEventListener('catio-insert', onInsert)
+      window.removeEventListener('catio-run', onRun)
+    }
+  }, [active, live, sessionId])
+
   // When this pane becomes the shown tab, its container regained a real size.
   // Refit xterm to the now-laid-out container, push the new size to the live PTY,
   // and focus so typing goes straight to the terminal.

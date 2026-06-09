@@ -792,7 +792,7 @@ export default function App() {
                           <TerminalPane conn={tabConn} sessionId={tab.sessionId} active={isShown} resolveSessionId={resolveSessionId} onChannel={(sid, chan) => setChanMap(m => { const n = { ...m }; if (chan) n[sid] = chan; else delete n[sid]; return n })} />
                         )}
                         {tab.kind === 'sql' && tabConn && (
-                          <DbWorkbench conn={tabConn} density={density} />
+                          <DbWorkbench conn={tabConn} density={density} active={isShown} />
                         )}
                       </div>
                     )
@@ -812,6 +812,7 @@ export default function App() {
               {activePanel === 'ai' && <AIPanel onClose={() => setPanelOpen(false)} mode={aiMode} conn={curConn ?? undefined} attachment={aiAttachment} onClearAttachment={() => setAiAttachment(null)} onInsert={insertToTerminal} canInsert={canInsert} onOpenSettings={() => goSettings('ai')}
                 conversation={activeConversation} busy={activeConvBusy} history={agentHistory}
                 onSend={cur ? (text => void sendAgentMessage(cur.id, text)) : undefined}
+                onAbort={cur ? (() => agentAborts.current[cur.id]?.abort()) : undefined}
                 onNewConversation={cur ? (() => newAgentConversation(cur.id)) : undefined}
                 onRestoreConversation={cur ? (convId => restoreConversation(cur.id, convId)) : undefined}
                 onDeleteConversation={cur ? (convId => deleteAgentConversation(cur.id, convId)) : undefined} />}

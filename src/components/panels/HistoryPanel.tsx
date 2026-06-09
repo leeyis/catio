@@ -62,6 +62,10 @@ function HistoryRow({ h, onSave, onInsert, canInsert }: HistoryRowProps) {
     setCopied(true)
     setTimeout(() => setCopied(false), 1400)
   }
+  function run(e: React.MouseEvent) {
+    e.stopPropagation()
+    window.dispatchEvent(new CustomEvent('catio-run', { detail: { kind: h.kind, text: h.text } }))
+  }
   const insertEnabled = !!onInsert && !!canInsert
   return (
     <div onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
@@ -81,6 +85,9 @@ function HistoryRow({ h, onSave, onInsert, canInsert }: HistoryRowProps) {
           </span>
         )}
         <div className="row gap2" style={{ flex: 'none', opacity: hover || copied ? 1 : 0, transition: 'opacity .12s' }}>
+          <button className="icon-btn bare" style={{ width: 22, height: 22 }} title={t('panels.runItem')} onClick={run}>
+            <Icon name="play" size={13} />
+          </button>
           <button className="icon-btn bare" style={{ width: 22, height: 22, color: copied ? 'var(--signal-green)' : 'var(--text-tertiary)' }} title={copied ? t('panels.copied') : t('panels.copy')} onClick={copy}>
             <Icon name={copied ? 'check' : 'copy'} size={13} />
           </button>

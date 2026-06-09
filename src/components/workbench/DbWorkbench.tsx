@@ -18,6 +18,13 @@ const PREVIEW_PAGE = 100
 export interface DbWorkbenchProps {
   conn: Connection
   density?: 'comfortable' | 'compact'
+  /**
+   * True when this workbench is the currently-shown App tab. Workbenches stay
+   * mounted while hidden, so this gates which query console may consume the
+   * global `catio-insert` / `catio-run` (sql) events (only the shown tab's
+   * active query console responds).
+   */
+  active?: boolean
 }
 
 /** All-enabled capabilities — used when no active backend connection is found (mock/demo). */
@@ -30,7 +37,7 @@ const ALL_ENABLED: DbCapabilities = {
   structureEdit: true,
 }
 
-export function DbWorkbench({ conn, density }: DbWorkbenchProps) {
+export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbenchProps) {
   const { t } = useTranslation()
   const D = useData()
 
@@ -335,7 +342,7 @@ export function DbWorkbench({ conn, density }: DbWorkbenchProps) {
             <div className="grow" style={{ minHeight: 0, minWidth: 0, width: '100%', display: 'flex', flexDirection: 'column' }}>
               {openQueries.map(id => (
                 <div key={id} style={{ flex: 1, minHeight: 0, width: '100%', display: obj.type === 'sql' && obj.qid === id ? 'flex' : 'none', flexDirection: 'column' }}>
-                  <SqlConsole density={density} fresh queryN={id} writable={caps.writable} connId={connId ?? undefined} initialCode={queryInitialCode[id]} />
+                  <SqlConsole density={density} fresh queryN={id} writable={caps.writable} connId={connId ?? undefined} initialCode={queryInitialCode[id]} active={shown && obj.type === 'sql' && obj.qid === id} />
                 </div>
               ))}
             </div>

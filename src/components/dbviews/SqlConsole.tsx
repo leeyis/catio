@@ -1,12 +1,12 @@
 /* ported from ref-ui/_extract/blob5.txt — verbatim per plan T1-T7; E6 wires the live query path */
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn } from '../atoms'
 import { useData } from '../../state/DataContext'
 import { runQuery, getSchema, schemaColumns, dbErrMsg } from '../../services/db'
 import type { ResultColumn, Schema } from '../../services/types'
-import { SqlEditor } from './SqlEditor'
+import { SqlEditor, type SqlEditorHandle } from './SqlEditor'
 import type { SQLNamespace } from '@codemirror/lang-sql'
 import { DataGrid } from './DataGrid'
 
@@ -20,9 +20,16 @@ export interface SqlConsoleProps {
   connId?: string
   /** Seed text for a fresh console (e.g. a CREATE TABLE/VIEW template). Falls back to empty. */
   initialCode?: string
+  /**
+   * True when this console is the currently-shown query tab. Consoles stay
+   * MOUNTED while hidden, so only the active one may consume the global
+   * `catio-insert` / `catio-run` (sql) window events — otherwise every open
+   * query tab would insert the same text.
+   */
+  active?: boolean
 }
 
-export function SqlConsole({ density, fresh, writable = true, connId, initialCode }: SqlConsoleProps) {
+export function SqlConsole({ density, fresh, writable = true, connId, initialCode, active }: SqlConsoleProps) {
   const { t } = useTranslation()
   const D = useData()
   const [code, setCode] = useState(
@@ -38,6 +45,8 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
   const [liveSchema, setLiveSchema] = useState<Schema | null>(null)
   // Live columns per schema namespace: { [schemaName]: { [table]: columns } }.
   const [liveColumns, setLiveColumns] = useState<Record<string, Record<string, string[]>>>({})
+  // Imperative handle to the CodeMirror editor for cursor-aware insertion.
+  const editorRef = useRef<SqlEditorHandle>(null)
 
   useEffect(() => {
     if (!connId) { setLiveSchema(null); return }
@@ -139,15 +148,49 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
     setTimeout(() => setPhase('done'), 450)
   }
 
+  // Keep the latest run() in a ref so the (active-gated) event listener always
+  // calls the current closure without re-subscribing on every keystroke.
+  const runRef = useRef(run)
+  runRef.current = run
+
+  // Snippet / history / AI "insert" + "run" into the SQL editor.
+  // GATING: only the ACTIVE query console consumes these global events, so N
+  // mounted (hidden) tabs don't all insert the same text. When active is
+  // undefined (e.g. a standalone console with no tab strip) we still respond so
+  // existing single-console usages keep working.
   useEffect(() => {
-    const h = (e: Event) => {
-      const ce = e as CustomEvent
-      if (!ce.detail || ce.detail.kind !== 'sql') return
-      setCode(prev => (prev.trim() ? prev.replace(/\s*$/, '') + '\n\n' : '') + ce.detail.text)
+    if (active === false) return
+    const onInsert = (e: Event) => {
+      const ce = e as CustomEvent<{ kind?: string; text?: string }>
+      if (!ce.detail || ce.detail.kind !== 'sql' || typeof ce.detail.text !== 'string') return
+      // Insert at the caret / replace the selection via the CodeMirror view.
+      // Fall back to the previous append behavior if the editor isn't mounted yet.
+      if (editorRef.current) editorRef.current.insertAtCursor(ce.detail.text)
+      else setCode(prev => (prev.trim() ? prev.replace(/\s*$/, '') + '\n\n' : '') + ce.detail.text)
     }
-    window.addEventListener('catio-insert', h)
-    return () => window.removeEventListener('catio-insert', h)
-  }, [])
+    const onRun = (e: Event) => {
+      const ce = e as CustomEvent<{ kind?: string; text?: string }>
+      if (!ce.detail || ce.detail.kind !== 'sql' || typeof ce.detail.text !== 'string') return
+      if (editorRef.current) {
+        // Insert on a NEW LINE at the caret, then run the resulting full doc.
+        const next = editorRef.current.insertAtCursor(ce.detail.text, true)
+        runRef.current(next)
+      } else {
+        // Editor not ready: append, then run the combined text.
+        setCode(prev => {
+          const next = (prev.trim() ? prev.replace(/\s*$/, '') + '\n\n' : '') + ce.detail.text
+          runRef.current(next)
+          return next
+        })
+      }
+    }
+    window.addEventListener('catio-insert', onInsert)
+    window.addEventListener('catio-run', onRun)
+    return () => {
+      window.removeEventListener('catio-insert', onInsert)
+      window.removeEventListener('catio-run', onRun)
+    }
+  }, [active])
 
   return (
     <div className="col" style={{ height: '100%', width: '100%', minHeight: 0, minWidth: 0 }}>
@@ -167,7 +210,7 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
           When there are no results yet it fills the whole console; once a run
           starts it shares the space with the results region below (a split). */}
       <div style={{ flex: 1, minHeight: 140, width: '100%', borderBottom: phase === 'idle' ? 'none' : '1px solid var(--border-hairline)' }}>
-        <SqlEditor code={code} onChange={setCode} schema={editorSchema} onRun={run} onRunSelection={connId ? (sql => run(sql)) : undefined} />
+        <SqlEditor ref={editorRef} code={code} onChange={setCode} schema={editorSchema} onRun={run} onRunSelection={connId ? (sql => run(sql)) : undefined} />
       </div>
       {/* results — only rendered once a run has started (running/done). While
           idle (fresh query) the editor above fills everything. */}

@@ -3,7 +3,7 @@
  * prop surface (code/onChange/minHeight/target) and visual language (Geist
  * Mono, 13px, app CSS vars) so callers and the design stay intact, and adds an
  * optional `schema` map (table → columns) wired into @codemirror/lang-sql. */
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useImperativeHandle, useRef, useState, forwardRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { EditorView, keymap } from '@codemirror/view'
 import { EditorState, Compartment, type Extension } from '@codemirror/state'
@@ -27,6 +27,20 @@ export interface SqlEditorProps {
   onRun?: () => void
   /** Run just the currently-selected SQL (from the selection toolbar's Run action). */
   onRunSelection?: (sql: string) => void
+}
+
+/** Imperative handle exposed to parents (e.g. SqlConsole) for cursor-aware
+ * insertion of snippet / history / AI text into the live CodeMirror doc. */
+export interface SqlEditorHandle {
+  /**
+   * Insert `text` at the current caret position (replacing any selection),
+   * using the CodeMirror view so the user's cursor/scroll are respected.
+   * When `newLine` is true, a leading '\n' is prepended unless the caret is
+   * already at the start of a line (so a "run" lands the SQL on its own line).
+   * Moves the caret to the end of the inserted text and focuses the editor.
+   * Returns the resulting full document text (so callers can run it).
+   */
+  insertAtCursor: (text: string, newLine?: boolean) => string
 }
 
 /** Map a backend engine name to a lang-sql dialect (default PostgreSQL). */
@@ -103,7 +117,10 @@ const catioTheme = EditorView.theme(
   { dark: true },
 )
 
-export function SqlEditor({ code, onChange, minHeight, target = 'prod-orders', schema, onRun, onRunSelection }: SqlEditorProps) {
+export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function SqlEditor(
+  { code, onChange, minHeight, target = 'prod-orders', schema, onRun, onRunSelection },
+  ref,
+) {
   const { t: tr } = useTranslation()
   const hostRef = useRef<HTMLDivElement>(null)
   const rootRef = useRef<HTMLDivElement>(null)
@@ -193,6 +210,33 @@ export function SqlEditor({ code, onChange, minHeight, target = 'prod-orders', s
     view.dispatch({ changes: { from: 0, to: current.length, insert: code } })
   }, [code])
 
+  // Expose cursor-aware insertion to the parent (SqlConsole forwards snippet /
+  // history / AI events here). Uses replaceSelection so insertion happens at the
+  // caret / replaces a selection, then keeps the caret after the inserted text.
+  useImperativeHandle(ref, () => ({
+    insertAtCursor(text: string, newLine?: boolean) {
+      const view = viewRef.current
+      if (!view) return code
+      let insert = text
+      if (newLine) {
+        const head = view.state.selection.main.from
+        // Prepend a newline unless the caret is already at the start of a line
+        // (column 0) — so a "run" always lands the SQL on its own fresh line.
+        const col = head - view.state.doc.lineAt(head).from
+        if (col > 0) insert = '\n' + text
+      }
+      // replaceSelection inserts at the caret (or replaces the active selection)
+      // and leaves the caret at the end of the inserted text.
+      view.dispatch(view.state.replaceSelection(insert))
+      const next = view.state.doc.toString()
+      // Keep React `code` in sync (the updateListener also fires, but return the
+      // fresh doc so the caller can run it synchronously).
+      onChangeRef.current(next)
+      try { view.focus() } catch { /* best-effort */ }
+      return next
+    },
+  }), [code])
+
   function onMouseUp(e: React.MouseEvent<HTMLDivElement>) {
     const view = viewRef.current
     const root = rootRef.current
@@ -254,4 +298,4 @@ export function SqlEditor({ code, onChange, minHeight, target = 'prod-orders', s
       )}
     </div>
   )
-}
+})

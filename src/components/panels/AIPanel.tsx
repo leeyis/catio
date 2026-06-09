@@ -35,6 +35,8 @@ export interface AIPanelProps {
   history?: Conversation[]
   /** Send a user message in the current conversation. */
   onSend?: (text: string) => void
+  /** Abort the in-flight streaming response (wired by App). */
+  onAbort?: () => void
   /** Start a fresh conversation for the active tab's host. */
   onNewConversation?: () => void
   /** Restore a past conversation by id. */
@@ -50,7 +52,6 @@ function shellHL(code: string): string {
   return h
 }
 
-const SHELL_LANGS = new Set(['sh', 'bash', 'shell', 'zsh', 'console'])
 const SQL_LANGS = new Set(['sql', 'mysql', 'postgres', 'postgresql', 'pgsql'])
 
 // ---- Shared copy button hook ----
@@ -73,13 +74,21 @@ interface BlockCodeProps {
   canInsert?: boolean
 }
 
-function BlockCode({ lang, code, mode, onInsert, canInsert }: BlockCodeProps) {
+function BlockCode({ lang, code, mode, onInsert }: BlockCodeProps) {
   const { t } = useTranslation()
   const { copied, copy } = useCopied()
   const isSqlBlock = SQL_LANGS.has(lang) || (lang === '' && mode === 'sql')
-  const isShellBlock = SHELL_LANGS.has(lang) || (lang === '' && mode === 'shell')
   const tone = isSqlBlock ? 'var(--signal-blue)' : 'var(--signal-amber)'
-  const canInsertShell = isShellBlock && !!onInsert && !!canInsert
+
+  // Insert / run dispatch via window CustomEvents (terminal pane / SQL console listen).
+  function doInsert() {
+    onInsert?.(code)
+    window.dispatchEvent(new CustomEvent('catio-insert', { detail: { kind: mode, text: code } }))
+  }
+  function doRun() {
+    window.dispatchEvent(new CustomEvent('catio-run', { detail: { kind: mode, text: code } }))
+  }
+
   return (
     <div className="col" style={{ border: '1px solid var(--border-hairline)', borderRadius: 12, overflow: 'hidden', background: 'var(--surface-card)' }}>
       <div className="row gap6" style={{ padding: '6px 8px 6px 10px', background: 'var(--surface-subtle)', borderBottom: '1px solid var(--border-hairline)' }}>
@@ -87,13 +96,15 @@ function BlockCode({ lang, code, mode, onInsert, canInsert }: BlockCodeProps) {
         <Icon name={isSqlBlock ? 'database' : 'terminal'} size={12} style={{ color: tone }} />
         <span className="mono" style={{ fontSize: 10.5, fontWeight: 700, color: 'var(--text-secondary)' }}>{isSqlBlock ? 'SQL' : 'SHELL'}</span>
         <div className="grow" />
-        {canInsertShell && (
-          <button className="icon-btn bare" style={{ width: 24, height: 24 }} title={t('panels.insertTerminal')} onClick={() => onInsert?.(code)}>
-            <Icon name="arrow-right-to-line" size={14} />
-          </button>
-        )}
+        {/* mode-specific actions: copy · insert · run */}
         <button className="icon-btn bare" style={{ width: 24, height: 24 }} title={copied ? t('panels.copied') : t('panels.copy')} onClick={() => copy(code)}>
           <Icon name={copied ? 'check' : 'copy'} size={13} style={copied ? { color: 'var(--signal-green)' } : undefined} />
+        </button>
+        <button className="icon-btn bare" style={{ width: 24, height: 24 }} title={mode === 'shell' ? t('panels.insertTerminal') : t('panels.insertEditor')} onClick={doInsert}>
+          <Icon name={mode === 'shell' ? 'terminal' : 'arrow-right-to-line'} size={14} />
+        </button>
+        <button className="icon-btn bare" style={{ width: 24, height: 24 }} title={mode === 'shell' ? t('panels.runCommand') : t('panels.execSql')} onClick={doRun}>
+          <Icon name="play" size={13} />
         </button>
       </div>
       <pre className="mono" style={{ margin: 0, padding: '9px 10px', fontSize: 11.5, lineHeight: 1.55, color: 'var(--text-secondary)', whiteSpace: 'pre-wrap', background: 'var(--surface-subtle)', overflowX: 'auto' }}
@@ -299,7 +310,7 @@ function HistoryDropdown({ history, currentId, onRestore, onDelete, onClose }: H
   )
 }
 
-export function AIPanel({ onClose, mode = 'sql', conn, attachment, onClearAttachment, onInsert, canInsert, onOpenSettings, conversation, busy = false, history = [], onSend, onNewConversation, onRestoreConversation, onDeleteConversation }: AIPanelProps) {
+export function AIPanel({ onClose, mode = 'sql', conn, attachment, onClearAttachment, onInsert, canInsert, onOpenSettings, conversation, busy = false, history = [], onSend, onAbort, onNewConversation, onRestoreConversation, onDeleteConversation }: AIPanelProps) {
   const { t } = useTranslation()
   const { config: cfg } = useAgentConfig()
   const isSql = mode !== 'shell'
@@ -404,7 +415,9 @@ export function AIPanel({ onClose, mode = 'sql', conn, attachment, onClearAttach
               <button className="icon-btn bare" style={{ width: 26, height: 26 }} title={t('panels.selectModel')} onClick={() => onOpenSettings?.()}><Icon name="box" size={14} /></button>
               <span style={{ fontSize: 11, color: 'var(--text-faint)', alignSelf: 'center' }}>{cfg.model || t('panels.modelInfo')}</span>
             </div>
-            <button className="btn btn-primary sm" style={{ width: 32, padding: 0 }} title={t('panels.send')} disabled={busy || !cfg.model || !draft.trim()} onClick={() => void send()}><Icon name="send" size={14} /></button>
+            {busy
+              ? <button className="btn sm" style={{ width: 32, padding: 0, background: 'var(--signal-red, #e5484d)', color: '#fff', borderColor: 'var(--signal-red, #e5484d)' }} title={t('panels.stop')} onClick={() => onAbort?.()}><Icon name="square" size={13} /></button>
+              : <button className="btn btn-primary sm" style={{ width: 32, padding: 0 }} title={t('panels.send')} disabled={!cfg.model || !draft.trim()} onClick={() => void send()}><Icon name="send" size={14} /></button>}
           </div>
         </div>
       </div>

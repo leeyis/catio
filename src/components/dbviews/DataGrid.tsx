@@ -283,19 +283,103 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
     }
   }
   function cellKey(rowIdx: number, col: string) { return `${rowIdx}-${col}` }
+
+  // The ORIGINAL (unedited) value of an existing cell, looked up from baseRows by
+  // its origIdx. Used by change-detection so an edit is only recorded when the
+  // committed value actually differs from what's in the underlying data.
+  function originalCellValue(origIdx: number, colName: string): unknown {
+    const entry = tagged.find(e => e.origIdx === origIdx)
+    if (!entry) return undefined
+    const ci = columns.findIndex(c => c.name === colName)
+    return ci < 0 ? undefined : entry.row[ci]
+  }
+
+  // --- typed editors --------------------------------------------------------
+  // Classify a column type into the native input it should use when editing.
+  function editorKind(type: string | undefined): 'date' | 'datetime' | 'time' | 'text' {
+    const t = (type ?? '').toLowerCase()
+    if (/timestamp|datetime/.test(t)) return 'datetime'
+    if (/date/.test(t)) return 'date'
+    if (/time/.test(t)) return 'time'
+    return 'text'
+  }
+
+  // Map a stored string value into the format a native picker expects. Best-effort:
+  // if the value can't be parsed into the expected shape, keep it as-is so the user
+  // never loses data (the picker may then show empty, but the raw text is preserved
+  // on commit when untouched).
+  function toEditorValue(kind: 'date' | 'datetime' | 'time' | 'text', raw: string): string {
+    if (kind === 'text' || !raw) return raw
+    if (kind === 'date') {
+      const m = raw.match(/^(\d{4}-\d{2}-\d{2})/)
+      return m ? m[1] : raw
+    }
+    if (kind === 'datetime') {
+      // datetime-local wants YYYY-MM-DDTHH:mm — accept space or T separators.
+      const m = raw.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})/)
+      return m ? `${m[1]}T${m[2]}` : raw
+    }
+    // time → HH:mm[:ss]
+    const m = raw.match(/^(\d{2}:\d{2}(?::\d{2})?)/)
+    return m ? m[1] : raw
+  }
+
+  // Map a native-picker value back to a string suitable for SQL. datetime-local
+  // returns YYYY-MM-DDTHH:mm — normalise the `T` to a space for SQL timestamps.
+  function fromEditorValue(kind: 'date' | 'datetime' | 'time' | 'text', val: string): string {
+    if (kind === 'datetime') return val.replace('T', ' ')
+    return val
+  }
+
   function startEdit(rIdx: number, cIdx: number, _rowIdx: number, _col: string, val: unknown) {
     if (!canEdit) return
-    setEditing({ r: rIdx, c: cIdx }); setEditVal(String(val)); setSel({ r: rIdx, c: cIdx })
+    const kind = editorKind(columns[cIdx]?.type)
+    setEditing({ r: rIdx, c: cIdx }); setEditVal(toEditorValue(kind, String(val ?? ''))); setSel({ r: rIdx, c: cIdx })
   }
   // Commit an edit. Existing rows (origIdx >= 0) write into the `edits` map; new
   // rows (encoded as r = -(rowId + 1)) write into their own `cells` map.
+  // For existing rows, change-detection: only record the edit when the committed
+  // value DIFFERS (string-compare) from the original cell value; if it's reverted
+  // to the original (or unchanged), remove any existing edit entry for that cell.
   function commitEdit(rowIdx: number, col: string) {
+    const kind = editorKind(columns.find(c => c.name === col)?.type)
+    const value = fromEditorValue(kind, editVal)
     if (rowIdx < 0) {
       const id = -rowIdx - 1
-      setNewRows(rs => rs.map(r => r.id === id ? { ...r, cells: { ...r.cells, [col]: editVal } } : r))
+      setNewRows(rs => rs.map(r => r.id === id ? { ...r, cells: { ...r.cells, [col]: value } } : r))
     } else {
-      setEdits(e => ({ ...e, [cellKey(rowIdx, col)]: editVal }))
+      const orig = originalCellValue(rowIdx, col)
+      const k = cellKey(rowIdx, col)
+      setEdits(e => {
+        if (value === String(orig ?? '')) {
+          if (e[k] === undefined) return e
+          const next = { ...e }
+          delete next[k]
+          return next
+        }
+        return { ...e, [k]: value }
+      })
     }
+    setEditing(null)
+  }
+
+  // Revert an already-committed edit on an existing cell back to its original value.
+  function revertCell(origIdx: number, col: string) {
+    const k = cellKey(origIdx, col)
+    setEdits(e => {
+      if (e[k] === undefined) return e
+      const next = { ...e }
+      delete next[k]
+      return next
+    })
+  }
+
+  // Discard ALL pending changes: edits, new rows, and pending deletes. Restores
+  // the grid to the originally-loaded view.
+  function discardChanges() {
+    setEdits({})
+    setNewRows([])
+    setDeleted(new Set())
     setEditing(null)
   }
 
@@ -471,6 +555,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
         </div>
         <div className="row gap6">
           {canEdit && <Btn size="sm" variant="secondary" icon="plus" onClick={addRow}>{t('dbviews.addRow')}</Btn>}
+          {canEdit && pendingTotal > 0 && <Btn size="sm" variant="ghost" icon="rotate-ccw" onClick={discardChanges}>{t('dbviews.discardChanges')}</Btn>}
           {canEdit && pendingTotal > 0 && <Btn size="sm" variant="primary" icon="save" onClick={openPreview}>{t('dbviews.saveEdits')}</Btn>}
           <button className="icon-btn bare" title={t('dbviews.filter')} data-active={filterOpen ? '1' : undefined}
             onClick={() => setFilterOpen(o => !o)}><Icon name="filter" size={15} /></button>
@@ -575,7 +660,8 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
                         color: 'var(--text-secondary)',
                       }}>
                       {isEditing ? (
-                        <input autoFocus value={editVal} onChange={e => setEditVal(e.target.value)}
+                        <input autoFocus type={(() => { const ek = editorKind(col.type); return ek === 'datetime' ? 'datetime-local' : ek })()}
+                          value={editVal} onChange={e => setEditVal(e.target.value)}
                           onBlur={() => commitEdit(origIdx, col.name)}
                           onKeyDown={e => { if (e.key === 'Enter') commitEdit(origIdx, col.name); if (e.key === 'Escape') setEditing(null) }}
                           style={{ width: '100%', border: 'none', outline: 'none', background: 'transparent', font: 'inherit', color: 'var(--text-primary)' }} />
@@ -592,6 +678,13 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
                         <span className="ell" style={{ color: 'var(--signal-blue)' }}>{String(val)}</span>
                       ) : (
                         <span className="ell">{String(val)}</span>
+                      )}
+                      {isEdited && !isEditing && (
+                        <button className="icon-btn bare cell-revert" style={{ width: 18, height: 18, marginLeft: 'auto', flex: 'none' }}
+                          title={t('dbviews.revertCell')}
+                          onClick={e => { e.stopPropagation(); revertCell(origIdx, col.name) }}>
+                          <Icon name="rotate-ccw" size={12} style={{ color: 'var(--signal-amber)' }} />
+                        </button>
                       )}
                     </div>
                   )
@@ -624,7 +717,8 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
                       onDoubleClick={() => startEdit(r, ci, r, col.name, val)}
                       style={{ ...tdStyle, cursor: 'cell', background: isEditing ? 'var(--surface-card)' : 'transparent', color: 'var(--text-secondary)' }}>
                       {isEditing ? (
-                        <input autoFocus value={editVal} onChange={e => setEditVal(e.target.value)}
+                        <input autoFocus type={(() => { const ek = editorKind(col.type); return ek === 'datetime' ? 'datetime-local' : ek })()}
+                          value={editVal} onChange={e => setEditVal(e.target.value)}
                           onBlur={() => commitEdit(r, col.name)}
                           onKeyDown={e => { if (e.key === 'Enter') commitEdit(r, col.name); if (e.key === 'Escape') setEditing(null) }}
                           style={{ width: '100%', border: 'none', outline: 'none', background: 'transparent', font: 'inherit', color: 'var(--text-primary)' }} />
