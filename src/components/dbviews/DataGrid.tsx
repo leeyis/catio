@@ -165,16 +165,19 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
     return null
   }, [connId, livePreview, sql, schema, table])
 
-  // Apply a freshly-fetched server page. On the ctid path the live preview still
-  // returns a leading `__ctid` system column; strip it from the displayed rows and
-  // capture its values as the server-side per-row keys (aligned to the page). On
-  // the PK path there is no `__ctid` column and rowKeys stay null.
-  function applyServerPage(res: { rows: unknown[][]; truncated?: boolean }) {
-    if (keyColumn) {
-      const k = res.rows.map(r => String(r[0]))
+  // Apply a freshly-fetched server page. The Postgres live preview ALWAYS returns a
+  // leading `__ctid` system column (for EVERY table, PK or not) — the parent strips
+  // it from the displayed `columns`, so we must strip it from server-fetched rows
+  // too, or the values shift one column left of their headers. Detect it from the
+  // fetched columns rather than from `keyColumn` (which is only set for PK-less
+  // tables); capture its values as the per-row keys for ctid-based editing.
+  function applyServerPage(res: { columns?: ResultColumn[]; rows: unknown[][]; truncated?: boolean }) {
+    const hasCtid = res.columns?.[0]?.name === '__ctid'
+    if (hasCtid) {
+      setServerRowKeys(res.rows.map(r => String(r[0])))
       setServerRows(res.rows.map(r => r.slice(1)))
-      setServerRowKeys(k)
     } else {
+      setServerRowKeys(null)
       setServerRows(res.rows)
     }
     setServerTruncated(!!res.truncated)
