@@ -3,7 +3,7 @@ import React, { useState, useMemo, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { BrandMark } from '../BrandMark'
-import { IconBtn, StatusDot, ConnGlyph, Segmented } from '../atoms'
+import { IconBtn, ConnGlyph, Segmented } from '../atoms'
 import { useData } from '../../state/DataContext'
 import { useGroups, addGroup, removeGroup } from '../../state/groups'
 import type { Connection } from '../../services/types'
@@ -375,7 +375,6 @@ export function ConnRow({ conn, active, onOpen, onDetail, nested }: ConnRowProps
       style={{
         display: 'flex', alignItems: 'center', gap: 9, padding: nested ? '6px 9px' : '7px 9px', borderRadius: 10, cursor: 'pointer',
         background: active ? 'var(--accent-soft)' : hover ? 'var(--surface-sunken)' : 'transparent',
-        boxShadow: active ? 'inset 2px 0 0 var(--accent-primary)' : 'none',
         transition: 'background .12s',
       }}>
       <ConnGlyph conn={conn} size={nested ? 26 : 30} radius={nested ? 7 : 8} />
@@ -385,7 +384,6 @@ export function ConnRow({ conn, active, onOpen, onDetail, nested }: ConnRowProps
         </div>
         <span className="ell mono" style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{nested ? (D.engineMeta[conn.engine ?? ''] || {}).label : conn.sub}</span>
       </div>
-      <StatusDot status={conn.status} size={6} />
     </div>
   )
 }
