@@ -171,18 +171,13 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
     const onRun = (e: Event) => {
       const ce = e as CustomEvent<{ kind?: string; text?: string }>
       if (!ce.detail || ce.detail.kind !== 'sql' || typeof ce.detail.text !== 'string') return
-      if (editorRef.current) {
-        // Insert on a NEW LINE at the caret, then run the resulting full doc.
-        const next = editorRef.current.insertAtCursor(ce.detail.text, true)
-        runRef.current(next)
-      } else {
-        // Editor not ready: append, then run the combined text.
-        setCode(prev => {
-          const next = (prev.trim() ? prev.replace(/\s*$/, '') + '\n\n' : '') + ce.detail.text
-          runRef.current(next)
-          return next
-        })
-      }
+      // Insert on a NEW LINE at the caret (so the statement is visible in the
+      // editor), then run ONLY that statement — NOT the whole document. Running
+      // the full buffer would concatenate it with any existing query and throw a
+      // syntax error (`…WHERE…select * …`). Run the snippet text in isolation.
+      if (editorRef.current) editorRef.current.insertAtCursor(ce.detail.text, true)
+      else setCode(prev => (prev.trim() ? prev.replace(/\s*$/, '') + '\n\n' : '') + ce.detail.text)
+      runRef.current(ce.detail.text)
     }
     window.addEventListener('catio-insert', onInsert)
     window.addEventListener('catio-run', onRun)
