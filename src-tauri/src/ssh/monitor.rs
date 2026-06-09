@@ -366,6 +366,44 @@ pub async fn ssh_sysinfo(
 }
 
 // ────────────────────────────────────────────────
+// 7. Tauri 命令：ssh_detect_os
+// ────────────────────────────────────────────────
+
+/// 连接成功后探测远端 OS，归一化为前端 LOGO 映射认得的 id：
+/// ubuntu/debian/alpine/centos/fedora/arch/rhel/macos/linux。
+///
+/// 优先读 /etc/os-release 的 ID；非 Linux 退到 `uname -s`（Darwin → macos）；
+/// 其余发行版统一归到 `linux`（前端有通用 Tux LOGO）。仅一条 shell，复用 run_cmd。
+#[tauri::command]
+pub async fn ssh_detect_os(
+    session_id: String,
+    mgr: tauri::State<'_, SessionManager>,
+) -> Result<String, SshError> {
+    let sess = mgr
+        .get(&session_id)
+        .await
+        .ok_or_else(|| SshError::NotFound(session_id.clone()))?;
+
+    const DETECT_CMD: &str = concat!(
+        "if [ -r /etc/os-release ]; then . /etc/os-release; id=\"${ID:-}\"; ",
+        "case \"$id\" in ",
+        "ubuntu|debian|alpine|centos|fedora|arch|rhel) printf '%s' \"$id\";; ",
+        "redhat) printf 'rhel';; ",
+        "*) printf 'linux';; ",
+        "esac; ",
+        "else u=$(uname -s 2>/dev/null); ",
+        "case \"$u\" in Darwin) printf 'macos';; *) printf 'linux';; esac; ",
+        "fi",
+    );
+
+    let out = {
+        let s = sess.lock().await;
+        run_cmd(&s.handle, DETECT_CMD).await?
+    };
+    Ok(out.trim().to_string())
+}
+
+// ────────────────────────────────────────────────
 // 单元测试（assemble_monitor 纯函数）
 // ────────────────────────────────────────────────
 

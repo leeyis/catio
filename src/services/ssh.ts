@@ -234,6 +234,13 @@ export async function sshSysinfo(sessionId: string): Promise<string> {
   return tauriInvoke<string>('ssh_sysinfo', { sessionId })
 }
 
+/** Detect the remote OS id (ubuntu/debian/alpine/centos/fedora/arch/rhel/macos/linux)
+ *  so the sidebar glyph can show the real OS logo. Empty string outside Tauri. */
+export async function sshDetectOs(sessionId: string): Promise<string> {
+  if (!isTauri()) return ''
+  return tauriInvoke<string>('ssh_detect_os', { sessionId })
+}
+
 export async function getTermBuffer(_id: string): Promise<TermLine[]> {
   return DATA.termLines
 }

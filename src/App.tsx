@@ -30,7 +30,7 @@ import {
   setActiveDbConnection, removeDbConnection, removeActiveDbConnection,
   type DbProfile,
 } from './state/dbConnections'
-import { sshConnect, sshDisconnect, sshTrustHost, isTauri, onHistory, sshSysinfo } from './services/ssh'
+import { sshConnect, sshDisconnect, sshTrustHost, isTauri, onHistory, sshSysinfo, sshDetectOs } from './services/ssh'
 import type { SshConnectArgs } from './services/ssh'
 import { appendHistory, loadHistory, clearHistory, deleteHistory } from './state/history'
 import { loadRecentSessions, recordRecentSession } from './state/recentSessions'
@@ -274,6 +274,18 @@ export default function App() {
     // home resolves against, and it persists across restarts.
     const pid = loadProfiles().find(p => p.host === args.host && p.port === args.port && p.user === args.user)?.id
     if (pid) { recordRecentSession(pid); setRecentSessions(loadRecentSessions()) }
+
+    // Detect the remote OS so the sidebar/home glyph shows the real OS logo. Runs
+    // once per connect; persists onto the profile (survives restart) and updates the
+    // live conn immediately. Best-effort — failures leave the generic host icon.
+    if (sessionId) {
+      void sshDetectOs(sessionId).then(os => {
+        if (!os) return
+        setLiveConns(prev => (prev[connId] ? { ...prev, [connId]: { ...prev[connId], os } } : prev))
+        const prof = loadProfiles().find(p => p.host === args.host && p.port === args.port && p.user === args.user)
+        if (prof && prof.os !== os) { try { saveProfile({ ...prof, os }); reloadProfiles() } catch { /* ignore */ } }
+      }).catch(() => { /* best-effort */ })
+    }
 
     // Subscribe to shell-command audit events for this session (Tauri only).
     // Reserve the slot SYNCHRONOUSLY before awaiting so a re-entrant call (e.g.

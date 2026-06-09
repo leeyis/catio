@@ -35,6 +35,7 @@ pub fn run() {
             ssh::monitor::monitor_start,
             ssh::monitor::monitor_stop,
             ssh::monitor::ssh_sysinfo,
+            ssh::monitor::ssh_detect_os,
             ssh::multiexec::multiexec_run,
             db::commands::db_connect,
             db::commands::db_test_connection,
