@@ -56,7 +56,7 @@ describe('DataGrid generic rows', () => {
     fireEvent.change(input, { target: { value: 'ALICE' } })
     fireEvent.keyDown(input, { key: 'Enter' })
 
-    const saveBtn = screen.getByText(/Save edits/i)
+    const saveBtn = screen.getByTitle(/Save edits/i)
     fireEvent.click(saveBtn)
 
     // preview modal renders the SQL returned by previewDml
@@ -85,7 +85,7 @@ describe('DataGrid generic rows', () => {
     fireEvent.change(input, { target: { value: 'ALICE' } })
     fireEvent.keyDown(input, { key: 'Enter' })
 
-    fireEvent.click(screen.getByText(/Save edits/i))
+    fireEvent.click(screen.getByTitle(/Save edits/i))
     await screen.findByText(/Review changes/i)
     fireEvent.click(screen.getByText(/^Apply$/i))
 
@@ -98,13 +98,13 @@ describe('DataGrid generic rows', () => {
     const columns: ResultColumn[] = [{ name: 'id', type: 'int', pk: true }]
     const rows: unknown[][] = [[1], [2]]
     wrap(<DataGrid columns={columns} rows={rows} writable={false} />)
-    expect(screen.queryByText(/Save edits/i)).not.toBeInTheDocument()
+    expect(screen.queryByTitle(/Save edits/i)).not.toBeInTheDocument()
   })
 
   it('results with no primary key disable editing (no Save)', () => {
     const columns: ResultColumn[] = [{ name: 'name', type: 'text' }]
     const rows: unknown[][] = [['alice'], ['bob']]
     wrap(<DataGrid columns={columns} rows={rows} writable />)
-    expect(screen.queryByText(/Save edits/i)).not.toBeInTheDocument()
+    expect(screen.queryByTitle(/Save edits/i)).not.toBeInTheDocument()
   })
 })

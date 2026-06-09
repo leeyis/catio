@@ -557,9 +557,16 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
           )}
         </div>
         <div className="row gap6">
-          {canEdit && <Btn size="sm" variant="secondary" icon="plus" onClick={addRow}>{t('dbviews.addRow')}</Btn>}
-          {canEdit && pendingTotal > 0 && <Btn size="sm" variant="ghost" icon="rotate-ccw" onClick={discardChanges}>{t('dbviews.discardChanges')}</Btn>}
-          {canEdit && pendingTotal > 0 && <Btn size="sm" variant="primary" icon="save" onClick={openPreview}>{t('dbviews.saveEdits')}</Btn>}
+          {/* edit actions as compact icons w/ hover tooltips (新增行/删除行/撤销/保存) */}
+          {canEdit && (
+            <>
+              <button className="icon-btn bare" title={t('dbviews.addRow')} onClick={addRow}><Icon name="plus" size={15} /></button>
+              <button className="icon-btn bare" title={t('dbviews.deleteRow')} onClick={() => toggleDelete(sel.r)}><Icon name="trash-2" size={15} /></button>
+              {pendingTotal > 0 && <button className="icon-btn bare" title={t('dbviews.discardChanges')} onClick={discardChanges}><Icon name="rotate-ccw" size={15} /></button>}
+              {pendingTotal > 0 && <button className="icon-btn bare" title={t('dbviews.saveEdits')} onClick={openPreview} style={{ color: 'var(--accent-primary)' }}><Icon name="save" size={15} /></button>}
+              <div style={{ width: 1, height: 18, background: 'var(--border-hairline)' }} />
+            </>
+          )}
           <button className="icon-btn bare" title={t('dbviews.filter')} data-active={filterOpen ? '1' : undefined}
             onClick={() => setFilterOpen(o => !o)}><Icon name="filter" size={15} /></button>
           <div ref={sortMenuRef} style={{ position: 'relative' }}>
