@@ -101,7 +101,7 @@ export function HomeView({ onOpen, onNew, owned = true, userName = '', authEnabl
         {/* Hero */}
         <div style={{ borderRadius: 20, background: 'var(--accent-soft-alt)', border: '1px solid var(--accent-border)', padding: '26px 30px', marginBottom: 32, position: 'relative', overflow: 'hidden' }}>
           <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 20 }}>
-            <div className="col" style={{ gap: 14, maxWidth: 560 }}>
+            <div className="col" style={{ gap: 14, maxWidth: 720 }}>
               <div className="row gap10">
                 <BrandMark size={40} style={{ borderRadius: 13 }} />
                 <div className="col" style={{ lineHeight: 1.1 }}>

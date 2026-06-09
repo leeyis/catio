@@ -51,7 +51,7 @@
     "greetingWithName": "{{greet}}，{{name}}",
     "heroTitle": "服务器与数据库，",
     "heroTitleLine2": "一个工作台搞定。",
-    "heroDesc": "SSH 进主机、隧道直连内网数据库、跑 SQL 与命令；自然语言生成 shell、报错一键问 AI、SQL 编写优化交给 Catio Agent，告别多工具横跳。",
+    "heroDesc": "SSH 登录主机、开隧道直连内网数据库、跑 SQL 与命令；用自然语言生成 shell 命令、终端报错一键问 AI、SQL 编写与优化交给 Catio Agent——一个工作台搞定，不用在多个工具间反复横跳。",
     "statHosts": "主机",
     "statDatabases": "数据库",
     "statActiveTunnels": "活跃隧道",
