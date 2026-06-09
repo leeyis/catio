@@ -30,6 +30,7 @@ const DB_LOGO: Record<string, string> = {
   cockroachdb: 'cockroachdb.svg',
   tidb: 'tidb.svg',
   oceanbase: 'oceanbase.svg',
+  'oceanbase-oracle': 'oceanbase.svg', // same brand, Oracle-compat mode
   h2: 'h2.svg',
   neo4j: 'neo4j.svg',
   redshift: 'redshift.svg',

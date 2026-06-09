@@ -26,6 +26,11 @@ export type DbProfile = Omit<DbConnectArgs, 'secret'> & {
   name: string
   /** Optional vault group id; defaults to DEFAULT_DB_GROUP when rendered. */
   group?: string
+  /** Engine-catalog id (e.g. "cockroachdb"). Distinguishes protocol-family
+   *  variants that share a `dbType` so the glyph/logo and edit-mode pre-select
+   *  resolve to the right brand. Falls back to `dbType` when absent (legacy
+   *  profiles saved before the multi-engine catalog). */
+  engineId?: string
 }
 
 export function listDbConnections(): DbProfile[] {
@@ -88,9 +93,11 @@ export function dbProfileToConnection(p: DbProfile, active = false): Connection 
     group: p.group ?? DEFAULT_DB_GROUP,
     kind: 'db',
     name: p.name,
-    sub: `${p.dbType} · ${p.host}:${p.port}`,
+    sub: `${p.engineId ?? p.dbType} · ${p.host}:${p.port}`,
     icon: 'database',
-    engine: p.dbType,
+    // Prefer the catalog engine id so protocol-family variants (CockroachDB,
+    // MariaDB, …) render their own brand logo rather than the family's.
+    engine: p.engineId ?? p.dbType,
     status: active ? 'up' : 'idle',
   }
 }

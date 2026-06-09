@@ -6,8 +6,8 @@ import { Btn, IconBtn, Segmented, Toggle, ConnGlyph } from '../atoms'
 import { useData } from '../../state/DataContext'
 import type { AuthMethod, SshConnectArgs, SshTestResult } from '../../services/ssh'
 import { sshTest } from '../../services/ssh'
-import type { DbType } from '../../services/db'
 import { dbConnect, testConnection, dbErrMsg } from '../../services/db'
+import { enginesByGroup, findEngine, matchEngineId } from '../../services/dbEngines'
 import { dbLogo } from '../../services/logos'
 import { saveProfile } from '../../state/connections'
 import type { ConnectionProfile, JumpProfile } from '../../state/connections'
@@ -96,18 +96,10 @@ function EngineGlyph({ id, short, color }: { id: string; short: string; color: s
 
 // ---- Constants ----
 
-const DB_ENGINES: { id: DbType; label: string; short: string; defaultPort: number }[] = [
-  { id: 'postgres',      label: 'PostgreSQL',    short: 'PG',   defaultPort: 5432  },
-  { id: 'mysql',         label: 'MySQL',          short: 'SQL',  defaultPort: 3306  },
-  { id: 'redis',         label: 'Redis',          short: 'RDS',  defaultPort: 6379  },
-  { id: 'mongodb',       label: 'MongoDB',        short: 'MGO',  defaultPort: 27017 },
-  { id: 'clickhouse',    label: 'ClickHouse',     short: 'CH',   defaultPort: 8123  },
-  { id: 'sqlite',        label: 'SQLite',         short: 'LITE', defaultPort: 0     },
-  { id: 'duckdb',        label: 'DuckDB',         short: 'DUCK', defaultPort: 0     },
-  { id: 'sqlserver',     label: 'SQL Server',     short: 'MSSQL',defaultPort: 1433  },
-  { id: 'elasticsearch', label: 'Elasticsearch',  short: 'ES',   defaultPort: 9200  },
-  { id: 'rqlite',        label: 'rqlite',         short: 'RQL',  defaultPort: 4001  },
-]
+// The engine catalog (all selectable engines + protocol-family variants) lives
+// in services/dbEngines.ts. Each catalog entry maps its id → { dbType,
+// driverProfile, defaultPort } so the modal can thread the right protocol family
+// AND profile through to the backend.
 
 // Trim a verbose server version banner to a compact label for the test-passed
 // pill. e.g. "PostgreSQL 16.2 on x86_64-pc-linux-gnu, compiled by ..." → "PostgreSQL 16.2".
@@ -141,7 +133,15 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
   ]
   // Edit mode opens on the tab matching the profile kind; otherwise the sidebar tab.
   const [kind, setKind] = useState<string>(isEdit ? (editDb ? 'db' : 'host') : initialKind)
-  const [engine, setEngine] = useState<DbType>(editDbProfile?.dbType ?? 'postgres')
+  // `engine` is a catalog id (e.g. "cockroachdb"), NOT a bare DbType — it resolves
+  // to { dbType, driverProfile } via findEngine(). Edit mode pre-selects from the
+  // saved engineId, else best-effort matches the saved dbType+driverProfile, else
+  // falls back to the bare dbType (legacy profiles), else postgres.
+  const initialEngine =
+    editDbProfile?.engineId
+    ?? matchEngineId(editDbProfile?.dbType, editDbProfile?.driverProfile)
+    ?? 'postgres'
+  const [engine, setEngine] = useState<string>(initialEngine)
   const [engineOpen, setEngineOpen] = useState(false)
   const engineRef = useRef<HTMLDivElement>(null)
   const [proto, setProto] = useState('ssh')
@@ -199,10 +199,10 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
   // port field always reflects the selected engine (never a stale value from a
   // previous engine). File-based engines (defaultPort 0) clear the field —
   // their port is irrelevant.
-  const handleEngineChange = (id: DbType) => {
+  const handleEngineChange = (id: string) => {
     setEngine(id)
     setEngineOpen(false)
-    const eng = DB_ENGINES.find(e => e.id === id)
+    const eng = findEngine(id)
     if (eng) setDbPort(eng.defaultPort > 0 ? String(eng.defaultPort) : '')
     // Connection params changed — any prior test result is stale.
     setDbTested(false)
@@ -337,8 +337,10 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
     setDbTestError(null)
     setDbTesting(true)
     try {
+      const eng = findEngine(engine)
       const result = await testConnection({
-        dbType: engine,
+        dbType: eng?.dbType ?? 'postgres',
+        ...(eng?.driverProfile ? { driverProfile: eng.driverProfile } : {}),
         host: dbHost,
         port: Number(dbPort),
         user: dbUser,
@@ -360,11 +362,16 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
     // EDIT mode reuses the existing profile id so saveDbConnection upserts (updates)
     // the same entry instead of creating a new one.
     const id = editDbProfile ? editDbProfile.id : generateProfileId()
+    const eng = findEngine(engine)
     const profile = {
       id,
       ...(group ? { group } : {}),
       name: dbName,
-      dbType: engine,
+      dbType: eng?.dbType ?? 'postgres',
+      // Persist the catalog id + driver profile so reconnect/edit resolve the
+      // exact engine variant (e.g. CockroachDB vs plain Postgres).
+      engineId: engine,
+      ...(eng?.driverProfile ? { driverProfile: eng.driverProfile } : {}),
       host: dbHost,
       port: Number(dbPort),
       user: dbUser,
@@ -450,33 +457,40 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
                   onClick={() => setEngineOpen(o => !o)}
                   style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8, height: 36, padding: '0 12px', borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', cursor: 'pointer', textAlign: 'left' }}>
                   {(() => {
-                    const sel = DB_ENGINES.find(e => e.id === engine) || DB_ENGINES[0]
+                    const sel = findEngine(engine) || findEngine('postgres')!
                     const m = D.engineMeta[sel.id] || {}
                     return (
                       <>
-                        <EngineGlyph id={sel.id} short={sel.short} color={m.color} />
+                        <EngineGlyph id={sel.id} short={sel.short} color={m.color || 'var(--text-secondary)'} />
                         <span style={{ flex: 1, fontSize: 13, color: 'var(--text-primary)' }}>{sel.label}</span>
                         <Icon name="chevron-down" size={14} style={{ color: 'var(--text-faint)', transform: engineOpen ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform .14s' }} />
                       </>
                     )
                   })()}
                 </button>
-                {/* dropdown menu */}
+                {/* dropdown menu — grouped by engine family */}
                 {engineOpen && (
-                  <div style={{ position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0, zIndex: 80, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', borderRadius: 10, boxShadow: 'var(--shadow-dropdown)', maxHeight: 260, overflowY: 'auto' }}>
-                    {DB_ENGINES.map(e => {
-                      const active = engine === e.id
-                      const m = D.engineMeta[e.id] || {}
-                      return (
-                        <button key={e.id}
-                          onClick={() => handleEngineChange(e.id)}
-                          style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', border: 'none', background: active ? 'var(--accent-soft)' : 'transparent', cursor: 'pointer', textAlign: 'left' }}>
-                          <EngineGlyph id={e.id} short={e.short} color={m.color} />
-                          <span style={{ flex: 1, fontSize: 13, fontWeight: active ? 600 : 400, color: active ? 'var(--accent-primary)' : 'var(--text-primary)' }}>{e.label}</span>
-                          {active && <Icon name="check" size={13} style={{ color: 'var(--accent-primary)' }} />}
-                        </button>
-                      )
-                    })}
+                  <div style={{ position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0, zIndex: 80, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', borderRadius: 10, boxShadow: 'var(--shadow-dropdown)', maxHeight: 320, overflowY: 'auto' }}>
+                    {enginesByGroup().map(({ group, engines }) => (
+                      <div key={group}>
+                        <div style={{ padding: '7px 12px 3px', fontSize: 10.5, fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--text-faint)' }}>
+                          {t(`modals.engineGroup.${group}` as const)}
+                        </div>
+                        {engines.map(e => {
+                          const active = engine === e.id
+                          const m = D.engineMeta[e.id] || {}
+                          return (
+                            <button key={e.id}
+                              onClick={() => handleEngineChange(e.id)}
+                              style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', border: 'none', background: active ? 'var(--accent-soft)' : 'transparent', cursor: 'pointer', textAlign: 'left' }}>
+                              <EngineGlyph id={e.id} short={e.short} color={m.color || 'var(--text-secondary)'} />
+                              <span style={{ flex: 1, fontSize: 13, fontWeight: active ? 600 : 400, color: active ? 'var(--accent-primary)' : 'var(--text-primary)' }}>{e.label}</span>
+                              {active && <Icon name="check" size={13} style={{ color: 'var(--accent-primary)' }} />}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>

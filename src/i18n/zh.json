@@ -380,6 +380,13 @@
     "kindDb": "数据库",
     "kindDbSub": "40+ 引擎 · 经隧道直连",
     "engine": "引擎",
+    "engineGroup": {
+      "relational": "关系型",
+      "distributed": "分布式 / NewSQL",
+      "analytics": "分析型 / OLAP",
+      "domestic": "国产数据库",
+      "document": "文档 / KV / 搜索"
+    },
     "protocol": "协议",
     "fieldName": "名称",
     "fieldGroup": "分组",

@@ -68,11 +68,30 @@ fn pg_query_err(e: &tokio_postgres::Error) -> DbError {
 }
 
 /// 协议族默认库名（照搬 dbx models/connection.rs default_database）。
+/// PG-wire 兼容引擎（openGauss/GaussDB/KingBase/Vastbase）默认库即 "postgres"；
+/// CockroachDB/KWDB 用 "defaultdb"，Redshift 用 "dev"，Highgo 用 "highgo"。
 fn default_database(profile: Option<&str>) -> Option<String> {
     match profile {
         Some("cockroachdb") | Some("kwdb") => Some("defaultdb".into()),
         Some("redshift") => Some("dev".into()),
+        Some("highgo") => Some("highgo".into()),
         _ => Some("postgres".into()),
+    }
+}
+
+#[cfg(test)]
+mod default_db_tests {
+    use super::default_database;
+    #[test]
+    fn family_default_databases() {
+        assert_eq!(default_database(Some("cockroachdb")).as_deref(), Some("defaultdb"));
+        assert_eq!(default_database(Some("kwdb")).as_deref(), Some("defaultdb"));
+        assert_eq!(default_database(Some("redshift")).as_deref(), Some("dev"));
+        assert_eq!(default_database(Some("highgo")).as_deref(), Some("highgo"));
+        // openGauss / GaussDB / KingBase / Vastbase / plain Postgres → "postgres"
+        assert_eq!(default_database(Some("opengauss")).as_deref(), Some("postgres"));
+        assert_eq!(default_database(Some("kingbase")).as_deref(), Some("postgres"));
+        assert_eq!(default_database(None).as_deref(), Some("postgres"));
     }
 }
 

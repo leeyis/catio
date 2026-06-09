@@ -380,6 +380,13 @@
     "kindDb": "Database",
     "kindDbSub": "40+ engines · Direct via tunnel",
     "engine": "Engine",
+    "engineGroup": {
+      "relational": "Relational",
+      "distributed": "Distributed / NewSQL",
+      "analytics": "Analytics / OLAP",
+      "domestic": "Domestic",
+      "document": "Document / KV / Search"
+    },
     "protocol": "Protocol",
     "fieldName": "Name",
     "fieldGroup": "Group",
