@@ -19,6 +19,7 @@ import { ConnectSecretPrompt } from './components/modals/ConnectSecretPrompt'
 import { HostKeyPrompt } from './components/modals/HostKeyPrompt'
 import { ConfirmModal } from './components/modals/ConfirmModal'
 import { AlertModal } from './components/modals/AlertModal'
+import { ConnectingOverlay } from './components/modals/ConnectingOverlay'
 import { AuthGate } from './components/auth/AuthGate'
 import { Icon } from './components/Icon'
 import { Btn } from './components/atoms'
@@ -996,14 +997,7 @@ export default function App() {
       )}
 
       {/* Connecting overlay — immediate feedback during the SSH handshake. */}
-      {connecting && (
-        <div style={{ position: 'absolute', inset: 0, zIndex: 74, background: 'color-mix(in srgb, var(--cta-bg) 42%, transparent)', backdropFilter: 'blur(3px)', display: 'grid', placeItems: 'center' }}>
-          <div className="pop-in col" style={{ alignItems: 'center', gap: 14, padding: '26px 34px', background: 'var(--surface-card)', borderRadius: 18, border: '1px solid var(--border-hairline)', boxShadow: 'var(--shadow-window)' }}>
-            <Icon name="loader" size={26} className="spin" style={{ color: 'var(--accent-primary)' }} />
-            <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{t('modals.connectingTo', { name: connecting })}</span>
-          </div>
-        </div>
-      )}
+      {connecting && <ConnectingOverlay name={connecting} />}
 
       {/* Connect error — styled in-app dialog (replaces native window.alert). */}
       {connectError && (

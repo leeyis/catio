@@ -14,6 +14,7 @@ import type { ConnectionProfile, JumpProfile } from '../../state/connections'
 import { saveDbConnection, setActiveDbConnection, generateProfileId } from '../../state/dbConnections'
 import type { DbProfile } from '../../state/dbConnections'
 import { useGroups } from '../../state/groups'
+import { ConnectingOverlay } from './ConnectingOverlay'
 
 // ---- Prop types ----
 
@@ -388,7 +389,8 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
       const msg = dbErrMsg(err)
       if (!msg.includes('Tauri runtime')) {
         // Real connection failure: keep the modal OPEN and surface the error.
-        setDbError(msg)
+        // Humanise the common auth failure, mirroring the SSH host flow.
+        setDbError(/auth|password/i.test(msg) ? t('modals.connectErrorAuth') : msg)
         setDbConnecting(false)
         return
       }
@@ -749,6 +751,8 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
           </div>
         </div>
       </div>
+      {/* Connecting feedback — same overlay as the SSH host flow. */}
+      {dbConnecting && <ConnectingOverlay name={dbName || dbHost} />}
     </div>
   )
 }
