@@ -400,7 +400,7 @@ export function IconRail({ active, onSelect, panelOpen }: IconRailProps) {
   const { t } = useTranslation()
 
   const top: RailItem[] = [
-    { id: 'ai', icon: 'sparkles', label: t('shell.railAi') },
+    { id: 'ai', icon: 'wand', label: t('shell.railAi') },
     { id: 'sftp', icon: 'folder', label: t('shell.railSftp') },
     { id: 'monitor', icon: 'gauge', label: t('shell.railMonitor') },
     { id: 'tunnels', icon: 'link', label: t('shell.railTunnels') },

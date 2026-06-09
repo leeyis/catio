@@ -454,7 +454,7 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
           <div style={{ width: 1, background: 'var(--border-hairline)', margin: '3px 1px' }} />
           <button className="row gap5 sel-pill" onMouseDown={e => e.preventDefault()} onClick={askSelAI}
             style={{ height: 27, padding: '0 10px', borderRadius: 7, fontSize: 12, fontWeight: 600, color: 'var(--accent-primary)' }}>
-            <Icon name="sparkles" size={13} /> {t('workbench.askAI')}
+            <Icon name="wand" size={13} /> {t('workbench.askAI')}
           </button>
           <span style={{ position: 'absolute', left: '50%', bottom: -5, transform: 'translateX(-50%) rotate(45deg)', width: 8, height: 8, background: 'var(--surface-elevated)', borderRight: '1px solid var(--border-hairline-alt)', borderBottom: '1px solid var(--border-hairline-alt)' }} />
         </div>

@@ -283,7 +283,7 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
           <div style={{ width: 1, background: 'var(--border-hairline)', margin: '3px 1px' }} />
           <button className="row gap5 sel-pill" onMouseDown={e => e.preventDefault()} onClick={askSelAI}
             style={{ height: 27, padding: '0 10px', borderRadius: 7, fontSize: 12, fontWeight: 600, color: 'var(--accent-primary)' }}>
-            <Icon name="sparkles" size={13} /> {tr('dbviews.askAI')}
+            <Icon name="wand" size={13} /> {tr('dbviews.askAI')}
           </button>
           {onRunSelection && <>
             <div style={{ width: 1, background: 'var(--border-hairline)', margin: '3px 1px' }} />

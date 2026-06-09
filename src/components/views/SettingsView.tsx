@@ -89,7 +89,7 @@ const SETTINGS_NAV: NavItem[] = [
   { id: 'theme', icon: 'palette', labelKey: 'settings.navTheme' },
   { id: 'appearance', icon: 'type', labelKey: 'settings.navAppearance' },
   { id: 'security', icon: 'shield', labelKey: 'settings.navSecurity' },
-  { id: 'ai', icon: 'sparkles', labelKey: 'settings.navAi' },
+  { id: 'ai', icon: 'wand', labelKey: 'settings.navAi' },
   { id: 'connections', icon: 'plug', labelKey: 'settings.navConnections' },
   { id: 'mcp', icon: 'command', labelKey: 'settings.navMcp' },
   { id: 'about', icon: 'info', labelKey: 'settings.navAbout' },
@@ -314,7 +314,7 @@ function AgentConfigBlock() {
         <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
           <div className="row gap12">
             <div className="icon-badge" style={{ width: 34, height: 34, borderRadius: 10, color: 'var(--text-tertiary)' }}>
-              <Icon name="sparkles" size={16} />
+              <Icon name="wand" size={16} />
             </div>
             <div className="col" style={{ lineHeight: 1.4 }}>
               <span style={{ fontSize: 13.5, fontWeight: 600 }}>{t('settings.agentProvider')}</span>

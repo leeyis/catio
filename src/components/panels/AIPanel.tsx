@@ -347,7 +347,7 @@ export function AIPanel({ onClose, mode = 'sql', conn, attachment, onClearAttach
   }
 
   return (
-    <PanelShell icon="sparkles" title="Catio Agent"
+    <PanelShell icon="wand" title="Catio Agent"
       sub={isSql ? t('panels.sqlAssistantSub', { target }) : t('panels.shellAssistantSub', { target })}
       onClose={onClose}
       actions={

@@ -1088,7 +1088,7 @@ function AIFloating({ mode, conn }: AIFloatingProps) {
         </div>
       ) : (
         <button className="btn btn-cta lg" onClick={() => setOpen(true)} style={{ boxShadow: 'var(--shadow-window)', borderRadius: 999, height: 48 }}>
-          <Icon name="sparkles" size={18} /> {isSql ? t('app.sqlAssistant') : t('app.shellAssistant')}
+          <Icon name="wand" size={18} /> {isSql ? t('app.sqlAssistant') : t('app.shellAssistant')}
         </button>
       )}
     </div>
@@ -1124,7 +1124,7 @@ function AICommandBar({ mode, conn }: AICommandBarProps) {
   return (
     <div style={{ position: 'absolute', left: '50%', transform: 'translateX(-50%)', bottom: 16, zIndex: 40, width: 'min(680px, 80%)' }}>
       <div className="row gap8 pop-in" style={{ background: 'var(--surface-card)', border: '1px solid var(--accent-border)', borderRadius: 14, padding: '8px 10px 8px 14px', boxShadow: 'var(--shadow-window)' }}>
-        <Icon name="sparkles" size={17} style={{ color: 'var(--accent-primary)' }} />
+        <Icon name="wand" size={17} style={{ color: 'var(--accent-primary)' }} />
         <input value={v} onChange={e => setV(e.target.value)}
           placeholder={isSql ? t('app.cmdBarSqlPlaceholder', { target }) : t('app.cmdBarShellPlaceholder', { target })}
           style={{ flex: 1, border: 'none', outline: 'none', background: 'transparent', fontSize: 13.5, color: 'var(--text-primary)' }} />
