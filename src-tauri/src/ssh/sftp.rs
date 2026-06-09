@@ -399,6 +399,67 @@ async fn download_stream(
     Ok(false)
 }
 
+// ─── 阻塞式传输（供 MCP 等非 UI 调用方：等待完成、不发进度事件）─────────────
+
+/// 上传本地文件到远端，等待完成后返回字节数。复用流式上传核心。
+pub async fn upload_blocking(
+    mgr: &SessionManager,
+    session_id: &str,
+    local_path: &str,
+    remote_path: &str,
+    app: &tauri::AppHandle,
+) -> Result<u64, SshError> {
+    let total_bytes = tokio::fs::metadata(local_path)
+        .await
+        .map_err(|e| SshError::Io(e.to_string()))?
+        .len();
+    if total_bytes == 0 {
+        let cmd = format!(": > {}", shell_escape(remote_path));
+        exec(mgr, session_id, &cmd).await?;
+        return Ok(0);
+    }
+    let cmd = format!("base64 -d > {}", shell_escape(remote_path));
+    let channel = open_exec_channel(mgr, session_id, &cmd).await?;
+    let filename = basename(local_path);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancelled = upload_stream(channel, local_path, total_bytes, &filename, "mcp", app, cancel).await?;
+    if cancelled {
+        return Err(SshError::Sftp("cancelled".into()));
+    }
+    Ok(total_bytes)
+}
+
+/// 下载远端文件到本地，等待完成后返回字节数。复用流式下载核心。
+pub async fn download_blocking(
+    mgr: &SessionManager,
+    session_id: &str,
+    remote_path: &str,
+    local_path: &str,
+    app: &tauri::AppHandle,
+) -> Result<u64, SshError> {
+    let stat_cmd = format!(
+        "stat -c%s {p} 2>/dev/null || stat -f%z {p} 2>/dev/null",
+        p = shell_escape(remote_path)
+    );
+    let size_out = exec(mgr, session_id, &stat_cmd).await?;
+    let total_bytes: u64 = size_out.trim().parse().unwrap_or(0);
+    if total_bytes == 0 {
+        tokio::fs::write(local_path, b"")
+            .await
+            .map_err(|e| SshError::Io(e.to_string()))?;
+        return Ok(0);
+    }
+    let cmd = format!("base64 {}", shell_escape(remote_path));
+    let channel = open_exec_channel(mgr, session_id, &cmd).await?;
+    let filename = basename(remote_path);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancelled = download_stream(channel, local_path, total_bytes, &filename, "mcp", app, cancel).await?;
+    if cancelled {
+        return Err(SshError::Sftp("cancelled".into()));
+    }
+    Ok(total_bytes)
+}
+
 /// 等待远端命令结束并校验退出码（上传用）。
 async fn wait_exit(channel: &mut Channel<Msg>) -> Result<(), SshError> {
     let mut stderr = String::new();

@@ -8,6 +8,7 @@ async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Prom
 
 export interface McpInfo {
   running: boolean
+  /** Full SSE endpoint including the per-run auth token (only when running). */
   url: string | null
   port: number | null
 }
@@ -18,11 +19,17 @@ export interface McpConnMeta {
   dbType: string
 }
 
+export interface McpHostMeta {
+  sessionId: string
+  name: string
+  host: string
+}
+
 const STOPPED: McpInfo = { running: false, url: null, port: null }
 
-// Start the server; returns its bound URL. Desktop-only (throws in the browser demo).
-export async function mcpStart(allowOpenWindow: boolean): Promise<McpInfo> {
-  return tauriInvoke<McpInfo>('mcp_start', { allowOpenWindow })
+// Start the server; returns its bound URL (with auth token). Desktop-only.
+export async function mcpStart(): Promise<McpInfo> {
+  return tauriInvoke<McpInfo>('mcp_start')
 }
 
 export async function mcpStop(): Promise<McpInfo> {
@@ -35,13 +42,8 @@ export async function mcpStatus(): Promise<McpInfo> {
   return tauriInvoke<McpInfo>('mcp_status')
 }
 
-export async function mcpSetAllowOpenWindow(allow: boolean): Promise<void> {
+// Push the active DB + SSH connections so the server's tools resolve them by name.
+export async function mcpSyncTargets(databases: McpConnMeta[], hosts: McpHostMeta[]): Promise<void> {
   if (!isTauri()) return
-  return tauriInvoke('mcp_set_allow_open_window', { allow })
-}
-
-// Push the set of active DB connections so the server's tools can resolve them by name.
-export async function mcpSyncConnections(conns: McpConnMeta[]): Promise<void> {
-  if (!isTauri()) return
-  return tauriInvoke('mcp_sync_connections', { conns })
+  return tauriInvoke('mcp_sync_targets', { databases, hosts })
 }

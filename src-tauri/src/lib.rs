@@ -63,8 +63,7 @@ pub fn run() {
             mcp::mcp_start,
             mcp::mcp_stop,
             mcp::mcp_status,
-            mcp::mcp_set_allow_open_window,
-            mcp::mcp_sync_connections
+            mcp::mcp_sync_targets
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

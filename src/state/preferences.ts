@@ -19,8 +19,6 @@ export interface Prefs {
   termBufferEnabled: boolean
   /** How many trailing terminal lines to include when termBufferEnabled. */
   termBufferLines: number
-  /** MCP: allow the open_table tool to open tabs in the Catio UI. */
-  mcpAllowOpenWindow: boolean
 }
 
 interface FontOption<K> { key: K; label: string; stack: string }
@@ -51,7 +49,6 @@ export const DEFAULT_PREFS: Prefs = {
   density: 'comfortable',
   termBufferEnabled: true,
   termBufferLines: 50,
-  mcpAllowOpenWindow: true,
 }
 
 const STORAGE_KEY = 'catio-prefs'

@@ -12,7 +12,7 @@ import type { UiFontKey, MonoFontKey, Density } from '../../state/preferences'
 import { fetchModels, testModel } from '../../services'
 import type { ModelTestResult } from '../../services'
 import { isTauri } from '../../services/ssh'
-import { mcpStart, mcpStop, mcpStatus, mcpSetAllowOpenWindow } from '../../services/mcp'
+import { mcpStart, mcpStop, mcpStatus } from '../../services/mcp'
 import type { McpInfo } from '../../services/mcp'
 
 // ---- Prop types ----
@@ -565,7 +565,6 @@ function ConnDefaults({ onImportSshConfig }: { onImportSshConfig?: () => Promise
 
 function MCPSettings() {
   const { t } = useTranslation()
-  const { prefs, update } = usePrefs()
   const tauri = isTauri()
   const [info, setInfo] = useState<McpInfo>({ running: false, url: null, port: null })
   const [busy, setBusy] = useState(false)
@@ -581,7 +580,7 @@ function MCPSettings() {
     setBusy(true)
     setError('')
     try {
-      const next = info.running ? await mcpStop() : await mcpStart(prefs.mcpAllowOpenWindow)
+      const next = info.running ? await mcpStop() : await mcpStart()
       setInfo(next)
     } catch (err) {
       setError(t('settings.mcpStartError', { message: (err as { message?: string } | null)?.message ?? String(err) }))
@@ -590,13 +589,8 @@ function MCPSettings() {
     }
   }
 
-  function setAllowOpenWindow(v: boolean) {
-    update({ mcpAllowOpenWindow: v })
-    void mcpSetAllowOpenWindow(v)
-  }
-
-  // The address the server is (or will be) reachable at.
-  const url = info.url ?? 'http://127.0.0.1:8765/sse'
+  // The token-bearing SSE endpoint (only present while running).
+  const url = info.url ?? ''
   const claudeCmd = `claude mcp add --transport sse catio ${url}`
   const clientJson = `{
   "mcpServers": {
@@ -656,8 +650,9 @@ function MCPSettings() {
           </>
         )}
       </div>
-      <SettingRow icon="plug" title={t('settings.mcpOpenWindow')} desc={t('settings.mcpOpenWindowDesc')}
-        control={<Toggle on={prefs.mcpAllowOpenWindow} onChange={setAllowOpenWindow} />} />
+      <div className="row gap6" style={{ fontSize: 11, color: 'var(--text-faint)', padding: '0 2px' }}>
+        <Icon name="shield" size={12} /> {t('settings.mcpTokenNote')}
+      </div>
     </Block>
   )
 }
