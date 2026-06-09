@@ -24,7 +24,7 @@ import { Btn } from './components/atoms'
 import { useTweaks, TWEAK_DEFAULTS } from './state/useTweaks'
 import { nextTheme, useApplyTheme } from './state/ThemeContext'
 import { useData } from './state/DataContext'
-import { dbConnect, getHistory as getDbHistory } from './services/db'
+import { dbConnect, getHistory as getDbHistory, clearDbHistory } from './services/db'
 import {
   useDbConnections, dbProfileToConnection, listActiveDbConnections,
   setActiveDbConnection, removeDbConnection, removeActiveDbConnection,
@@ -838,7 +838,7 @@ export default function App() {
               {activePanel === 'monitor' && <MonitorPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} />}
               {activePanel === 'tunnels' && <TunnelsPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} activeConnId={cur?.connId} profiles={profiles} />}
               {activePanel === 'snippets' && <SnippetsPanel onClose={() => setPanelOpen(false)} snippets={snippets} onChange={() => setSnippets(loadSnippets())} onInsert={insertToTerminal} canInsert={canInsert} />}
-              {activePanel === 'history' && <HistoryPanel onClose={() => setPanelOpen(false)} onAddSnippet={addSnippet} items={mergedHistory} onClear={() => { clearHistory(); setHistory([]); setDbHistory([]) }} onInsert={insertToTerminal} canInsert={canInsert} />}
+              {activePanel === 'history' && <HistoryPanel onClose={() => setPanelOpen(false)} onAddSnippet={addSnippet} items={mergedHistory} onClear={() => { clearHistory(); setHistory([]); setDbHistory([]); void clearDbHistory() }} onInsert={insertToTerminal} canInsert={canInsert} />}
               {/* DetailsPanel branches internally on conn.kind === 'db': DB conns use the
                   onEditDb/onDeleteDb/onConnectDb handlers; host conns use the SSH handlers. */}
               {activePanel === 'details' && (

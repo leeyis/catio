@@ -13,6 +13,7 @@ import {
   listActiveDbConnections,
   type DbProfile,
 } from '../../state/dbConnections'
+import { dbErrMsg } from '../../services/db'
 
 export interface DetailsPanelProps {
   onClose: () => void
@@ -235,7 +236,7 @@ function DbDetails({ conn, onClose, onEdit, onDelete, onConnect }: {
       setPromptConnect(false)
     } catch (err) {
       setConnecting(false)
-      setConnectError(err instanceof Error ? err.message : String(err))
+      setConnectError(dbErrMsg(err))
       // keep the prompt open so the user can retry
     }
   }

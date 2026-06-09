@@ -107,6 +107,13 @@ pub async fn db_history(app: tauri::AppHandle) -> Result<Vec<HistoryEntry>, DbEr
     Ok(history::load_history(&dir))
 }
 
+/// Clear the persisted DB query history (writes an empty list).
+#[tauri::command]
+pub async fn db_clear_history(app: tauri::AppHandle) -> Result<(), DbError> {
+    let dir = app_data_dir(&app)?;
+    history::save_history(&dir, &[]).map_err(|e| DbError::Io(e.to_string()))
+}
+
 /// Read saved SQL snippets.
 #[tauri::command]
 pub async fn db_snippets(app: tauri::AppHandle) -> Result<Vec<SnippetEntry>, DbError> {

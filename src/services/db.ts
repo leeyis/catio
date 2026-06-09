@@ -184,6 +184,12 @@ export async function getHistory(connId: string): Promise<HistoryItem[]> {
   })
 }
 
+/** Clear the persisted DB query history. No-op outside Tauri. */
+export async function clearDbHistory(): Promise<void> {
+  if (!isTauri()) return
+  return tauriInvoke('db_clear_history')
+}
+
 /** Saved SQL snippets. Falls back to mock outside Tauri. */
 export async function getSnippets(): Promise<Snippet[]> {
   if (!isTauri()) return DATA.snippets

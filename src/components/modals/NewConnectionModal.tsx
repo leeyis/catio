@@ -7,7 +7,7 @@ import { useData } from '../../state/DataContext'
 import type { AuthMethod, SshConnectArgs, SshTestResult } from '../../services/ssh'
 import { sshTest } from '../../services/ssh'
 import type { DbType } from '../../services/db'
-import { dbConnect, testConnection } from '../../services/db'
+import { dbConnect, testConnection, dbErrMsg } from '../../services/db'
 import { saveProfile } from '../../state/connections'
 import type { ConnectionProfile, JumpProfile } from '../../state/connections'
 import { saveDbConnection, setActiveDbConnection, generateProfileId } from '../../state/dbConnections'
@@ -253,8 +253,7 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
       const result = await sshTest(args)
       setTestResult(result)
     } catch (err) {
-      const message = (err as { message?: string } | null)?.message ?? String(err)
-      setTestResult({ ok: false, latencyMs: 0, error: message })
+      setTestResult({ ok: false, latencyMs: 0, error: dbErrMsg(err) })
     } finally {
       setTesting(false)
     }
@@ -328,7 +327,7 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
       setDbTestResult(result)
       setDbTested(true)
     } catch (err) {
-      setDbTestError(err instanceof Error ? err.message : String(err))
+      setDbTestError(dbErrMsg(err))
     } finally {
       setDbTesting(false)
     }
@@ -367,7 +366,7 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
       onClose()
       return
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
+      const msg = dbErrMsg(err)
       if (!msg.includes('Tauri runtime')) {
         // Real connection failure: keep the modal OPEN and surface the error.
         setDbError(msg)
