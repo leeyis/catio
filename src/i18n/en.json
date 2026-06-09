@@ -429,7 +429,11 @@
     "hostKeyTrust": "Trust & connect",
     "hostKeyCancel": "Cancel",
     "connectErrorMismatch": "Host key mismatch — the server's key has changed. Connection aborted for safety.",
-    "connectErrorGeneric": "Connection failed: {{message}}"
+    "connectErrorGeneric": "Connection failed: {{message}}",
+    "connectErrorAuth": "Authentication failed — the username, password, or key is incorrect. Check and try again.",
+    "connectFailedTitle": "Connection failed",
+    "connectingTo": "Connecting to {{name}}…",
+    "ok": "OK"
   },
   "auth": {
     "initTitle": "Initialize workspace",

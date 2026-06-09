@@ -18,6 +18,7 @@ import { NewConnectionModal } from './components/modals/NewConnectionModal'
 import { ConnectSecretPrompt } from './components/modals/ConnectSecretPrompt'
 import { HostKeyPrompt } from './components/modals/HostKeyPrompt'
 import { ConfirmModal } from './components/modals/ConfirmModal'
+import { AlertModal } from './components/modals/AlertModal'
 import { AuthGate } from './components/auth/AuthGate'
 import { Icon } from './components/Icon'
 import { Btn } from './components/atoms'
@@ -153,6 +154,11 @@ export default function App() {
   const [pendingJumpSecret, setPendingJumpSecret] = useState<{ args: SshConnectArgs; name: string } | null>(null)
   const [pendingConnect, setPendingConnect] = useState<{ args: SshConnectArgs; name: string } | null>(null)
   const [pendingTrust, setPendingTrust] = useState<{ args: SshConnectArgs; name: string; sessionId: string; fingerprint: string } | null>(null)
+  // Connect feedback: host name while a connect is in flight (shows an overlay so
+  // there's immediate feedback instead of a 1–2s silent gap), and a styled in-app
+  // error dialog (replaces the jarring native window.alert).
+  const [connecting, setConnecting] = useState<string | null>(null)
+  const [connectError, setConnectError] = useState<string | null>(null)
   const resolveSessionId = (connId: string) => sessionMap[connId]
 
   function addSnippet(s: Snippet) {
@@ -346,6 +352,8 @@ export default function App() {
   // Secret collected → call sshConnect; route to trust prompt / success / error.
   // args.jump (with its secret) is forwarded intact to sshConnect.
   async function performConnect(args: SshConnectArgs, name: string, secret: string) {
+    // Immediate feedback: show the connecting overlay before the (1–2s) await.
+    setConnecting(name)
     try {
       const result = await sshConnect({ ...args, secret, jump: args.jump })
       if (result.hostKeyTrusted === false) {
@@ -356,11 +364,15 @@ export default function App() {
     } catch (err) {
       const kind = (err as { kind?: string } | null)?.kind
       if (kind === 'HostKeyMismatch') {
-        window.alert(t('modals.connectErrorMismatch'))
+        setConnectError(t('modals.connectErrorMismatch'))
       } else {
-        const message = (err as { message?: string } | null)?.message ?? String(err)
-        window.alert(t('modals.connectErrorGeneric', { message }))
+        const raw = (err as { message?: string } | null)?.message ?? String(err)
+        // Humanise the common auth failure; otherwise surface the raw reason.
+        const message = /auth/i.test(raw) ? t('modals.connectErrorAuth') : t('modals.connectErrorGeneric', { message: raw })
+        setConnectError(message)
       }
+    } finally {
+      setConnecting(null)
     }
   }
 
@@ -981,6 +993,21 @@ export default function App() {
           onTrust={() => { void trustAndOpen(pendingTrust) }}
           onCancel={() => rejectTrust(pendingTrust)}
         />
+      )}
+
+      {/* Connecting overlay — immediate feedback during the SSH handshake. */}
+      {connecting && (
+        <div style={{ position: 'absolute', inset: 0, zIndex: 74, background: 'color-mix(in srgb, var(--cta-bg) 42%, transparent)', backdropFilter: 'blur(3px)', display: 'grid', placeItems: 'center' }}>
+          <div className="pop-in col" style={{ alignItems: 'center', gap: 14, padding: '26px 34px', background: 'var(--surface-card)', borderRadius: 18, border: '1px solid var(--border-hairline)', boxShadow: 'var(--shadow-window)' }}>
+            <Icon name="loader" size={26} className="spin" style={{ color: 'var(--accent-primary)' }} />
+            <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{t('modals.connectingTo', { name: connecting })}</span>
+          </div>
+        </div>
+      )}
+
+      {/* Connect error — styled in-app dialog (replaces native window.alert). */}
+      {connectError && (
+        <AlertModal title={t('modals.connectFailedTitle')} message={connectError} onClose={() => setConnectError(null)} />
       )}
 
       {locked && <AuthGate users={users} onLogin={loginUser} onCreate={createUser} onCancel={disableAuth} />}

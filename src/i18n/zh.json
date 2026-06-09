@@ -429,7 +429,11 @@
     "hostKeyTrust": "信任并连接",
     "hostKeyCancel": "取消",
     "connectErrorMismatch": "主机密钥不匹配 —— 服务器密钥已变更。为安全起见已中止连接。",
-    "connectErrorGeneric": "连接失败：{{message}}"
+    "connectErrorGeneric": "连接失败：{{message}}",
+    "connectErrorAuth": "认证失败 —— 用户名、密码或密钥不正确，请检查后重试。",
+    "connectFailedTitle": "连接失败",
+    "connectingTo": "正在连接 {{name}}…",
+    "ok": "确定"
   },
   "auth": {
     "initTitle": "初始化工作区",
