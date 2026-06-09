@@ -59,7 +59,7 @@
     "quickConnectEmpty": "暂无已保存连接",
     "automation": "自动化",
     "automationHint": "Ansible · OpenTofu",
-    "automationEmpty": "暂无自动化任务",
+    "automationEmpty": "自动化编排即将推出",
     "connect": "连接",
     "ago": "{{time}} 前"
   },

@@ -1,10 +1,8 @@
 /* ported from ref-ui/_extract/blob4.txt — verbatim per plan T1-T7 */
-import React from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { BrandMark } from '../BrandMark'
-import { ConnGlyph, SectionHead } from '../atoms'
-import { useData } from '../../state/DataContext'
+import { SectionHead } from '../atoms'
 import type { Connection } from '../../services/types'
 
 // ---- Prop types ----
@@ -39,46 +37,7 @@ function Stat({ n, label, icon }: StatProps) {
   )
 }
 
-interface InfoRowProps {
-  conn: Connection
-  onOpen: (conn: Connection) => void
-  onDetail?: (conn: Connection) => void
-  showGroup?: boolean
-}
-
-function InfoRow({ conn, onOpen, onDetail, showGroup }: InfoRowProps) {
-  const D = useData()
-  const { t } = useTranslation()
-  const [hover, setHover] = React.useState(false)
-  const g = D.groups.find(x => x.id === conn.group)
-  return (
-    <div onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)} onClick={() => onOpen(conn)}
-      style={{ display: 'flex', alignItems: 'center', gap: 16, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', borderRadius: 14, padding: '12px 16px', cursor: 'pointer', boxShadow: hover ? 'var(--shadow-card)' : 'none', transition: 'box-shadow .12s' }}>
-      <ConnGlyph conn={conn} size={42} radius={10} />
-      <div className="col" style={{ lineHeight: 1.35, minWidth: 0, flex: 1 }}>
-        <div className="row gap8" style={{ minWidth: 0 }}>
-          <span className="ell" style={{ fontSize: 14.5, fontWeight: 600 }}>{conn.name}</span>
-          {conn.status === 'up' && <span className="badge-accent" style={{ background: 'color-mix(in srgb, var(--signal-green) 13%, transparent)', color: 'var(--signal-green)' }}><Icon name="check" size={10} /> {t('vault.online')}</span>}
-          {conn.tunnel && <Icon name="link" size={12} style={{ color: 'var(--text-faint)' }} />}
-        </div>
-        <span className="ell mono" style={{ fontSize: 11.5, color: 'var(--text-tertiary)' }}>{conn.sub}</span>
-      </div>
-      {showGroup && g && <span className="chip"><span className="dot" style={{ background: g.color }} /> {g.name}</span>}
-      <div className="row gap6" style={{ flexWrap: 'wrap', maxWidth: 200, justifyContent: 'flex-end' }}>
-        {(conn.tags || []).slice(0, 2).map(tag => <span key={tag} className="chip mono" style={{ height: 20, fontSize: 10 }}>{tag}</span>)}
-      </div>
-      <span style={{ fontSize: 11, color: 'var(--text-faint)', width: 56, textAlign: 'right' }}>{conn.lastUsed ? t('home.ago', { time: conn.lastUsed }) : ''}</span>
-      {hover ? (
-        <div className="row gap4">
-          <button className="icon-btn" style={{ width: 30, height: 30 }} onClick={e => { e.stopPropagation(); onDetail && onDetail(conn) }}><Icon name="info" size={14} /></button>
-          <button className="btn btn-primary sm" onClick={e => { e.stopPropagation(); onOpen(conn) }}><Icon name="play" size={13} /> {t('home.connect')}</button>
-        </div>
-      ) : <Icon name="chevron-right" size={16} style={{ color: 'var(--text-disabled)' }} />}
-    </div>
-  )
-}
-
-export function HomeView({ onOpen, onNew, onVault, owned = true, userName = '', authEnabled = false, conns = [] }: HomeViewProps) {
+export function HomeView({ onNew, onVault, owned = true, userName = '', authEnabled = false, conns = [] }: HomeViewProps) {
   const { t, i18n } = useTranslation()
   // Real time-based greeting + live date/time (was a hardcoded mock). Name only
   // when account auth is on (otherwise there is no real user to greet).
@@ -93,7 +52,6 @@ export function HomeView({ onOpen, onNew, onVault, owned = true, userName = '', 
   const dbCount = conns.filter(c => c.kind === 'db').length
   // Active tunnels + recent-session history are not yet tracked → 0 / empty state.
   const tunnelCount = 0
-  const quickConns: Connection[] = conns
 
   if (!owned) {
     return (
@@ -144,27 +102,17 @@ export function HomeView({ onOpen, onNew, onVault, owned = true, userName = '', 
           </div>
         </div>
 
-        {/* Recent sessions — not tracked yet, so an honest empty state (no mock cards) */}
-        <SectionHead title={t('home.recentSessions')} count={0} />
-        <div style={{ marginBottom: 32 }}>
-          <EmptySection icon="history" text={t('home.recentEmpty')} />
-        </div>
-
-        {/* Automation + quick */}
+        {/* Recent activity + Automation — the saved connections already live in the
+            left VAULT sidebar, so the home no longer duplicates them as a
+            "quick connect" list. Two honest, balanced sections instead. */}
         <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 16 }}>
           <div>
-            <SectionHead title={t('home.quickConnect')} hint={t('home.quickConnectHint')} />
-            <div className="col gap8">
-              {quickConns.length
-                ? quickConns.map(c => <InfoRow key={c.id} conn={c} onOpen={onOpen} />)
-                : <EmptySection icon="server" text={t('home.quickConnectEmpty')} />}
-            </div>
+            <SectionHead title={t('home.recentSessions')} count={0} />
+            <EmptySection icon="history" text={t('home.recentEmpty')} />
           </div>
           <div>
             <SectionHead title={t('home.automation')} hint={t('home.automationHint')} />
-            <div className="col gap8">
-              <EmptySection icon="box" text={t('home.automationEmpty')} />
-            </div>
+            <EmptySection icon="box" text={t('home.automationEmpty')} />
           </div>
         </div>
       </div>

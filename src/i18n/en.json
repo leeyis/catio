@@ -59,7 +59,7 @@
     "quickConnectEmpty": "No saved connections yet",
     "automation": "Automation",
     "automationHint": "Ansible · OpenTofu",
-    "automationEmpty": "No automation tasks yet",
+    "automationEmpty": "Automation orchestration coming soon",
     "connect": "Connect",
     "ago": "{{time}} ago"
   },
