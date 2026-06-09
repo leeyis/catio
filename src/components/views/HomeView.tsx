@@ -11,7 +11,6 @@ import type { Connection } from '../../services/types'
 export interface HomeViewProps {
   onOpen: (conn: Connection) => void
   onNew: () => void
-  onVault: () => void
   owned?: boolean
   userName?: string
   /** Whether local account auth is on — greeting shows a name only when true. */
@@ -62,7 +61,7 @@ function RecentRow({ conn, onOpen }: { conn: Connection; onOpen: (c: Connection)
   )
 }
 
-export function HomeView({ onOpen, onNew, onVault, owned = true, userName = '', authEnabled = false, conns = [], recent = [] }: HomeViewProps) {
+export function HomeView({ onOpen, onNew, owned = true, userName = '', authEnabled = false, conns = [], recent = [] }: HomeViewProps) {
   const { t, i18n } = useTranslation()
   // Real time-based greeting + live date/time (was a hardcoded mock). Name only
   // when account auth is on (otherwise there is no real user to greet).
@@ -122,7 +121,6 @@ export function HomeView({ onOpen, onNew, onVault, owned = true, userName = '', 
             </div>
             <div className="col gap8">
               <button className="btn btn-cta lg" onClick={onNew}><Icon name="plus" size={16} /> {t('common.newConnection')}</button>
-              <button className="btn btn-secondary" onClick={onVault}><Icon name="terminal-square" size={15} /> {t('home.enterWorkbench')}</button>
             </div>
           </div>
         </div>

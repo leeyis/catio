@@ -66,7 +66,7 @@ export default function App() {
   const [view, setView] = useState<string>(initView)
   const [prevView, setPrevView] = useState<string>('home')
   // Which Settings section to open to (theme | security | ai | ...).
-  const [settingsSection, setSettingsSection] = useState<string>('theme')
+  const [settingsSection, setSettingsSection] = useState<string>('appearance')
   // Start with no open tabs — the app lands on 'home' by default (clean, no
   // auto-opened mock host/db). Tabs are created on demand by openConn/openLiveTab.
   const [tabs, setTabs] = useState<Tab[]>([])
@@ -653,7 +653,7 @@ export default function App() {
   // Open Settings, optionally to a specific section (e.g. 'security', 'ai'). The
   // guard handles being used directly as a click handler (event arg != string).
   function goSettings(section?: string) {
-    setSettingsSection(typeof section === 'string' ? section : 'theme')
+    setSettingsSection(typeof section === 'string' ? section : 'appearance')
     if (view !== 'settings') setPrevView(view)
     setView(view === 'settings' ? prevView : 'settings')
   }
@@ -855,7 +855,7 @@ export default function App() {
           <div className="card-surface grow col" style={{ overflow: 'hidden', position: 'relative' }}>
             {/* view body */}
             <div className="grow col" style={{ minHeight: 0 }}>
-              {view === 'home' && <HomeView onOpen={openConn} onNew={() => setShowNew(true)} onVault={() => setView('workbench')} owned={ownsVault} userName={authEnabled ? currentName : ''} authEnabled={authEnabled} conns={vaultConns}
+              {view === 'home' && <HomeView onOpen={openConn} onNew={() => setShowNew(true)} owned={ownsVault} userName={authEnabled ? currentName : ''} authEnabled={authEnabled} conns={vaultConns}
                 recent={recentSessions.map(r => vaultConns.find(c => c.id === r.connId)).filter((c): c is Connection => !!c)} />}
 
               {/* tab bar — only in workbench when there are tabs */}

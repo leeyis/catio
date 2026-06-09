@@ -86,8 +86,8 @@ interface NavItem {
 }
 
 const SETTINGS_NAV: NavItem[] = [
-  { id: 'theme', icon: 'palette', labelKey: 'settings.navTheme' },
-  { id: 'appearance', icon: 'type', labelKey: 'settings.navAppearance' },
+  // Theme + appearance merged into one "外观" tab (palette icon).
+  { id: 'appearance', icon: 'palette', labelKey: 'settings.navAppearance' },
   { id: 'security', icon: 'shield', labelKey: 'settings.navSecurity' },
   { id: 'ai', icon: 'wand', labelKey: 'settings.navAi' },
   { id: 'connections', icon: 'plug', labelKey: 'settings.navConnections' },
@@ -517,7 +517,8 @@ function AboutSettings() {
 
 export function SettingsView({ theme, onTheme, onClose, authEnabled, users, currentUser, ownerUser, onEnableAuth, onDisableAuth, onLock, onRemoveUser, initialSection }: SettingsViewProps) {
   const { t } = useTranslation()
-  const [nav, setNav] = React.useState(initialSection || 'theme')
+  // 'theme' is folded into 'appearance' — normalise any legacy section id.
+  const [nav, setNav] = React.useState(initialSection === 'theme' ? 'appearance' : (initialSection || 'appearance'))
   return (
     <div className="body fade-in" style={{ flex: 1 }}>
       {/* left nav */}
@@ -541,15 +542,14 @@ export function SettingsView({ theme, onTheme, onClose, authEnabled, users, curr
         <div className="grow" />
         <div className="row gap8" style={{ padding: '10px 10px', background: 'var(--surface-sunken)', borderRadius: 12 }}>
           <BrandMark size={30} style={{ borderRadius: 9 }} />
-          <div className="col" style={{ lineHeight: 1.25 }}><span style={{ fontSize: 12, fontWeight: 600 }}>Catio</span><span className="mono" style={{ fontSize: 10, color: 'var(--text-faint)' }}>v1.0 · Reach × DBX</span></div>
+          <div className="col" style={{ lineHeight: 1.25 }}><span style={{ fontSize: 12, fontWeight: 600 }}>Catio</span><span className="mono" style={{ fontSize: 10, color: 'var(--text-faint)' }}>v0.1.0</span></div>
         </div>
       </div>
 
       {/* main */}
       <div className="card-surface grow" style={{ overflowY: 'auto' }}>
         <div style={{ padding: '24px 40px 40px', maxWidth: 760 }}>
-          {nav === 'theme' && <ThemeSettings theme={theme} onTheme={onTheme} />}
-          {nav === 'appearance' && <AppearanceSettings />}
+          {nav === 'appearance' && <><ThemeSettings theme={theme} onTheme={onTheme} /><AppearanceSettings /></>}
           {nav === 'security' && <SecuritySettings authEnabled={authEnabled} users={users} currentUser={currentUser} ownerUser={ownerUser} onEnableAuth={onEnableAuth} onDisableAuth={onDisableAuth} onLock={onLock} onRemoveUser={onRemoveUser} />}
           {nav === 'ai' && <AISettings />}
           {nav === 'connections' && <ConnDefaults />}
