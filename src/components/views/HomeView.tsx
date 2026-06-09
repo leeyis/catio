@@ -1,8 +1,9 @@
 /* ported from ref-ui/_extract/blob4.txt — verbatim per plan T1-T7 */
+import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { BrandMark } from '../BrandMark'
-import { SectionHead } from '../atoms'
+import { ConnGlyph, SectionHead } from '../atoms'
 import type { Connection } from '../../services/types'
 
 // ---- Prop types ----
@@ -17,6 +18,8 @@ export interface HomeViewProps {
   authEnabled?: boolean
   /** Real saved connections (from the vault). Empty on a fresh install. */
   conns?: Connection[]
+  /** Recently-opened connections (most-recent first), resolved to live vault entries. */
+  recent?: Connection[]
 }
 
 interface StatProps {
@@ -37,7 +40,29 @@ function Stat({ n, label, icon }: StatProps) {
   )
 }
 
-export function HomeView({ onNew, onVault, owned = true, userName = '', authEnabled = false, conns = [] }: HomeViewProps) {
+// Compact recent-session row — click to re-open/connect.
+function RecentRow({ conn, onOpen }: { conn: Connection; onOpen: (c: Connection) => void }) {
+  const { t } = useTranslation()
+  const [hover, setHover] = useState(false)
+  return (
+    <div onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)} onClick={() => onOpen(conn)}
+      style={{ display: 'flex', alignItems: 'center', gap: 12, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', borderRadius: 12, padding: '10px 14px', cursor: 'pointer', boxShadow: hover ? 'var(--shadow-card)' : 'none', transition: 'box-shadow .12s' }}>
+      <ConnGlyph conn={conn} size={36} radius={9} />
+      <div className="col" style={{ lineHeight: 1.35, minWidth: 0, flex: 1 }}>
+        <div className="row gap8" style={{ minWidth: 0 }}>
+          <span className="ell" style={{ fontSize: 13.5, fontWeight: 600 }}>{conn.name}</span>
+          {conn.status === 'up' && <span className="badge-accent" style={{ background: 'color-mix(in srgb, var(--signal-green) 13%, transparent)', color: 'var(--signal-green)' }}><Icon name="check" size={10} /> {t('vault.online')}</span>}
+        </div>
+        <span className="ell mono" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{conn.sub}</span>
+      </div>
+      {hover
+        ? <button className="btn btn-primary sm" onClick={e => { e.stopPropagation(); onOpen(conn) }}><Icon name="play" size={12} /> {t('home.connect')}</button>
+        : <Icon name="chevron-right" size={15} style={{ color: 'var(--text-disabled)' }} />}
+    </div>
+  )
+}
+
+export function HomeView({ onOpen, onNew, onVault, owned = true, userName = '', authEnabled = false, conns = [], recent = [] }: HomeViewProps) {
   const { t, i18n } = useTranslation()
   // Real time-based greeting + live date/time (was a hardcoded mock). Name only
   // when account auth is on (otherwise there is no real user to greet).
@@ -107,8 +132,10 @@ export function HomeView({ onNew, onVault, owned = true, userName = '', authEnab
             "quick connect" list. Two honest, balanced sections instead. */}
         <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 16 }}>
           <div>
-            <SectionHead title={t('home.recentSessions')} count={0} />
-            <EmptySection icon="history" text={t('home.recentEmpty')} />
+            <SectionHead title={t('home.recentSessions')} count={recent.length} />
+            {recent.length
+              ? <div className="col gap8">{recent.map(c => <RecentRow key={c.id} conn={c} onOpen={onOpen} />)}</div>
+              : <EmptySection icon="history" text={t('home.recentEmpty')} />}
           </div>
           <div>
             <SectionHead title={t('home.automation')} hint={t('home.automationHint')} />

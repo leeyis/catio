@@ -33,6 +33,7 @@ import {
 import { sshConnect, sshDisconnect, sshTrustHost, isTauri, onHistory, sshSysinfo } from './services/ssh'
 import type { SshConnectArgs } from './services/ssh'
 import { appendHistory, loadHistory, clearHistory, deleteHistory } from './state/history'
+import { loadRecentSessions, recordRecentSession } from './state/recentSessions'
 import type { HistoryItem } from './services/types'
 import { loadProfiles, saveProfile, deleteProfile } from './state/connections'
 import { loadSnippets, saveSnippet, newSnippetId } from './state/snippets'
@@ -126,6 +127,8 @@ export default function App() {
   // DB query history (backend file), fetched when the History panel is open. Merged
   // with the SSH command history into one timeline for the unified panel.
   const [dbHistory, setDbHistory] = useState<HistoryItem[]>([])
+  // Recently-opened connections (for the home "最近会话" section), newest-first.
+  const [recentSessions, setRecentSessions] = useState(() => loadRecentSessions())
   // Refresh DB history whenever the History panel is opened. Map the recorded
   // backend connId → a friendly connection name (when the conn is still active)
   // so the panel's per-connection filter shows real names.
@@ -358,6 +361,9 @@ export default function App() {
   }
 
   function openConn(conn: Connection) {
+    // Record this as a recent session (newest-first) for the home screen.
+    recordRecentSession(conn.id)
+    setRecentSessions(loadRecentSessions())
     // If this vault entry maps to a saved profile, run the REAL connect flow
     // (collects the secret, verifies host key, opens a live session/tab).
     const profile = profiles.find(p => p.id === conn.id)
@@ -787,7 +793,8 @@ export default function App() {
           <div className="card-surface grow col" style={{ overflow: 'hidden', position: 'relative' }}>
             {/* view body */}
             <div className="grow col" style={{ minHeight: 0 }}>
-              {view === 'home' && <HomeView onOpen={openConn} onNew={() => setShowNew(true)} onVault={() => setView('workbench')} owned={ownsVault} userName={authEnabled ? currentName : ''} authEnabled={authEnabled} conns={vaultConns} />}
+              {view === 'home' && <HomeView onOpen={openConn} onNew={() => setShowNew(true)} onVault={() => setView('workbench')} owned={ownsVault} userName={authEnabled ? currentName : ''} authEnabled={authEnabled} conns={vaultConns}
+                recent={recentSessions.map(r => vaultConns.find(c => c.id === r.connId)).filter((c): c is Connection => !!c)} />}
 
               {/* tab bar — only in workbench when there are tabs */}
               {view === 'workbench' && tabs.length > 0 && (
