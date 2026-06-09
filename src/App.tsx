@@ -26,7 +26,7 @@ import { Btn } from './components/atoms'
 import { useTweaks, TWEAK_DEFAULTS } from './state/useTweaks'
 import { nextTheme, useApplyTheme } from './state/ThemeContext'
 import { useData } from './state/DataContext'
-import { dbConnect, getHistory as getDbHistory, clearDbHistory, deleteDbHistory } from './services/db'
+import { dbConnect, getHistory as getDbHistory, clearDbHistory, deleteDbHistory, dbErrMsg } from './services/db'
 import {
   useDbConnections, dbProfileToConnection, listActiveDbConnections,
   setActiveDbConnection, removeDbConnection, removeActiveDbConnection,
@@ -160,6 +160,11 @@ export default function App() {
   // error dialog (replaces the jarring native window.alert).
   const [connecting, setConnecting] = useState<string | null>(null)
   const [connectError, setConnectError] = useState<string | null>(null)
+  // DB connect-with-password prompt (opened directly from a DB card's 连接 button,
+  // mirroring the SSH host prompt — no detour through the details panel).
+  const [pendingDbConnect, setPendingDbConnect] = useState<DbProfile | null>(null)
+  const [dbPromptError, setDbPromptError] = useState<string | null>(null)
+  const [dbPromptBusy, setDbPromptBusy] = useState(false)
   const resolveSessionId = (connId: string) => sessionMap[connId]
 
   function addSnippet(s: Snippet) {
@@ -406,9 +411,9 @@ export default function App() {
       )
       return
     }
-    // DB connection: if already live, open its SQL workbench tab; otherwise open
-    // the details panel where the connect-with-password flow lives (dbConnect is
-    // never run directly from here because it needs a secret).
+    // DB connection: if already live, open its SQL workbench tab; otherwise prompt
+    // for the password right here and connect (dbConnect needs a secret). Falls back
+    // to the details panel only if the saved profile can't be resolved.
     if (conn.kind === 'db') {
       const active = listActiveDbConnections().find(a => a.profileId === conn.id)
       if (active) {
@@ -419,7 +424,9 @@ export default function App() {
         setActiveTab(tabId)
         setView('workbench')
       } else {
-        openDetail(conn)
+        const dbp = dbProfiles.find(p => p.id === conn.id)
+        if (dbp) { setDbPromptError(null); setPendingDbConnect(dbp) }
+        else openDetail(conn)
       }
       return
     }
@@ -556,6 +563,29 @@ export default function App() {
     setView('workbench')
     // Success → auto-hide the connection details panel.
     closeDetailPanel()
+  }
+
+  // Submit handler for the direct DB connect prompt (opened from a DB card).
+  // Shows the shared connecting overlay, surfaces a friendly inline error on
+  // failure (keeps the prompt open for retry), and closes on success.
+  async function submitDbConnect(secret: string) {
+    const profile = pendingDbConnect
+    if (!profile || dbPromptBusy) return
+    setDbPromptBusy(true)
+    setDbPromptError(null)
+    setConnecting(profile.name)
+    try {
+      await connectDbProfile(profile, secret)
+      setPendingDbConnect(null)
+    } catch (err) {
+      const msg = dbErrMsg(err)
+      // Non-Tauri dev has no DB backend — just close quietly (matches the modal).
+      if (msg.includes('Tauri runtime')) { setPendingDbConnect(null); return }
+      setDbPromptError(/auth|password/i.test(msg) ? t('modals.connectErrorAuth') : msg)
+    } finally {
+      setDbPromptBusy(false)
+      setConnecting(null)
+    }
   }
 
   // ---- SSH DetailsPanel actions (operate on the REAL saved SSH profile) ----
@@ -984,6 +1014,16 @@ export default function App() {
             void performConnect(p.args, p.name, secret)
           }}
           onCancel={() => setPendingConnect(null)}
+        />
+      )}
+
+      {pendingDbConnect && (
+        <ConnectSecretPrompt
+          title={t('panels.connectPromptTitle', { name: pendingDbConnect.name })}
+          label={t('panels.connectPromptLabel')}
+          error={dbPromptError}
+          onSubmit={s => { void submitDbConnect(s) }}
+          onCancel={() => { if (!dbPromptBusy) { setPendingDbConnect(null); setDbPromptError(null) } }}
         />
       )}
 
