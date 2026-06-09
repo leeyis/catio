@@ -846,7 +846,7 @@ export default function App() {
           the body), mirroring the AuthGate overlay pattern. */}
       <div style={{ flex: 1, minHeight: 0, minWidth: 0, position: 'relative', display: 'flex' }}>
         <div className="body" style={{ flex: 1 }}>
-          <Sidebar activeId={detailConn ? detailConn.id : (cur ? cur.connId : undefined)} onOpen={openDetail} onDetail={openDetail} onNew={() => setShowNew(true)}
+          <Sidebar activeId={detailConn ? detailConn.id : (cur ? cur.connId : undefined)} onOpen={openDetail} onDetail={openDetail}
             collapsed={sidebarCollapsed} onToggleCollapse={() => setSidebarCollapsed(c => !c)}
             conns={vaultConns} currentUser={currentName} authEnabled={authEnabled} onLock={lockApp} onEnableAuth={() => goSettings('security')}
             filter={sidebarFilter} onFilterChange={setSidebarFilter} />

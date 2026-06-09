@@ -27,7 +27,6 @@ export interface SidebarProps {
   /** Opens the connection DETAILS panel. Used by DB cards (click) and the
    *  hover detail icon on host/SSH cards. */
   onDetail?: (conn: Connection) => void
-  onNew?: React.MouseEventHandler<HTMLButtonElement>
   collapsed?: boolean
   onToggleCollapse?: React.MouseEventHandler<HTMLButtonElement>
   conns?: Connection[]
@@ -152,7 +151,7 @@ export function TitleBar({ theme, onToggleTheme, onOpenSettings, settingsActive 
 
 // ---- Sidebar ----
 
-export function Sidebar({ activeId, onOpen, onDetail, onNew, collapsed, onToggleCollapse, conns: vaultConns, currentUser, authEnabled, onLock, onEnableAuth, filter: filterProp, onFilterChange }: SidebarProps) {
+export function Sidebar({ activeId, onOpen, onDetail, collapsed, onToggleCollapse, conns: vaultConns, currentUser, authEnabled, onLock, onEnableAuth, filter: filterProp, onFilterChange }: SidebarProps) {
   const { t } = useTranslation()
   const D = useData()
   const groups = useGroups()
@@ -322,13 +321,12 @@ export function Sidebar({ activeId, onOpen, onDetail, onNew, collapsed, onToggle
           )
         })}
         {!conns.length && (
-          <div className="col" style={{ alignItems: 'center', gap: 10, padding: '28px 16px', textAlign: 'center' }}>
-            <div className="icon-badge" style={{ width: 44, height: 44, borderRadius: 13, background: 'var(--surface-sunken)', color: 'var(--text-faint)' }}><Icon name="lock" size={20} /></div>
-            <div className="col" style={{ gap: 3 }}>
-              <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text-secondary)' }}>{query ? t('shell.noMatchingConns') : t('shell.privateWorkspace')}</span>
-              {!query && <span style={{ fontSize: 11, color: 'var(--text-faint)', lineHeight: 1.5 }}>{t('shell.vaultEmptyHint', { user: currentUser })}<br />{t('shell.newConnToStart')}</span>}
+          <div className="col" style={{ alignItems: 'center', gap: 10, padding: '32px 16px', textAlign: 'center' }}>
+            <div className="icon-badge" style={{ width: 44, height: 44, borderRadius: 13, background: 'var(--surface-sunken)', color: 'var(--text-faint)' }}><Icon name={query ? 'search' : 'plug'} size={20} /></div>
+            <div className="col" style={{ gap: 4 }}>
+              <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text-secondary)' }}>{query ? t('shell.noMatchingConns') : t('shell.vaultEmptyTitle')}</span>
+              {!query && <span style={{ fontSize: 11, color: 'var(--text-faint)', lineHeight: 1.5 }}>{t('shell.vaultEmptyHint')}</span>}
             </div>
-            {!query && <button className="btn btn-cta sm" onClick={onNew}><Icon name="plus" size={14} /> {t('common.newConnection')}</button>}
           </div>
         )}
       </div>

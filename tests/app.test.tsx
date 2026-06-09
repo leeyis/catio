@@ -52,9 +52,9 @@ it('boots clean: no demo tabs and Agent panel collapsed', () => {
 })
 
 it('vault is empty on a fresh install, and renders a saved profile', () => {
-  // Fresh: no profiles → empty private-workspace state in the sidebar.
+  // Fresh: no profiles → empty-state in the sidebar.
   const fresh = wrap()
-  expect(screen.getByText('这是你的私有工作区')).toBeTruthy()
+  expect(screen.getByText('还没有连接')).toBeTruthy()
   fresh.unmount()
 
   // With a saved profile in localStorage, the vault renders it.
