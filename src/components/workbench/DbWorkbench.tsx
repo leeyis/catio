@@ -132,9 +132,14 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
   }, [namespaces, obj])
 
   // The schema qualifier passed to the dialect-correct preview + structure fetch.
-  // Comes from the selected object's schema. Only meaningful when the engine has
-  // schema namespaces; the backend drops it otherwise.
-  const selectedSchema = caps.schemas ? (obj.type === 'table' ? obj.schema : undefined) : undefined
+  // Comes from the selected object's schema (the namespace the table lives under).
+  // We pass it for ALL engines — not just those with `caps.schemas` — because the
+  // schema browser groups every engine's tables under a namespace, and engines
+  // like MySQL NEED that namespace (their "schema" is the database) to introspect
+  // structure via information_schema. `db_table_preview` drops the schema itself
+  // for engines without a real schema namespace (MySQL/SQLite/…), so passing it is
+  // safe; structure/DML use it where the engine requires it.
+  const selectedSchema = obj.type === 'table' ? obj.schema : undefined
 
   const tbl = namespace.tables.find(t => t.name === (obj.type === 'table' ? obj.table : ''))
 
