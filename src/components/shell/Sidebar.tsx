@@ -251,7 +251,7 @@ export function Sidebar({ activeId, onOpen, onDetail, collapsed, onToggleCollaps
               <button onClick={() => setOpenGroups(s => ({ ...s, __saved: s.__saved === false }))}
                 style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 7, padding: '7px 8px', color: 'var(--text-tertiary)' }}>
                 <Icon name="chevron-right" size={13} style={{ transition: 'transform .15s', transform: open ? 'rotate(90deg)' : 'none' }} />
-                <span className="dot" style={{ background: 'var(--text-faint)' }} />
+                <Icon name={open ? 'folder-open' : 'folder'} size={13} style={{ color: 'var(--text-faint)' }} />
                 <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.4px', textTransform: 'uppercase' }}>{t('shell.ungrouped')}</span>
                 <span className="mono" style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--text-faint)' }}>{ungrouped.length}</span>
               </button>
@@ -289,7 +289,7 @@ export function Sidebar({ activeId, onOpen, onDetail, collapsed, onToggleCollaps
               <div className="row" style={{ alignItems: 'center', gap: 7, padding: '7px 8px', color: 'var(--text-tertiary)', cursor: 'pointer' }}
                 onClick={() => setOpenGroups(s => ({ ...s, [g.id]: s[g.id] === false }))}>
                 <Icon name="chevron-right" size={13} style={{ transition: 'transform .15s', transform: open ? 'rotate(90deg)' : 'none' }} />
-                <span className="dot" style={{ background: g.color }} />
+                <Icon name={open ? 'folder-open' : 'folder'} size={13} style={{ color: g.color }} />
                 <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.4px', textTransform: 'uppercase' }}>{g.name}</span>
                 <span className="mono" style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--text-faint)' }}>{items.length}</span>
                 <button className="icon-btn bare group-del" title={t('shell.deleteGroup')}
