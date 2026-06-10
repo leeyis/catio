@@ -90,3 +90,65 @@ async fn pg_paginated_query_windows_rows() {
     assert_eq!(r.rows[0][0], json!(6));
     assert_eq!(r.rows[4][0], json!(10));
 }
+
+// ── MySQL family (MariaDB/TiDB/…) ────────────────────────────────────────────
+// Same DML-builder round-trip on a real MySQL-protocol engine, proving table
+// data editing works for the MySQL family (driver_profile "mariadb" is harmless
+// to the driver — it only matters to the frontend catalog). Gated by
+// CATIO_TEST_MYSQL_URL=host:port:user:pw:db.
+
+fn mysql_args(profile: Option<&str>) -> Option<ConnectArgs> {
+    let raw = std::env::var("CATIO_TEST_MYSQL_URL").ok()?;
+    let parts: Vec<&str> = raw.splitn(5, ':').collect();
+    if parts.len() != 5 { return None; }
+    Some(ConnectArgs {
+        db_type: DatabaseType::Mysql,
+        host: parts[0].into(),
+        port: parts[1].parse().ok()?,
+        user: parts[2].into(),
+        secret: Some(parts[3].into()),
+        database: Some(parts[4].into()),
+        driver_profile: profile.map(str::to_string),
+    })
+}
+
+#[tokio::test]
+async fn mysql_dml_insert_update_delete_roundtrip() {
+    let Some(args) = mysql_args(Some("mariadb")) else {
+        eprintln!("SKIP mysql_dml_insert_update_delete_roundtrip: set CATIO_TEST_MYSQL_URL=host:port:user:pw:db");
+        return;
+    };
+    let drv = connect(&args).await.expect("connect");
+    let db = DatabaseType::Mysql;
+    // MySQL has no schema namespace (capabilities.schemas=false); the table lives
+    // in the connected database, so DML is built unqualified.
+    let schema: Option<&str> = None;
+    let table = "catio_it_dml";
+
+    drv.query("DROP TABLE IF EXISTS catio_it_dml", 1).await.ok();
+    drv.query("CREATE TABLE catio_it_dml (id INT PRIMARY KEY, name VARCHAR(40), qty INT)", 1)
+        .await.expect("create");
+
+    let insert = dml::build_insert(db, schema, table, &[
+        CellEdit { column: "id".into(),   new_value: json!(1) },
+        CellEdit { column: "name".into(), new_value: json!("alpha") },
+        CellEdit { column: "qty".into(),  new_value: json!(10) },
+    ]);
+    assert_eq!(drv.query(&insert, 0).await.expect("insert").rows_affected, Some(1));
+
+    let update = dml::build_update(db, schema, table,
+        &[("id".into(), json!(1))],
+        &[CellEdit { column: "qty".into(), new_value: json!(42) }]);
+    assert_eq!(drv.query(&update, 0).await.expect("update").rows_affected, Some(1));
+
+    let r = drv.query("SELECT qty FROM catio_it_dml WHERE id = 1", 10).await.unwrap();
+    assert_eq!(r.rows[0][0], json!(42), "qty should be updated to 42");
+
+    let delete = dml::build_delete(db, schema, table, &[("id".into(), json!(1))]);
+    assert_eq!(drv.query(&delete, 0).await.expect("delete").rows_affected, Some(1));
+    let r = drv.query("SELECT COUNT(*) FROM catio_it_dml", 10).await.unwrap();
+    // MySQL COUNT(*) comes back as a BIGINT → JSON number 0
+    assert_eq!(r.rows[0][0], json!(0), "table empty after delete");
+
+    drv.query("DROP TABLE catio_it_dml", 1).await.ok();
+}

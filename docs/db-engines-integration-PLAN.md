@@ -31,8 +31,17 @@
 ## 验收结果
 - ✅ `cargo test` 全过（lib 77 + 集成，EXIT=0）；`cargo build` 无错。
 - ✅ `tsc --noEmit` 无错；`vitest run` 226 例全过。
-- ✅ 数据库查询 + 表格数据编辑（DML 增改删）真实验证（WSL Docker）：
-  - Postgres 族：真实 postgres:16/latest 容器 —— 查询 + DML 增改删 + 分页往返。
-  - MySQL 族：真实 mariadb:11.8 容器 —— 连接 + 查询 + introspection（db_mysql）。
-  - JDBC：嵌入 H2 —— 连接/查询/DML 增改删往返/introspection。
+- ✅ 数据库查询 + 表格数据编辑（DML 增改删）真实验证（WSL Docker / 真实驱动 jar）：
+  - Postgres 族：真实 postgres 容器 —— 查询 + DML 增改删 + 分页往返（db_dml_roundtrip）。
+  - MySQL 族：真实 mariadb:11.8 容器 —— 查询 + introspection（db_mysql）+ DML 增改删往返（db_dml_roundtrip::mysql_dml）。
+  - JDBC / Oracle：真实 Oracle XE 21c 容器 + ojdbc11 驱动 —— 连接/版本/查询/DML 增改删往返/introspection 全过（db_jdbc_engines::jdbc_oracle）。
+  - JDBC / H2：嵌入 H2 —— 全流程往返。
+  - JDBC / DB2：真实 db2 容器 + db2jcc 驱动 —— 桥接连接成功（驱动加载、JCC 与服务端通信、返回标准 SQLSTATE）；
+    DB2 社区镜像首启 catalog 自建库异常（SYSIBMADM 内部错误，镜像问题，非 catio 代码），未跑完整 round-trip。
+- ✅ 前端渲染：NewConnectionModal 组件测试断言新引擎（CockroachDB/MariaDB/TiDB/KingbaseES/Oracle/Db2/Snowflake）
+  出现在下拉、分组标题渲染、driverProfile 正确透传（native cockroachdb=postgres+profile；jdbc oracle=jdbc+profile）。
 - 打包：Tauri 资源打包 jar / 启动时自动 mvn 构建为后续部署项；dev/test 经 CARGO_MANIFEST_DIR 定位。
+
+## 如何在前端看到新引擎
+改动在 worktree 分支 `feat/db-engines-all`（不是 main）。在 worktree 目录跑 `npm run dev`，
+新建连接 → 数据库 → 引擎下拉即见分组的 54 个引擎。

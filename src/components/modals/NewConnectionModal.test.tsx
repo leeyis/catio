@@ -116,6 +116,60 @@ describe('NewConnectionModal', () => {
   })
 })
 
+describe('NewConnectionModal — multi-engine catalog', () => {
+  beforeEach(() => { h.testConnection.mockReset() })
+
+  it('lists protocol-family variants and JDBC engines in the dropdown', () => {
+    wrap(<NewConnectionModal onClose={() => {}} />)
+    // open the engine dropdown (trigger shows the current engine, PostgreSQL)
+    fireEvent.click(screen.getByText('PostgreSQL'))
+    // native protocol-family variants are now selectable…
+    expect(screen.getByText('CockroachDB')).toBeTruthy()
+    expect(screen.getByText('MariaDB')).toBeTruthy()
+    expect(screen.getByText('TiDB')).toBeTruthy()
+    expect(screen.getByText('KingbaseES')).toBeTruthy()
+    // …and JDBC-sidecar engines too
+    expect(screen.getByText('Oracle')).toBeTruthy()
+    expect(screen.getByText('IBM Db2')).toBeTruthy()
+    expect(screen.getByText('Snowflake')).toBeTruthy()
+    // group headers render (i18n)
+    expect(screen.getByText('国产数据库')).toBeTruthy()
+    expect(screen.getByText('JDBC（需驱动 JAR）')).toBeTruthy()
+  })
+
+  it('threads the selected variant driverProfile through testConnection', async () => {
+    h.testConnection.mockResolvedValue({ version: 'CockroachDB CCL v23', latencyMs: 5 })
+    const { container } = wrap(<NewConnectionModal onClose={() => {}} />)
+    fireEvent.click(screen.getByText('PostgreSQL'))
+    fireEvent.click(screen.getByText('CockroachDB'))
+    // port should snap to the engine default (26257)
+    const inputs = Array.from(container.querySelectorAll('input')) as HTMLInputElement[]
+    expect(inputs.some(i => i.value === '26257')).toBe(true)
+    const host = inputs.find(i => i.getAttribute('placeholder') === '127.0.0.1')!
+    fireEvent.change(host, { target: { value: '127.0.0.1' } })
+    fireEvent.click(screen.getByText('测试连接'))
+    await waitFor(() => expect(h.testConnection).toHaveBeenCalledTimes(1))
+    expect(h.testConnection.mock.calls[0][0]).toMatchObject({
+      dbType: 'postgres', driverProfile: 'cockroachdb',
+    })
+  })
+
+  it('threads a JDBC engine as dbType=jdbc + its driverProfile', async () => {
+    h.testConnection.mockResolvedValue({ version: 'Oracle 21c', latencyMs: 9 })
+    const { container } = wrap(<NewConnectionModal onClose={() => {}} />)
+    fireEvent.click(screen.getByText('PostgreSQL'))
+    fireEvent.click(screen.getByText('Oracle'))
+    const inputs = Array.from(container.querySelectorAll('input')) as HTMLInputElement[]
+    const host = inputs.find(i => i.getAttribute('placeholder') === '127.0.0.1')!
+    fireEvent.change(host, { target: { value: '127.0.0.1' } })
+    fireEvent.click(screen.getByText('测试连接'))
+    await waitFor(() => expect(h.testConnection).toHaveBeenCalledTimes(1))
+    expect(h.testConnection.mock.calls[0][0]).toMatchObject({
+      dbType: 'jdbc', driverProfile: 'oracle',
+    })
+  })
+})
+
 describe('NewConnectionModal — create mode', () => {
   beforeEach(() => { h.saveProfile.mockClear(); h.sshTest.mockReset() })
 

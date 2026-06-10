@@ -3,6 +3,8 @@ dist/
 src-tauri/target/
 # JDBC sidecar Maven build output (regenerable via `mvn package`)
 src-tauri/jdbc-plugin/target/
+# local JDBC driver JARs used for integration testing (downloaded, not redistributed)
+.test-drivers/
 .DS_Store
 # decoded reference scratch (regenerable from ref-ui HTML)
 ref-ui/_extract/
