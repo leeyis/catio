@@ -162,7 +162,9 @@
     "columns": "Columns",
     "pkLabel": "PK",
     "removeColumn": "Remove column",
-    "create": "Create"
+    "create": "Create",
+    "mongoPlaceholder": "db.collection.find({ ... })  —  supports find / countDocuments / aggregate / getIndexes / insertOne·Many / updateOne·Many / deleteOne·Many",
+    "esPlaceholder": "GET /index/_search\n{ \"query\": { \"match_all\": {} } }  —  SELECT * FROM index also works"
   },
   "workbench": {
     "newTab": "New tab",

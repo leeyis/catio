@@ -162,7 +162,9 @@
     "columns": "列",
     "pkLabel": "主键",
     "removeColumn": "移除列",
-    "create": "创建"
+    "create": "创建",
+    "mongoPlaceholder": "db.collection.find({ ... })  —  支持 find / countDocuments / aggregate / getIndexes / insertOne·Many / updateOne·Many / deleteOne·Many",
+    "esPlaceholder": "GET /index/_search\n{ \"query\": { \"match_all\": {} } }  —  也支持 SELECT * FROM index"
   },
   "workbench": {
     "newTab": "新建标签",

@@ -5,7 +5,7 @@
  * optional `schema` map (table → columns) wired into @codemirror/lang-sql. */
 import React, { useEffect, useImperativeHandle, useRef, useState, forwardRef } from 'react'
 import { useTranslation } from 'react-i18next'
-import { EditorView, keymap } from '@codemirror/view'
+import { EditorView, keymap, placeholder as cmPlaceholder } from '@codemirror/view'
 import { EditorState, Compartment, type Extension } from '@codemirror/state'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
 import { autocompletion, completionKeymap, closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete'
@@ -27,6 +27,10 @@ export interface SqlEditorProps {
   onRun?: () => void
   /** Run just the currently-selected SQL (from the selection toolbar's Run action). */
   onRunSelection?: (sql: string) => void
+  /** 空文档占位提示(mongo/es 控制台展示各自语法示例)。 */
+  placeholder?: string
+  /** true → 非 SQL 模式:不挂 lang-sql(无 SQL 补全),用于 mongo/es 控制台。 */
+  plain?: boolean
 }
 
 /** Imperative handle exposed to parents (e.g. SqlConsole) for cursor-aware
@@ -118,7 +122,7 @@ const catioTheme = EditorView.theme(
 )
 
 export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function SqlEditor(
-  { code, onChange, minHeight, target = 'prod-orders', schema, onRun, onRunSelection },
+  { code, onChange, minHeight, target = 'prod-orders', schema, onRun, onRunSelection, placeholder, plain },
   ref,
 ) {
   const { t: tr } = useTranslation()
@@ -144,6 +148,7 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
       autocompletion(),
       syntaxHighlighting(catioHighlight),
       catioTheme,
+      ...(placeholder ? [cmPlaceholder(placeholder)] : []),
       keymap.of([
         {
           key: 'Mod-Enter',
@@ -156,7 +161,7 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
         ...defaultKeymap,
         indentWithTab,
       ]),
-      sqlCompartment.current.of(sql({ dialect: PostgreSQL, upperCaseKeywords: true })),
+      sqlCompartment.current.of(plain ? [] : sql({ dialect: PostgreSQL, upperCaseKeywords: true })),
       EditorView.updateListener.of(update => {
         if (update.docChanged) {
           onChangeRef.current(update.state.doc.toString())
@@ -195,10 +200,10 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
     if (!view) return
     view.dispatch({
       effects: sqlCompartment.current.reconfigure(
-        sql({ dialect: PostgreSQL, schema, upperCaseKeywords: true }),
+        plain ? [] : sql({ dialect: PostgreSQL, schema, upperCaseKeywords: true }),
       ),
     })
-  }, [schema])
+  }, [schema, plain])
 
   // Sync external `code` changes (e.g. AI-inserted SQL, Clear button) into the
   // doc without clobbering the cursor while the user types locally.

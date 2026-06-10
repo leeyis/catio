@@ -31,8 +31,15 @@ export interface SqlConsoleProps {
   engine?: string
 }
 
-export function SqlConsole({ density, fresh, writable = true, connId, initialCode, active, engine: _engine }: SqlConsoleProps) {
+export function SqlConsole({ density, fresh, writable = true, connId, initialCode, active, engine }: SqlConsoleProps) {
   const { t } = useTranslation()
+  // mongodb/elasticsearch 用各自语法(mongo shell / REST+SQL),编辑器走 plain 模式:
+  // 不挂 SQL 补全、显示语法占位提示、结果网格只读(mongo 的 _id 带 pk 标记,
+  // 会让 DataGrid 误开 SQL DML 编辑——对 mongo 必然失败)。
+  const plain = engine === 'mongodb' || engine === 'elasticsearch'
+  const editorPlaceholder = engine === 'mongodb' ? t('dbviews.mongoPlaceholder')
+    : engine === 'elasticsearch' ? t('dbviews.esPlaceholder')
+    : undefined
   const D = useData()
   const [code, setCode] = useState(
     // A fresh query starts with its optional seed template (or EMPTY when none).
@@ -51,11 +58,11 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
   const editorRef = useRef<SqlEditorHandle>(null)
 
   useEffect(() => {
-    if (!connId) { setLiveSchema(null); return }
+    if (!connId || plain) { setLiveSchema(null); return }
     let alive = true
     getSchema(connId).then(s => { if (alive) setLiveSchema(s) }).catch(() => {})
     return () => { alive = false }
-  }, [connId])
+  }, [connId, plain])
 
   // Stable identity of the schema namespaces (names only) so the column fetch
   // re-runs when connId or the schema list changes, but NOT on every keystroke.
@@ -69,7 +76,7 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
   // Best-effort: on rejection we leave that namespace out (editor falls back to
   // table-names-only). Re-runs only when connId or the namespace list changes.
   useEffect(() => {
-    if (!connId || namespaceNames.length === 0) { setLiveColumns({}); return }
+    if (!connId || plain || namespaceNames.length === 0) { setLiveColumns({}); return }
     let alive = true
     Promise.all(
       namespaceNames.map(name =>
@@ -83,7 +90,7 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
     return () => { alive = false }
     // namespaceKey captures the namespace-name identity; intentionally not on liveSchema object.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connId, namespaceKey])
+  }, [connId, plain, namespaceKey])
 
   /**
    * Nested completion schema for the SQL editor, in @codemirror/lang-sql's
@@ -207,7 +214,7 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
           When there are no results yet it fills the whole console; once a run
           starts it shares the space with the results region below (a split). */}
       <div style={{ flex: 1, minHeight: 140, width: '100%', borderBottom: phase === 'idle' ? 'none' : '1px solid var(--border-hairline)' }}>
-        <SqlEditor ref={editorRef} code={code} onChange={setCode} schema={editorSchema} onRun={run} onRunSelection={connId ? (sql => run(sql)) : undefined} />
+        <SqlEditor ref={editorRef} code={code} onChange={setCode} schema={editorSchema} onRun={run} onRunSelection={connId ? (sql => run(sql)) : undefined} placeholder={editorPlaceholder} plain={plain} />
       </div>
       {/* results — only rendered once a run has started (running/done). While
           idle (fresh query) the editor above fills everything. */}
@@ -223,7 +230,7 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
                     columns={result?.columns ?? []}
                     rows={result?.rows ?? []}
                     statusTones={D.statusTones} density={density}
-                    writable={writable} connId={connId} sql={result?.sql}
+                    writable={writable && !plain} connId={connId} sql={result?.sql}
                     resultLabel={t('dbviews.queryResult')}
                     loadError={runErr ?? undefined} />
                 : <DataGrid
