@@ -803,7 +803,11 @@ git commit -m "feat(db): JSON→BSON 转换——$oid 扩展 JSON 与 _id Object
                 let filter = mongo_shell::json_filter_to_doc(&filter).map_err(DbError::QueryFailed)?;
                 // 多取 1 条用于 truncated 检测;用户 limit 更小时以用户为准。
                 let cap = (max_rows as i64) + 1;
-                let fetch = limit.map(|l| l.min(cap)).unwrap_or(cap);
+                // limit(0)/负数在 mongodb 驱动里语义是"不限制",必须落回 cap,否则整个集合拉进内存。
+                let fetch = match limit {
+                    Some(l) if l > 0 => l.min(cap),
+                    _ => cap,
+                };
                 let mut find = coll.find(filter).limit(fetch);
                 if let Some(s) = &sort {
                     find = find.sort(mongo_shell::json_to_doc(s).map_err(DbError::QueryFailed)?);
