@@ -47,15 +47,18 @@ interface StatProps {
   unit: string
   data: number[]
   color: string
+  /** Optional caption, e.g. "9.6 GB / 16 GB" for memory used/total. */
+  sub?: string
 }
 
-function Stat({ label, val, unit, data, color }: StatProps) {
+function Stat({ label, val, unit, data, color, sub }: StatProps) {
   return (
     <div className="col" style={{ background: 'var(--surface-subtle)', border: '1px solid var(--border-hairline)', borderRadius: 12, padding: 10 }}>
       <div className="row" style={{ justifyContent: 'space-between' }}>
         <span style={{ fontSize: 11.5, color: 'var(--text-tertiary)', fontWeight: 500 }}>{label}</span>
         <span className="mono" style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>{val}<span style={{ fontSize: 10, color: 'var(--text-faint)' }}>{unit}</span></span>
       </div>
+      {sub && <span className="mono" style={{ fontSize: 9.5, color: 'var(--text-faint)', marginTop: -2 }}>{sub}</span>}
       <Spark data={data} color={color} />
     </div>
   )
@@ -165,6 +168,8 @@ const EMPTY_MONITOR: Monitor = {
   mem: [],
   net: [],
   disk: 0,
+  diskTotal: '',
+  diskUsed: '',
   cores: 0,
   memTotal: '',
   memUsed: '',
@@ -219,7 +224,8 @@ export function MonitorPanel({ onClose, conn: _conn, sessionId }: MonitorPanelPr
         <div className="grow" style={{ overflowY: 'auto', padding: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
             <Stat label={t('panels.cpu')} val={mon.cpu[mon.cpu.length - 1]} unit="%" data={mon.cpu} color="var(--signal-blue)" />
-            <Stat label={t('panels.mem')} val={mon.mem[mon.mem.length - 1]} unit="%" data={mon.mem} color="var(--signal-violet)" />
+            <Stat label={t('panels.mem')} val={mon.mem[mon.mem.length - 1]} unit="%" data={mon.mem} color="var(--signal-violet)"
+              sub={mon.memUsed && mon.memTotal ? `${mon.memUsed} / ${mon.memTotal}` : undefined} />
           </div>
           <Stat label={t('panels.netIO')} val={mon.net[mon.net.length - 1]} unit=" MB/s" data={mon.net} color="var(--signal-green)" />
 
@@ -231,7 +237,7 @@ export function MonitorPanel({ onClose, conn: _conn, sessionId }: MonitorPanelPr
           {mon.gpus.map(g => <GpuCard key={g.idx} g={g} />)}
 
           <div className="col" style={{ background: 'var(--surface-subtle)', border: '1px solid var(--border-hairline)', borderRadius: 12, padding: 10, gap: 8 }}>
-            <div className="row" style={{ justifyContent: 'space-between' }}><span style={{ fontSize: 11.5, color: 'var(--text-tertiary)', fontWeight: 500 }}>{t('panels.disk')}</span><span className="mono" style={{ fontSize: 12 }}>{mon.disk}%</span></div>
+            <div className="row" style={{ justifyContent: 'space-between' }}><span style={{ fontSize: 11.5, color: 'var(--text-tertiary)', fontWeight: 500 }}>{t('panels.disk')}</span><span className="mono" style={{ fontSize: 12 }}>{mon.diskUsed && mon.diskTotal ? <span style={{ color: 'var(--text-faint)' }}>{mon.diskUsed} / {mon.diskTotal} · </span> : null}{mon.disk}%</span></div>
             <div style={{ height: 7, borderRadius: 999, background: 'var(--surface-inset)', overflow: 'hidden' }}><div style={{ width: mon.disk + '%', height: '100%', background: mon.disk > 80 ? 'var(--danger-fg)' : 'var(--signal-amber)' }} /></div>
           </div>
           <div className="col" style={{ gap: 2 }}>

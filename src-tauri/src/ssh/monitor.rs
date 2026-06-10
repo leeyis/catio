@@ -18,7 +18,7 @@ use tauri::Emitter;
 use crate::ssh::conn::ClientHandler;
 use crate::ssh::manager::SessionManager;
 use crate::ssh::parse::{
-    parse_cpu_cores, parse_cpu_pct, parse_disk_pct, parse_gpus, parse_mem, parse_net_mbps,
+    parse_cpu_cores, parse_cpu_pct, parse_disk, parse_gpus, parse_mem, parse_net_mbps,
     parse_procs, Gpu, Proc,
 };
 use crate::ssh::SshError;
@@ -43,6 +43,8 @@ pub struct Monitor {
     pub mem: Vec<f64>,
     pub net: Vec<f64>,
     pub disk: u8,
+    pub disk_total: String,
+    pub disk_used: String,
     pub cores: usize,
     pub mem_total: String,
     pub mem_used: String,
@@ -112,7 +114,7 @@ pub fn assemble_monitor(
     let cores = parse_cpu_cores(stat_now);
     let (mem_pct, mem_total, mem_used) = parse_mem(meminfo);
     let net_mbps = parse_net_mbps(netdev_prev, netdev_now, secs);
-    let disk = parse_disk_pct(df);
+    let (disk, disk_total, disk_used) = parse_disk(df);
     let procs = parse_procs(ps, PROC_LIMIT);
     let gpus = parse_gpus(nvidia_csv);
 
@@ -122,6 +124,8 @@ pub fn assemble_monitor(
         mem: vec![mem_pct],
         net: vec![net_mbps],
         disk,
+        disk_total,
+        disk_used,
         cores,
         mem_total,
         mem_used,
@@ -294,6 +298,8 @@ pub async fn monitor_start(
                 mem,
                 net,
                 disk: snap.disk,
+                disk_total: snap.disk_total,
+                disk_used: snap.disk_used,
                 cores: snap.cores,
                 mem_total: snap.mem_total,
                 mem_used: snap.mem_used,

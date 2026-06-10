@@ -31,6 +31,8 @@ const CUSTOM_MONITOR: Monitor = {
   mem: [40, 42, 44],
   net: [10, 12, 14],
   disk: 77,
+  diskTotal: '1 TB',
+  diskUsed: '770 GB',
   cores: 8,
   memTotal: '32 GB',
   memUsed: '14 GB',

@@ -224,6 +224,8 @@ const EMPTY_MONITOR: Monitor = {
   mem: [],
   net: [],
   disk: 0,
+  diskTotal: '',
+  diskUsed: '',
   cores: 0,
   memTotal: '',
   memUsed: '',

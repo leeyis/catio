@@ -409,6 +409,7 @@ const monitor = {
   mem: series(61, 8, 40),
   net: series(48, 30, 40),
   disk: 72,
+  diskTotal: '500 GB', diskUsed: '360 GB',
   cores: 16, memTotal: '16 GB', memUsed: '9.6 GB',
   // multi-GPU telemetry
   gpus: [

@@ -224,10 +224,11 @@ pub fn parse_net_mbps(prev: &str, now: &str, secs: f64) -> f64 {
 /// Looks for the row whose mountpoint (last whitespace-separated token) is exactly `/`.
 /// The capacity column is formatted as `73%`; we strip the `%` and parse.
 /// Returns 0 on parse failure.
-pub fn parse_disk_pct(df_out: &str) -> u8 {
+/// Parse `df -P /` → (capacity %, total human size, used human size).
+/// POSIX df -P columns: Filesystem  1024-blocks  Used  Available  Capacity  Mounted-on.
+pub fn parse_disk(df_out: &str) -> (u8, String, String) {
     for line in df_out.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
-        // POSIX df -P: Filesystem Blocks Used Available Capacity Mounted-on  (6 cols)
         if fields.len() < 6 {
             continue;
         }
@@ -235,10 +236,13 @@ pub fn parse_disk_pct(df_out: &str) -> u8 {
         if mountpoint != "/" {
             continue;
         }
-        let cap = fields[fields.len() - 2]; // e.g. "73%"
-        return cap.trim_end_matches('%').parse().unwrap_or(0);
+        let pct = fields[fields.len() - 2].trim_end_matches('%').parse().unwrap_or(0);
+        // df -P blocks are 1024 bytes: total = blocks col, used = used col.
+        let total_kb: u64 = fields[fields.len() - 5].parse().unwrap_or(0);
+        let used_kb: u64 = fields[fields.len() - 4].parse().unwrap_or(0);
+        return (pct, human_size(total_kb * 1024), human_size(used_kb * 1024));
     }
-    0
+    (0, "0 B".to_string(), "0 B".to_string())
 }
 
 // ────────────────────────────────────────────────
@@ -436,27 +440,32 @@ mod tests {
         assert_eq!(parse_net_mbps(s, s, -1.0), 0.0);
     }
 
-    // ── parse_disk_pct ────────────────────────────
+    // ── parse_disk ────────────────────────────
     #[test]
-    fn disk_pct_root_filesystem() {
+    fn disk_root_filesystem_pct_and_sizes() {
         let df = "Filesystem      1024-blocks      Used Available Capacity Mounted on\n\
                   /dev/sda1            102400     75000     27000      73%          /\n";
-        assert_eq!(parse_disk_pct(df), 73);
+        let (pct, total, used) = parse_disk(df);
+        assert_eq!(pct, 73);
+        assert_eq!(total, human_size(102400 * 1024)); // total blocks → bytes
+        assert_eq!(used, human_size(75000 * 1024));
     }
 
     #[test]
-    fn disk_pct_ignores_non_root_mounts() {
+    fn disk_ignores_non_root_mounts() {
         let df = "Filesystem      1024-blocks      Used Available Capacity Mounted on\n\
                   /dev/sdb1            102400     10000     92000      10%  /data\n\
                   /dev/sda1            102400     75000     27000      73%     /\n";
-        assert_eq!(parse_disk_pct(df), 73);
+        assert_eq!(parse_disk(df).0, 73);
     }
 
     #[test]
-    fn disk_pct_zero_when_no_root() {
+    fn disk_zero_when_no_root() {
         let df = "Filesystem 1024-blocks Used Available Capacity Mounted on\n\
                   /dev/sdb1   100  10  90  10% /data\n";
-        assert_eq!(parse_disk_pct(df), 0);
+        let (pct, total, _) = parse_disk(df);
+        assert_eq!(pct, 0);
+        assert_eq!(total, "0 B");
     }
 
     // ── parse_procs ───────────────────────────────

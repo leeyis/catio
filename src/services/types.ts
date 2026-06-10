@@ -335,6 +335,9 @@ export interface Monitor {
   mem: number[]
   net: number[]
   disk: number
+  /** Total / used root-filesystem size, human-readable (e.g. "500 GB"). */
+  diskTotal: string
+  diskUsed: string
   cores: number
   memTotal: string
   memUsed: string
