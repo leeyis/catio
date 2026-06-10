@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { DB_ENGINES, ENGINE_GROUP_ORDER, enginesByGroup, findEngine, matchEngineId } from './dbEngines'
+import { dbLogo } from './logos'
 
 describe('DB_ENGINES catalog', () => {
   it('has unique ids', () => {
@@ -40,6 +41,11 @@ describe('DB_ENGINES catalog', () => {
   it('file-based engines have port 0', () => {
     expect(findEngine('sqlite')?.defaultPort).toBe(0)
     expect(findEngine('duckdb')?.defaultPort).toBe(0)
+  })
+
+  it('every engine resolves a brand logo (no short-code fallback)', () => {
+    const missing = DB_ENGINES.filter(e => dbLogo(e.id) === null).map(e => e.id)
+    expect(missing, `engines without a logo: ${missing.join(', ')}`).toEqual([])
   })
 })
 

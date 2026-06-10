@@ -9,37 +9,73 @@
 // theme (single colour, no embedded fill). Initial/unknown OS falls back to the
 // generic host icon until the backend detects the real OS post-connect.
 
-/** Engine id (DbType, plus mock aliases) → logo filename under public/logos/db/. */
+/** Engine id (catalog id / DbType, plus mock aliases) → logo filename under
+ *  public/logos/db/. Brand marks reused from dbx (apps/desktop/public/icons/
+ *  database); Trino from simple-icons. Every engine in services/dbEngines.ts has
+ *  an entry here so the connection dropdown shows a real logo, not a short code. */
 const DB_LOGO: Record<string, string> = {
+  // ── relational core ──
   postgres: 'postgres.svg',
   mysql: 'mysql.svg',
   mariadb: 'mariadb.svg',
-  redis: 'redis.svg',
-  mongodb: 'mongodb.svg',
-  mongo: 'mongodb.svg', // mock alias
-  clickhouse: 'clickhouse.svg',
+  sqlserver: 'sqlserver.svg',
   sqlite: 'sqlite.svg',
   duckdb: 'duckdb.svg',
-  sqlserver: 'sqlserver.svg',
-  elasticsearch: 'elasticsearch.svg',
-  rqlite: 'rqlite.png',
-  oracle: 'oracle.svg',
-  db2: 'db2.svg',
-  cassandra: 'cassandra.svg',
-  snowflake: 'snowflake.svg',
+  // ── distributed / NewSQL ──
   cockroachdb: 'cockroachdb.svg',
   tidb: 'tidb.svg',
   oceanbase: 'oceanbase.svg',
   'oceanbase-oracle': 'oceanbase.svg', // same brand, Oracle-compat mode
-  h2: 'h2.svg',
-  neo4j: 'neo4j.svg',
-  redshift: 'redshift.svg',
-  bigquery: 'bigquery.svg',
-  hive: 'hive.svg',
+  // ── analytics / OLAP ──
+  clickhouse: 'clickhouse.svg',
   doris: 'doris.svg',
   starrocks: 'starrocks.svg',
-  tdengine: 'tdengine.svg',
+  selectdb: 'selectdb.svg',
+  databend: 'databend.svg',
+  redshift: 'redshift.svg',
+  // ── domestic (PG/MySQL-wire) ──
+  opengauss: 'opengauss.svg',
+  gaussdb: 'gaussdb.svg',
+  kingbase: 'kingbase.svg',
+  vastbase: 'vastbase.png',
+  highgo: 'highgo.png',
+  kwdb: 'kwdb.svg',
+  goldendb: 'goldendb.png',
+  gbase: 'gbase.webp',
+  // ── document / KV / search ──
+  mongodb: 'mongodb.svg',
+  mongo: 'mongodb.svg', // mock alias
+  redis: 'redis.svg',
+  elasticsearch: 'elasticsearch.svg',
+  rqlite: 'rqlite.png',
+  // ── JDBC sidecar engines ──
+  oracle: 'oracle.svg',
+  db2: 'db2.svg',
+  snowflake: 'snowflake.svg',
+  hive: 'hive.svg',
+  trino: 'trino.svg',
   presto: 'presto.svg',
+  cassandra: 'cassandra.svg',
+  neo4j: 'neo4j.svg',
+  saphana: 'saphana.webp',
+  teradata: 'teradata.webp',
+  vertica: 'vertica.webp',
+  firebird: 'firebird.webp',
+  exasol: 'exasol.webp',
+  informix: 'informix.svg',
+  dameng: 'dm.svg',
+  yashandb: 'yashandb.png',
+  gbase8s: 'gbase.webp', // same vendor as gbase
+  xugu: 'xugu.png',
+  kylin: 'apache_kylin.svg',
+  iotdb: 'iotdb.svg',
+  tdengine: 'tdengine.svg',
+  iris: 'iris.png',
+  databricks: 'databricks.webp',
+  bigquery: 'bigquery.svg',
+  sundb: 'sundb.svg',
+  access: 'access.png',
+  h2: 'h2.svg',
 }
 
 /** OS id → monochrome logo file + brand colour (for the CSS-mask tint). */

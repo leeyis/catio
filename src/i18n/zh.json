@@ -388,6 +388,12 @@
       "document": "文档 / KV / 搜索",
       "jdbc": "JDBC（需驱动 JAR）"
     },
+    "jdbcDriverReady": "JDBC 驱动已就绪",
+    "jdbcDriverMissing": "JDBC 驱动未安装",
+    "jdbcDriverManual": "需手动提供驱动 JAR",
+    "jdbcDriverManualHint": "请将驱动 JAR 放入驱动目录（类名：{{cls}}）",
+    "jdbcDriverDownload": "下载驱动",
+    "jdbcDriverDownloading": "下载中…",
     "protocol": "协议",
     "fieldName": "名称",
     "fieldGroup": "分组",

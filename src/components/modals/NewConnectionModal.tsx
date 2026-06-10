@@ -8,6 +8,7 @@ import type { AuthMethod, SshConnectArgs, SshTestResult } from '../../services/s
 import { sshTest } from '../../services/ssh'
 import { dbConnect, testConnection, dbErrMsg } from '../../services/db'
 import { enginesByGroup, findEngine, matchEngineId } from '../../services/dbEngines'
+import { jdbcDriverStatus, downloadJdbcDriver, JDBC_DOWNLOADABLE, type JdbcDriverStatus } from '../../services/jdbcDrivers'
 import { dbLogo } from '../../services/logos'
 import { saveProfile } from '../../state/connections'
 import type { ConnectionProfile, JumpProfile } from '../../state/connections'
@@ -142,6 +143,13 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
     ?? matchEngineId(editDbProfile?.dbType, editDbProfile?.driverProfile)
     ?? 'postgres'
   const [engine, setEngine] = useState<string>(initialEngine)
+  // JDBC engines need a driver JAR; surface install-status + one-click download.
+  const currentEngine = findEngine(engine)
+  const isJdbc = currentEngine?.dbType === 'jdbc'
+  const jdbcProfile = currentEngine?.driverProfile
+  const [driverStatus, setDriverStatus] = useState<JdbcDriverStatus | null>(null)
+  const [driverBusy, setDriverBusy] = useState(false)
+  const [driverErr, setDriverErr] = useState<string | null>(null)
   const [engineOpen, setEngineOpen] = useState(false)
   const engineRef = useRef<HTMLDivElement>(null)
   const [proto, setProto] = useState('ssh')
@@ -208,6 +216,27 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
     setDbTested(false)
     setDbTestResult(null)
     setDbTestError(null)
+  }
+
+  // Fetch JDBC driver install-status whenever a JDBC engine is selected.
+  useEffect(() => {
+    if (!isJdbc || !jdbcProfile) { setDriverStatus(null); setDriverErr(null); return }
+    let cancelled = false
+    setDriverErr(null)
+    jdbcDriverStatus(jdbcProfile).then(s => { if (!cancelled) setDriverStatus(s) }).catch(() => {})
+    return () => { cancelled = true }
+  }, [isJdbc, jdbcProfile])
+
+  const handleDownloadDriver = async () => {
+    if (!jdbcProfile) return
+    setDriverBusy(true); setDriverErr(null)
+    try {
+      setDriverStatus(await downloadJdbcDriver(jdbcProfile))
+    } catch (e) {
+      setDriverErr(dbErrMsg(e))
+    } finally {
+      setDriverBusy(false)
+    }
   }
 
   // Any change to DB connection params invalidates a prior test result.
@@ -499,6 +528,38 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
             <div className="col" style={{ gap: 6, marginBottom: 16 }}>
               <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.protocol')}</span>
               <Segmented value={proto} onChange={setProto} options={PROTOS.map(p => ({ value: p.id, label: p.label }))} />
+            </div>
+          )}
+
+          {/* JDBC driver row — install-status + one-click download (DBeaver-style) */}
+          {kind === 'db' && isJdbc && (
+            <div className="row" style={{ alignItems: 'center', gap: 10, marginBottom: 16, padding: '10px 12px', borderRadius: 10, border: '1px solid var(--border-hairline)', background: 'var(--surface-subtle)' }}>
+              <Icon name={driverStatus?.installed ? 'circle-check' : 'hard-drive'} size={16}
+                style={{ color: driverStatus?.installed ? 'var(--signal-green)' : 'var(--text-tertiary)', flex: 'none' }} />
+              <div className="col" style={{ gap: 1, flex: 1, minWidth: 0 }}>
+                <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text-primary)' }}>
+                  {driverStatus?.installed
+                    ? t('modals.jdbcDriverReady')
+                    : driverStatus?.downloadable ?? JDBC_DOWNLOADABLE.has(jdbcProfile ?? '')
+                      ? t('modals.jdbcDriverMissing')
+                      : t('modals.jdbcDriverManual')}
+                </span>
+                <span className="mono" style={{ fontSize: 10.5, color: 'var(--text-faint)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {driverStatus?.installed
+                    ? driverStatus.fileName
+                    : driverStatus && !driverStatus.downloadable
+                      ? t('modals.jdbcDriverManualHint', { cls: driverStatus.driverClass ?? '' })
+                      : (driverStatus?.driverClass ?? currentEngine?.label)}
+                </span>
+                {driverErr && <span style={{ fontSize: 11, color: 'var(--danger-fg)' }}>{driverErr}</span>}
+              </div>
+              {!driverStatus?.installed && (driverStatus?.downloadable ?? JDBC_DOWNLOADABLE.has(jdbcProfile ?? '')) && (
+                <button className="btn btn-secondary" onClick={handleDownloadDriver} disabled={driverBusy} style={{ flex: 'none' }}>
+                  {driverBusy
+                    ? <><Icon name="refresh-cw" size={14} className="spin" /> {t('modals.jdbcDriverDownloading')}</>
+                    : <><Icon name="arrow-down" size={14} /> {t('modals.jdbcDriverDownload')}</>}
+                </button>
+              )}
             </div>
           )}
 

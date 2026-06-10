@@ -388,6 +388,12 @@
       "document": "Document / KV / Search",
       "jdbc": "JDBC (driver JAR required)"
     },
+    "jdbcDriverReady": "JDBC driver ready",
+    "jdbcDriverMissing": "JDBC driver not installed",
+    "jdbcDriverManual": "Driver JAR must be supplied manually",
+    "jdbcDriverManualHint": "Place the driver JAR in the drivers folder (class: {{cls}})",
+    "jdbcDriverDownload": "Download driver",
+    "jdbcDriverDownloading": "Downloading…",
     "protocol": "Protocol",
     "fieldName": "Name",
     "fieldGroup": "Group",

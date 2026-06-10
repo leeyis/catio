@@ -154,6 +154,24 @@ describe('NewConnectionModal — multi-engine catalog', () => {
     })
   })
 
+  it('shows the JDBC driver row with a download button for a downloadable engine', async () => {
+    wrap(<NewConnectionModal onClose={() => {}} />)
+    fireEvent.click(screen.getByText('PostgreSQL'))
+    fireEvent.click(screen.getByText('Oracle'))
+    // Oracle has a Maven download → driver row offers "下载驱动".
+    await waitFor(() => expect(screen.getByText('下载驱动')).toBeTruthy())
+    expect(screen.getByText('JDBC 驱动未安装')).toBeTruthy()
+  })
+
+  it('shows a manual hint (no download button) for a proprietary engine', async () => {
+    wrap(<NewConnectionModal onClose={() => {}} />)
+    fireEvent.click(screen.getByText('PostgreSQL'))
+    fireEvent.click(screen.getByText('达梦 DM'))
+    // 达梦 is proprietary → manual hint, no download button.
+    await waitFor(() => expect(screen.getByText('需手动提供驱动 JAR')).toBeTruthy())
+    expect(screen.queryByText('下载驱动')).toBeNull()
+  })
+
   it('threads a JDBC engine as dbType=jdbc + its driverProfile', async () => {
     h.testConnection.mockResolvedValue({ version: 'Oracle 21c', latencyMs: 9 })
     const { container } = wrap(<NewConnectionModal onClose={() => {}} />)

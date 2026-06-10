@@ -314,6 +314,111 @@ pub async fn export_file(path: String, contents: String) -> Result<(), String> {
     std::fs::write(&path, contents).map_err(|e| e.to_string())
 }
 
+// ── JDBC driver management (DBeaver-style one-click download) ─────────────────
+
+/// Resolve the directory where JDBC driver JARs live: `CATIO_JDBC_DRIVERS_DIR`
+/// if set (dev/test + the value the app sets at startup), else
+/// `<app_data>/jdbc/drivers`. Created if missing.
+fn jdbc_drivers_dir(app: &tauri::AppHandle) -> Result<PathBuf, DbError> {
+    if let Some(d) = std::env::var_os("CATIO_JDBC_DRIVERS_DIR") {
+        let p = PathBuf::from(d);
+        std::fs::create_dir_all(&p).map_err(|e| DbError::Io(e.to_string()))?;
+        return Ok(p);
+    }
+    let dir = app_data_dir(app)?.join("jdbc").join("drivers");
+    std::fs::create_dir_all(&dir).map_err(|e| DbError::Io(e.to_string()))?;
+    Ok(dir)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JdbcDriverStatus {
+    /// engine profile (e.g. "oracle").
+    pub profile: String,
+    /// the expected driver JAR is present in the drivers dir.
+    pub installed: bool,
+    /// expected JAR filename (when there is a known download), else None.
+    pub file_name: Option<String>,
+    /// has a one-click Maven download (false → user must supply the JAR).
+    pub downloadable: bool,
+    /// JDBC driver class, shown as a hint for manual installs.
+    pub driver_class: Option<String>,
+    /// directory the user can drop a manual JAR into.
+    pub drivers_dir: String,
+}
+
+fn jdbc_status(profile: &str, dir: &std::path::Path) -> JdbcDriverStatus {
+    use crate::db::drivers::jdbc_config;
+    let spec = jdbc_config::download_spec(profile);
+    let (installed, file_name) = match &spec {
+        Some(s) => (dir.join(&s.file_name).exists(), Some(s.file_name.clone())),
+        None => (false, None),
+    };
+    JdbcDriverStatus {
+        profile: profile.to_string(),
+        installed,
+        file_name,
+        downloadable: spec.is_some(),
+        driver_class: jdbc_config::driver_class(profile),
+        drivers_dir: dir.to_string_lossy().into_owned(),
+    }
+}
+
+/// Report whether the JDBC driver for `profile` is installed + downloadable.
+#[tauri::command]
+pub async fn jdbc_driver_status(profile: String, app: tauri::AppHandle)
+    -> Result<JdbcDriverStatus, DbError> {
+    let dir = jdbc_drivers_dir(&app)?;
+    Ok(jdbc_status(&profile, &dir))
+}
+
+/// Download the JDBC driver JAR for `profile` from Maven Central into the drivers
+/// dir (streamed to a `.part` file then renamed). No-op if already present.
+#[tauri::command]
+pub async fn jdbc_download_driver(profile: String, app: tauri::AppHandle)
+    -> Result<JdbcDriverStatus, DbError> {
+    let dir = jdbc_drivers_dir(&app)?;
+    download_driver_to_dir(&profile, &dir).await
+}
+
+/// Core (AppHandle-free) driver download — testable directly. Streams the Maven
+/// JAR to `<dir>/<file>.part` then renames it into place; no-op if present.
+pub async fn download_driver_to_dir(profile: &str, dir: &std::path::Path)
+    -> Result<JdbcDriverStatus, DbError> {
+    use crate::db::drivers::jdbc_config;
+    use futures_util::StreamExt;
+    use std::io::Write;
+
+    let spec = jdbc_config::download_spec(profile).ok_or_else(|| {
+        DbError::Unsupported(format!(
+            "'{profile}' has no auto-download — place its driver JAR in {}",
+            dir.to_string_lossy()
+        ))
+    })?;
+    let target = dir.join(&spec.file_name);
+    if !target.exists() {
+        let resp = reqwest::Client::new()
+            .get(&spec.url)
+            .send().await
+            .map_err(|e| DbError::Io(format!("driver download failed: {e}")))?;
+        if !resp.status().is_success() {
+            return Err(DbError::Io(format!("driver download failed: HTTP {}", resp.status())));
+        }
+        let tmp = dir.join(format!("{}.part", spec.file_name));
+        {
+            let mut file = std::fs::File::create(&tmp).map_err(|e| DbError::Io(e.to_string()))?;
+            let mut stream = resp.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|e| DbError::Io(format!("driver download interrupted: {e}")))?;
+                file.write_all(&chunk).map_err(|e| DbError::Io(e.to_string()))?;
+            }
+            file.flush().map_err(|e| DbError::Io(e.to_string()))?;
+        }
+        std::fs::rename(&tmp, &target).map_err(|e| DbError::Io(e.to_string()))?;
+    }
+    Ok(jdbc_status(profile, dir))
+}
+
 #[cfg(test)]
 mod tests {
     use super::qualified_name;

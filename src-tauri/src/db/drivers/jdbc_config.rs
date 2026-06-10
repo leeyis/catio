@@ -73,6 +73,57 @@ pub fn driver_class(profile: &str) -> Option<String> {
     build(profile, "h", 1, "").ok().map(|t| t.driver_class)
 }
 
+/// A one-click-downloadable driver JAR (Maven Central), DBeaver-style.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriverDownload {
+    pub url: String,
+    pub file_name: String,
+}
+
+/// Build a Maven Central URL + filename for `group:artifact:version` (+ optional
+/// classifier). Returns `(url, file_name)`.
+fn maven(group: &str, artifact: &str, version: &str, classifier: Option<&str>) -> DriverDownload {
+    let gpath = group.replace('.', "/");
+    let suffix = classifier.map(|c| format!("-{c}")).unwrap_or_default();
+    let file_name = format!("{artifact}-{version}{suffix}.jar");
+    DriverDownload {
+        url: format!("https://repo1.maven.org/maven2/{gpath}/{artifact}/{version}/{file_name}"),
+        file_name,
+    }
+}
+
+/// Where to fetch the JDBC driver JAR for `profile`, or `None` when the engine's
+/// driver is proprietary / not on Maven Central (the user must supply the JAR).
+///
+/// Only self-contained jars (or vendor "bundle"/"standalone" uber-jars) are
+/// listed, so a single download yields a working driver. Versions are pinned and
+/// verified to resolve on Maven Central.
+pub fn download_spec(profile: &str) -> Option<DriverDownload> {
+    Some(match profile {
+        "oracle"     => maven("com.oracle.database.jdbc", "ojdbc11", "23.5.0.24.07", None),
+        "db2"        => maven("com.ibm.db2", "jcc", "11.5.9.0", None),
+        "snowflake"  => maven("net.snowflake", "snowflake-jdbc", "3.19.0", None),
+        "trino"      => maven("io.trino", "trino-jdbc", "457", None),
+        "hive"       => maven("org.apache.hive", "hive-jdbc", "4.0.1", Some("standalone")),
+        "neo4j"      => maven("org.neo4j", "neo4j-jdbc-full-bundle", "6.2.1", None),
+        "saphana"    => maven("com.sap.cloud.db.jdbc", "ngdbc", "2.28.8", None),
+        "teradata"   => maven("com.teradata.jdbc", "terajdbc", "20.00.00.42", None),
+        "vertica"    => maven("com.vertica.jdbc", "vertica-jdbc", "24.3.0-0", None),
+        "firebird"   => maven("org.firebirdsql.jdbc", "jaybird", "5.0.6.java11", None),
+        "exasol"     => maven("com.exasol", "exasol-jdbc", "24.2.0", None),
+        "informix"   => maven("com.ibm.informix", "jdbc", "4.50.10.1", None),
+        "iris"       => maven("com.intersystems", "intersystems-jdbc", "3.11.0", None),
+        "databricks" => maven("com.databricks", "databricks-jdbc", "2.6.40", None),
+        "tdengine"   => maven("com.taosdata.jdbc", "taos-jdbcdriver", "3.4.0", None),
+        "kylin"      => maven("org.apache.kylin", "kylin-jdbc", "4.0.4", None),
+        // Not a clean single-jar download → user supplies the JAR:
+        //   cassandra (needs the driver + deps; no published uber-jar),
+        //   dameng/yashandb/gbase8s/xugu/sundb/bigquery/access (proprietary /
+        //   not on Maven Central). h2 is bundled in the plugin.
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,6 +164,24 @@ mod tests {
     fn unknown_profile_is_unsupported() {
         let e = build("totally-made-up", "h", 1, "").unwrap_err();
         assert!(matches!(e, DbError::Unsupported(_)));
+    }
+
+    #[test]
+    fn download_spec_builds_maven_central_urls() {
+        let o = download_spec("oracle").unwrap();
+        assert_eq!(o.file_name, "ojdbc11-23.5.0.24.07.jar");
+        assert_eq!(o.url, "https://repo1.maven.org/maven2/com/oracle/database/jdbc/ojdbc11/23.5.0.24.07/ojdbc11-23.5.0.24.07.jar");
+        // classifier (hive standalone uber-jar)
+        let h = download_spec("hive").unwrap();
+        assert_eq!(h.file_name, "hive-jdbc-4.0.1-standalone.jar");
+        assert!(h.url.ends_with("/hive-jdbc/4.0.1/hive-jdbc-4.0.1-standalone.jar"));
+    }
+
+    #[test]
+    fn proprietary_engines_have_no_download() {
+        for p in ["dameng", "yashandb", "gbase8s", "xugu", "sundb", "bigquery", "access", "cassandra", "h2"] {
+            assert!(download_spec(p).is_none(), "{p} should be manual");
+        }
     }
 
     #[test]
