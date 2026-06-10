@@ -14,6 +14,7 @@ import {
   type DbProfile,
 } from '../../state/dbConnections'
 import { dbErrMsg } from '../../services/db'
+import { findEngine } from '../../services/dbEngines'
 
 export interface DetailsPanelProps {
   onClose: () => void
@@ -211,7 +212,11 @@ function DbDetails({ conn, onClose, onEdit, onDelete, onConnect, onDisconnect, o
   }
 
   const isActive = listActiveDbConnections().some(a => a.profileId === profile.id)
-  const engineLabel = (D.engineMeta[profile.dbType] || {}).label ?? profile.dbType
+  // Prefer the engine catalog's name for the specific engine variant (e.g.
+  // "CockroachDB") rather than the bare protocol family ("PostgreSQL").
+  const engineLabel = findEngine(profile.engineId ?? profile.dbType)?.label
+    ?? (D.engineMeta[profile.engineId ?? profile.dbType] || {}).label
+    ?? profile.dbType
 
   const descriptor = `${profile.dbType}://${profile.user}@${profile.host}:${profile.port}/${profile.database ?? ''}`
 

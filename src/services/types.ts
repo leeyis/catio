@@ -29,7 +29,13 @@ export interface Connection {
   lastUsed?: string
   proto?: 'ssh' | 'telnet' | 'local'
   os?: string
+  /** Protocol family (DbType) — drives DDL dialect / quoting. Keep this the
+   *  family (e.g. "mysql"), not a catalog variant id, so dialect selection stays
+   *  correct for MySQL-wire engines (TiDB, GoldenDB, …). */
   engine?: string
+  /** Engine-catalog id (e.g. "cockroachdb") — drives the brand logo/glyph only.
+   *  Falls back to `engine` when absent. */
+  engineId?: string
   tunnel?: string
   stats?: ConnStats
 }

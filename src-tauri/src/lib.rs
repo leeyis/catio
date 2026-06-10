@@ -65,6 +65,22 @@ pub fn run() {
             mcp::mcp_status,
             mcp::mcp_sync_targets
         ])
+        .setup(|app| {
+            // Default the JDBC sidecar's driver-JAR directory to
+            // <app_data>/jdbc/drivers (created if missing) unless the user
+            // overrode CATIO_JDBC_DRIVERS_DIR. JDBC engines load their
+            // user-supplied driver JARs from here; this realises the documented
+            // default so packaged installs work without manual env setup.
+            if std::env::var_os("CATIO_JDBC_DRIVERS_DIR").is_none() {
+                use tauri::Manager;
+                if let Ok(dir) = app.path().app_data_dir() {
+                    let drivers = dir.join("jdbc").join("drivers");
+                    let _ = std::fs::create_dir_all(&drivers);
+                    std::env::set_var("CATIO_JDBC_DRIVERS_DIR", drivers);
+                }
+            }
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

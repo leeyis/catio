@@ -2,10 +2,11 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import {
   listDbConnections, saveDbConnection, removeDbConnection,
   setActiveDbConnection, getActiveDbConnection, listActiveDbConnections, removeActiveDbConnection,
-  generateProfileId,
+  generateProfileId, dbProfileToConnection,
 } from './dbConnections'
 import type { DbProfile } from './dbConnections'
 import type { DbConnectResult } from '../services/db'
+import { dialectFor } from '../components/dbviews/structureDdl'
 
 beforeEach(() => {
   localStorage.clear()
@@ -134,6 +135,33 @@ describe('active DB connection store (in-memory)', () => {
     const list = listActiveDbConnections()
     expect(list).toHaveLength(2)
     expect(list.map(c => c.connId).sort()).toEqual(['conn-abc-123', 'conn-xyz-999'])
+  })
+})
+
+describe('dbProfileToConnection — engine family vs catalog id', () => {
+  // Regression (codex P1): a MySQL-wire variant must report the protocol family
+  // as `engine` so structureDdl.dialectFor() picks the MySQL dialect; the catalog
+  // id rides separately in `engineId` for the brand glyph.
+  it('maps a MySQL-wire variant to engine=mysql (+ engineId) and selects the MySQL DDL dialect', () => {
+    const p: DbProfile = {
+      id: 'db-1', name: 'gd', dbType: 'mysql', driverProfile: 'goldendb',
+      engineId: 'goldendb', host: 'h', port: 3306, user: 'u',
+    }
+    const c = dbProfileToConnection(p)
+    expect(c.engine).toBe('mysql')        // family → correct DDL quoting
+    expect(c.engineId).toBe('goldendb')   // variant → brand logo
+    expect(dialectFor(c.engine)).toBe('mysql')
+  })
+
+  it('keeps engine as the family for a PG-wire variant too', () => {
+    const p: DbProfile = {
+      id: 'db-2', name: 'crdb', dbType: 'postgres', driverProfile: 'cockroachdb',
+      engineId: 'cockroachdb', host: 'h', port: 26257, user: 'u',
+    }
+    const c = dbProfileToConnection(p)
+    expect(c.engine).toBe('postgres')
+    expect(c.engineId).toBe('cockroachdb')
+    expect(dialectFor(c.engine)).toBe('postgres')
   })
 })
 

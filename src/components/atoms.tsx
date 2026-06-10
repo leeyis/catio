@@ -175,8 +175,11 @@ export function ConnGlyph({ conn, size = 42, radius = 10 }: ConnGlyphProps) {
   const D = useData()
   const small = size <= 32
   if (conn.kind === 'db') {
-    const m = D.engineMeta[conn.engine ?? ''] || { short: 'DB', color: 'var(--text-tertiary)' }
-    const logo = dbLogo(conn.engine)
+    // Brand glyph/logo prefers the catalog variant id (engineId) so e.g. a
+    // CockroachDB connection shows its own mark; falls back to the family.
+    const glyphId = conn.engineId ?? conn.engine
+    const m = D.engineMeta[glyphId ?? ''] || { short: 'DB', color: 'var(--text-tertiary)' }
+    const logo = dbLogo(glyphId)
     if (logo) {
       return (
         <div className="icon-badge" style={{ width: size, height: size, borderRadius: radius, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', padding: small ? 4 : 6 }}>

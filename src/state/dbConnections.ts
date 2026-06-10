@@ -95,9 +95,13 @@ export function dbProfileToConnection(p: DbProfile, active = false): Connection 
     name: p.name,
     sub: `${p.engineId ?? p.dbType} · ${p.host}:${p.port}`,
     icon: 'database',
-    // Prefer the catalog engine id so protocol-family variants (CockroachDB,
-    // MariaDB, …) render their own brand logo rather than the family's.
-    engine: p.engineId ?? p.dbType,
+    // `engine` MUST stay the protocol family (dbType) — DDL dialect selection
+    // (structureDdl.dialectFor) keys off it by substring, so a MySQL-wire variant
+    // like "goldendb"/"tidb" must report "mysql" here or it generates wrong DDL.
+    engine: p.dbType,
+    // `engineId` carries the catalog variant id so the glyph shows the right
+    // brand logo (CockroachDB, MariaDB, …) without affecting dialect.
+    engineId: p.engineId,
     status: active ? 'up' : 'idle',
   }
 }
