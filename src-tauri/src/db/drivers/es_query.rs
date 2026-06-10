@@ -79,7 +79,9 @@ pub fn parse_es_response(body: Value, max_rows: u32) -> QueryResult {
             pk: false,
         }).collect();
         let mut out: Vec<Vec<Value>> = rows.iter().filter_map(|r| r.as_array().cloned()).collect();
-        let truncated = out.len() > max_rows as usize;
+        // ES _sql 还有后续页时返回非空 cursor —— 即结果被截断。
+        let has_cursor = body.get("cursor").and_then(|c| c.as_str()).map_or(false, |c| !c.is_empty());
+        let truncated = has_cursor || out.len() > max_rows as usize;
         out.truncate(max_rows as usize);
         return QueryResult { columns, rows: out, rows_affected: None, truncated };
     }
@@ -255,6 +257,22 @@ mod tests {
         let hits: Vec<_> = (0..5).map(|i| json!({"_id": i.to_string(), "_source": {"a": i}})).collect();
         let r = parse_es_response(json!({"hits": {"hits": hits}}), 3);
         assert_eq!(r.rows.len(), 3);
+        assert!(r.truncated);
+    }
+
+    #[test]
+    fn sql_response_with_cursor_is_truncated() {
+        let body = json!({"columns": [{"name": "a", "type": "long"}], "rows": [[1]], "cursor": "abc123"});
+        let r = parse_es_response(body, 100);
+        assert!(r.truncated);
+    }
+
+    #[test]
+    fn sql_response_truncates_rows_to_max_rows() {
+        // 模拟 SELECT * LIMIT 哨兵行场景:有效上限 1,返回 2 行 → 截断到 1 行且 truncated。
+        let body = json!({"columns": [{"name": "a", "type": "long"}], "rows": [[1], [2]]});
+        let r = parse_es_response(body, 1);
+        assert_eq!(r.rows.len(), 1);
         assert!(r.truncated);
     }
 }

@@ -106,14 +106,16 @@ impl Driver for ElasticsearchDriver {
         }
 
         if let Some((index, limit)) = es_query::parse_select_star(input) {
-            let size = (limit.unwrap_or(max_rows).min(max_rows) as u64) + 1;
-            let body = serde_json::json!({ "from": 0, "size": size, "sort": ["_doc"] });
+            // 有效上限 = min(用户 LIMIT, max_rows);多取 1 行用于 truncated 检测,
+            // 拍平时按有效上限截断(否则 LIMIT 50 会显示 51 行)。
+            let effective = limit.unwrap_or(max_rows).min(max_rows);
+            let body = serde_json::json!({ "from": 0, "size": (effective as u64) + 1, "sort": ["_doc"] });
             let resp = self.http.post(&format!("/{}/_search", index)).json(&body).send().await
                 .map_err(send_err)?;
             let resp = check_response_query(resp).await?;
             let body: serde_json::Value = resp.json().await
                 .map_err(|e| DbError::QueryFailed(format!("Elasticsearch parse error: {e}")))?;
-            return Ok(es_query::parse_es_response(body, max_rows));
+            return Ok(es_query::parse_es_response(body, effective));
         }
 
         if es_query::is_select(input) {

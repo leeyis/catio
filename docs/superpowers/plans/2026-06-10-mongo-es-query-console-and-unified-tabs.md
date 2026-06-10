@@ -1050,6 +1050,22 @@ mod tests {
         assert_eq!(r.rows.len(), 3);
         assert!(r.truncated);
     }
+
+    #[test]
+    fn sql_response_with_cursor_is_truncated() {
+        let body = json!({"columns": [{"name": "a", "type": "long"}], "rows": [[1]], "cursor": "abc123"});
+        let r = parse_es_response(body, 100);
+        assert!(r.truncated);
+    }
+
+    #[test]
+    fn sql_response_truncates_rows_to_max_rows() {
+        // 模拟 SELECT * LIMIT 哨兵行场景:有效上限 1,返回 2 行 → 截断到 1 行且 truncated。
+        let body = json!({"columns": [{"name": "a", "type": "long"}], "rows": [[1], [2]]});
+        let r = parse_es_response(body, 1);
+        assert_eq!(r.rows.len(), 1);
+        assert!(r.truncated);
+    }
 }
 ```
 
@@ -1120,7 +1136,9 @@ pub fn parse_es_response(body: Value, max_rows: u32) -> QueryResult {
             pk: false,
         }).collect();
         let mut out: Vec<Vec<Value>> = rows.iter().filter_map(|r| r.as_array().cloned()).collect();
-        let truncated = out.len() > max_rows as usize;
+        // ES _sql 还有后续页时返回非空 cursor —— 即结果被截断。
+        let has_cursor = body.get("cursor").and_then(|c| c.as_str()).map_or(false, |c| !c.is_empty());
+        let truncated = has_cursor || out.len() > max_rows as usize;
         out.truncate(max_rows as usize);
         return QueryResult { columns, rows: out, rows_affected: None, truncated };
     }
@@ -1262,14 +1280,16 @@ Expected: 8 个测试全部 PASS。
         }
 
         if let Some((index, limit)) = es_query::parse_select_star(input) {
-            let size = (limit.unwrap_or(max_rows).min(max_rows) as u64) + 1;
-            let body = serde_json::json!({ "from": 0, "size": size, "sort": ["_doc"] });
+            // 有效上限 = min(用户 LIMIT, max_rows);多取 1 行用于 truncated 检测,
+            // 拍平时按有效上限截断(否则 LIMIT 50 会显示 51 行)。
+            let effective = limit.unwrap_or(max_rows).min(max_rows);
+            let body = serde_json::json!({ "from": 0, "size": (effective as u64) + 1, "sort": ["_doc"] });
             let resp = self.http.post(&format!("/{}/_search", index)).json(&body).send().await
                 .map_err(send_err)?;
             let resp = check_response_query(resp).await?;
             let body: serde_json::Value = resp.json().await
                 .map_err(|e| DbError::QueryFailed(format!("Elasticsearch parse error: {e}")))?;
-            return Ok(es_query::parse_es_response(body, max_rows));
+            return Ok(es_query::parse_es_response(body, effective));
         }
 
         if es_query::is_select(input) {
