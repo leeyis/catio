@@ -249,6 +249,7 @@ describe('DbWorkbench unified tabs', () => {
     fireEvent.click(await screen.findByText('calc_total()'))
     expect(await screen.findByTestId('wbtab-object:function:public.calc_total')).toBeInTheDocument()
     expect(screen.getByTestId('wbtab-sql:1')).toBeInTheDocument()
+    // CodeMirror 在 jsdom 下取不到渲染文本,降级为行为断言(objectSource 被正确调用)
     // 函数源码已加载(通过行为验证)
     await waitFor(() => expect(h.objectSource).toHaveBeenCalledWith('conn-live', 'public', 'calc_total', 'function'))
   })
@@ -261,5 +262,40 @@ describe('DbWorkbench unified tabs', () => {
     fireEvent.click(screen.getByTestId('wbtab-close-sql:1'))
     expect(screen.queryByTestId('wbtab-sql:1')).not.toBeInTheDocument()
     expect(tableChip).toBeInTheDocument()
+  })
+
+  it('关闭当前 tab 后相邻 tab 成为激活态(内容可见)', async () => {
+    wrap(<DbWorkbench conn={CONN} />)
+    await screen.findByTestId('wbtab-table:public.orders')
+    await screen.findByText('101')
+    fireEvent.click(screen.getByTestId('wb-new-query'))
+    await screen.findByTestId('wbtab-sql:1')
+    fireEvent.click(screen.getByTestId('wbtab-close-sql:1'))
+    // 关闭激活的 sql tab 后,表 tab 被激活,其内容重新可见
+    expect(screen.getByText('101')).toBeVisible()
+  })
+
+  it('schema 刷新后失效的表 tab 被剔除,activeId 回落到存活 tab', async () => {
+    wrap(<DbWorkbench conn={CONN} />)
+    await screen.findByTestId('wbtab-table:public.orders')
+    // 第二次 getSchema(刷新)返回不含 orders 的 schema → orders tab 应被剔除,自动打开新首表
+    h.getSchema.mockResolvedValue({
+      db: 'conn',
+      schemas: [{ name: 'public', open: false, tables: [{ name: 'users', rows: '', cols: 0 }], views: [], functions: [] }],
+    })
+    fireEvent.click(screen.getByTestId('wb-refresh'))
+    await waitFor(() => expect(screen.queryByTestId('wbtab-table:public.orders')).not.toBeInTheDocument())
+    // 新首表 tab 打开且为激活态(其 testid 存在)
+    expect(await screen.findByTestId('wbtab-table:public.users')).toBeInTheDocument()
+  })
+
+  it('mock 路径(无连接)关闭最后一个 tab 显示空状态', async () => {
+    h.list.mockReturnValue([])
+    wrap(<DbWorkbench conn={CONN} />)
+    const chip = await screen.findByTestId('wbtab-table:public.orders')
+    expect(chip).toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('wbtab-close-table:public.orders'))
+    expect(screen.queryByTestId('wbtab-table:public.orders')).not.toBeInTheDocument()
+    expect(screen.getByText(/没有打开的标签|No open tabs/)).toBeInTheDocument()
   })
 })

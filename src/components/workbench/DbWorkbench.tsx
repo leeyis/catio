@@ -145,12 +145,16 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
     const s = schema ?? namespace.name
     openTab({ id: tabIdOf.er(s), kind: 'er', schema: s })
   }
-  /** 关闭 tab;若关的是当前 tab,激活右侧相邻(无则左侧),全关后为空状态。 */
+  /** 关闭 tab;若关的是当前 tab,激活右侧相邻(无则左侧),全关后为空状态。
+   *  全函数式更新:批量/程序化连续关闭也不会用陈旧 tabs 覆盖。 */
   function closeTab(id: string) {
-    const idx = tabs.findIndex(x => x.id === id)
-    const next = tabs.filter(x => x.id !== id)
-    setTabs(next)
-    if (activeId === id) setActiveId(next.length ? next[Math.min(idx, next.length - 1)].id : null)
+    setTabs(prev => {
+      const idx = prev.findIndex(x => x.id === id)
+      if (idx < 0) return prev
+      const next = prev.filter(x => x.id !== id)
+      setActiveId(cur => (cur === id ? (next.length ? next[Math.min(idx, next.length - 1)].id : null) : cur))
+      return next
+    })
   }
 
   // Live schema 加载后:剔除不存在的表 tab;若没有任何表 tab,自动打开第一张表。
@@ -163,6 +167,7 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
     const firstTable = first.tables[0]
     setTabs(prev => {
       const kept = prev.filter(tb => tb.kind !== 'table' || exists(tb.schema, tb.table))
+      if (kept.length === prev.length && (kept.some(tb => tb.kind === 'table') || !firstTable)) return prev
       if (kept.some(tb => tb.kind === 'table') || !firstTable) return kept
       return [...kept, { id: tabIdOf.table(first.name, firstTable.name), kind: 'table' as const, schema: first.name, table: firstTable.name }]
     })
