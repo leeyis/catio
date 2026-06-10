@@ -389,7 +389,8 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
           </div>
         )}
         {refreshErr && (
-          <div className="row gap6" style={{ position: 'absolute', left: 12, bottom: 12, zIndex: 80, maxWidth: 420, padding: '9px 12px', borderRadius: 10, border: '1px solid var(--danger-border)', background: 'var(--danger-soft)', color: 'var(--danger-fg)', fontSize: 12, boxShadow: 'var(--shadow-window)' }}>
+          /* createErr toast 占同一角落时上移错开,避免互相遮挡。 */
+          <div className="row gap6" style={{ position: 'absolute', left: 12, bottom: createErr ? 58 : 12, zIndex: 80, maxWidth: 420, padding: '9px 12px', borderRadius: 10, border: '1px solid var(--danger-border)', background: 'var(--danger-soft)', color: 'var(--danger-fg)', fontSize: 12, boxShadow: 'var(--shadow-window)' }}>
             <Icon name="alert-triangle" size={14} style={{ flex: 'none' }} />
             <span>{t('workbench.refreshFailed', { message: refreshErr })}</span>
             <button className="icon-btn bare" style={{ width: 20, height: 20, marginLeft: 'auto' }} onClick={() => setRefreshErr(null)}><Icon name="x" size={12} /></button>
