@@ -68,6 +68,9 @@ export function TablePane({ conn, connId, caps, schema, table, density }: TableP
     return () => { cancelled = true }
   }, [connId, schema, table])
 
+  // mongo/es 的数据网格编辑会生成 SQL DML(db_apply_edits),对这两类引擎必败 → 预览只读。
+  const sqlDml = conn.engine !== 'mongodb' && conn.engine !== 'elasticsearch'
+
   return (
     <>
       <div className="row" style={{ justifyContent: 'space-between', padding: '8px 12px', borderBottom: '1px solid var(--border-hairline)', flex: 'none', gap: 12 }}>
@@ -91,7 +94,7 @@ export function TablePane({ conn, connId, caps, schema, table, density }: TableP
               columns={(live?.columns ?? [])}
               rows={(live?.rows ?? [])}
               statusTones={D.statusTones} density={density} key={`${schema ?? ''}.${table}`}
-              writable={caps.writable} connId={connId} table={table} schema={schema}
+              writable={caps.writable && sqlDml} connId={connId} table={table} schema={schema}
               rowKeys={rowKeys ?? undefined} keyColumn={rowKeys ? 'ctid' : undefined}
               livePreview loadError={liveErr ?? undefined} />
           : <DataGrid

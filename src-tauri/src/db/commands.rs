@@ -239,6 +239,11 @@ pub async fn db_preview_dml(conn_id: String, req: EditRequest,
     if !drv.capabilities().writable {
         return Err(DbError::Unsupported("read-only engine".into()));
     }
+    // Mongo/ES 的网格编辑走 SQL DML 路径,这两类引擎不支持 —— 在入口明确拒绝,
+    // 而不是让生成的 SQL 在 query() 里报一个误导性的语法错误。
+    if matches!(drv.db_type(), crate::db::DatabaseType::Mongodb | crate::db::DatabaseType::Elasticsearch) {
+        return Err(DbError::Unsupported("editing via SQL DML is not supported for this engine".into()));
+    }
     build_sql(drv.db_type(), &req)
 }
 
@@ -248,6 +253,11 @@ pub async fn db_apply_edits(conn_id: String, reqs: Vec<EditRequest>,
     let drv = mgr.get(&conn_id).await.ok_or(DbError::NotFound(conn_id))?;
     if !drv.capabilities().writable {
         return Err(DbError::Unsupported("read-only engine".into()));
+    }
+    // Mongo/ES 的网格编辑走 SQL DML 路径,这两类引擎不支持 —— 在入口明确拒绝,
+    // 而不是让生成的 SQL 在 query() 里报一个误导性的语法错误。
+    if matches!(drv.db_type(), crate::db::DatabaseType::Mongodb | crate::db::DatabaseType::Elasticsearch) {
+        return Err(DbError::Unsupported("editing via SQL DML is not supported for this engine".into()));
     }
     let mut affected = 0u64;
     for req in &reqs {

@@ -230,7 +230,9 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
                     columns={result?.columns ?? []}
                     rows={result?.rows ?? []}
                     statusTones={D.statusTones} density={density}
-                    writable={writable && !plain} connId={connId} sql={result?.sql}
+                    writable={writable && !plain} connId={connId}
+                    // plain 引擎(mongo/es)不传 sql:服务端分页会拼 SQL LIMIT/OFFSET 必败,回落客户端分页。
+                    sql={plain ? undefined : result?.sql}
                     resultLabel={t('dbviews.queryResult')}
                     loadError={runErr ?? undefined} />
                 : <DataGrid
