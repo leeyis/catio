@@ -9,7 +9,7 @@ use crate::db::drivers::http::{HttpClient, check_response_connect, check_respons
 
 /// Elasticsearch driver — pseudo-tabular mapping.
 /// Indices → tables, documents → rows.
-/// sql_console = false, er = false.
+/// sql_console = true(REST / SELECT,见 query()), er = false.
 pub struct ElasticsearchDriver {
     http: HttpClient,
 }
@@ -74,74 +74,62 @@ impl Driver for ElasticsearchDriver {
         Ok(format!("Elasticsearch {version}"))
     }
 
-    /// query() treats `sql` as an INDEX NAME (DataGrid uses this to fetch rows).
-    /// GET /<index>/_search?size=<max_rows> → hits.hits._source fields as columns/rows.
+    /// 查询控制台多语法入口(照 dbx execute_rest_query 的分流):
+    /// 1) REST `GET/POST/PUT/DELETE /path [+ JSON body]`
+    /// 2) 简单 `SELECT * FROM idx [LIMIT n]` → 直转 _search
+    /// 3) 其他 SELECT → 转发 ES 原生 _sql endpoint
     async fn query(&self, sql: &str, max_rows: u32) -> Result<QueryResult, DbError> {
-        let index = sql.trim();
-        if index.is_empty() {
-            return Err(DbError::QueryFailed("Elasticsearch query: provide an index name as the query".into()));
+        use crate::db::drivers::es_query::{self, RestRequest};
+        let input = sql.trim();
+        if input.is_empty() {
+            return Err(DbError::QueryFailed(es_query::ES_SYNTAX_HINT.into()));
+        }
+        let send_err = |e: reqwest::Error| DbError::QueryFailed(format!("Elasticsearch request failed: {e}"));
+
+        if let Some(parsed) = es_query::parse_rest(input) {
+            let RestRequest { method, path, body } = parsed.map_err(DbError::QueryFailed)?;
+            let req = match method.as_str() {
+                "GET" => self.http.get(&path),
+                "POST" => self.http.post(&path),
+                "PUT" => self.http.put(&path),
+                _ => self.http.delete(&path),
+            };
+            let req = match body { Some(b) => req.json(&b), None => req };
+            let resp = req.send().await.map_err(send_err)?;
+            let resp = check_response_query(resp).await?;
+            // _cat 端点常返回纯文本:先按 JSON 解析,失败则包成字符串走 status|response。
+            let text = resp.text().await
+                .map_err(|e| DbError::QueryFailed(format!("Elasticsearch parse error: {e}")))?;
+            let body: serde_json::Value = serde_json::from_str(&text)
+                .unwrap_or(serde_json::Value::String(text));
+            return Ok(es_query::parse_es_response(body, max_rows));
         }
 
-        let path = format!("/{}/_search", index);
-        // Request one extra hit so we can detect truncation without counting == max_rows.
-        let fetch_size = (max_rows as u64) + 1;
-        let body = serde_json::json!({
-            "from": 0,
-            "size": fetch_size,
-            "sort": ["_doc"],
-        });
-        let resp = self.http
-            .post(&path)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| DbError::QueryFailed(format!("Elasticsearch request failed: {e}")))?;
-        let resp = check_response_query(resp).await?;
-
-        let result: SearchResponse = resp
-            .json()
-            .await
-            .map_err(|e| DbError::QueryFailed(format!("Elasticsearch parse error: {e}")))?;
-
-        // Detect truncation via the extra hit, then clamp to max_rows.
-        let mut hits = result.hits.hits;
-        let truncated = hits.len() > max_rows as usize;
-        if truncated {
-            hits.truncate(max_rows as usize);
+        if let Some((index, limit)) = es_query::parse_select_star(input) {
+            let size = (limit.unwrap_or(max_rows).min(max_rows) as u64) + 1;
+            let body = serde_json::json!({ "from": 0, "size": size, "sort": ["_doc"] });
+            let resp = self.http.post(&format!("/{}/_search", index)).json(&body).send().await
+                .map_err(send_err)?;
+            let resp = check_response_query(resp).await?;
+            let body: serde_json::Value = resp.json().await
+                .map_err(|e| DbError::QueryFailed(format!("Elasticsearch parse error: {e}")))?;
+            return Ok(es_query::parse_es_response(body, max_rows));
         }
 
-        // Build column union from all _source docs + always include _id first
-        let mut all_keys: Vec<String> = vec!["_id".to_string()];
-        let docs: Vec<serde_json::Map<String, serde_json::Value>> = hits
-            .into_iter()
-            .map(|hit| {
-                let mut doc = serde_json::Map::new();
-                doc.insert("_id".to_string(), serde_json::Value::String(hit.id));
-                if let Some(serde_json::Value::Object(source)) = hit.source {
-                    for (k, v) in source {
-                        if !all_keys.contains(&k) {
-                            all_keys.push(k.clone());
-                        }
-                        doc.insert(k, v);
-                    }
-                }
-                doc
-            })
-            .collect();
+        if es_query::is_select(input) {
+            let body = serde_json::json!({
+                "query": input.trim_end_matches(';'),
+                "fetch_size": max_rows,
+            });
+            let resp = self.http.post("/_sql?format=json").json(&body).send().await
+                .map_err(send_err)?;
+            let resp = check_response_query(resp).await?;
+            let body: serde_json::Value = resp.json().await
+                .map_err(|e| DbError::QueryFailed(format!("Elasticsearch parse error: {e}")))?;
+            return Ok(es_query::parse_es_response(body, max_rows));
+        }
 
-        let columns: Vec<ColumnInfo> = all_keys.iter().map(|k| ColumnInfo {
-            name: k.clone(),
-            type_name: String::new(),
-            pk: k == "_id",
-        }).collect();
-
-        let rows: Vec<Vec<serde_json::Value>> = docs.iter().map(|doc| {
-            all_keys.iter().map(|k| {
-                doc.get(k).cloned().unwrap_or(serde_json::Value::Null)
-            }).collect()
-        }).collect();
-
-        Ok(QueryResult { columns, rows, rows_affected: None, truncated })
+        Err(DbError::QueryFailed(es_query::ES_SYNTAX_HINT.into()))
     }
 
     /// Native index-data preview for the data grid: `table` is the index,

@@ -7,6 +7,7 @@ pub mod http;
 pub mod clickhouse;
 pub mod rqlite;
 pub mod elasticsearch;
+pub mod es_query;
 pub mod mongo;
 pub mod mongo_shell;
 pub mod redis;
