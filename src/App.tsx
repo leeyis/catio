@@ -536,6 +536,23 @@ export default function App() {
         delete n[closing.id]
         return n
       })
+      // DB tab: when no remaining tab uses this connection, release its live
+      // backend connection. This keeps "has an open tab" ⟺ "active connection",
+      // so the details panel correctly offers 连接 (not 关闭连接) once the tab is
+      // gone. (disconnectDbProfile already clears actives before closeTab, so this
+      // is a no-op there — it only fires when the tab is closed via its ✕.)
+      const stillOpen = remaining.some(tb => tb.connId === closing.connId)
+      if (!stillOpen) {
+        const actives = listActiveDbConnections().filter(a => a.profileId === closing.connId)
+        if (actives.length > 0) {
+          actives.forEach(a => {
+            dbDisconnect(a.connId).catch(() => { /* best-effort */ })
+            removeActiveDbConnection(a.connId)
+          })
+          bumpDbActive()
+          syncMcpTargets()
+        }
+      }
     }
     if (!closing?.sessionId) return
     const sid = closing.sessionId
@@ -597,6 +614,14 @@ export default function App() {
     setView('home')
   }
   function openDetail(conn: Connection) {
+    // If this connection already has an open tab, activate it so the focused
+    // sidebar card and the middle workbench tab stay consistent (clicking a host
+    // surfaces its terminal, a DB its workbench — not whatever tab was active).
+    const tab = tabs.find(tb => tb.connId === conn.id)
+    if (tab) {
+      setActiveTab(tab.id)
+      setView('workbench')
+    }
     setDetailConn(conn)
     setActivePanel('details')
     setPanelOpen(true)
