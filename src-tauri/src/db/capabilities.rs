@@ -29,9 +29,11 @@ pub fn capabilities_for(db: DatabaseType) -> Capabilities {
             writable: true, transactions: false, schemas: false,
             sql_console: true, er: false, structure_edit: false,
         },
+        // Mongo 用 mongo shell 语法、ES 用 REST/SELECT(见各 driver 的 query()),
+        // 控制台可用 → sql_console = true。
         Elasticsearch | Mongodb => Capabilities {
             writable: true, transactions: false, schemas: db == Mongodb,
-            sql_console: false, er: false, structure_edit: false,
+            sql_console: true, er: false, structure_edit: false,
         },
         Redis => Capabilities {
             writable: true, transactions: false, schemas: true,
@@ -63,5 +65,10 @@ mod tests {
     #[test]
     fn mysql_has_no_schema_namespace() {
         assert!(!capabilities_for(DatabaseType::Mysql).schemas);
+    }
+    #[test]
+    fn mongodb_and_es_have_sql_console() {
+        assert!(capabilities_for(DatabaseType::Mongodb).sql_console);
+        assert!(capabilities_for(DatabaseType::Elasticsearch).sql_console);
     }
 }
