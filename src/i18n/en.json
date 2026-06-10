@@ -193,6 +193,7 @@
     "searchTablesViews": "Search tables / views…",
     "newQuery": "New query",
     "refresh": "Refresh",
+    "refreshFailed": "Refresh failed: {{message}}",
     "scrollLeft": "Scroll left",
     "scrollRight": "Scroll right",
     "erDiagram": "ER diagram",

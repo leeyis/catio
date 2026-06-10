@@ -35,9 +35,11 @@ export interface SchemaBrowserProps {
   conn?: Connection
   /** True when connected to a live backend (hides the mock column-expansion affordance). */
   live?: boolean
+  /** True while the schema tree is being re-introspected — spins the refresh icon. */
+  refreshing?: boolean
 }
 
-export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, schemas, conn, live }: SchemaBrowserProps) {
+export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, schemas, conn, live, refreshing }: SchemaBrowserProps) {
   const { t } = useTranslation()
   const D = useData()
   // Live path: render every supplied namespace; mock path: the single seeded schema (pixel-identical).
@@ -56,8 +58,10 @@ export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpen
       <div className="row" style={{ padding: '10px 10px 8px', justifyContent: 'space-between' }}>
         <div className="row gap6" style={{ minWidth: 0 }}><ConnGlyph conn={headerGlyph} size={24} radius={7} /><div className="col" style={{ lineHeight: 1.2, minWidth: 0 }}><span className="ell" style={{ fontSize: 12.5, fontWeight: 700 }}>{headerName}</span><span className="mono ell" style={{ fontSize: 9.5, color: 'var(--text-faint)' }}>{headerEngine}</span></div></div>
         <div className="row gap2">
-          <button className="icon-btn bare" style={{ width: 26, height: 26 }} title={t('workbench.newQuery')} onClick={onNewQuery}><Icon name="plus" size={14} /></button>
-          <button className="icon-btn bare" style={{ width: 26, height: 26 }} title={t('workbench.refresh')} onClick={onRefresh}><Icon name="refresh-cw" size={13} /></button>
+          <button className="icon-btn bare" data-testid="wb-new-query" style={{ width: 26, height: 26 }} title={t('workbench.newQuery')} onClick={onNewQuery}><Icon name="plus" size={14} /></button>
+          <button className="icon-btn bare" data-testid="wb-refresh" style={{ width: 26, height: 26 }} title={t('workbench.refresh')} onClick={onRefresh} disabled={refreshing}>
+            <Icon name="refresh-cw" size={13} style={refreshing ? { animation: 'spin 1s linear infinite' } : undefined} />
+          </button>
         </div>
       </div>
       {/* search */}

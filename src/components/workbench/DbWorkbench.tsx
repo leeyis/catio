@@ -93,11 +93,17 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
   }, [connId])
 
   // Re-introspect the live schema on demand (schema "刷新" action). No-op on the mock path.
+  // refreshing 驱动刷新按钮转圈;失败不再吞错,refreshErr 以 toast 显示。
+  const [refreshing, setRefreshing] = useState(false)
+  const [refreshErr, setRefreshErr] = useState<string | null>(null)
   function refreshSchema() {
-    if (!connId) return
+    if (!connId || refreshing) return
+    setRefreshing(true)
+    setRefreshErr(null)
     getSchema(connId)
       .then(sc => setLiveSchema(sc))
-      .catch(() => {})
+      .catch(e => setRefreshErr(dbErrMsg(e)))
+      .finally(() => setRefreshing(false))
   }
 
   const selectedTable = obj.type === 'table' ? obj.table : null
@@ -257,7 +263,7 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
         onNewQuery={() => newQuery()} onOpenER={openER} onNewObjectTemplate={onNewObjectTemplate} onRefresh={refreshSchema}
         erActive={obj.type === 'er'} sqlActive={obj.type === 'sql'}
         disabledSql={!caps.sqlConsole} disabledEr={!caps.er}
-        schemas={connId ? namespaces : undefined} conn={connId ? conn : undefined} live={!!connId} />
+        schemas={connId ? namespaces : undefined} conn={connId ? conn : undefined} live={!!connId} refreshing={refreshing} />
       <div className="col grow" style={{ minWidth: 0, minHeight: 0, overflow: 'hidden', position: 'relative' }}>
         {obj.type === 'table' && (
           <>
@@ -380,6 +386,13 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
             <Icon name="alert-triangle" size={14} style={{ flex: 'none' }} />
             <span>{t('dbviews.applyError', { message: createErr })}</span>
             <button className="icon-btn bare" style={{ width: 20, height: 20, marginLeft: 'auto' }} onClick={() => setCreateErr(null)}><Icon name="x" size={12} /></button>
+          </div>
+        )}
+        {refreshErr && (
+          <div className="row gap6" style={{ position: 'absolute', left: 12, bottom: 12, zIndex: 80, maxWidth: 420, padding: '9px 12px', borderRadius: 10, border: '1px solid var(--danger-border)', background: 'var(--danger-soft)', color: 'var(--danger-fg)', fontSize: 12, boxShadow: 'var(--shadow-window)' }}>
+            <Icon name="alert-triangle" size={14} style={{ flex: 'none' }} />
+            <span>{t('workbench.refreshFailed', { message: refreshErr })}</span>
+            <button className="icon-btn bare" style={{ width: 20, height: 20, marginLeft: 'auto' }} onClick={() => setRefreshErr(null)}><Icon name="x" size={12} /></button>
           </div>
         )}
       </div>
