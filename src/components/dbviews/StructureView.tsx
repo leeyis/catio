@@ -17,6 +17,9 @@ export interface StructureViewProps {
   schema?: string
   /** Engine string (Connection.engine / DbType) — selects identifier quoting. Postgres-first. */
   engine?: string
+  /** Whether structure EDITING (add/modify/drop column) is supported by the engine
+   *  (capabilities.structureEdit). Viewing columns is always allowed. Defaults true. */
+  canEdit?: boolean
 }
 
 // `table-layout: fixed` makes the table honor `width:100%` strictly and split the
@@ -47,7 +50,7 @@ interface ColForm {
   default: string
 }
 
-export function StructureView({ table, connId, schema, engine }: StructureViewProps) {
+export function StructureView({ table, connId, schema, engine, canEdit = true }: StructureViewProps) {
   const { t } = useTranslation()
   const D = useData()
   const mockSt = D.tableStructures[table] || D.tableStructures['orders']
@@ -71,8 +74,9 @@ export function StructureView({ table, connId, schema, engine }: StructureViewPr
   const [tab, setTab] = useState('columns')
   const keyTone: Record<string, string> = { PK: 'var(--signal-amber)', FK: 'var(--signal-blue)', UNI: 'var(--signal-violet)' }
 
-  // ---- Column editing (live path only) ----
-  const editable = !!connId
+  // ---- Column editing (live path only, and only when the engine supports
+  // structure edits — MongoDB/ClickHouse/… can VIEW structure but not ALTER it). ----
+  const editable = !!connId && canEdit
   const dialect = dialectFor(engine)
   const sqlQualified = qualifiedTable(dialect, schema, table)
   // Open add/modify form (null = closed).

@@ -38,6 +38,19 @@ describe('DataGrid generic rows', () => {
     expect(screen.getByText('id')).toBeInTheDocument()
   })
 
+  it('renders nested objects/arrays as JSON, not "[object Object]" (MongoDB sub-docs)', () => {
+    const columns: ResultColumn[] = [
+      { name: '_id', type: 'string', pk: true },
+      { name: 'data', type: 'object' },
+      { name: 'variables', type: 'array' },
+    ]
+    const rows: unknown[][] = [['abc', { ip: '127.0.0.1', ok: true }, [{ k: 1 }, { k: 2 }]]]
+    wrap(<DataGrid columns={columns} rows={rows} statusTones={{}} density="comfortable" />)
+    expect(screen.getByText('{"ip":"127.0.0.1","ok":true}')).toBeInTheDocument()
+    expect(screen.getByText('[{"k":1},{"k":2}]')).toBeInTheDocument()
+    expect(screen.queryByText('[object Object]')).toBeNull()
+  })
+
   it('Save opens a preview gate showing the DML, then apply commits and clears edits', async () => {
     previewDml.mockResolvedValue('UPDATE orders SET status = $1 WHERE id = $2')
     applyEdits.mockResolvedValue(2)

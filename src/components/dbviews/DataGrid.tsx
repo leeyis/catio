@@ -54,6 +54,17 @@ export interface DataGridProps {
 const thStyle: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 6, padding: '0 10px', height: 34, cursor: 'pointer', borderRight: '1px solid var(--border-hairline)', userSelect: 'none' }
 const tdStyle: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 6, padding: '0 10px', borderRight: '1px solid var(--border-hairline)', overflow: 'hidden', whiteSpace: 'nowrap' }
 
+/** Render a cell value as display text. Nested documents/arrays (MongoDB
+ *  sub-docs, Postgres JSON columns) are JSON-encoded instead of becoming the
+ *  useless "[object Object]" that `String(obj)` yields. */
+function cellText(v: unknown): string {
+  if (v == null) return ''
+  if (typeof v === 'object') {
+    try { return JSON.stringify(v) } catch { return String(v) }
+  }
+  return String(v)
+}
+
 /** Derive a column icon from its type/pk/fk flags (mirrors the mock ordersColumns icons). */
 function colIcon(col: ResultColumn): string {
   if (col.pk) return 'hash'
@@ -229,7 +240,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   // value contains a comma, quote, or newline.
   function csvEscape(v: unknown): string {
     if (v == null) return ''
-    const s = String(v)
+    const s = cellText(v)
     return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
   }
 
@@ -337,7 +348,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   function startEdit(rIdx: number, cIdx: number, _rowIdx: number, _col: string, val: unknown) {
     if (!canEdit) return
     const kind = editorKind(columns[cIdx]?.type)
-    setEditing({ r: rIdx, c: cIdx }); setEditVal(toEditorValue(kind, String(val ?? ''))); setSel({ r: rIdx, c: cIdx })
+    setEditing({ r: rIdx, c: cIdx }); setEditVal(toEditorValue(kind, cellText(val))); setSel({ r: rIdx, c: cIdx })
   }
   // Commit an edit. Existing rows (origIdx >= 0) write into the `edits` map; new
   // rows (encoded as r = -(rowId + 1)) write into their own `cells` map.
@@ -682,16 +693,16 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
                       ) : col.name === 'status' ? (
                         <span className="row gap6" style={{ minWidth: 0 }}>
                           <span className="dot" style={{ background: statusTones[String(val)] || 'var(--text-faint)' }} />
-                          <span className="ell" style={{ color: 'var(--text-primary)' }}>{String(val)}</span>
+                          <span className="ell" style={{ color: 'var(--text-primary)' }}>{cellText(val)}</span>
                         </span>
                       ) : col.name === 'total_cents' ? (
                         <span className="ell" style={{ color: isEdited ? 'var(--signal-amber)' : 'var(--text-primary)', fontWeight: 500, marginLeft: 'auto' }}>{Number(val).toLocaleString()}</span>
                       ) : col.name === 'id' ? (
-                        <span className="ell" style={{ color: 'var(--text-tertiary)' }}>{String(val)}</span>
+                        <span className="ell" style={{ color: 'var(--text-tertiary)' }}>{cellText(val)}</span>
                       ) : col.name === 'customer_id' ? (
-                        <span className="ell" style={{ color: 'var(--signal-blue)' }}>{String(val)}</span>
+                        <span className="ell" style={{ color: 'var(--signal-blue)' }}>{cellText(val)}</span>
                       ) : (
-                        <span className="ell">{String(val)}</span>
+                        <span className="ell">{cellText(val)}</span>
                       )}
                       {isEdited && !isEditing && (
                         <button className="icon-btn bare cell-revert" style={{ width: 18, height: 18, marginLeft: 'auto', flex: 'none' }}
@@ -728,7 +739,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
                           onKeyDown={e => { if (e.key === 'Enter') commitEdit(r, col.name); if (e.key === 'Escape') setEditing(null) }}
                           style={{ width: '100%', border: 'none', outline: 'none', background: 'transparent', font: 'inherit', color: 'var(--text-primary)' }} />
                       ) : (
-                        <span className="ell" style={{ color: String(val).length ? 'var(--text-primary)' : 'var(--text-faint)' }}>{String(val).length ? String(val) : '—'}</span>
+                        <span className="ell" style={{ color: cellText(val).length ? 'var(--text-primary)' : 'var(--text-faint)' }}>{cellText(val).length ? cellText(val) : '—'}</span>
                       )}
                     </div>
                   )

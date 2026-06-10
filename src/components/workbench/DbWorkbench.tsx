@@ -59,9 +59,10 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
     | { type: 'sql'; qid: number }
     | { type: 'er' }
   >({ type: 'table', schema: 'public', table: 'orders' })
-  // If structure tab is disabled and currently active, fall back to data
-  const [tableTab, setTableTab] = useState('data') // data | structure
-  const effectiveTableTab = (!caps.structureEdit && tableTab === 'structure') ? 'data' : tableTab
+  // data | structure. Structure is VIEWABLE for every engine (read-only column
+  // list); structure EDITING is gated by caps.structureEdit inside StructureView.
+  const [tableTab, setTableTab] = useState('data')
+  const effectiveTableTab = tableTab
   const [queryN, setQueryN] = useState(1)
   // Open SQL query tabs (ids). Each click of 新建查询 appends one; consoles stay
   // mounted so each tab's editor + results persist across switches.
@@ -265,12 +266,14 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
                 <div className="icon-badge" style={{ width: 28, height: 28, borderRadius: 8, background: 'var(--accent-soft)', color: 'var(--accent-primary)' }}><Icon name="table-2" size={15} /></div>
                 <div className="col" style={{ lineHeight: 1.25, minWidth: 0 }}>
                   <span className="mono ell" style={{ fontSize: 13.5, fontWeight: 700 }}>{connId ? (selectedSchema ? `${selectedSchema}.${obj.table}` : obj.table) : `public.${obj.table}`}</span>
-                  <span className="mono" style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{tbl ? `${tbl.rows} ${t('workbench.rowsLabel')} · ${tbl.cols} ${t('workbench.colsLabel')}` : ''}</span>
+                  <span className="mono" style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{connId
+                    ? `${live?.rows?.length ?? 0} ${t('workbench.rowsLabel')} · ${live?.columns?.length ?? 0} ${t('workbench.colsLabel')}`
+                    : tbl ? `${tbl.rows} ${t('workbench.rowsLabel')} · ${tbl.cols} ${t('workbench.colsLabel')}` : ''}</span>
                 </div>
               </div>
               <Segmented value={effectiveTableTab} onChange={setTableTab} options={[
                 { value: 'data', label: t('workbench.tabData'), icon: 'table-2' },
-                { value: 'structure', label: t('workbench.tabStructure'), icon: 'columns', disabled: !caps.structureEdit, testId: 'seg-structure' },
+                { value: 'structure', label: t('workbench.tabStructure'), icon: 'columns', testId: 'seg-structure' },
               ]} />
             </div>
             <div className="grow" style={{ minHeight: 0 }}>
@@ -286,7 +289,7 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
                     columns={D.ordersColumns.map((c): ResultColumn => ({ name: c.name, type: c.type, pk: c.pk, fk: c.fk, icon: c.icon }))}
                     rows={D.ordersRows.map(r => D.ordersColumns.map(c => (r as unknown as Record<string, unknown>)[c.name]))}
                     statusTones={D.statusTones} density={density} key={obj.table} />)}
-              {effectiveTableTab === 'structure' && <StructureView table={obj.table} schema={selectedSchema} connId={connId ?? undefined} engine={conn.engine} key={`${selectedSchema ?? ''}.${obj.table}`} />}
+              {effectiveTableTab === 'structure' && <StructureView table={obj.table} schema={selectedSchema} connId={connId ?? undefined} engine={conn.engine} canEdit={caps.structureEdit} key={`${selectedSchema ?? ''}.${obj.table}`} />}
             </div>
           </>
         )}

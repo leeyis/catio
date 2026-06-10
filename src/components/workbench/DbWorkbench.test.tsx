@@ -59,7 +59,9 @@ describe('DbWorkbench capability-gating', () => {
     expect(screen.getByTestId('seg-structure')).not.toBeDisabled()
   })
 
-  it('disables structure/er/sqlConsole tabs when capabilities are false', () => {
+  it('keeps the structure tab viewable even when structureEdit is false', () => {
+    // MongoDB/ClickHouse/… can VIEW structure (sampled columns) but not ALTER it;
+    // the tab must stay clickable — editing is gated inside StructureView instead.
     h.list.mockReturnValue([
       {
         connId: 'conn-1',
@@ -78,16 +80,16 @@ describe('DbWorkbench capability-gating', () => {
     ])
     wrap(<DbWorkbench conn={CONN} />)
 
-    // Structure Segmented button should be disabled
-    expect(screen.getByTestId('seg-structure')).toBeDisabled()
+    // Structure tab is viewable regardless of structureEdit.
+    expect(screen.getByTestId('seg-structure')).not.toBeDisabled()
   })
 
-  it('disables only structureEdit=false, leaves er/sqlConsole enabled', () => {
+  it('structure tab stays viewable with structureEdit=false (edit gated separately)', () => {
     h.list.mockReturnValue([
       {
         connId: 'conn-2',
         profileId: 'd-orders',
-        dbType: 'redis',
+        dbType: 'mongodb',
         name: 'test',
         capabilities: {
           writable: true,
@@ -101,7 +103,7 @@ describe('DbWorkbench capability-gating', () => {
     ])
     wrap(<DbWorkbench conn={CONN} />)
 
-    expect(screen.getByTestId('seg-structure')).toBeDisabled()
+    expect(screen.getByTestId('seg-structure')).not.toBeDisabled()
   })
 
   it('all tabs enabled when all capabilities are true', () => {
