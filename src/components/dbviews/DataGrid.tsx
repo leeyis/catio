@@ -65,6 +65,26 @@ function cellText(v: unknown): string {
   return String(v)
 }
 
+/** Full-content text for the cell viewer: objects/arrays pretty-printed, JSON
+ *  strings re-indented, everything else as-is. */
+function prettyCell(v: unknown): string {
+  if (v == null) return ''
+  if (typeof v === 'object') {
+    try { return JSON.stringify(v, null, 2) } catch { return String(v) }
+  }
+  const s = String(v)
+  const t = s.trim()
+  if ((t.startsWith('{') && t.endsWith('}')) || (t.startsWith('[') && t.endsWith(']'))) {
+    try { return JSON.stringify(JSON.parse(t), null, 2) } catch { /* not JSON — show raw */ }
+  }
+  return s
+}
+
+/** Truncate to `n` chars, appending an ellipsis when clipped. */
+function clip(s: string, n: number): string {
+  return s.length > n ? s.slice(0, n) + '…' : s
+}
+
 /** Derive a column icon from its type/pk/fk flags (mirrors the mock ordersColumns icons). */
 function colIcon(col: ResultColumn): string {
   if (col.pk) return 'hash'
@@ -112,6 +132,8 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   const [applying, setApplying] = useState(false)
   const [applyMsg, setApplyMsg] = useState<string | null>(null)
   const [applyErr, setApplyErr] = useState<string | null>(null)
+  // Full-content viewer for a long/nested cell value (opened from the status bar).
+  const [cellViewer, setCellViewer] = useState<{ label: string; text: string } | null>(null)
   const rowH = density === 'compact' ? 30 : 36
   const PAGE = pageSize
 
@@ -556,6 +578,16 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   // blow up a couple of columns to fill the viewport and hide the rest.
   const gridTemplate = '46px ' + columns.map(c => c.name === 'channel' || c.name === 'currency' ? '92px' : c.name === 'created_at' || c.name === 'updated_at' ? '150px' : c.name === 'customer_id' ? '150px' : '160px').join(' ') + (showActionCol ? ' 44px' : '')
 
+  // The currently-selected cell's value (for the status-bar preview + viewer).
+  const selCell = (() => {
+    const entry = sorted.find(e => e.origIdx === sel.r)
+    const col = columns[sel.c]
+    if (!entry || !col) return null
+    const k = cellKey(sel.r, col.name)
+    const raw = edits[k] !== undefined ? edits[k] : entry.row[sel.c]
+    return { label: col.name, raw, full: cellText(raw) }
+  })()
+
   return (
     <div className="col" style={{ height: '100%', minHeight: 0, position: 'relative' }}>
       {/* result toolbar */}
@@ -761,7 +793,16 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
         <div className="row gap10">
           <span>R{sel.r + 1} · C{sel.c + 1}</span>
           <span className="metadot" />
-          <span>{t('dbviews.cell')}: <span className="mono" style={{ color: 'var(--text-secondary)' }}>{(() => { const entry = sorted.find(e => e.origIdx === sel.r); const col = columns[sel.c]; if (!entry || !col) return '—'; const k = cellKey(sel.r, col.name); return String(edits[k] !== undefined ? edits[k] : entry.row[sel.c]); })()}</span></span>
+          <span className="row gap6" style={{ minWidth: 0, maxWidth: 520 }}>
+            <span style={{ flex: 'none' }}>{t('dbviews.cell')}:</span>
+            <span className="mono ell" style={{ color: 'var(--text-secondary)', minWidth: 0 }}>{selCell ? (clip(selCell.full, 120) || '—') : '—'}</span>
+            {selCell && selCell.full.length > 120 && (
+              <button className="icon-btn bare" title={t('dbviews.viewFull')} style={{ width: 18, height: 18, flex: 'none' }}
+                onClick={() => setCellViewer({ label: selCell.label, text: prettyCell(selCell.raw) })}>
+                <Icon name="external-link" size={12} />
+              </button>
+            )}
+          </span>
           {showTruncated && <span className="chip" style={{ background: 'color-mix(in srgb, var(--signal-amber) 14%, transparent)', color: 'var(--signal-amber)', fontWeight: 600 }}>{t('dbviews.truncated')}</span>}
           {applyMsg && <span style={{ color: 'var(--signal-green)' }}>{applyMsg}</span>}
           {loadError && <span className="row gap6" style={{ color: 'var(--danger-fg)' }}><Icon name="alert-triangle" size={12} /> {t('dbviews.loadError', { message: loadError })}</span>}
@@ -806,6 +847,27 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
                 <Btn variant="primary" icon="check" onClick={confirmApply} disabled={applying}>{applying ? t('dbviews.applying') : t('dbviews.applyChanges')}</Btn>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Cell content viewer — full value of a long/nested cell (objects pretty-printed). */}
+      {cellViewer && (
+        <div onClick={() => setCellViewer(null)}
+          style={{ position: 'absolute', inset: 0, zIndex: 70, background: 'color-mix(in srgb, var(--cta-bg) 42%, transparent)', backdropFilter: 'blur(3px)', display: 'grid', placeItems: 'center' }}>
+          <div onClick={e => e.stopPropagation()} className="pop-in"
+            style={{ width: 620, maxWidth: '90%', maxHeight: '80%', background: 'var(--surface-card)', borderRadius: 18, border: '1px solid var(--border-hairline)', boxShadow: 'var(--shadow-window)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+            <div className="row" style={{ justifyContent: 'space-between', padding: '16px 20px 12px', borderBottom: '1px solid var(--border-hairline)' }}>
+              <div className="col" style={{ gap: 2, minWidth: 0 }}>
+                <span style={{ fontSize: 15, fontWeight: 700, letterSpacing: '-0.2px' }}>{t('dbviews.cellContent')}</span>
+                <span className="mono ell" style={{ fontSize: 11.5, color: 'var(--text-tertiary)' }}>{cellViewer.label}</span>
+              </div>
+              <div className="row gap8">
+                <button className="icon-btn bare" title={t('dbviews.copy')} onClick={() => navigator.clipboard?.writeText(cellViewer.text).catch(() => {})}><Icon name="copy" size={15} /></button>
+                <IconBtn name="x" size={16} variant="bare" onClick={() => setCellViewer(null)} />
+              </div>
+            </div>
+            <pre className="mono" style={{ margin: 0, padding: '14px 18px', color: 'var(--text-primary)', fontSize: 12.5, lineHeight: 1.6, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{cellViewer.text}</pre>
           </div>
         </div>
       )}

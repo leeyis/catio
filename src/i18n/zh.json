@@ -134,6 +134,8 @@
     "refresh": "刷新",
     "export": "导出",
     "cell": "cell",
+    "viewFull": "查看完整内容",
+    "cellContent": "单元格内容",
     "previewTitle": "确认修改",
     "previewSubtitle": "将在数据库执行 {{count}} 条语句。",
     "previewReadOnly": "该引擎为只读 —— 编辑已禁用。",
