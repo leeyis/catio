@@ -21,6 +21,7 @@ fn mongo_args() -> Option<ConnectArgs> {
         secret,
         database: Some(parts[4].into()),
         driver_profile: None,
+        options: None,
     })
 }
 

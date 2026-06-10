@@ -25,6 +25,7 @@ fn redis_args() -> Option<ConnectArgs> {
         secret,
         database,
         driver_profile: None,
+        options: None,
     })
 }
 

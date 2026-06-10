@@ -18,6 +18,7 @@ fn h2_args() -> Option<ConnectArgs> {
     Some(ConnectArgs {
         db_type: DatabaseType::Jdbc,
         driver_profile: Some("h2".into()),
+        options: None,
         host: String::new(),
         port: 0,
         user: "sa".into(),
@@ -87,6 +88,7 @@ async fn jdbc_unknown_engine_is_unsupported() {
     let args = ConnectArgs {
         db_type: DatabaseType::Jdbc,
         driver_profile: Some("not-a-real-engine".into()),
+        options: None,
         host: "h".into(), port: 1, user: "u".into(), secret: None,
         database: None,
     };

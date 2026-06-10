@@ -194,6 +194,9 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
   const [dbPort, setDbPort] = useState(editDbProfile ? String(editDbProfile.port) : '5432')
   const [dbUser, setDbUser] = useState(editDbProfile?.user ?? '')
   const [dbDatabase, setDbDatabase] = useState(editDbProfile?.database ?? '')
+  // Advanced connection params (URL query string), e.g. MongoDB
+  // "authSource=admin&directConnection=true".
+  const [dbOptions, setDbOptions] = useState(editDbProfile?.options ?? '')
   const [dbSecret, setDbSecret] = useState('')
   const [dbConnecting, setDbConnecting] = useState(false)
   const [dbError, setDbError] = useState<string | null>(null)
@@ -245,7 +248,7 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
     setDbTestResult(null)
     setDbTestError(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dbHost, dbPort, dbUser, dbDatabase, dbSecret])
+  }, [dbHost, dbPort, dbUser, dbDatabase, dbOptions, dbSecret])
 
   // Build the auth descriptor (non-secret) from the current form.
   function currentAuth(): AuthMethod {
@@ -374,6 +377,7 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
         port: Number(dbPort),
         user: dbUser,
         ...(dbDatabase ? { database: dbDatabase } : {}),
+        ...(dbOptions.trim() ? { options: dbOptions.trim() } : {}),
         secret: dbSecret || undefined,
       })
       setDbTestResult(result)
@@ -405,6 +409,7 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
       port: Number(dbPort),
       user: dbUser,
       ...(dbDatabase ? { database: dbDatabase } : {}),
+      ...(dbOptions.trim() ? { options: dbOptions.trim() } : {}),
     }
     // Persist profile WITHOUT secret. Triggers the reactive store's notify(), so the
     // sidebar / home connection list updates immediately — the connection never
@@ -628,6 +633,16 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
             {/* Database name field — DB kind only */}
             {kind === 'db' && (
               <Field label={t('modals.fieldDatabase')} value={dbDatabase} onChange={setDbDatabase} placeholder="e.g. orders" />
+            )}
+            {/* Advanced connection params — DB kind only */}
+            {kind === 'db' && (
+              <label className="col" style={{ gap: 5 }}>
+                <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.fieldOptions')}</span>
+                <input value={dbOptions} onChange={e => setDbOptions(e.target.value)}
+                  placeholder={t('modals.fieldOptionsPlaceholder')} className="mono"
+                  style={{ height: 36, padding: '0 12px', borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }} />
+                <span style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{t('modals.fieldOptionsHint')}</span>
+              </label>
             )}
             {/* Error message */}
             {kind === 'db' && dbError && (

@@ -50,16 +50,30 @@ impl MongoDriver {
     }
 }
 
-/// Build a mongodb:// URI from ConnectArgs.
+/// Build a mongodb:// URI from ConnectArgs, including the database path and any
+/// advanced options. The options query string is essential for real-world
+/// deployments — e.g. `authSource=admin` (auth against a different DB) and
+/// `directConnection=true` (skip replica-set discovery, which otherwise resolves
+/// internal member hostnames like `mongo:27017` that the client can't reach).
 fn build_uri(args: &ConnectArgs) -> String {
     let has_creds = !args.user.is_empty() && args.secret.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
-    if has_creds {
+    let authority = if has_creds {
         let user = urlencoded(&args.user);
         let pw = urlencoded(args.secret.as_deref().unwrap_or(""));
-        format!("mongodb://{}:{}@{}:{}", user, pw, args.host, args.port)
+        format!("{}:{}@{}:{}", user, pw, args.host, args.port)
     } else {
-        format!("mongodb://{}:{}", args.host, args.port)
+        format!("{}:{}", args.host, args.port)
+    };
+    // Always include the path separator; the db name (when given) is the default
+    // database (authSource in options can override the auth DB independently).
+    let db_path = args.database.as_deref().map(str::trim).filter(|s| !s.is_empty())
+        .map(urlencoded).unwrap_or_default();
+    let mut uri = format!("mongodb://{authority}/{db_path}");
+    if let Some(opts) = args.options.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        uri.push('?');
+        uri.push_str(opts.trim_start_matches(['?', '&']));
     }
+    uri
 }
 
 /// Minimal percent-encoding for URI credentials (encode @, /, :, ? etc.).
@@ -342,5 +356,53 @@ impl Driver for MongoDriver {
 
     async fn er_relations(&self, _schema: &str) -> Result<Vec<ErRelation>, DbError> {
         Ok(vec![])
+    }
+}
+
+#[cfg(test)]
+mod uri_tests {
+    use super::build_uri;
+    use crate::db::driver::ConnectArgs;
+    use crate::db::DatabaseType;
+
+    fn args(db: Option<&str>, opts: Option<&str>, creds: bool) -> ConnectArgs {
+        ConnectArgs {
+            db_type: DatabaseType::Mongodb,
+            host: "192.168.10.253".into(),
+            port: 27017,
+            user: if creds { "myusername".into() } else { String::new() },
+            secret: if creds { Some("12345678".into()) } else { None },
+            database: db.map(str::to_string),
+            driver_profile: None,
+            options: opts.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn builds_uri_with_db_and_advanced_options() {
+        // the exact real-world case: auth against admin + direct connection
+        let a = args(Some("fastgpt"), Some("authSource=admin&directConnection=true"), true);
+        assert_eq!(
+            build_uri(&a),
+            "mongodb://myusername:12345678@192.168.10.253:27017/fastgpt?authSource=admin&directConnection=true"
+        );
+    }
+
+    #[test]
+    fn options_without_db_use_empty_path() {
+        let a = args(None, Some("directConnection=true"), false);
+        assert_eq!(build_uri(&a), "mongodb://192.168.10.253:27017/?directConnection=true");
+    }
+
+    #[test]
+    fn strips_leading_separator_from_options() {
+        let a = args(Some("db"), Some("?retryWrites=false"), false);
+        assert_eq!(build_uri(&a), "mongodb://192.168.10.253:27017/db?retryWrites=false");
+    }
+
+    #[test]
+    fn plain_connection_has_trailing_slash() {
+        let a = args(None, None, false);
+        assert_eq!(build_uri(&a), "mongodb://192.168.10.253:27017/");
     }
 }

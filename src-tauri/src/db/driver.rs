@@ -13,6 +13,11 @@ pub struct ConnectArgs {
     pub database: Option<String>,
     /// 协议族内变体（如 "cockroachdb"/"tidb"/"oceanbase-oracle"），照搬 dbx driver_profile。
     pub driver_profile: Option<String>,
+    /// 高级连接参数：URL 查询串形式的 key=value（如
+    /// "authSource=admin&directConnection=true"），由各驱动按其连接 URL 语义拼接。
+    /// 非敏感，可入连接档案。
+    #[serde(default)]
+    pub options: Option<String>,
     /// 密码；仅内存，不落盘、不回前端。
     pub secret: Option<String>,
 }
@@ -28,6 +33,7 @@ impl std::fmt::Debug for ConnectArgs {
             .field("user", &self.user)
             .field("database", &self.database)
             .field("driver_profile", &self.driver_profile)
+            .field("options", &self.options)
             .field("secret", &self.secret.as_ref().map(|_| "<redacted>"))
             .finish()
     }

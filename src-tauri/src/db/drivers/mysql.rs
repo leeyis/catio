@@ -17,13 +17,19 @@ pub struct MySqlDriver {
 impl MySqlDriver {
     pub async fn connect(args: &ConnectArgs) -> Result<Self, DbError> {
         let db = args.database.clone().unwrap_or_default();
+        // Advanced params (e.g. charset/pool/SSL options) ride as the URL query
+        // string when provided.
+        let query = args.options.as_deref().map(str::trim).filter(|s| !s.is_empty())
+            .map(|o| format!("?{}", o.trim_start_matches(['?', '&'])))
+            .unwrap_or_default();
         let url = format!(
-            "mysql://{}:{}@{}:{}/{}",
+            "mysql://{}:{}@{}:{}/{}{}",
             args.user,
             args.secret.clone().unwrap_or_default(),
             args.host,
             args.port,
-            db
+            db,
+            query,
         );
         let pool = Pool::from_url(&url)
             .map_err(|e| DbError::ConnectFailed(e.to_string()))?;

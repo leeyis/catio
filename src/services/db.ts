@@ -42,6 +42,10 @@ export interface DbConnectArgs {
   user: string
   database?: string
   driverProfile?: string
+  /** Advanced connection params as a URL query string (e.g.
+   *  "authSource=admin&directConnection=true"). Appended by the driver to its
+   *  connection URL. Non-secret; persisted in the profile. */
+  options?: string
   secret?: string
 }
 

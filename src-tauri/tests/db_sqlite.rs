@@ -10,6 +10,7 @@ fn mem_args() -> ConnectArgs {
         user: String::new(),
         database: None,
         driver_profile: None,
+        options: None,
         secret: None,
     }
 }

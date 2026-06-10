@@ -22,6 +22,7 @@ fn jdbc_args(env_var: &str, profile: &str) -> Option<ConnectArgs> {
     Some(ConnectArgs {
         db_type: DatabaseType::Jdbc,
         driver_profile: Some(profile.into()),
+        options: None,
         host: parts[0].into(),
         port: parts[1].parse().ok()?,
         user: parts[2].into(),

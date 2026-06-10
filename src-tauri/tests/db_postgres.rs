@@ -14,6 +14,7 @@ fn pg_args() -> Option<ConnectArgs> {
         secret: Some(parts[3].into()),
         database: Some(parts[4].into()),
         driver_profile: None,
+        options: None,
     })
 }
 
