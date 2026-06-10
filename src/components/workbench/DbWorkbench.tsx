@@ -1,19 +1,17 @@
-/* ported from ref-ui/_extract/blob7.txt — verbatim per plan T1-T7; E6 wires the live-connection data path */
+/* ported from ref-ui/_extract/blob7.txt — verbatim per plan T1-T7; E6 wires the live-connection data path
+   Task 9: 统一 tab 系统 — 表/对象/查询/ER 平级共存,身份复用互不覆盖 */
 import { useState, useMemo, useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
-import { Segmented } from '../atoms'
-import { DataGrid, StructureView, SqlConsole, ERDiagram } from '../dbviews'
-import { SqlEditor } from '../dbviews/SqlEditor'
+import { SqlConsole, ERDiagram } from '../dbviews'
 import { CreateObjectModal } from '../dbviews/CreateObjectModal'
 import { SchemaBrowser } from './SchemaBrowser'
+import { TablePane } from './TablePane'
+import { ObjectPane } from './ObjectPane'
 import { useData } from '../../state/DataContext'
 import { listActiveDbConnections } from '../../state/dbConnections'
-import { getSchema, tablePreview, tableStructure, objectSource, runQuery, dbErrMsg, type DbCapabilities } from '../../services/db'
-import type { Connection, ResultColumn, Schema, SchemaNamespace } from '../../services/types'
-
-/** Initial page size for the live table preview (matches DataGrid's default). */
-const PREVIEW_PAGE = 100
+import { getSchema, runQuery, dbErrMsg, type DbCapabilities } from '../../services/db'
+import type { Connection, Schema, SchemaNamespace } from '../../services/types'
 
 export interface DbWorkbenchProps {
   conn: Connection
@@ -37,6 +35,21 @@ const ALL_ENABLED: DbCapabilities = {
   structureEdit: true,
 }
 
+/** 统一 tab:表预览 / 对象源码 / SQL 查询 / ER 图(照 dbx 的 QueryTab.mode 思路)。
+ *  id 即身份键 → 单击侧边栏时同身份 tab 直接激活复用(findTabByIdentity)。 */
+export type WorkbenchTab =
+  | { id: string; kind: 'table'; schema: string; table: string }
+  | { id: string; kind: 'object'; schema: string; name: string; objKind: 'view' | 'function' | 'procedure' }
+  | { id: string; kind: 'sql'; qid: number }
+  | { id: string; kind: 'er'; schema: string }
+
+const tabIdOf = {
+  table: (schema: string, table: string) => `table:${schema}.${table}`,
+  object: (kind: string, schema: string, name: string) => `object:${kind}:${schema}.${name}`,
+  sql: (qid: number) => `sql:${qid}`,
+  er: (schema: string) => `er:${schema}`,
+}
+
 export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbenchProps) {
   const { t } = useTranslation()
   const D = useData()
@@ -51,32 +64,21 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
   const caps: DbCapabilities = active ? active.capabilities : ALL_ENABLED
   const connId = active?.connId ?? null
 
-  // active object: a table (with data/structure sub-tab), the schema ER diagram, or a query console.
-  // A table carries BOTH its schema namespace and name (names are ambiguous across schemas).
-  const [obj, setObj] = useState<
-    | { type: 'table'; schema: string; table: string }
-    | { type: 'object'; schema: string; name: string; kind: 'view' | 'function' | 'procedure' }
-    | { type: 'sql'; qid: number }
-    | { type: 'er' }
-  >({ type: 'table', schema: 'public', table: 'orders' })
-  // data | structure. Structure is VIEWABLE for every engine (read-only column
-  // list); structure EDITING is gated by caps.structureEdit inside StructureView.
-  const [tableTab, setTableTab] = useState('data')
-  const effectiveTableTab = tableTab
-  const [queryN, setQueryN] = useState(1)
-  // Open SQL query tabs (ids). Each click of 新建查询 appends one; consoles stay
-  // mounted so each tab's editor + results persist across switches.
-  const [openQueries, setOpenQueries] = useState<number[]>([])
-  // Optional seed SQL per query tab (qid → template), used to pre-fill a fresh
-  // console opened via 新建表 / 新建视图. Tabs without an entry start empty.
+  // ---- Unified tab state ----
+  // Mock/demo path initial: a single public.orders table tab (pixel-identical demo).
+  const [tabs, setTabs] = useState<WorkbenchTab[]>([
+    { id: tabIdOf.table('public', 'orders'), kind: 'table', schema: 'public', table: 'orders' },
+  ])
+  const [activeId, setActiveId] = useState<string | null>(tabIdOf.table('public', 'orders'))
+  const [queryN, setQueryN] = useState(0)
   const [queryInitialCode, setQueryInitialCode] = useState<Record<number, string>>({})
-  // Schema whose ER diagram is being viewed (null → falls back to current namespace).
-  const [erSchema, setErSchema] = useState<string | null>(null)
+  const activeTab = tabs.find(tb => tb.id === activeId) ?? null
+
   // Open CREATE TABLE/VIEW form modal (null → closed). Carries the target schema + kind.
   const [createObj, setCreateObj] = useState<{ schema: string; kind: 'table' | 'view' } | null>(null)
   // Error surfaced when a CREATE statement fails to run.
   const [createErr, setCreateErr] = useState<string | null>(null)
-  // Horizontally-scrollable query tab strip — chevrons scroll it when tabs overflow.
+  // Horizontally-scrollable tab strip — chevrons scroll it when tabs overflow.
   const tabStripRef = useRef<HTMLDivElement>(null)
   const scrollTabs = (dx: number) => tabStripRef.current?.scrollBy({ left: dx, behavior: 'smooth' })
 
@@ -106,135 +108,31 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
       .finally(() => setRefreshing(false))
   }
 
-  const selectedTable = obj.type === 'table' ? obj.table : null
-
-  // All schema namespaces to render. Live: the backend's full list (ads/dwd/dws/…);
-  // Mock: the seeded single namespace (pixel-identical demo).
+  // All schema namespaces to render. Live: the backend's full list; Mock: the seeded single namespace.
   const namespaces: SchemaNamespace[] = useMemo(() => {
     const ns = liveSchema?.schemas
     return (ns && ns.length) ? ns : D.schema.schemas
   }, [liveSchema, D.schema])
 
-  // Auto-select a REAL table once the live schema loads: if the current table is not
-  // present in any live namespace, jump to the first table of the first schema. This
-  // prevents the mock default ('public.orders') from triggering "加载数据失败" on a real DB.
-  useEffect(() => {
-    if (!connId || !liveSchema || !liveSchema.schemas.length) return
-    if (obj.type !== 'table') return
-    const exists = liveSchema.schemas.some(
-      n => n.name === obj.schema && (n.tables.some(t => t.name === obj.table) || n.views.some(v => v.name === obj.table)),
-    )
-    if (exists) return
-    const first = liveSchema.schemas.find(n => n.tables.length) ?? liveSchema.schemas[0]
-    const firstTable = first.tables[0]
-    if (firstTable) setObj({ type: 'table', schema: first.name, table: firstTable.name })
-    // obj.schema/obj.table read inside; intentionally re-run only when schema/conn change.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connId, liveSchema])
+  // ---- tab 操作 ----
 
-  // The namespace currently being viewed (drives the table-meta lookup).
-  const namespace: SchemaNamespace = useMemo(() => {
-    return namespaces.find(n => n.name === (obj.type === 'table' ? obj.schema : ''))
-      ?? namespaces[0]
-  }, [namespaces, obj])
-
-  // The schema qualifier passed to the dialect-correct preview + structure fetch.
-  // Comes from the selected object's schema (the namespace the table lives under).
-  // We pass it for ALL engines — not just those with `caps.schemas` — because the
-  // schema browser groups every engine's tables under a namespace, and engines
-  // like MySQL NEED that namespace (their "schema" is the database) to introspect
-  // structure via information_schema. `db_table_preview` drops the schema itself
-  // for engines without a real schema namespace (MySQL/SQLite/…), so passing it is
-  // safe; structure/DML use it where the engine requires it.
-  const selectedSchema = obj.type === 'table' ? obj.schema : undefined
-
-  const tbl = namespace.tables.find(t => t.name === (obj.type === 'table' ? obj.table : ''))
-
-  // ---- Live table-data fetch (only when there is an active backend connection) ----
-  // `live` holds the real QueryResult for the selected table; null means "use the mock path".
-  const [live, setLive] = useState<{ columns: ResultColumn[]; rows: unknown[][] } | null>(null)
-  const [liveErr, setLiveErr] = useState<string | null>(null)
-  // For PK-less Postgres tables: the per-row `ctid` value (aligned to `live.rows`),
-  // used as a stable row key for in-grid UPDATE/DELETE. Null when the table has a
-  // PK or the engine doesn't expose `__ctid`.
-  const [rowKeys, setRowKeys] = useState<string[] | null>(null)
-
-  useEffect(() => {
-    // Only fetch when connected to a real backend AND viewing a table.
-    if (!connId || !selectedTable) { setLive(null); setLiveErr(null); setRowKeys(null); return }
-    let cancelled = false
-    setLiveErr(null)
-    // Dialect-correct, identifier-quoted, paginated preview (works for all engines,
-    // not just Postgres). Schema qualification lives in the backend command.
-    // In parallel, fetch the table structure to learn which columns are primary
-    // keys — `db_table_preview` doesn't mark PKs, but in-grid editing needs them
-    // (DataGrid's `canEdit` is gated on `pkCols.length > 0`). We mark `pk: true`
-    // on any preview column whose name is a PK in the structure. A failed
-    // structure fetch is non-fatal: we just leave pk flags off (editing stays
-    // disabled) rather than crashing or losing the data.
-    Promise.all([
-      tablePreview(connId, selectedSchema, selectedTable, PREVIEW_PAGE, 0),
-      tableStructure(connId, selectedSchema ?? '', selectedTable).catch(() => null),
-    ])
-      .then(([res, struct]) => {
-        if (cancelled) return
-        const pkNames = new Set((struct?.columns ?? []).filter(c => c.key === 'PK').map(c => c.name))
-        // The Postgres preview prepends a leading `__ctid` system column. Always
-        // strip it from the displayed columns/rows so it's never shown or exported.
-        // When the table has NO primary key, keep its per-row values as `rowKeys`
-        // so the grid can still key UPDATE/DELETE on `ctid`.
-        const ctidIdx = res.columns.findIndex(c => c.name === '__ctid')
-        let cols = res.columns
-        let rws = res.rows
-        let keys: string[] | null = null
-        if (ctidIdx >= 0) {
-          if (pkNames.size === 0) keys = res.rows.map(r => String(r[ctidIdx]))
-          cols = res.columns.filter((_, i) => i !== ctidIdx)
-          rws = res.rows.map(r => r.filter((_, i) => i !== ctidIdx))
-        }
-        const columns: ResultColumn[] = pkNames.size
-          ? cols.map(c => (pkNames.has(c.name) ? { ...c, pk: true } : c))
-          : cols
-        setLive({ columns, rows: rws })
-        setRowKeys(keys)
-      })
-      .catch(e => { if (!cancelled) { setLiveErr(dbErrMsg(e)); setRowKeys(null) } })
-    return () => { cancelled = true }
-  }, [connId, selectedTable, selectedSchema])
-
-  // ---- Object definition (view / function / procedure source) ----
-  // Fetched only when an object is selected AND there is a live backend connection.
-  const [objSource, setObjSource] = useState<string>('')
-  const [objLoading, setObjLoading] = useState(false)
-  const [objErr, setObjErr] = useState<string | null>(null)
-  const objSig = obj.type === 'object' ? `${obj.kind}:${obj.schema}.${obj.name}` : null
-
-  useEffect(() => {
-    if (!connId || obj.type !== 'object') { setObjSource(''); setObjErr(null); setObjLoading(false); return }
-    let cancelled = false
-    setObjLoading(true)
-    setObjErr(null)
-    setObjSource('')
-    objectSource(connId, obj.schema, obj.name, obj.kind)
-      .then(src => { if (!cancelled) setObjSource(src) })
-      .catch(e => { if (!cancelled) setObjErr(dbErrMsg(e)) })
-      .finally(() => { if (!cancelled) setObjLoading(false) })
-    return () => { cancelled = true }
-    // obj.kind/schema/name captured via objSig; re-run only when the selection changes.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connId, objSig])
-
-  function pickTable(schema: string, name: string) { setObj({ type: 'table', schema, table: name }) }
+  /** 同身份 tab 已开 → 激活复用;否则追加并激活。 */
+  function openTab(tab: WorkbenchTab) {
+    setTabs(prev => (prev.some(x => x.id === tab.id) ? prev : [...prev, tab]))
+    setActiveId(tab.id)
+  }
+  function pickTable(schema: string, name: string) {
+    openTab({ id: tabIdOf.table(schema, name), kind: 'table', schema, table: name })
+  }
   function pickObject(schema: string, name: string, kind: 'view' | 'function' | 'procedure') {
-    setObj({ type: 'object', schema, name, kind })
+    openTab({ id: tabIdOf.object(kind, schema, name), kind: 'object', schema, name, objKind: kind })
   }
   function newQuery(seed?: string) {
     if (!caps.sqlConsole) return
     const id = queryN + 1
     setQueryN(id)
-    setOpenQueries(q => [...q, id])
     if (seed != null) setQueryInitialCode(m => ({ ...m, [id]: seed }))
-    setObj({ type: 'sql', qid: id })
+    openTab({ id: tabIdOf.sql(id), kind: 'sql', qid: id })
   }
   /** Open the CREATE TABLE/VIEW form modal for `schema`. No-op without a live connection. */
   function onNewObjectTemplate(schema: string, kind: 'table' | 'view') {
@@ -242,126 +140,112 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
     setCreateErr(null)
     setCreateObj({ schema, kind })
   }
-  function closeQuery(id: number) {
-    const next = openQueries.filter(x => x !== id)
-    setOpenQueries(next)
-    if (obj.type === 'sql' && obj.qid === id) {
-      setObj(next.length
-        ? { type: 'sql', qid: next[next.length - 1] }
-        : { type: 'table', schema: selectedSchema ?? namespace.name, table: selectedTable ?? namespace.tables[0]?.name ?? 'orders' })
-    }
-  }
   function openER(schema?: string) {
     if (!caps.er) return
-    setErSchema(schema ?? null)
-    setObj({ type: 'er' })
+    const s = schema ?? namespace.name
+    openTab({ id: tabIdOf.er(s), kind: 'er', schema: s })
   }
+  /** 关闭 tab;若关的是当前 tab,激活右侧相邻(无则左侧),全关后为空状态。 */
+  function closeTab(id: string) {
+    const idx = tabs.findIndex(x => x.id === id)
+    const next = tabs.filter(x => x.id !== id)
+    setTabs(next)
+    if (activeId === id) setActiveId(next.length ? next[Math.min(idx, next.length - 1)].id : null)
+  }
+
+  // Live schema 加载后:剔除不存在的表 tab;若没有任何表 tab,自动打开第一张表。
+  useEffect(() => {
+    if (!connId || !liveSchema || !liveSchema.schemas.length) return
+    const exists = (s: string, tname: string) => liveSchema.schemas.some(
+      n => n.name === s && (n.tables.some(x => x.name === tname) || n.views.some(v => v.name === tname)),
+    )
+    const first = liveSchema.schemas.find(n => n.tables.length) ?? liveSchema.schemas[0]
+    const firstTable = first.tables[0]
+    setTabs(prev => {
+      const kept = prev.filter(tb => tb.kind !== 'table' || exists(tb.schema, tb.table))
+      if (kept.some(tb => tb.kind === 'table') || !firstTable) return kept
+      return [...kept, { id: tabIdOf.table(first.name, firstTable.name), kind: 'table' as const, schema: first.name, table: firstTable.name }]
+    })
+  }, [connId, liveSchema])
+
+  // activeId 失效(指向已被剔除的 tab)时回落到最后一个 tab。
+  useEffect(() => {
+    if (activeId && tabs.some(tb => tb.id === activeId)) return
+    setActiveId(tabs.length ? tabs[tabs.length - 1].id : null)
+  }, [tabs, activeId])
+
+  // The namespace currently being viewed (drives namespace-level operations like ER/new-object).
+  const namespace: SchemaNamespace = useMemo(() => {
+    return namespaces.find(n => n.name === (activeTab?.kind === 'table' ? activeTab.schema : ''))
+      ?? namespaces[0]
+  }, [namespaces, activeTab])
 
   return (
     <div style={{ display: 'flex', alignItems: 'stretch', height: '100%', width: '100%', flex: 1, minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
-      <SchemaBrowser onPick={pickTable} onPickObject={pickObject} active={obj.type === 'table' ? { schema: obj.schema, table: obj.table } : null}
+      <SchemaBrowser onPick={pickTable} onPickObject={pickObject}
+        active={activeTab?.kind === 'table' ? { schema: activeTab.schema, table: activeTab.table } : null}
         onNewQuery={() => newQuery()} onOpenER={openER} onNewObjectTemplate={onNewObjectTemplate} onRefresh={refreshSchema}
-        erActive={obj.type === 'er'} sqlActive={obj.type === 'sql'}
+        refreshing={refreshing}
+        erActive={activeTab?.kind === 'er'} sqlActive={activeTab?.kind === 'sql'}
         disabledSql={!caps.sqlConsole} disabledEr={!caps.er}
-        schemas={connId ? namespaces : undefined} conn={connId ? conn : undefined} live={!!connId} refreshing={refreshing} />
+        schemas={connId ? namespaces : undefined} conn={connId ? conn : undefined} live={!!connId} />
       <div className="col grow" style={{ minWidth: 0, minHeight: 0, overflow: 'hidden', position: 'relative' }}>
-        {obj.type === 'table' && (
-          <>
-            <div className="row" style={{ justifyContent: 'space-between', padding: '8px 12px', borderBottom: '1px solid var(--border-hairline)', flex: 'none', gap: 12 }}>
-              <div className="row gap7" style={{ minWidth: 0 }}>
-                <div className="icon-badge" style={{ width: 28, height: 28, borderRadius: 8, background: 'var(--accent-soft)', color: 'var(--accent-primary)' }}><Icon name="table-2" size={15} /></div>
-                <div className="col" style={{ lineHeight: 1.25, minWidth: 0 }}>
-                  <span className="mono ell" style={{ fontSize: 13.5, fontWeight: 700 }}>{connId ? (selectedSchema ? `${selectedSchema}.${obj.table}` : obj.table) : `public.${obj.table}`}</span>
-                  <span className="mono" style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{connId
-                    ? `${live?.rows?.length ?? 0} ${t('workbench.rowsLabel')} · ${live?.columns?.length ?? 0} ${t('workbench.colsLabel')}`
-                    : tbl ? `${tbl.rows} ${t('workbench.rowsLabel')} · ${tbl.cols} ${t('workbench.colsLabel')}` : ''}</span>
-                </div>
-              </div>
-              <Segmented value={effectiveTableTab} onChange={setTableTab} options={[
-                { value: 'data', label: t('workbench.tabData'), icon: 'table-2' },
-                { value: 'structure', label: t('workbench.tabStructure'), icon: 'columns', testId: 'seg-structure' },
-              ]} />
+        {/* 统一 tab strip:表 / 对象 / 查询 / ER 平级,身份复用,全部保持 mounted。 */}
+        {tabs.length > 0 && (
+          <div className="row" style={{ gap: 4, padding: '6px 8px', borderBottom: '1px solid var(--border-hairline)', flex: 'none', width: '100%', minWidth: 0, alignItems: 'center' }}>
+            <button className="icon-btn bare" style={{ width: 24, height: 24, flex: 'none' }} title={t('workbench.scrollLeft')} onClick={() => scrollTabs(-160)}><Icon name="chevron-left" size={14} /></button>
+            <div ref={tabStripRef} className="row" style={{ gap: 6, flex: 1, minWidth: 0, overflowX: 'auto' }}>
+              {tabs.map(tb => {
+                const isActive = tb.id === activeId
+                const icon = tb.kind === 'table' ? 'table-2'
+                  : tb.kind === 'sql' ? 'file-code'
+                  : tb.kind === 'er' ? 'network'
+                  : tb.objKind === 'view' ? 'eye' : 'function-square'
+                const label = tb.kind === 'table' ? tb.table
+                  : tb.kind === 'sql' ? `query-${tb.qid}.sql`
+                  : tb.kind === 'er' ? `ER · ${tb.schema}`
+                  : tb.name
+                return (
+                  <div key={tb.id} data-testid={`wbtab-${tb.id}`} onClick={() => setActiveId(tb.id)} className="row gap6" title={label}
+                    style={{ flex: 'none', alignItems: 'center', height: 26, padding: '0 6px 0 10px', borderRadius: 8, cursor: 'pointer', fontSize: 12,
+                      background: isActive ? 'var(--accent-soft)' : 'var(--surface-sunken)', color: isActive ? 'var(--accent-primary)' : 'var(--text-secondary)' }}>
+                    <Icon name={icon} size={12} /> <span className="ell mono" style={{ maxWidth: 140 }}>{label}</span>
+                    <button className="icon-btn bare" data-testid={`wbtab-close-${tb.id}`} style={{ width: 18, height: 18 }} title={t('shell.close')} onClick={e => { e.stopPropagation(); closeTab(tb.id) }}><Icon name="x" size={11} /></button>
+                  </div>
+                )
+              })}
             </div>
-            <div className="grow" style={{ minHeight: 0 }}>
-              {effectiveTableTab === 'data' && (connId
-                ? <DataGrid
-                    columns={(live?.columns ?? [])}
-                    rows={(live?.rows ?? [])}
-                    statusTones={D.statusTones} density={density} key={`${selectedSchema ?? ''}.${obj.table}`}
-                    writable={caps.writable} connId={connId} table={obj.table} schema={selectedSchema}
-                    rowKeys={rowKeys ?? undefined} keyColumn={rowKeys ? 'ctid' : undefined}
-                    livePreview loadError={liveErr ?? undefined} />
-                : <DataGrid
-                    columns={D.ordersColumns.map((c): ResultColumn => ({ name: c.name, type: c.type, pk: c.pk, fk: c.fk, icon: c.icon }))}
-                    rows={D.ordersRows.map(r => D.ordersColumns.map(c => (r as unknown as Record<string, unknown>)[c.name]))}
-                    statusTones={D.statusTones} density={density} key={obj.table} />)}
-              {effectiveTableTab === 'structure' && <StructureView table={obj.table} schema={selectedSchema} connId={connId ?? undefined} engine={conn.engine} canEdit={caps.structureEdit} key={`${selectedSchema ?? ''}.${obj.table}`} />}
-            </div>
-          </>
-        )}
-        {obj.type === 'object' && (
-          <>
-            <div className="row" style={{ justifyContent: 'space-between', padding: '8px 12px', borderBottom: '1px solid var(--border-hairline)', flex: 'none', gap: 12 }}>
-              <div className="row gap7" style={{ minWidth: 0 }}>
-                <div className="icon-badge" style={{ width: 28, height: 28, borderRadius: 8, background: 'var(--accent-soft)', color: 'var(--accent-primary)' }}>
-                  <Icon name={obj.kind === 'view' ? 'eye' : 'function-square'} size={15} />
-                </div>
-                <div className="col" style={{ lineHeight: 1.25, minWidth: 0 }}>
-                  <span className="mono ell" style={{ fontSize: 13.5, fontWeight: 700 }}>{`${obj.schema}.${obj.name}`}</span>
-                  <span className="mono" style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{t('dbviews.objectDefinition')}</span>
-                </div>
-              </div>
-              <span className="mono" style={{ flex: 'none', alignSelf: 'center', height: 22, lineHeight: '22px', padding: '0 9px', borderRadius: 7, fontSize: 11, fontWeight: 600,
-                color: 'var(--accent-primary)', background: 'var(--accent-soft)', border: '1px solid var(--accent-border)' }}>
-                {obj.kind === 'view' ? t('dbviews.objViewKind') : obj.kind === 'function' ? t('dbviews.objFunctionKind') : t('dbviews.objProcedureKind')}
-              </span>
-            </div>
-            <div className="grow" style={{ minHeight: 0, position: 'relative', display: 'flex', flexDirection: 'column' }}>
-              {objLoading
-                ? <div className="grow" style={{ display: 'grid', placeItems: 'center', color: 'var(--text-faint)', fontSize: 12 }}>{t('dbviews.objLoading')}</div>
-                : objErr
-                  ? <div className="grow" style={{ display: 'grid', placeItems: 'center', color: 'var(--signal-red)', fontSize: 12, padding: 16, textAlign: 'center' }}>{t('dbviews.loadError', { message: objErr })}</div>
-                  : objSource
-                    ? <SqlEditor code={objSource} onChange={() => {}} />
-                    : <div className="grow" style={{ display: 'grid', placeItems: 'center', color: 'var(--text-faint)', fontSize: 12 }}>{t('dbviews.noDefinition')}</div>}
-            </div>
-          </>
-        )}
-        {obj.type === 'er' && (() => {
-          const erName = erSchema ?? namespace.name
-          return <ERDiagram connId={connId ?? undefined} schema={erName} onOpenTable={(tblName) => setObj({ type: 'table', schema: erName, table: tblName })} />
-        })()}
-        {/* SQL query tabs — every open query stays mounted (display-toggled) so its
-            editor + results persist across tab/table switches. */}
-        {openQueries.length > 0 && (
-          <div className="col" style={{ height: '100%', width: '100%', minHeight: 0, minWidth: 0, display: obj.type === 'sql' ? 'flex' : 'none' }}>
-            <div className="row" style={{ gap: 4, padding: '6px 8px', borderBottom: '1px solid var(--border-hairline)', flex: 'none', width: '100%', minWidth: 0, alignItems: 'center' }}>
-              <button className="icon-btn bare" style={{ width: 24, height: 24, flex: 'none' }} title={t('workbench.scrollLeft')} onClick={() => scrollTabs(-160)}><Icon name="chevron-left" size={14} /></button>
-              <div ref={tabStripRef} className="row" style={{ gap: 6, flex: 1, minWidth: 0, overflowX: 'auto' }}>
-                {openQueries.map(id => {
-                  const isActive = obj.type === 'sql' && obj.qid === id
-                  return (
-                    <div key={id} onClick={() => setObj({ type: 'sql', qid: id })} className="row gap6"
-                      style={{ flex: 'none', alignItems: 'center', height: 26, padding: '0 6px 0 10px', borderRadius: 8, cursor: 'pointer', fontSize: 12,
-                        background: isActive ? 'var(--accent-soft)' : 'var(--surface-sunken)', color: isActive ? 'var(--accent-primary)' : 'var(--text-secondary)' }}>
-                      <Icon name="file-code" size={12} /> query-{id}.sql
-                      <button className="icon-btn bare" style={{ width: 18, height: 18 }} title={t('shell.close')} onClick={e => { e.stopPropagation(); closeQuery(id) }}><Icon name="x" size={11} /></button>
-                    </div>
-                  )
-                })}
-              </div>
-              <button className="icon-btn bare" style={{ width: 24, height: 24, flex: 'none' }} title={t('workbench.scrollRight')} onClick={() => scrollTabs(160)}><Icon name="chevron-right" size={14} /></button>
-              <button className="icon-btn bare" style={{ width: 24, height: 24, flex: 'none' }} title={t('workbench.newQuery')} onClick={() => newQuery()}><Icon name="plus" size={14} /></button>
-            </div>
-            <div className="grow" style={{ minHeight: 0, minWidth: 0, width: '100%', display: 'flex', flexDirection: 'column' }}>
-              {openQueries.map(id => (
-                <div key={id} style={{ flex: 1, minHeight: 0, width: '100%', display: obj.type === 'sql' && obj.qid === id ? 'flex' : 'none', flexDirection: 'column' }}>
-                  <SqlConsole density={density} fresh queryN={id} writable={caps.writable} connId={connId ?? undefined} initialCode={queryInitialCode[id]} active={shown && obj.type === 'sql' && obj.qid === id} />
-                </div>
-              ))}
-            </div>
+            <button className="icon-btn bare" style={{ width: 24, height: 24, flex: 'none' }} title={t('workbench.scrollRight')} onClick={() => scrollTabs(160)}><Icon name="chevron-right" size={14} /></button>
+            <button className="icon-btn bare" style={{ width: 24, height: 24, flex: 'none' }} title={t('workbench.newQuery')} onClick={() => newQuery()} disabled={!caps.sqlConsole}><Icon name="plus" size={14} /></button>
           </div>
         )}
+        {/* panes — 全部 mounted,display 切换,切回状态原样(与原 SQL console 同款机制)。 */}
+        <div className="grow" style={{ minHeight: 0, minWidth: 0, position: 'relative' }}>
+          {tabs.map(tb => (
+            <div key={tb.id} className="col" style={{ height: '100%', width: '100%', minHeight: 0, minWidth: 0, display: tb.id === activeId ? 'flex' : 'none' }}>
+              {tb.kind === 'table' && (
+                <TablePane conn={conn} connId={connId} caps={caps} schema={tb.schema} table={tb.table} density={density} />
+              )}
+              {tb.kind === 'object' && (
+                <ObjectPane connId={connId} schema={tb.schema} name={tb.name} objKind={tb.objKind} />
+              )}
+              {tb.kind === 'sql' && (
+                <SqlConsole density={density} fresh queryN={tb.qid} writable={caps.writable} connId={connId ?? undefined}
+                  initialCode={queryInitialCode[tb.qid]} active={shown && tb.id === activeId} engine={conn.engine} />
+              )}
+              {tb.kind === 'er' && (
+                <ERDiagram connId={connId ?? undefined} schema={tb.schema} onOpenTable={tname => pickTable(tb.schema, tname)} />
+              )}
+            </div>
+          ))}
+          {tabs.length === 0 && (
+            <div className="col" style={{ height: '100%', alignItems: 'center', justifyContent: 'center', gap: 8, color: 'var(--text-faint)' }}>
+              <Icon name="table-2" size={28} />
+              <span style={{ fontSize: 13, fontWeight: 600 }}>{t('workbench.noTabs')}</span>
+              <span style={{ fontSize: 11.5 }}>{t('workbench.noTabsHint')}</span>
+            </div>
+          )}
+        </div>
         {/* CREATE TABLE / VIEW form modal — only with a live connection. */}
         {createObj && connId && (
           <CreateObjectModal

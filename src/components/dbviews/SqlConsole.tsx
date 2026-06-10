@@ -27,9 +27,11 @@ export interface SqlConsoleProps {
    * query tab would insert the same text.
    */
   active?: boolean
+  /** 连接引擎(conn.engine = dbType)。mongodb/elasticsearch → plain 模式(Task 10 实装)。 */
+  engine?: string
 }
 
-export function SqlConsole({ density, fresh, writable = true, connId, initialCode, active }: SqlConsoleProps) {
+export function SqlConsole({ density, fresh, writable = true, connId, initialCode, active, engine: _engine }: SqlConsoleProps) {
   const { t } = useTranslation()
   const D = useData()
   const [code, setCode] = useState(

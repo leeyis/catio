@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { vi, describe, it, expect, beforeEach } from 'vitest'
 import { LanguageProvider } from '../../state/LanguageContext'
 import { DataProvider } from '../../state/DataContext'
@@ -9,6 +9,7 @@ const h = vi.hoisted(() => ({
   list: vi.fn(() => [] as import('../../state/dbConnections').ActiveDbConnection[]),
   tablePreview: vi.fn(),
   getSchema: vi.fn(),
+  objectSource: vi.fn(),
 }))
 
 vi.mock('../../state/dbConnections', async (importOriginal) => {
@@ -19,7 +20,7 @@ vi.mock('../../state/dbConnections', async (importOriginal) => {
 // ---- mock the db service so the live-connection data path can be driven without Tauri ----
 vi.mock('../../services/db', async (importOriginal) => {
   const mod = await importOriginal<typeof import('../../services/db')>()
-  return { ...mod, tablePreview: h.tablePreview, getSchema: h.getSchema }
+  return { ...mod, tablePreview: h.tablePreview, getSchema: h.getSchema, objectSource: h.objectSource }
 })
 
 import { DbWorkbench } from './DbWorkbench'
@@ -44,10 +45,12 @@ describe('DbWorkbench capability-gating', () => {
     h.list.mockReset()
     h.tablePreview.mockReset()
     h.getSchema.mockReset()
+    h.objectSource.mockReset()
     // Defaults so capability-gating tests (which now have an active connection →
     // live fetch + schema load) don't crash on an undefined promise.
     h.tablePreview.mockResolvedValue({ columns: [], rows: [] })
     h.getSchema.mockResolvedValue(LIVE_SCHEMA)
+    h.objectSource.mockResolvedValue('CREATE FUNCTION calc_total() ...')
   })
 
   it('all tabs enabled when no active connection (mock/demo path)', () => {
@@ -134,8 +137,10 @@ describe('DbWorkbench live-connection data path', () => {
     h.list.mockReset()
     h.tablePreview.mockReset()
     h.getSchema.mockReset()
+    h.objectSource.mockReset()
     h.tablePreview.mockResolvedValue({ columns: [], rows: [] })
     h.getSchema.mockResolvedValue(LIVE_SCHEMA)
+    h.objectSource.mockResolvedValue('CREATE FUNCTION calc_total() ...')
   })
 
   it('fetches real rows via tablePreview (real schema/table, not hardcoded) and renders them when connected', async () => {
@@ -179,5 +184,82 @@ describe('DbWorkbench live-connection data path', () => {
     h.list.mockReturnValue([])
     wrap(<DbWorkbench conn={CONN} />)
     expect(h.tablePreview).not.toHaveBeenCalled()
+  })
+})
+
+describe('DbWorkbench unified tabs', () => {
+  const LIVE_CONN = {
+    connId: 'conn-live', profileId: 'd-orders', dbType: 'postgres' as const, name: 'prod-orders',
+    capabilities: {
+      writable: true, transactions: true, schemas: true,
+      sqlConsole: true, er: true, structureEdit: true,
+    },
+  }
+  const SCHEMA_WITH_FN = {
+    db: 'conn',
+    schemas: [{
+      name: 'public', open: false,
+      tables: [{ name: 'orders', rows: '', cols: 0 }],
+      views: [], functions: [{ name: 'calc_total' }],
+    }],
+  }
+
+  beforeEach(() => {
+    h.list.mockReset(); h.tablePreview.mockReset(); h.getSchema.mockReset(); h.objectSource.mockReset()
+    h.list.mockReturnValue([LIVE_CONN])
+    h.getSchema.mockResolvedValue(SCHEMA_WITH_FN)
+    h.tablePreview.mockResolvedValue({
+      columns: [{ name: 'id', type: 'int', pk: true }],
+      rows: [[101]],
+    })
+    h.objectSource.mockResolvedValue('CREATE FUNCTION calc_total() RETURNS int ...')
+  })
+
+  it('新建查询与表预览 tab 共存,切回表预览数据仍在', async () => {
+    wrap(<DbWorkbench conn={CONN} />)
+    // live schema 加载后自动打开第一张表的 tab
+    const tableChip = await screen.findByTestId('wbtab-table:public.orders')
+    expect(await screen.findByText('101')).toBeInTheDocument()
+    // 新建查询 → sql tab 出现,表 tab 仍在
+    fireEvent.click(screen.getByTestId('wb-new-query'))
+    expect(await screen.findByTestId('wbtab-sql:1')).toBeInTheDocument()
+    expect(screen.getByTestId('wbtab-table:public.orders')).toBeInTheDocument()
+    // 切回表 tab → 数据仍然渲染(pane 保持 mounted)
+    fireEvent.click(tableChip)
+    expect(screen.getByText('101')).toBeVisible()
+  })
+
+  it('再次单击同一表复用已开 tab,不重复新开', async () => {
+    wrap(<DbWorkbench conn={CONN} />)
+    await screen.findByTestId('wbtab-table:public.orders')
+    const treeItems = await screen.findAllByText('orders')
+    fireEvent.click(treeItems[treeItems.length - 1])
+    fireEvent.click(treeItems[treeItems.length - 1])
+    expect(screen.getAllByTestId('wbtab-table:public.orders')).toHaveLength(1)
+  })
+
+  it('函数源码 tab 与查询 tab 并存', async () => {
+    wrap(<DbWorkbench conn={CONN} />)
+    await screen.findByTestId('wbtab-table:public.orders')
+    fireEvent.click(screen.getByTestId('wb-new-query'))
+    await screen.findByTestId('wbtab-sql:1')
+    // 展开 Functions 分组(默认折叠)并点函数
+    const fnHeaders = screen.getAllByText(/函数|Functions/)
+    fireEvent.click(fnHeaders[0])
+    fireEvent.click(await screen.findByText('calc_total()'))
+    expect(await screen.findByTestId('wbtab-object:function:public.calc_total')).toBeInTheDocument()
+    expect(screen.getByTestId('wbtab-sql:1')).toBeInTheDocument()
+    // 函数源码已加载(通过行为验证)
+    await waitFor(() => expect(h.objectSource).toHaveBeenCalledWith('conn-live', 'public', 'calc_total', 'function'))
+  })
+
+  it('关闭当前 tab 后激活相邻 tab', async () => {
+    wrap(<DbWorkbench conn={CONN} />)
+    const tableChip = await screen.findByTestId('wbtab-table:public.orders')
+    fireEvent.click(screen.getByTestId('wb-new-query'))
+    await screen.findByTestId('wbtab-sql:1')
+    fireEvent.click(screen.getByTestId('wbtab-close-sql:1'))
+    expect(screen.queryByTestId('wbtab-sql:1')).not.toBeInTheDocument()
+    expect(tableChip).toBeInTheDocument()
   })
 })

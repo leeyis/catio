@@ -208,7 +208,9 @@
     "rowsLabel": "rows",
     "colsLabel": "cols",
     "tabData": "Data",
-    "tabStructure": "Structure"
+    "tabStructure": "Structure",
+    "noTabs": "No open tabs",
+    "noTabsHint": "Pick a table, view or function from the sidebar, or open a new query"
   },
   "panels": {
     "sessionHistory": "Session history",
