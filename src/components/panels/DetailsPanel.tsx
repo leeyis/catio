@@ -237,8 +237,13 @@ function DbDetails({ conn, onClose, onEdit, onDelete, onConnect, onDisconnect, o
       void onConnect?.(profile!, '')
       return
     }
-    // Auth-gated cached secret → connect without prompting.
-    if (onTryConnect && (await onTryConnect(profile!))) return
+    // Auth-gated cached secret → connect without prompting. Show a connecting
+    // state so the button isn't dead while the connect is in flight.
+    setConnecting(true)
+    try {
+      if (onTryConnect && (await onTryConnect(profile!))) { setConnecting(false); return }
+    } catch { /* fall through to the password prompt */ }
+    setConnecting(false)
     setPromptConnect(true)
   }
 
@@ -286,7 +291,7 @@ function DbDetails({ conn, onClose, onEdit, onDelete, onConnect, onDisconnect, o
           {isActive ? (
             <Btn variant="danger" icon="x" style={{ flex: 1 }} onClick={() => onDisconnect?.(profile!)}>{t('panels.closeConnection')}</Btn>
           ) : (
-            <Btn variant="cta" icon="play" style={{ flex: 1 }} onClick={handleConnectClick}>{t('panels.connect')}</Btn>
+            <Btn variant="cta" icon="play" style={{ flex: 1 }} onClick={handleConnectClick} disabled={connecting}>{connecting ? (t('modals.connecting') ?? t('panels.connect')) : t('panels.connect')}</Btn>
           )}
           <Btn variant="secondary" icon="copy" onClick={handleCopy}>{copied ? t('panels.copied') : t('panels.copy')}</Btn>
         </div>

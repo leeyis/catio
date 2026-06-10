@@ -659,8 +659,13 @@ export default function App() {
       return
     }
     // Real connect (Tauri). Throws outside Tauri / on failure — DetailsPanel surfaces it.
+    // IMPORTANT: thread driverProfile + options (advanced params) — without them a
+    // reconnect loses e.g. MongoDB's directConnection/authSource and hangs on
+    // replica-set discovery, or a protocol-family variant connects as the base.
     const result = await dbConnect({
       dbType: profile.dbType,
+      ...(profile.driverProfile ? { driverProfile: profile.driverProfile } : {}),
+      ...(profile.options ? { options: profile.options } : {}),
       host: profile.host,
       port: profile.port,
       user: profile.user,
