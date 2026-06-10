@@ -107,6 +107,17 @@ async fn mongo_list_and_query() {
     assert!(names.contains(&"Bob"),   "expected Bob in rows, got: {names:?}");
     assert!(names.contains(&"Carol"), "expected Carol in rows, got: {names:?}");
 
+    // table_data — the DATA GRID path. Must use the schema (database), NOT the
+    // connection's default_db, and must paginate. This is the regression the user
+    // hit: clicking a collection in another DB showed 0 rows.
+    let page1 = driver.table_data(Some(&db_name), coll_name, 2, 0).await.expect("table_data page1");
+    assert_eq!(page1.rows.len(), 2, "page size 2, got {}", page1.rows.len());
+    assert!(page1.truncated, "3 docs with page size 2 → truncated");
+    assert!(page1.columns.iter().any(|c| c.name == "_id" && c.pk), "_id pk column expected");
+    let page2 = driver.table_data(Some(&db_name), coll_name, 2, 2).await.expect("table_data page2");
+    assert_eq!(page2.rows.len(), 1, "remaining 1 doc on page 2");
+    assert!(!page2.truncated, "page 2 is the last page");
+
     // ---- Cleanup ----
     let _ = coll.drop().await;
     eprintln!("mongo_list_and_query PASSED: schemas={schemas:?}, tables={tables:?}, rows={}", result.rows.len());

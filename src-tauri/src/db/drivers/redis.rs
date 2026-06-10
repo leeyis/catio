@@ -417,6 +417,38 @@ impl Driver for RedisDriver {
         })
     }
 
+    /// Native key-space preview for the data grid: `schema` is the logical DB
+    /// number, the pseudo-table is always "keys". Columns ["key","type","ttl",
+    /// "value"]. SCAN has no offset, so we scan `offset+limit` keys and slice the
+    /// page (key order is best-effort, as in other Redis browsers).
+    async fn table_data(&self, schema: Option<&str>, _table: &str, limit: u32, offset: u32)
+        -> Result<QueryResult, DbError> {
+        let db = parse_db_number(schema).unwrap_or(self.default_db);
+        let columns = vec![
+            ColumnInfo { name: "key".into(),   type_name: "string".into(), pk: true  },
+            ColumnInfo { name: "type".into(),  type_name: "string".into(), pk: false },
+            ColumnInfo { name: "ttl".into(),   type_name: "integer".into(), pk: false },
+            ColumnInfo { name: "value".into(), type_name: "mixed".into(),  pk: false },
+        ];
+        let mut conn = self.conn.lock().await;
+        let _ = select_db(&mut *conn, db).await;
+
+        let need = (offset as usize).saturating_add(limit as usize);
+        let (keys, more) = scan_keys(&mut *conn, "*", need).await?;
+        let start = (offset as usize).min(keys.len());
+        let end = (start + limit as usize).min(keys.len());
+        let truncated = more || keys.len() > end;
+
+        let mut rows: Vec<Vec<serde_json::Value>> = Vec::with_capacity(end - start);
+        for key in &keys[start..end] {
+            if let Some(row) = read_key_row(&mut *conn, key).await {
+                rows.push(row);
+            }
+        }
+        let _ = select_db(&mut *conn, self.default_db).await;
+        Ok(QueryResult { columns, rows, rows_affected: None, truncated })
+    }
+
     /// Redis has no table structure concept.
     async fn table_structure(&self, _schema: &str, _table: &str) -> Result<TableStructure, DbError> {
         Err(DbError::Unsupported("redis has no table structure".into()))

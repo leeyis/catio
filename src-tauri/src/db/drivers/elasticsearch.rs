@@ -144,6 +144,57 @@ impl Driver for ElasticsearchDriver {
         Ok(QueryResult { columns, rows, rows_affected: None, truncated })
     }
 
+    /// Native index-data preview for the data grid: `table` is the index,
+    /// paginated via `from`/`size`. The default SQL path can't run against ES.
+    async fn table_data(&self, _schema: Option<&str>, table: &str, limit: u32, offset: u32)
+        -> Result<QueryResult, DbError> {
+        let index = table.trim();
+        if index.is_empty() {
+            return Err(DbError::QueryFailed("Elasticsearch: empty index name".into()));
+        }
+        let path = format!("/{}/_search", index);
+        let body = serde_json::json!({
+            "from": offset,
+            "size": (limit as u64) + 1, // +1 to detect truncation
+            "sort": ["_doc"],
+        });
+        let resp = self.http.post(&path).json(&body).send().await
+            .map_err(|e| DbError::QueryFailed(format!("Elasticsearch request failed: {e}")))?;
+        let resp = check_response_query(resp).await?;
+        let result: SearchResponse = resp.json().await
+            .map_err(|e| DbError::QueryFailed(format!("Elasticsearch parse error: {e}")))?;
+
+        let mut hits = result.hits.hits;
+        let truncated = hits.len() > limit as usize;
+        if truncated {
+            hits.truncate(limit as usize);
+        }
+        let mut all_keys: Vec<String> = vec!["_id".to_string()];
+        let docs: Vec<serde_json::Map<String, serde_json::Value>> = hits
+            .into_iter()
+            .map(|hit| {
+                let mut doc = serde_json::Map::new();
+                doc.insert("_id".to_string(), serde_json::Value::String(hit.id));
+                if let Some(serde_json::Value::Object(source)) = hit.source {
+                    for (k, v) in source {
+                        if !all_keys.contains(&k) {
+                            all_keys.push(k.clone());
+                        }
+                        doc.insert(k, v);
+                    }
+                }
+                doc
+            })
+            .collect();
+        let columns: Vec<ColumnInfo> = all_keys.iter().map(|k| ColumnInfo {
+            name: k.clone(), type_name: String::new(), pk: k == "_id",
+        }).collect();
+        let rows: Vec<Vec<serde_json::Value>> = docs.iter().map(|doc| {
+            all_keys.iter().map(|k| doc.get(k).cloned().unwrap_or(serde_json::Value::Null)).collect()
+        }).collect();
+        Ok(QueryResult { columns, rows, rows_affected: None, truncated })
+    }
+
     async fn list_schemas(&self) -> Result<Vec<String>, DbError> {
         Ok(vec!["default".to_string()])
     }

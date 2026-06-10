@@ -25,6 +25,17 @@ pub fn paginate(db: DatabaseType, sql: &str, limit: u32, offset: u32) -> String 
     }
 }
 
+/// Dialect-correct, identifier-quoted qualified table name. Qualifies with the
+/// schema only when the engine has schema namespaces AND a non-empty schema was
+/// given; otherwise returns the bare quoted table.
+pub fn qualified_table(db: DatabaseType, has_schemas: bool, schema: Option<&str>, table: &str) -> String {
+    match schema {
+        Some(s) if has_schemas && !s.is_empty() =>
+            format!("{}.{}", quote_ident(db, s), quote_ident(db, table)),
+        _ => quote_ident(db, table),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -46,5 +57,21 @@ mod tests {
     fn sqlserver_pagination_differs() {
         assert!(paginate(DatabaseType::Sqlserver, "SELECT 1", 10, 5).contains("FETCH NEXT 10"));
         assert!(paginate(DatabaseType::Postgres, "SELECT 1", 10, 5).contains("LIMIT 10 OFFSET 5"));
+    }
+    #[test]
+    fn pg_with_schema_is_quoted_and_qualified() {
+        assert_eq!(qualified_table(DatabaseType::Postgres, true, Some("public"), "orders"), r#""public"."orders""#);
+    }
+    #[test]
+    fn mysql_no_schema_is_bare_backtick() {
+        assert_eq!(qualified_table(DatabaseType::Mysql, false, Some("ignored"), "orders"), "`orders`");
+    }
+    #[test]
+    fn sqlserver_with_schema_uses_brackets() {
+        assert_eq!(qualified_table(DatabaseType::Sqlserver, true, Some("dbo"), "orders"), "[dbo].[orders]");
+    }
+    #[test]
+    fn pg_empty_schema_falls_back_to_bare() {
+        assert_eq!(qualified_table(DatabaseType::Postgres, true, Some(""), "orders"), r#""orders""#);
     }
 }

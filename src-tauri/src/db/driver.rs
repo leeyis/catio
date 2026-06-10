@@ -122,6 +122,26 @@ pub trait Driver: Send + Sync {
         let paged = crate::db::dialect::paginate(self.db_type(), sql, limit, offset);
         self.query(&paged, limit).await
     }
+
+    /// 表格数据预览：取一张表（或集合 / index / key 空间）的分页行。
+    ///
+    /// 默认走关系型 SQL 路径：`SELECT * FROM <qualified>` + 方言分页。非 SQL 引擎
+    /// （MongoDB/Redis/Elasticsearch）覆盖此方法，用各自原生协议取数（find/scan/
+    /// _search），因为它们不能执行 SQL。这样数据网格无需关心引擎差异。
+    async fn table_data(&self, schema: Option<&str>, table: &str, limit: u32, offset: u32)
+        -> Result<QueryResult, DbError> {
+        let db = self.db_type();
+        let has_schemas = self.capabilities().schemas;
+        let qualified = crate::db::dialect::qualified_table(db, has_schemas, schema, table);
+        // On Postgres, prepend ctid (aliased __ctid) so the grid can edit/delete
+        // rows in tables with no primary key.
+        let select = if db == DatabaseType::Postgres {
+            format!("SELECT ctid AS __ctid, * FROM {}", qualified)
+        } else {
+            format!("SELECT * FROM {}", qualified)
+        };
+        self.paginated_query(&select, limit, offset).await
+    }
     /// schema 浏览：库下的 schema 名（无 schema 概念的引擎返回单元素如 ["default"]）。
     async fn list_schemas(&self) -> Result<Vec<String>, DbError>;
     async fn list_tables(&self, schema: &str) -> Result<Vec<TableInfo>, DbError>;

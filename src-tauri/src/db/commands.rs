@@ -265,45 +265,15 @@ pub async fn db_query_page(conn_id: String, sql: String, limit: u32, offset: u32
     drv.paginated_query(&sql, limit, offset).await
 }
 
-/// Build a dialect-correct, identifier-quoted qualified table name.
-///
-/// Mirrors dml.rs's `qualified`, but only qualifies with a schema when the
-/// engine actually has schema namespaces (`has_schemas`) AND a non-empty
-/// schema was supplied. Engines without schemas (MySQL/SQLite/ClickHouse/...)
-/// always get the bare quoted table name.
-fn qualified_name(
-    db: crate::db::DatabaseType, has_schemas: bool, schema: Option<&str>, table: &str,
-) -> String {
-    use crate::db::dialect::quote_ident;
-    match schema {
-        Some(s) if has_schemas && !s.is_empty() =>
-            format!("{}.{}", quote_ident(db, s), quote_ident(db, table)),
-        _ => quote_ident(db, table),
-    }
-}
-
-/// Dialect-correct, paginated `SELECT * FROM <qualified table>`.
-///
-/// Qualification respects the engine's schema capability so non-Postgres
-/// engines (MySQL/SQLite/SQLServer/ClickHouse/...) get correct quoting and
-/// no bogus `public.` prefix. Pagination is dialect-aware via
-/// `paginated_query` (SQLServer OFFSET/FETCH vs LIMIT/OFFSET).
+/// Paginated table-data preview. Delegates to the driver's `table_data`, which
+/// for relational engines builds a dialect-correct `SELECT * FROM <qualified>`
+/// and for non-SQL engines (MongoDB/Redis/Elasticsearch) fetches natively
+/// (find/scan/_search) — so collections/keys/indices show their rows too.
 #[tauri::command]
 pub async fn db_table_preview(conn_id: String, schema: Option<String>, table: String,
     limit: u32, offset: u32, mgr: tauri::State<'_, ConnManager>) -> Result<QueryResult, DbError> {
     let drv = mgr.get(&conn_id).await.ok_or(DbError::NotFound(conn_id))?;
-    let has_schemas = drv.capabilities().schemas;
-    let qualified = qualified_name(drv.db_type(), has_schemas, schema.as_deref(), &table);
-    // On Postgres, prepend the `ctid` system column (aliased to `__ctid`) so each
-    // row carries a stable physical identity. This lets the grid edit/delete rows
-    // in tables that have NO primary key (the frontend strips `__ctid` from the
-    // display and uses it as the row key). Other engines are unchanged.
-    let select = if drv.db_type() == crate::db::DatabaseType::Postgres {
-        format!("SELECT ctid AS __ctid, * FROM {}", qualified)
-    } else {
-        format!("SELECT * FROM {}", qualified)
-    };
-    drv.paginated_query(&select, limit, offset).await
+    drv.table_data(schema.as_deref(), &table, limit, offset).await
 }
 
 /// Write `contents` to `path` on disk. Used by the grid's CSV/JSON export, which
@@ -419,33 +389,4 @@ pub async fn download_driver_to_dir(profile: &str, dir: &std::path::Path)
     Ok(jdbc_status(profile, dir))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::qualified_name;
-    use crate::db::DatabaseType;
-
-    #[test]
-    fn pg_with_schema_is_quoted_and_qualified() {
-        let q = qualified_name(DatabaseType::Postgres, true, Some("public"), "orders");
-        assert_eq!(q, r#""public"."orders""#);
-    }
-
-    #[test]
-    fn mysql_no_schema_is_bare_backtick() {
-        // MySQL has no schema namespace: even if a schema is passed, drop it.
-        let q = qualified_name(DatabaseType::Mysql, false, Some("ignored"), "orders");
-        assert_eq!(q, "`orders`");
-    }
-
-    #[test]
-    fn sqlserver_with_schema_uses_brackets() {
-        let q = qualified_name(DatabaseType::Sqlserver, true, Some("dbo"), "orders");
-        assert_eq!(q, "[dbo].[orders]");
-    }
-
-    #[test]
-    fn pg_empty_schema_falls_back_to_bare() {
-        let q = qualified_name(DatabaseType::Postgres, true, Some(""), "orders");
-        assert_eq!(q, r#""orders""#);
-    }
-}
+// qualified-table tests moved to dialect.rs (`qualified_table`).

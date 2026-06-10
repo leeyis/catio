@@ -160,6 +160,42 @@ fn bson_type_name(bson: &Bson) -> &'static str {
     }
 }
 
+/// Flatten sampled documents into a pseudo-table QueryResult: columns are the
+/// field-name union (`_id` first), each row is aligned to that column order.
+/// Truncates to `max_rows` and reports whether more were fetched.
+fn docs_to_result(mut docs: Vec<Document>, max_rows: u32) -> QueryResult {
+    let truncated = docs.len() > max_rows as usize;
+    if truncated {
+        docs.truncate(max_rows as usize);
+    }
+    let mut col_names: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // `_id` always first when present.
+    if docs.iter().any(|d| d.contains_key("_id")) {
+        col_names.push("_id".to_string());
+        seen.insert("_id".to_string());
+    }
+    for doc in &docs {
+        for key in doc.keys() {
+            if seen.insert(key.clone()) {
+                col_names.push(key.clone());
+            }
+        }
+    }
+    let columns: Vec<ColumnInfo> = col_names.iter().map(|name| ColumnInfo {
+        name: name.clone(),
+        type_name: "mixed".into(),
+        pk: name == "_id",
+    }).collect();
+    let rows: Vec<Vec<serde_json::Value>> = docs.iter().map(|doc| {
+        col_names.iter().map(|col| match doc.get(col) {
+            Some(bson) => bson_to_json(bson),
+            None => serde_json::Value::Null,
+        }).collect()
+    }).collect();
+    QueryResult { columns, rows, rows_affected: None, truncated }
+}
+
 #[async_trait]
 impl Driver for MongoDriver {
     fn db_type(&self) -> DatabaseType { DatabaseType::Mongodb }
@@ -218,47 +254,29 @@ impl Driver for MongoDriver {
             docs.push(doc);
         }
 
-        let truncated = docs.len() > max_rows as usize;
-        if truncated {
-            docs.truncate(max_rows as usize);
+        Ok(docs_to_result(docs, max_rows))
+    }
+
+    /// Native collection-data preview: `schema` is the database, `table` the
+    /// collection, paginated via skip/limit (no SQL). This is what powers the
+    /// data grid for MongoDB — the default SQL path can't run against Mongo.
+    async fn table_data(&self, schema: Option<&str>, table: &str, limit: u32, offset: u32)
+        -> Result<QueryResult, DbError> {
+        use futures_util::TryStreamExt;
+        let dbname = schema.map(str::trim).filter(|s| !s.is_empty()).unwrap_or(self.default_db.as_str());
+        let db = self.client.database(dbname);
+        let coll: mongodb::Collection<Document> = db.collection(table);
+        // +1 to detect truncation; skip applies the page offset.
+        let fetch = (limit as i64) + 1;
+        let mut cursor = coll.find(doc! {}).skip(offset as u64).limit(fetch).await
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        let mut docs: Vec<Document> = Vec::new();
+        while let Some(doc) = cursor.try_next().await
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?
+        {
+            docs.push(doc);
         }
-
-        // Build column list: _id first, then all other field names in first-seen order
-        let mut col_names: Vec<String> = Vec::new();
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        // Always put _id first if it appears
-        for doc in &docs {
-            if doc.contains_key("_id") && seen.insert("_id".to_string()) {
-                col_names.push("_id".to_string());
-            }
-            break; // just need to check once for _id presence
-        }
-        seen.insert("_id".to_string()); // ensure _id not duplicated below
-        for doc in &docs {
-            for key in doc.keys() {
-                if seen.insert(key.clone()) {
-                    col_names.push(key.clone());
-                }
-            }
-        }
-
-        let columns: Vec<ColumnInfo> = col_names.iter().map(|name| ColumnInfo {
-            name: name.clone(),
-            type_name: "mixed".into(),
-            pk: name == "_id",
-        }).collect();
-
-        // Map each doc to a row aligned to columns
-        let rows: Vec<Vec<serde_json::Value>> = docs.iter().map(|doc| {
-            col_names.iter().map(|col| {
-                match doc.get(col) {
-                    Some(bson) => bson_to_json(bson),
-                    None => serde_json::Value::Null,
-                }
-            }).collect()
-        }).collect();
-
-        Ok(QueryResult { columns, rows, rows_affected: None, truncated })
+        Ok(docs_to_result(docs, limit))
     }
 
     async fn table_structure(&self, schema: &str, table: &str) -> Result<TableStructure, DbError> {
@@ -404,5 +422,44 @@ mod uri_tests {
     fn plain_connection_has_trailing_slash() {
         let a = args(None, None, false);
         assert_eq!(build_uri(&a), "mongodb://192.168.10.253:27017/");
+    }
+}
+
+#[cfg(test)]
+mod result_tests {
+    use super::docs_to_result;
+    use mongodb::bson::doc;
+    use serde_json::{json, Value};
+
+    #[test]
+    fn columns_are_field_union_with_id_first_and_pk() {
+        let docs = vec![
+            doc! { "_id": 1, "name": "a" },
+            doc! { "_id": 2, "name": "b", "age": 30 },
+        ];
+        let r = docs_to_result(docs, 100);
+        let cols: Vec<String> = r.columns.iter().map(|c| c.name.clone()).collect();
+        assert_eq!(cols, vec!["_id", "name", "age"]);
+        assert!(r.columns[0].pk, "_id should be the pk column");
+        assert_eq!(r.rows.len(), 2);
+        // sparse field: row 0 has no age → null; row 1 has 30
+        assert_eq!(r.rows[0][2], Value::Null);
+        assert_eq!(r.rows[1][2], json!(30));
+    }
+
+    #[test]
+    fn truncates_to_max_rows_and_flags() {
+        let docs = vec![doc! { "_id": 1 }, doc! { "_id": 2 }, doc! { "_id": 3 }];
+        let r = docs_to_result(docs, 2);
+        assert_eq!(r.rows.len(), 2);
+        assert!(r.truncated);
+    }
+
+    #[test]
+    fn empty_collection_yields_no_columns() {
+        let r = docs_to_result(vec![], 100);
+        assert!(r.columns.is_empty());
+        assert!(r.rows.is_empty());
+        assert!(!r.truncated);
     }
 }
