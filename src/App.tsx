@@ -683,12 +683,15 @@ export default function App() {
     closeDetailPanel()
   }
 
-  // DetailsPanel "连接": try a cached secret first; returns true if it connected
-  // (so the panel can skip its password prompt).
+  // DetailsPanel "连接": try a cached secret first. Returns true if it connected,
+  // false if there's no cached secret (→ panel prompts for the password). A real
+  // connect failure (auth/timeout) is RE-THROWN so the panel can surface why,
+  // instead of silently popping a password prompt with no explanation.
   async function tryConnectDbCached(profile: DbProfile): Promise<boolean> {
     const cached = await cachedSecret(profile.id)
     if (!cached) return false
-    try { await connectDbProfile(profile, cached); return true } catch { return false }
+    await connectDbProfile(profile, cached)
+    return true
   }
 
   // Disconnect every live connection for a DB profile (details panel "关闭连接").

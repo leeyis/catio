@@ -68,10 +68,23 @@ fn build_uri(args: &ConnectArgs) -> String {
     // database (authSource in options can override the auth DB independently).
     let db_path = args.database.as_deref().map(str::trim).filter(|s| !s.is_empty())
         .map(urlencoded).unwrap_or_default();
+    let opts = args.options.as_deref().map(str::trim).filter(|s| !s.is_empty())
+        .map(|o| o.trim_start_matches(['?', '&']).to_string());
+    // Default a SINGLE-host connection to directConnection=true (matches Compass/
+    // DBeaver): without it the driver does replica-set discovery and tries the
+    // members' advertised internal hostnames (e.g. mongo:27017), which a desktop
+    // client usually can't reach → it hangs on server-selection timeout. Skip when
+    // the user already set directConnection or replicaSet, or gave a host list.
+    let lower = opts.as_deref().unwrap_or("").to_lowercase();
+    let mut params: Vec<String> = Vec::new();
+    if let Some(o) = &opts { params.push(o.clone()); }
+    if !args.host.contains(',') && !lower.contains("directconnection") && !lower.contains("replicaset") {
+        params.push("directConnection=true".to_string());
+    }
     let mut uri = format!("mongodb://{authority}/{db_path}");
-    if let Some(opts) = args.options.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if !params.is_empty() {
         uri.push('?');
-        uri.push_str(opts.trim_start_matches(['?', '&']));
+        uri.push_str(&params.join("&"));
     }
     uri
 }
@@ -413,15 +426,25 @@ mod uri_tests {
     }
 
     #[test]
-    fn strips_leading_separator_from_options() {
+    fn strips_leading_separator_and_appends_direct_default() {
+        // options without directConnection/replicaSet → single-host default appended.
         let a = args(Some("db"), Some("?retryWrites=false"), false);
-        assert_eq!(build_uri(&a), "mongodb://192.168.10.253:27017/db?retryWrites=false");
+        assert_eq!(build_uri(&a), "mongodb://192.168.10.253:27017/db?retryWrites=false&directConnection=true");
     }
 
     #[test]
-    fn plain_connection_has_trailing_slash() {
+    fn single_host_defaults_to_direct_connection() {
+        // No options + single host → directConnection=true so the client doesn't
+        // hang on replica-set discovery (the real bug the user hit).
         let a = args(None, None, false);
-        assert_eq!(build_uri(&a), "mongodb://192.168.10.253:27017/");
+        assert_eq!(build_uri(&a), "mongodb://192.168.10.253:27017/?directConnection=true");
+    }
+
+    #[test]
+    fn does_not_add_direct_when_replica_set_requested() {
+        // replicaSet present → user wants discovery → leave it alone.
+        let a = args(Some("app"), Some("replicaSet=rs0"), false);
+        assert_eq!(build_uri(&a), "mongodb://192.168.10.253:27017/app?replicaSet=rs0");
     }
 }
 

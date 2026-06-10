@@ -242,9 +242,17 @@ function DbDetails({ conn, onClose, onEdit, onDelete, onConnect, onDisconnect, o
     setConnecting(true)
     try {
       if (onTryConnect && (await onTryConnect(profile!))) { setConnecting(false); return }
-    } catch { /* fall through to the password prompt */ }
-    setConnecting(false)
-    setPromptConnect(true)
+      // No cached secret → ask for the password.
+      setConnecting(false)
+      setPromptConnect(true)
+    } catch (err) {
+      // Cached secret connect FAILED — surface why (auth/timeout/etc.) and open
+      // the prompt so the user can retry, rather than a silent password box.
+      setConnecting(false)
+      const msg = dbErrMsg(err)
+      setConnectError(/auth|password/i.test(msg) ? t('modals.connectErrorAuth') : msg)
+      setPromptConnect(true)
+    }
   }
 
   async function handleSubmitSecret(secret: string) {
