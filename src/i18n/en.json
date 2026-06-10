@@ -438,6 +438,7 @@
     "fieldPassphrasePlaceholder": "Private-key passphrase, may be empty",
     "cancel": "Cancel",
     "saveAndConnect": "Save & connect",
+    "connecting": "Connecting…",
     "editTitle": "Edit connection",
     "editSub": "Update connection details · Encrypted credentials",
     "save": "Save",

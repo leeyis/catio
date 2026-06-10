@@ -291,7 +291,7 @@ function DbDetails({ conn, onClose, onEdit, onDelete, onConnect, onDisconnect, o
           {isActive ? (
             <Btn variant="danger" icon="x" style={{ flex: 1 }} onClick={() => onDisconnect?.(profile!)}>{t('panels.closeConnection')}</Btn>
           ) : (
-            <Btn variant="cta" icon="play" style={{ flex: 1 }} onClick={handleConnectClick} disabled={connecting}>{connecting ? (t('modals.connecting') ?? t('panels.connect')) : t('panels.connect')}</Btn>
+            <Btn variant="cta" icon="play" style={{ flex: 1 }} onClick={handleConnectClick} disabled={connecting}>{connecting ? t('modals.connecting') : t('panels.connect')}</Btn>
           )}
           <Btn variant="secondary" icon="copy" onClick={handleCopy}>{copied ? t('panels.copied') : t('panels.copy')}</Btn>
         </div>

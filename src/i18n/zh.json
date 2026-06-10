@@ -438,6 +438,7 @@
     "fieldPassphrasePlaceholder": "私钥口令，可留空",
     "cancel": "取消",
     "saveAndConnect": "保存并连接",
+    "connecting": "连接中…",
     "editTitle": "编辑连接",
     "editSub": "更新连接信息 · 凭据加密存储",
     "save": "保存",
