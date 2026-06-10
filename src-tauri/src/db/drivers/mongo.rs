@@ -238,36 +238,122 @@ impl Driver for MongoDriver {
         Ok(tables)
     }
 
+    /// mongo shell 风格查询控制台(语法行为照 dbx):输入由 mongo_shell::parse
+    /// 解析为结构化命令后用 mongodb crate 执行。database 取连接配置的 default_db。
     async fn query(&self, sql: &str, max_rows: u32) -> Result<QueryResult, DbError> {
         use futures_util::TryStreamExt;
+        use crate::db::drivers::mongo_shell::{self, MongoCommand};
 
-        // `sql` is treated as the collection name (convention for MongoDB pseudo-SQL)
-        let coll_name = sql.trim();
-        if coll_name.is_empty() {
-            return Ok(QueryResult {
-                columns: vec![],
-                rows: vec![],
-                rows_affected: None,
-                truncated: false,
-            });
-        }
-
+        let cmd = mongo_shell::parse(sql).map_err(DbError::QueryFailed)?;
         let db = self.client.database(&self.default_db);
-        let coll: mongodb::Collection<Document> = db.collection(coll_name);
+        let map_err = |e: mongodb::error::Error| DbError::QueryFailed(e.to_string());
 
-        // Fetch up to max_rows + 1 to detect truncation
-        let limit = (max_rows as i64) + 1;
-        let mut cursor = coll.find(doc! {}).limit(limit).await
-            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
-
-        let mut docs: Vec<Document> = Vec::new();
-        while let Some(doc) = cursor.try_next().await
-            .map_err(|e| DbError::QueryFailed(e.to_string()))?
-        {
-            docs.push(doc);
+        // 写命令的统一回执:空表格 + rows_affected。
+        fn affected(n: u64) -> QueryResult {
+            QueryResult { columns: vec![], rows: vec![], rows_affected: Some(n), truncated: false }
         }
 
-        Ok(docs_to_result(docs, max_rows))
+        match cmd {
+            MongoCommand::Find { collection, filter, sort, skip, limit } => {
+                let coll: mongodb::Collection<Document> = db.collection(&collection);
+                let filter = mongo_shell::json_filter_to_doc(&filter).map_err(DbError::QueryFailed)?;
+                // 多取 1 条用于 truncated 检测;用户 limit 更小时以用户为准。
+                let cap = (max_rows as i64) + 1;
+                let fetch = limit.map(|l| l.min(cap)).unwrap_or(cap);
+                let mut find = coll.find(filter).limit(fetch);
+                if let Some(s) = &sort {
+                    find = find.sort(mongo_shell::json_to_doc(s).map_err(DbError::QueryFailed)?);
+                }
+                if let Some(sk) = skip {
+                    find = find.skip(sk);
+                }
+                let mut cursor = find.await.map_err(map_err)?;
+                let mut docs: Vec<Document> = Vec::new();
+                while let Some(d) = cursor.try_next().await.map_err(map_err)? {
+                    docs.push(d);
+                }
+                Ok(docs_to_result(docs, max_rows))
+            }
+            MongoCommand::Count { collection, filter } => {
+                let coll: mongodb::Collection<Document> = db.collection(&collection);
+                let filter = mongo_shell::json_filter_to_doc(&filter).map_err(DbError::QueryFailed)?;
+                let n = coll.count_documents(filter).await.map_err(map_err)?;
+                Ok(QueryResult {
+                    columns: vec![ColumnInfo { name: "count".into(), type_name: "int64".into(), pk: false }],
+                    rows: vec![vec![safe_i64_to_json(n as i64)]],
+                    rows_affected: None,
+                    truncated: false,
+                })
+            }
+            MongoCommand::Aggregate { collection, pipeline } => {
+                let coll: mongodb::Collection<Document> = db.collection(&collection);
+                let stages: Vec<Document> = pipeline
+                    .as_array()
+                    .map(|arr| arr.iter().map(mongo_shell::json_to_doc).collect::<Result<Vec<_>, _>>())
+                    .unwrap_or_else(|| Ok(vec![]))
+                    .map_err(DbError::QueryFailed)?;
+                let mut cursor = coll.aggregate(stages).await.map_err(map_err)?;
+                let mut docs: Vec<Document> = Vec::new();
+                while let Some(d) = cursor.try_next().await.map_err(map_err)? {
+                    docs.push(d);
+                    if docs.len() > max_rows as usize { break; }
+                }
+                Ok(docs_to_result(docs, max_rows))
+            }
+            MongoCommand::GetIndexes { collection } => {
+                // 走 listIndexes 命令取 firstBatch,避免 IndexModel 的手工展开。
+                let res = db.run_command(doc! { "listIndexes": &collection }).await.map_err(map_err)?;
+                let docs: Vec<Document> = res
+                    .get_document("cursor").ok()
+                    .and_then(|c| c.get_array("firstBatch").ok())
+                    .map(|arr| arr.iter().filter_map(|b| b.as_document().cloned()).collect())
+                    .unwrap_or_default();
+                Ok(docs_to_result(docs, max_rows))
+            }
+            MongoCommand::InsertOne { collection, doc: d } => {
+                let coll: mongodb::Collection<Document> = db.collection(&collection);
+                let bd = mongo_shell::json_to_doc(&d).map_err(DbError::QueryFailed)?;
+                coll.insert_one(bd).await.map_err(map_err)?;
+                Ok(affected(1))
+            }
+            MongoCommand::InsertMany { collection, docs } => {
+                let coll: mongodb::Collection<Document> = db.collection(&collection);
+                let bds: Vec<Document> = docs
+                    .as_array()
+                    .map(|arr| arr.iter().map(mongo_shell::json_to_doc).collect::<Result<Vec<_>, _>>())
+                    .unwrap_or_else(|| Ok(vec![]))
+                    .map_err(DbError::QueryFailed)?;
+                let n = bds.len() as u64;
+                coll.insert_many(bds).await.map_err(map_err)?;
+                Ok(affected(n))
+            }
+            MongoCommand::UpdateOne { collection, filter, update } => {
+                let coll: mongodb::Collection<Document> = db.collection(&collection);
+                let f = mongo_shell::json_filter_to_doc(&filter).map_err(DbError::QueryFailed)?;
+                let u = mongo_shell::json_to_doc(&update).map_err(DbError::QueryFailed)?;
+                let r = coll.update_one(f, u).await.map_err(map_err)?;
+                Ok(affected(r.modified_count))
+            }
+            MongoCommand::UpdateMany { collection, filter, update } => {
+                let coll: mongodb::Collection<Document> = db.collection(&collection);
+                let f = mongo_shell::json_filter_to_doc(&filter).map_err(DbError::QueryFailed)?;
+                let u = mongo_shell::json_to_doc(&update).map_err(DbError::QueryFailed)?;
+                let r = coll.update_many(f, u).await.map_err(map_err)?;
+                Ok(affected(r.modified_count))
+            }
+            MongoCommand::DeleteOne { collection, filter } => {
+                let coll: mongodb::Collection<Document> = db.collection(&collection);
+                let f = mongo_shell::json_filter_to_doc(&filter).map_err(DbError::QueryFailed)?;
+                let r = coll.delete_one(f).await.map_err(map_err)?;
+                Ok(affected(r.deleted_count))
+            }
+            MongoCommand::DeleteMany { collection, filter } => {
+                let coll: mongodb::Collection<Document> = db.collection(&collection);
+                let f = mongo_shell::json_filter_to_doc(&filter).map_err(DbError::QueryFailed)?;
+                let r = coll.delete_many(f).await.map_err(map_err)?;
+                Ok(affected(r.deleted_count))
+            }
+        }
     }
 
     /// Native collection-data preview: `schema` is the database, `table` the
