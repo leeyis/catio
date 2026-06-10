@@ -2,6 +2,7 @@
 // catio 是统一 db_query(sql) → Driver::query() 架构,SqlConsole 的原文输入到达
 // mongo.rs::query() 后由本模块解析为结构化 MongoCommand 再用 mongodb crate 执行。
 // 本模块只有纯函数(无 IO),便于单测。
+use mongodb::bson::{doc, oid::ObjectId, Bson, Document};
 use serde_json::Value;
 
 /// 解析后的 mongo shell 命令。参数保留为 serde_json::Value,
@@ -317,6 +318,94 @@ fn requote(s: &str) -> String {
     out
 }
 
+/// JSON → BSON。识别扩展 JSON `{"$oid": "..."}` → ObjectId;整数走 Int64。
+pub fn json_to_bson(v: &Value) -> Bson {
+    match v {
+        Value::Object(map) => {
+            if map.len() == 1 {
+                if let Some(Value::String(hex)) = map.get("$oid") {
+                    if let Ok(oid) = ObjectId::parse_str(hex) {
+                        return Bson::ObjectId(oid);
+                    }
+                }
+            }
+            let mut d = Document::new();
+            for (k, val) in map {
+                d.insert(k.clone(), json_to_bson(val));
+            }
+            Bson::Document(d)
+        }
+        Value::Array(arr) => Bson::Array(arr.iter().map(json_to_bson).collect()),
+        Value::String(s) => Bson::String(s.clone()),
+        Value::Bool(b) => Bson::Boolean(*b),
+        Value::Null => Bson::Null,
+        Value::Number(n) => match n.as_i64() {
+            Some(i) => Bson::Int64(i),
+            None => Bson::Double(n.as_f64().unwrap_or(0.0)),
+        },
+    }
+}
+
+/// JSON 对象 → BSON Document(非对象报错)。用于 update 文档、aggregate stage、sort。
+pub fn json_to_doc(v: &Value) -> Result<Document, String> {
+    match json_to_bson(v) {
+        Bson::Document(d) => Ok(d),
+        _ => Err("expected a JSON object".to_string()),
+    }
+}
+
+/// filter JSON → BSON Document。`_id` 做 ObjectId/String 双变体展开(照 dbx):
+/// 24 位 hex 字符串 → `{$in: [ObjectId(hex), "hex"]}`;`$eq` → `$in`、`$ne` → `$nin` 同样展开。
+pub fn json_filter_to_doc(v: &Value) -> Result<Document, String> {
+    let map = v.as_object().ok_or_else(|| "filter must be a JSON object".to_string())?;
+    let mut d = Document::new();
+    for (k, val) in map {
+        if k == "_id" {
+            d.insert("_id", id_filter_bson(val));
+        } else {
+            d.insert(k.clone(), json_to_bson(val));
+        }
+    }
+    Ok(d)
+}
+
+fn hex24(s: &str) -> Option<ObjectId> {
+    if s.len() == 24 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+        ObjectId::parse_str(s).ok()
+    } else {
+        None
+    }
+}
+
+fn id_variants(s: &str) -> Bson {
+    match hex24(s) {
+        Some(oid) => Bson::Array(vec![Bson::ObjectId(oid), Bson::String(s.to_string())]),
+        None => Bson::Array(vec![Bson::String(s.to_string())]),
+    }
+}
+
+fn id_filter_bson(v: &Value) -> Bson {
+    match v {
+        Value::String(s) if hex24(s).is_some() => Bson::Document(doc! { "$in": id_variants(s) }),
+        Value::Object(map) => {
+            // 已是 $oid 扩展 JSON → 直接转 ObjectId(json_to_bson 处理)
+            if map.len() == 1 && map.contains_key("$oid") {
+                return json_to_bson(v);
+            }
+            let mut out = Document::new();
+            for (op, ov) in map {
+                match (op.as_str(), ov) {
+                    ("$eq", Value::String(s)) => { out.insert("$in", id_variants(s)); }
+                    ("$ne", Value::String(s)) => { out.insert("$nin", id_variants(s)); }
+                    _ => { out.insert(op.clone(), json_to_bson(ov)); }
+                }
+            }
+            Bson::Document(out)
+        }
+        other => json_to_bson(other),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,5 +556,42 @@ mod tests {
     fn true_false_null_values_pass_through() {
         let v = normalize_loose_json("{active: true, gone: null}").unwrap();
         assert_eq!(v, json!({"active": true, "gone": null}));
+    }
+
+    #[test]
+    fn json_to_bson_converts_oid_and_scalars() {
+        let v = json!({"_id": {"$oid": "65f1c0ffee65f1c0ffee65f1"}, "n": 3, "f": 1.5, "s": "x", "b": true, "z": null, "arr": [1]});
+        let b = json_to_bson(&v);
+        let d = match b { Bson::Document(d) => d, other => panic!("expected doc, got {other:?}") };
+        assert_eq!(d.get("_id"), Some(&Bson::ObjectId(ObjectId::parse_str("65f1c0ffee65f1c0ffee65f1").unwrap())));
+        assert_eq!(d.get("n"), Some(&Bson::Int64(3)));
+        assert_eq!(d.get("b"), Some(&Bson::Boolean(true)));
+    }
+
+    #[test]
+    fn id_filter_expands_hex24_to_dual_variants() {
+        // _id: "hex24" → {_id: {$in: [ObjectId, "hex24"]}}(dbx 的 _id 类型痛点解法)
+        let d = json_filter_to_doc(&json!({"_id": "65f1c0ffee65f1c0ffee65f1"})).unwrap();
+        let id = d.get_document("_id").unwrap();
+        let arr = id.get_array("$in").unwrap();
+        assert_eq!(arr.len(), 2);
+        assert!(matches!(arr[0], Bson::ObjectId(_)));
+        assert!(matches!(arr[1], Bson::String(_)));
+    }
+
+    #[test]
+    fn id_filter_expands_eq_ne_operators() {
+        let d = json_filter_to_doc(&json!({"_id": {"$eq": "65f1c0ffee65f1c0ffee65f1"}})).unwrap();
+        assert!(d.get_document("_id").unwrap().contains_key("$in"));
+        let d = json_filter_to_doc(&json!({"_id": {"$ne": "65f1c0ffee65f1c0ffee65f1"}})).unwrap();
+        assert!(d.get_document("_id").unwrap().contains_key("$nin"));
+    }
+
+    #[test]
+    fn non_hex_id_and_other_fields_convert_plainly() {
+        let d = json_filter_to_doc(&json!({"_id": "plain-key", "age": {"$gt": 18}})).unwrap();
+        // 非 24-hex 的 _id 不展开,保持等值匹配
+        assert_eq!(d.get("_id"), Some(&Bson::String("plain-key".into())));
+        assert_eq!(d.get_document("age").unwrap().get("$gt"), Some(&Bson::Int64(18)));
     }
 }
