@@ -4,6 +4,133 @@
 // 本模块只有纯函数(无 IO),便于单测。
 use serde_json::Value;
 
+/// 解析后的 mongo shell 命令。参数保留为 serde_json::Value,
+/// BSON 转换在执行时做(见 json_to_bson / json_filter_to_doc)。
+#[derive(Debug, Clone, PartialEq)]
+pub enum MongoCommand {
+    Find { collection: String, filter: Value, sort: Option<Value>, skip: Option<u64>, limit: Option<i64> },
+    Count { collection: String, filter: Value },
+    Aggregate { collection: String, pipeline: Value },
+    GetIndexes { collection: String },
+    InsertOne { collection: String, doc: Value },
+    InsertMany { collection: String, docs: Value },
+    UpdateOne { collection: String, filter: Value, update: Value },
+    UpdateMany { collection: String, filter: Value, update: Value },
+    DeleteOne { collection: String, filter: Value },
+    DeleteMany { collection: String, filter: Value },
+}
+
+pub const SYNTAX_HINT: &str = "Unsupported MongoDB command. Expected mongo shell syntax, e.g. \
+db.users.find({age: {$gt: 18}}).sort({_id: -1}).limit(20). Supported: find / countDocuments / \
+aggregate / getIndexes / insertOne / insertMany / updateOne / updateMany / deleteOne / deleteMany";
+
+fn hint() -> String { SYNTAX_HINT.to_string() }
+
+pub fn parse(input: &str) -> Result<MongoCommand, String> {
+    let s = input.trim().trim_end_matches(';').trim();
+    let rest = s.strip_prefix("db.").ok_or_else(hint)?;
+    let (collection, rest) = parse_collection(rest)?;
+    let paren = rest.find('(').ok_or_else(hint)?;
+    let method = rest[..paren].trim().to_string();
+    let (args_raw, chain) = extract_balanced(&rest[paren..]).map_err(|_| hint())?;
+    let args = split_top_level(&args_raw);
+    // 第 i 个参数,缺省为空对象 {}
+    let arg = |i: usize| -> Result<Value, String> {
+        match args.get(i) {
+            Some(a) => normalize_loose_json(a),
+            None => Ok(Value::Object(Default::default())),
+        }
+    };
+    // find 之外的方法不允许链式调用
+    if method != "find" && !chain.trim().is_empty() {
+        return Err(hint());
+    }
+    match method.as_str() {
+        "find" => {
+            let (sort, skip, limit) = parse_find_chain(chain)?;
+            Ok(MongoCommand::Find { collection, filter: arg(0)?, sort, skip, limit })
+        }
+        "countDocuments" | "count" => Ok(MongoCommand::Count { collection, filter: arg(0)? }),
+        "aggregate" => {
+            let trimmed = args_raw.trim();
+            let pipeline = if trimmed.starts_with('[') {
+                normalize_loose_json(trimmed)?
+            } else {
+                Value::Array(args.iter().map(|a| normalize_loose_json(a)).collect::<Result<Vec<_>, _>>()?)
+            };
+            if !pipeline.is_array() { return Err(hint()); }
+            Ok(MongoCommand::Aggregate { collection, pipeline })
+        }
+        "getIndexes" => Ok(MongoCommand::GetIndexes { collection }),
+        "insertOne" => Ok(MongoCommand::InsertOne { collection, doc: arg(0)? }),
+        "insertMany" => {
+            let trimmed = args_raw.trim();
+            let docs = if trimmed.starts_with('[') {
+                normalize_loose_json(trimmed)?
+            } else {
+                Value::Array(args.iter().map(|a| normalize_loose_json(a)).collect::<Result<Vec<_>, _>>()?)
+            };
+            if !docs.is_array() { return Err(hint()); }
+            Ok(MongoCommand::InsertMany { collection, docs })
+        }
+        "updateOne" | "updateMany" => {
+            if args.len() < 2 { return Err(hint()); }
+            let filter = arg(0)?;
+            let update = arg(1)?;
+            if method == "updateOne" {
+                Ok(MongoCommand::UpdateOne { collection, filter, update })
+            } else {
+                Ok(MongoCommand::UpdateMany { collection, filter, update })
+            }
+        }
+        "deleteOne" => Ok(MongoCommand::DeleteOne { collection, filter: arg(0)? }),
+        "deleteMany" => Ok(MongoCommand::DeleteMany { collection, filter: arg(0)? }),
+        _ => Err(hint()),
+    }
+}
+
+/// 集合名:`getCollection("x")` 或裸标识符(直到下一个 `.`)。
+fn parse_collection(rest: &str) -> Result<(String, &str), String> {
+    if let Some(r) = rest.strip_prefix("getCollection") {
+        let (inner, after) = extract_balanced(r).map_err(|_| hint())?;
+        let name = inner.trim().trim_matches(|c| c == '"' || c == '\'').to_string();
+        if name.is_empty() { return Err(hint()); }
+        let after = after.trim_start().strip_prefix('.').ok_or_else(hint)?;
+        Ok((name, after))
+    } else {
+        let dot = rest.find('.').ok_or_else(hint)?;
+        let name = &rest[..dot];
+        let valid = !name.is_empty()
+            && name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-');
+        if !valid { return Err(hint()); }
+        Ok((name.to_string(), &rest[dot + 1..]))
+    }
+}
+
+/// find 之后的链式调用:仅允许 .sort({..}) / .skip(n) / .limit(n)。
+fn parse_find_chain(mut chain: &str) -> Result<(Option<Value>, Option<u64>, Option<i64>), String> {
+    let (mut sort, mut skip, mut limit) = (None, None, None);
+    loop {
+        chain = chain.trim_start();
+        if chain.is_empty() {
+            return Ok((sort, skip, limit));
+        }
+        let rest = chain.strip_prefix('.').ok_or_else(hint)?;
+        let paren = rest.find('(').ok_or_else(hint)?;
+        let name = rest[..paren].trim();
+        let (arg, tail) = extract_balanced(&rest[paren..]).map_err(|_| hint())?;
+        match name {
+            "sort" => sort = Some(normalize_loose_json(&arg)?),
+            "skip" => skip = Some(arg.trim().parse::<u64>().map_err(|_| hint())?),
+            "limit" => limit = Some(arg.trim().parse::<i64>().map_err(|_| hint())?),
+            _ => return Err(format!(
+                "Unsupported chained method `.{name}()` — only .sort() / .skip() / .limit() may follow find()"
+            )),
+        }
+        chain = tail;
+    }
+}
+
 /// 从 `(` 开始提取配对括号内容(尊重字符串字面量与嵌套 ()/[]/{}),
 /// 返回 (括号内内容, 右括号之后的剩余)。输入允许有前导空白。
 pub fn extract_balanced(s: &str) -> Result<(String, &str), String> {
@@ -182,6 +309,85 @@ fn requote(s: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn parses_find_with_chain() {
+        let cmd = parse(r#"db.users.find({age: {$gt: 18}}).sort({name: 1}).skip(10).limit(20)"#).unwrap();
+        match cmd {
+            MongoCommand::Find { collection, filter, sort, skip, limit } => {
+                assert_eq!(collection, "users");
+                assert_eq!(filter, json!({"age": {"$gt": 18}}));
+                assert_eq!(sort, Some(json!({"name": 1})));
+                assert_eq!(skip, Some(10));
+                assert_eq!(limit, Some(20));
+            }
+            other => panic!("expected Find, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_get_collection_form_and_empty_find() {
+        let cmd = parse(r#"db.getCollection("order-items").find()"#).unwrap();
+        match cmd {
+            MongoCommand::Find { collection, filter, sort, skip, limit } => {
+                assert_eq!(collection, "order-items");
+                assert_eq!(filter, json!({}));
+                assert!(sort.is_none() && skip.is_none() && limit.is_none());
+            }
+            other => panic!("expected Find, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_count_aggregate_indexes() {
+        assert!(matches!(parse("db.users.countDocuments({active: true})").unwrap(),
+            MongoCommand::Count { .. }));
+        let agg = parse(r#"db.orders.aggregate([{$match: {status: 'paid'}}, {$group: {_id: "$uid"}}])"#).unwrap();
+        match agg {
+            MongoCommand::Aggregate { collection, pipeline } => {
+                assert_eq!(collection, "orders");
+                assert_eq!(pipeline.as_array().unwrap().len(), 2);
+            }
+            other => panic!("expected Aggregate, got {other:?}"),
+        }
+        assert!(matches!(parse("db.users.getIndexes()").unwrap(),
+            MongoCommand::GetIndexes { .. }));
+    }
+
+    #[test]
+    fn parses_write_commands() {
+        assert!(matches!(parse(r#"db.users.insertOne({name: "n"})"#).unwrap(),
+            MongoCommand::InsertOne { .. }));
+        let im = parse(r#"db.users.insertMany([{a: 1}, {a: 2}])"#).unwrap();
+        match im {
+            MongoCommand::InsertMany { docs, .. } => assert_eq!(docs.as_array().unwrap().len(), 2),
+            other => panic!("expected InsertMany, got {other:?}"),
+        }
+        let up = parse(r#"db.users.updateMany({a: 1}, {$set: {b: 2}})"#).unwrap();
+        match up {
+            MongoCommand::UpdateMany { filter, update, .. } => {
+                assert_eq!(filter, json!({"a": 1}));
+                assert_eq!(update, json!({"$set": {"b": 2}}));
+            }
+            other => panic!("expected UpdateMany, got {other:?}"),
+        }
+        assert!(matches!(parse("db.users.deleteOne({a: 1})").unwrap(),
+            MongoCommand::DeleteOne { .. }));
+    }
+
+    #[test]
+    fn rejects_invalid_input_with_hint() {
+        assert!(parse("SELECT * FROM users").unwrap_err().contains("db.users.find"));
+        assert!(parse("db.users.dropDatabase()").is_err());
+        assert!(parse("db.users.find({a: 1}).explain()").unwrap_err().contains("sort"));
+        assert!(parse("db.users.updateOne({a: 1})").is_err()); // 缺 update 参数
+        assert!(parse("").is_err());
+    }
+
+    #[test]
+    fn trailing_semicolon_is_tolerated() {
+        assert!(matches!(parse("db.users.find();").unwrap(), MongoCommand::Find { .. }));
+    }
 
     #[test]
     fn extracts_balanced_parens_with_nesting_and_strings() {
