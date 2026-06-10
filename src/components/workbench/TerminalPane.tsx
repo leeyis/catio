@@ -3,6 +3,7 @@ import { useState, useMemo, useRef, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import { SearchAddon } from '@xterm/addon-search'
 import '@xterm/xterm/css/xterm.css'
 import { Icon } from '../Icon'
 import { ConnGlyph, StatusDot } from '../atoms'
@@ -119,6 +120,10 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
   // FitAddon kept in a ref so the "became visible" effect can refit after this
   // pane was hidden (display:none → zero size → xterm can't lay out).
   const fitAddonRef = useRef<FitAddon | null>(null)
+  // SearchAddon for buffer search; search UI state (toggle + query).
+  const searchAddonRef = useRef<SearchAddon | null>(null)
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
   // Mutable ref tracking the active channel id; nulled on server-initiated close to
   // prevent double-termClose and dead-channel keystroke writes.
   const chanIdRef = useRef<string | null>(null)
@@ -129,7 +134,10 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
   const [selBar, setSelBar] = useState<{ left: number; top: number; text: string } | null>(null)
   // Multiexec run state — per-target progress; held here for ORCH to consume via a future prop/callback.
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const [_mxRunState, setMxRunState] = useState<MxRunState>({})
+  const [mxRunState, setMxRunState] = useState<MxRunState>({})
+  // The command typed into the broadcast bar (Multi-Exec).
+  const [bcCmd, setBcCmd] = useState('')
+  const [bcSending, setBcSending] = useState(false)
 
   const host = conn ? (conn.sub.split(' ')[0].replace('ssh ', '')) : 'jump@db-bastion'
   const live = !!sessionId && isTauri()
@@ -164,8 +172,11 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
     }
     if (targetIds.length === 0) return
 
-    // Initialise run state for all targets.
+    // Initialise run state for all targets (current session first, then hosts).
     const initial: MxRunState = {}
+    if (sessionId && live) {
+      initial[sessionId] = { id: sessionId, name: `${conn?.name ?? t('workbench.currentSession')} ·`, state: 'running', out: '' }
+    }
     for (const connId of mxHosts) {
       initial[connId] = { id: connId, name: D.byId[connId]?.name ?? connId, state: 'running', out: '' }
     }
@@ -199,6 +210,24 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
     }
   }
 
+  // Buffer search via the xterm SearchAddon (highlights + scrolls to matches).
+  function doSearch(forward: boolean) {
+    const sa = searchAddonRef.current
+    if (!sa || !searchQuery) return
+    const opts = { caseSensitive: false }
+    if (forward) sa.findNext(searchQuery, opts)
+    else sa.findPrevious(searchQuery, opts)
+  }
+
+  // Send the typed command to every selected broadcast target (+ current session).
+  async function sendBroadcast() {
+    const cmd = bcCmd.trim()
+    if (!cmd || bcSending) return
+    setBcSending(true)
+    try { await broadcastCommandRef.current(cmd) } finally { setBcSending(false) }
+    setBcCmd('')
+  }
+
   // ---- xterm lifecycle (once per session/chan) ----
   useEffect(() => {
     const hostEl = xtermHost.current
@@ -218,6 +247,9 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
     const fitAddon = new FitAddon()
     fitAddonRef.current = fitAddon
     term.loadAddon(fitAddon)
+    const searchAddon = new SearchAddon()
+    searchAddonRef.current = searchAddon
+    try { term.loadAddon(searchAddon) } catch { /* mocked terminal in tests */ }
     term.open(hostEl)
     try { fitAddon.fit() } catch { /* jsdom has no layout */ }
 
@@ -471,14 +503,63 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
               </>
             )}
           </div>
-          <button className="icon-btn bare" title={t('workbench.searchBuffer')}><Icon name="search" size={15} /></button>
-          <button className="icon-btn bare" title={t('workbench.clearScreen')} onClick={() => { if (termRef.current) termRef.current.clear() }}><Icon name="trash-2" size={15} /></button>
+          <button className="icon-btn bare" title={t('workbench.searchBuffer')} onClick={() => setSearchOpen(o => !o)}
+            style={{ color: searchOpen ? 'var(--accent-primary)' : undefined, background: searchOpen ? 'var(--accent-soft)' : undefined }}><Icon name="search" size={15} /></button>
+          <button className="icon-btn bare" title={t('workbench.clearScreen')} onClick={() => { if (termRef.current) termRef.current.clear() }}><Icon name="broom" size={15} /></button>
         </div>
       </div>
+
+      {/* Multi-Exec broadcast bar — type a command, run it on every selected host */}
+      {broadcast && (
+        <div className="row gap8" style={{ padding: '8px 12px', borderBottom: '1px solid var(--border-hairline)', background: 'var(--surface-subtle)', flex: 'none', alignItems: 'center' }}>
+          <Icon name="radar" size={14} style={{ color: 'var(--accent-primary)', flex: 'none' }} />
+          <input value={bcCmd} onChange={e => setBcCmd(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') void sendBroadcast() }}
+            placeholder={t('workbench.broadcastCmdPlaceholder', { count: mxHosts.length + 1 })}
+            className="mono" style={{ flex: 1, height: 32, padding: '0 10px', borderRadius: 8, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-card)', fontSize: 12.5, color: 'var(--text-primary)', outline: 'none' }} />
+          <button className="btn btn-primary sm" style={{ flex: 'none' }} disabled={!bcCmd.trim() || bcSending} onClick={() => void sendBroadcast()}>
+            <Icon name="radar" size={13} /> {t('workbench.broadcastSend', { count: mxHosts.length + 1 })}
+          </button>
+        </div>
+      )}
+
+      {/* Multi-Exec per-target results */}
+      {Object.keys(mxRunState).length > 0 && (
+        <div className="col" style={{ maxHeight: 190, overflowY: 'auto', borderBottom: '1px solid var(--border-hairline)', background: 'var(--surface-sunken)', flex: 'none' }}>
+          <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', padding: '5px 12px', borderBottom: '1px solid var(--border-hairline)' }}>
+            <span style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '0.3px', textTransform: 'uppercase', color: 'var(--text-faint)' }}>{t('workbench.broadcastResults')}</span>
+            <button className="icon-btn bare" title={t('workbench.clearAll')} style={{ width: 18, height: 18 }} onClick={() => setMxRunState({})}><Icon name="x" size={12} /></button>
+          </div>
+          {Object.values(mxRunState).map(tg => (
+            <div key={tg.id} className="col" style={{ padding: '6px 12px', borderBottom: '1px solid var(--border-hairline)', gap: 3 }}>
+              <div className="row gap6" style={{ alignItems: 'center' }}>
+                <span className="dot" style={{ background: tg.state === 'done' ? 'var(--signal-green)' : tg.state === 'error' ? 'var(--danger-fg)' : 'var(--signal-amber)' }} />
+                <span className="ell" style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-primary)' }}>{tg.name}</span>
+                <span className="mono" style={{ marginLeft: 'auto', fontSize: 9.5, color: 'var(--text-faint)', textTransform: 'uppercase' }}>{tg.state}</span>
+              </div>
+              {tg.out && <pre className="mono" style={{ margin: 0, fontSize: 10.5, lineHeight: 1.5, color: 'var(--text-tertiary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: 90, overflow: 'auto' }}>{tg.out}</pre>}
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* terminal surface — xterm.js host */}
       <div ref={xtermHost} className="grow" onMouseDown={() => setSelBar(null)}
         style={{ overflow: 'hidden', background: 'var(--term-bg)', padding: '12px 14px', fontFamily: monoFontStack(prefs.monoFont), fontSize: prefs.termFontPx, lineHeight: 1.65, minHeight: 0 }} />
+
+      {/* buffer search overlay (xterm SearchAddon) */}
+      {searchOpen && (
+        <div className="row gap4 pop-in" style={{ position: 'absolute', top: 54, right: 14, zIndex: 30, background: 'var(--surface-elevated)', border: '1px solid var(--border-hairline-alt)', borderRadius: 9, boxShadow: 'var(--shadow-dropdown)', padding: '4px 6px', alignItems: 'center' }}>
+          <Icon name="search" size={13} style={{ color: 'var(--text-faint)', flex: 'none' }} />
+          <input autoFocus value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') doSearch(!e.shiftKey); if (e.key === 'Escape') setSearchOpen(false) }}
+            placeholder={t('workbench.searchBuffer')}
+            className="mono" style={{ width: 170, height: 26, border: 'none', outline: 'none', background: 'transparent', fontSize: 12.5, color: 'var(--text-primary)' }} />
+          <button className="icon-btn bare" title={t('workbench.searchPrev')} style={{ width: 22, height: 22, flex: 'none' }} onClick={() => doSearch(false)}><Icon name="chevron-up" size={13} /></button>
+          <button className="icon-btn bare" title={t('workbench.searchNext')} style={{ width: 22, height: 22, flex: 'none' }} onClick={() => doSearch(true)}><Icon name="chevron-down" size={13} /></button>
+          <button className="icon-btn bare" style={{ width: 22, height: 22, flex: 'none' }} onClick={() => setSearchOpen(false)}><Icon name="x" size={13} /></button>
+        </div>
+      )}
 
       {/* selection toolbar — copy / ask AI */}
       {selBar && (
