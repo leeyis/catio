@@ -47,6 +47,9 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
     }
     match method.as_str() {
         "find" => {
+            if args.len() > 1 {
+                return Err("find() projection (second argument) is not supported yet — use db.coll.find(filter) and select columns from the result".to_string());
+            }
             let (sort, skip, limit) = parse_find_chain(chain)?;
             Ok(MongoCommand::Find { collection, filter: arg(0)?, sort, skip, limit })
         }
@@ -62,7 +65,10 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
             Ok(MongoCommand::Aggregate { collection, pipeline })
         }
         "getIndexes" => Ok(MongoCommand::GetIndexes { collection }),
-        "insertOne" => Ok(MongoCommand::InsertOne { collection, doc: arg(0)? }),
+        "insertOne" => {
+            if args.is_empty() { return Err(hint()); }
+            Ok(MongoCommand::InsertOne { collection, doc: arg(0)? })
+        }
         "insertMany" => {
             let trimmed = args_raw.trim();
             let docs = if trimmed.starts_with('[') {
@@ -83,8 +89,14 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
                 Ok(MongoCommand::UpdateMany { collection, filter, update })
             }
         }
-        "deleteOne" => Ok(MongoCommand::DeleteOne { collection, filter: arg(0)? }),
-        "deleteMany" => Ok(MongoCommand::DeleteMany { collection, filter: arg(0)? }),
+        "deleteOne" => {
+            if args.is_empty() { return Err(hint()); }
+            Ok(MongoCommand::DeleteOne { collection, filter: arg(0)? })
+        }
+        "deleteMany" => {
+            if args.is_empty() { return Err(hint()); }
+            Ok(MongoCommand::DeleteMany { collection, filter: arg(0)? })
+        }
         _ => Err(hint()),
     }
 }
@@ -387,6 +399,30 @@ mod tests {
     #[test]
     fn trailing_semicolon_is_tolerated() {
         assert!(matches!(parse("db.users.find();").unwrap(), MongoCommand::Find { .. }));
+    }
+
+    #[test]
+    fn rejects_zero_arg_delete_and_insert() {
+        // mongosh 对缺 filter 的 delete / 缺 doc 的 insert 直接报错;
+        // 默认空 filter 会让手滑变成全集合删除,必须拒绝。
+        assert!(parse("db.users.deleteMany()").is_err());
+        assert!(parse("db.users.deleteOne()").is_err());
+        assert!(parse("db.users.insertOne()").is_err());
+        // 空 filter 的查询仍合法
+        assert!(parse("db.users.find()").is_ok());
+        assert!(parse("db.users.countDocuments()").is_ok());
+    }
+
+    #[test]
+    fn rejects_find_projection_argument() {
+        let err = parse(r#"db.users.find({}, {name: 1})"#).unwrap_err();
+        assert!(err.contains("projection"));
+    }
+
+    #[test]
+    fn parses_get_collection_single_quote_form() {
+        assert!(matches!(parse(r#"db.getCollection('users').find()"#).unwrap(),
+            MongoCommand::Find { .. }));
     }
 
     #[test]
