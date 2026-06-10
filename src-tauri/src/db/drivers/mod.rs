@@ -8,6 +8,7 @@ pub mod clickhouse;
 pub mod rqlite;
 pub mod elasticsearch;
 pub mod mongo;
+pub mod mongo_shell;
 pub mod redis;
 pub mod jdbc;
 pub mod jdbc_config;
