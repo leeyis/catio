@@ -507,7 +507,19 @@ export default function App() {
         if (dbp) {
           const cached = await cachedSecret(dbp.id)
           if (cached) {
-            try { await connectDbProfile(dbp, cached); return } catch { /* fall through to prompt */ }
+            try { await connectDbProfile(dbp, cached); return }
+            catch (err) {
+              // The cached secret failed to connect. Surface WHY in the prompt
+              // instead of silently dropping to a blank password box (which
+              // looks like "the password was never cached"). Dev runtime w/o a
+              // backend is the one case we still fall through quietly.
+              const msg = dbErrMsg(err)
+              if (!msg.includes('Tauri runtime')) {
+                setDbPromptError(/auth|password/i.test(msg) ? t('modals.connectErrorAuth') : msg)
+                setPendingDbConnect(dbp)
+                return
+              }
+            }
           }
           setDbPromptError(null); setPendingDbConnect(dbp)
         } else openDetail(conn)
