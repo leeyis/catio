@@ -83,6 +83,18 @@ pub fn run() {
                     std::env::set_var("CATIO_JDBC_DRIVERS_DIR", drivers);
                 }
             }
+            // 把打包进资源目录的 sidecar 插件 jar 暴露给 plugin_jar_path()
+            // （它优先读取 CATIO_JDBC_PLUGIN_JAR）。开发态该资源不存在时无副作用，
+            // 仍走 CARGO_MANIFEST_DIR 下的构建产物回退。
+            if std::env::var_os("CATIO_JDBC_PLUGIN_JAR").is_none() {
+                use tauri::Manager;
+                use tauri::path::BaseDirectory;
+                if let Ok(jar) = app.path().resolve("catio-jdbc-plugin.jar", BaseDirectory::Resource) {
+                    if jar.exists() {
+                        std::env::set_var("CATIO_JDBC_PLUGIN_JAR", jar);
+                    }
+                }
+            }
             Ok(())
         })
         .run(tauri::generate_context!())
