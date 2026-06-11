@@ -29,8 +29,10 @@ fn hint() -> String { SYNTAX_HINT.to_string() }
 
 pub fn parse(input: &str) -> Result<MongoCommand, String> {
     let s = input.trim().trim_end_matches(';').trim();
-    let rest = s.strip_prefix("db.").ok_or_else(hint)?;
-    let (collection, rest) = parse_collection(rest)?;
+    // After the leading `db`, the collection is addressed by `.name`,
+    // `.getCollection("name")`, or bracket notation `["name"]` / `['name']`.
+    let after_db = s.strip_prefix("db").ok_or_else(hint)?;
+    let (collection, rest) = parse_collection(after_db)?;
     let paren = rest.find('(').ok_or_else(hint)?;
     let method = rest[..paren].trim().to_string();
     let (args_raw, chain) = extract_balanced(&rest[paren..]).map_err(|_| hint())?;
@@ -102,8 +104,22 @@ pub fn parse(input: &str) -> Result<MongoCommand, String> {
     }
 }
 
-/// 集合名:`getCollection("x")` 或裸标识符(直到下一个 `.`)。
-fn parse_collection(rest: &str) -> Result<(String, &str), String> {
+/// 集合名,紧跟在 `db` 之后:
+///   - 方括号:`["x"]` / `['x']`(支持含点/特殊字符的集合名)
+///   - `.getCollection("x")`
+///   - 裸标识符 `.x`(可含点,如 `system.users`)
+fn parse_collection(after_db: &str) -> Result<(String, &str), String> {
+    let s = after_db.trim_start();
+    // 方括号表示法 db["name"] / db['name'] —— 标准 mongo shell,集合名可含点。
+    if let Some(r) = s.strip_prefix('[') {
+        let close = r.find(']').ok_or_else(hint)?;
+        let name = r[..close].trim().trim_matches(|c| c == '"' || c == '\'').to_string();
+        if name.is_empty() { return Err(hint()); }
+        let after = r[close + 1..].trim_start().strip_prefix('.').ok_or_else(hint)?;
+        return Ok((name, after));
+    }
+    // 其余形式都以 `.` 开头(db.xxx)。
+    let rest = s.strip_prefix('.').ok_or_else(hint)?;
     if let Some(r) = rest.strip_prefix("getCollection") {
         let (inner, after) = extract_balanced(r).map_err(|_| hint())?;
         let name = inner.trim().trim_matches(|c| c == '"' || c == '\'').to_string();
@@ -447,6 +463,23 @@ mod tests {
         }
         // a semantically-meaningful unknown method still errors
         assert!(parse("db.users.find().count()").is_err());
+    }
+
+    #[test]
+    fn parses_bracket_notation_collection() {
+        // db["system.users"].countDocuments({}) — standard mongo shell for names with dots.
+        match parse(r#"db["system.users"].countDocuments({})"#).unwrap() {
+            MongoCommand::Count { collection, .. } => assert_eq!(collection, "system.users"),
+            other => panic!("expected Count, got {other:?}"),
+        }
+        // single quotes + a find chain
+        match parse(r#"db['orders'].find({}).limit(5)"#).unwrap() {
+            MongoCommand::Find { collection, limit, .. } => {
+                assert_eq!(collection, "orders");
+                assert_eq!(limit, Some(5));
+            }
+            other => panic!("expected Find, got {other:?}"),
+        }
     }
 
     #[test]
