@@ -227,7 +227,7 @@
     "relHoursAgo": "{{count}}h ago",
     "relDaysAgo": "{{count}}d ago",
     "sqlAssistantSub": "Database assistant · reading {{target}} schema",
-    "shellAssistantSub": "Shell assistant · {{target}}",
+    "shellAssistantSub": "Terminal assistant · {{target}}",
     "sqlMode": "Database mode",
     "shellMode": "Shell mode",
     "followActiveTab": "Following active tab · {{target}}",
@@ -515,7 +515,6 @@
     "navMcp": "MCP Server",
     "navAbout": "About",
     "themeTitle": "Theme",
-    "themeHint": "All pages share the same structure across themes — only token values differ (DESIGN.md §3)",
     "themeDawn": "Dawn",
     "themeAmber": "Amber",
     "themeGrove": "Grove",
@@ -608,7 +607,7 @@
     "noSessions": "No open sessions",
     "noSessionsHint": "Select a host or database from the Vault on the left to get started",
     "sqlAssistant": "SQL assistant",
-    "shellAssistant": "Shell assistant",
+    "shellAssistant": "Terminal assistant",
     "cmdBarSqlPlaceholder": "Generate / optimize / explain SQL · {{target}}…  ⌘J",
     "cmdBarShellPlaceholder": "Generate shell command · {{target}}…  ⌘J"
   }

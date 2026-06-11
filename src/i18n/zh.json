@@ -227,7 +227,7 @@
     "relHoursAgo": "{{count}} 小时前",
     "relDaysAgo": "{{count}} 天前",
     "sqlAssistantSub": "数据库助手 · 读取 {{target}} schema",
-    "shellAssistantSub": "Shell 助手 · {{target}}",
+    "shellAssistantSub": "终端助手 · {{target}}",
     "sqlMode": "数据库模式",
     "shellMode": "Shell 模式",
     "followActiveTab": "跟随激活标签 · {{target}}",
@@ -515,7 +515,6 @@
     "navMcp": "MCP 服务",
     "navAbout": "关于",
     "themeTitle": "主题",
-    "themeHint": "所有页面在各主题下结构一致，仅令牌取值不同（DESIGN.md §3）",
     "themeDawn": "晨曦",
     "themeAmber": "琥珀",
     "themeGrove": "松岚",
@@ -608,7 +607,7 @@
     "noSessions": "没有打开的会话",
     "noSessionsHint": "从左侧 Vault 选择一个主机或数据库开始",
     "sqlAssistant": "SQL 助手",
-    "shellAssistant": "Shell 助手",
+    "shellAssistant": "终端助手",
     "cmdBarSqlPlaceholder": "生成 / 优化 / 解释 SQL · {{target}}…  ⌘J",
     "cmdBarShellPlaceholder": "生成 shell 命令 · {{target}}…  ⌘J"
   }

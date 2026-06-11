@@ -136,7 +136,7 @@ function SettingRow({ icon, title, desc, control, danger }: SettingRowProps) {
 function ThemeSettings({ theme, onTheme }: ThemeSettingsProps) {
   const { t } = useTranslation()
   return (
-    <Block title={t('settings.themeTitle')} hint={t('settings.themeHint')}>
+    <Block title={t('settings.themeTitle')}>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 24 }}>
         {THEMES.map(th => {
           const active = theme === th.id
