@@ -54,16 +54,35 @@ fn jar_is_usable(p: &std::path::Path) -> bool {
     std::fs::metadata(p).map(|m| m.is_file() && m.len() > 0).unwrap_or(false)
 }
 
+/// Strip Windows verbatim/extended-length prefixes (`\\?\`, `\\?\UNC\`). Tauri's
+/// `resolve(BaseDirectory::Resource)` returns such a path, but the JVM's `-jar`
+/// launcher cannot open a jar addressed by a verbatim path — it fails with
+/// "错误: 尝试打开文件 \\?\…jar 时出现意外错误". No-op on non-Windows / plain paths.
+fn de_verbatim(p: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let s = p.to_string_lossy();
+        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = s.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest);
+        }
+    }
+    p
+}
+
 /// Locate the bundled plugin jar. Env override first (tests/dev + the resource path
-/// the app injects at startup), then the build output relative to the crate.
+/// the app injects at startup), then the build output relative to the crate. The
+/// returned path is de-verbatim'd so `java -jar` can open it on Windows.
 fn plugin_jar_path() -> Result<PathBuf, DbError> {
     if let Ok(p) = std::env::var("CATIO_JDBC_PLUGIN_JAR") {
         let pb = PathBuf::from(p);
-        if jar_is_usable(&pb) { return Ok(pb); }
+        if jar_is_usable(&pb) { return Ok(de_verbatim(pb)); }
     }
     let built = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("jdbc-plugin/target/catio-jdbc-plugin.jar");
-    if jar_is_usable(&built) { return Ok(built); }
+    if jar_is_usable(&built) { return Ok(de_verbatim(built)); }
     Err(DbError::ConnectFailed(
         "JDBC plugin jar not found — build src-tauri/jdbc-plugin (mvn package) \
          or set CATIO_JDBC_PLUGIN_JAR".into()))
@@ -92,7 +111,7 @@ fn driver_jar_paths() -> Vec<String> {
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| p.extension().and_then(|x| x.to_str()).map(|x| x.eq_ignore_ascii_case("jar")) == Some(true))
-        .map(|p| p.to_string_lossy().into_owned())
+        .map(|p| de_verbatim(p).to_string_lossy().into_owned())
         .collect()
 }
 
