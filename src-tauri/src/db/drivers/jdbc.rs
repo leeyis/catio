@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::time::Duration;
 use std::sync::{Arc, Mutex};
 use serde_json::{json, Value};
 
@@ -28,6 +29,10 @@ struct JdbcProc {
     stdin: BufWriter<ChildStdin>,
     stdout: BufReader<ChildStdout>,
     next_id: u64,
+    /// Tail of the sidecar's stderr, drained on a background thread. Surfaced when
+    /// the process dies unexpectedly so a JVM crash (e.g. a driver `Error`, a bad
+    /// JAR, or an incompatible Java version) is diagnosable instead of an opaque EOF.
+    stderr_buf: Arc<Mutex<String>>,
 }
 
 pub struct JdbcDriver {
@@ -112,7 +117,7 @@ impl JdbcDriver {
         let mut cmd = Command::new(java_bin());
         cmd.arg("-Dfile.encoding=UTF-8")
             .arg("-jar").arg(&jar)
-            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -125,7 +130,28 @@ impl JdbcDriver {
         })?;
         let stdin = BufWriter::new(child.stdin.take().ok_or_else(|| DbError::ConnectFailed("no sidecar stdin".into()))?);
         let stdout = BufReader::new(child.stdout.take().ok_or_else(|| DbError::ConnectFailed("no sidecar stdout".into()))?);
-        let proc = Arc::new(Mutex::new(JdbcProc { child, stdin, stdout, next_id: 0 }));
+        // Drain stderr on a background thread so the OS pipe never fills (which would
+        // deadlock the JVM), keeping the tail for crash diagnostics.
+        let stderr_buf = Arc::new(Mutex::new(String::new()));
+        if let Some(err) = child.stderr.take() {
+            let buf = stderr_buf.clone();
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(err);
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    match reader.read_line(&mut line) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {
+                            if let Ok(mut g) = buf.lock() {
+                                if g.len() < 8192 { g.push_str(&line); }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        let proc = Arc::new(Mutex::new(JdbcProc { child, stdin, stdout, next_id: 0, stderr_buf }));
 
         let driver = Self { proc, connection, database };
         // Validate connectivity now (also primes the cached JDBC connection).
@@ -158,7 +184,16 @@ impl JdbcDriver {
             let n = p.stdout.read_line(&mut resp)
                 .map_err(|e| DbError::ConnectFailed(format!("JDBC sidecar read failed: {e}")))?;
             if n == 0 {
-                return Err(DbError::ConnectFailed("JDBC sidecar closed unexpectedly (is Java installed / driver JAR present?)".into()));
+                // The sidecar exited without answering. Give the stderr-drain thread
+                // a moment to flush the JVM's dying output, then surface it — that's
+                // the actual cause (driver Error, incompatible Java, bad JAR, …).
+                std::thread::sleep(Duration::from_millis(150));
+                let detail = p.stderr_buf.lock().ok().map(|g| g.trim().to_string()).unwrap_or_default();
+                return Err(DbError::ConnectFailed(if detail.is_empty() {
+                    "JDBC sidecar 意外退出（Java 是否已安装？驱动 JAR 是否就绪？）".into()
+                } else {
+                    format!("JDBC sidecar 意外退出：{detail}")
+                }));
             }
             let v: Value = serde_json::from_str(resp.trim())
                 .map_err(|e| DbError::QueryFailed(format!("bad JSON from JDBC sidecar: {e}")))?;
