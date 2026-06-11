@@ -124,7 +124,12 @@ public final class CatioJdbcPlugin {
             }
             registerDrivers(connection);
             response.set("result", handle(method, params, connection));
-        } catch (Exception error) {
+        } catch (Throwable error) {
+            // Catch Throwable, not just Exception: a JDBC driver can throw Error
+            // subclasses (NoClassDefFoundError, ExceptionInInitializerError,
+            // LinkageError, …) while loading classes or reading metadata. Letting
+            // those escape would kill the whole sidecar process (the catio side
+            // then sees an unexplained EOF) instead of returning a usable error.
             ObjectNode errorNode = MAPPER.createObjectNode();
             errorNode.put("message", error.getMessage() == null ? error.toString() : error.getMessage());
             response.set("error", errorNode);
@@ -146,8 +151,10 @@ public final class CatioJdbcPlugin {
                     String version = md.getDatabaseProductVersion();
                     result.put("version", ((product == null ? "" : product) + " "
                         + (version == null ? "" : version)).trim());
-                } catch (SQLException ignored) {
-                    // best-effort: some drivers reject getMetaData pre-query
+                } catch (Throwable ignored) {
+                    // best-effort: some drivers reject getMetaData pre-query, and a
+                    // few (e.g. 达梦/DM) can throw an Error here — never let reading
+                    // the version number fail the connection itself.
                 }
                 yield result;
             }
