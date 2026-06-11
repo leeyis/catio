@@ -197,6 +197,7 @@
     "newQuery": "New query",
     "refresh": "Refresh",
     "refreshFailed": "Refresh failed: {{message}}",
+    "schemaLoadFailed": "Failed to load schema: {{message}}",
     "scrollLeft": "Scroll left",
     "scrollRight": "Scroll right",
     "erDiagram": "ER diagram",

@@ -85,12 +85,17 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
   // ---- Real schema tree (only when connected) ----
   // `liveSchema` holds the backend-introspected schema; null means "use the mock schema".
   const [liveSchema, setLiveSchema] = useState<Schema | null>(null)
+  // Surface introspection failures instead of swallowing them — a swallowed error
+  // used to fall back to the mock demo tree, which then let the user query tables
+  // the real database doesn't have.
+  const [schemaErr, setSchemaErr] = useState<string | null>(null)
   useEffect(() => {
-    if (!connId) { setLiveSchema(null); return }
+    if (!connId) { setLiveSchema(null); setSchemaErr(null); return }
     let cancelled = false
+    setSchemaErr(null)
     getSchema(connId)
-      .then(sc => { if (!cancelled) setLiveSchema(sc) })
-      .catch(() => { if (!cancelled) setLiveSchema(null) })
+      .then(sc => { if (!cancelled) { setLiveSchema(sc); setSchemaErr(null) } })
+      .catch(e => { if (!cancelled) { setLiveSchema(null); setSchemaErr(dbErrMsg(e)) } })
     return () => { cancelled = true }
   }, [connId])
 
@@ -108,11 +113,14 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
       .finally(() => setRefreshing(false))
   }
 
-  // All schema namespaces to render. Live: the backend's full list; Mock: the seeded single namespace.
+  // All schema namespaces to render. A real connection renders the backend's
+  // schema ONLY — never the mock/demo tree (showing fake tables a user could click
+  // and then query against a real DB that lacks them is actively misleading). The
+  // seeded demo tree is used only when there is no live connection.
   const namespaces: SchemaNamespace[] = useMemo(() => {
-    const ns = liveSchema?.schemas
-    return (ns && ns.length) ? ns : D.schema.schemas
-  }, [liveSchema, D.schema])
+    if (connId) return liveSchema?.schemas ?? []
+    return D.schema.schemas
+  }, [connId, liveSchema, D.schema])
 
   // ---- tab 操作 ----
 
@@ -172,6 +180,18 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
       return [...kept, { id: tabIdOf.table(first.name, firstTable.name), kind: 'table' as const, schema: first.name, table: firstTable.name }]
     })
   }, [connId, liveSchema])
+
+  // Real connection whose introspection FAILED or returned no schemas: drop the
+  // seeded demo table/object/ER tabs so we never auto-query a mock table the real
+  // database doesn't have (the source of the misleading "无效的模式名[public]"). SQL
+  // tabs are kept — the user can still run queries. (Success/non-empty is handled
+  // by the reconciliation effect above.)
+  useEffect(() => {
+    if (!connId) return
+    const settledEmpty = schemaErr != null || (liveSchema != null && liveSchema.schemas.length === 0)
+    if (!settledEmpty) return
+    setTabs(prev => (prev.some(tb => tb.kind !== 'sql') ? prev.filter(tb => tb.kind === 'sql') : prev))
+  }, [connId, schemaErr, liveSchema])
 
   // activeId 失效(指向已被剔除的 tab)时回落到最后一个 tab。
   useEffect(() => {
@@ -283,6 +303,14 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
             <Icon name="alert-triangle" size={14} style={{ flex: 'none' }} />
             <span>{t('workbench.refreshFailed', { message: refreshErr })}</span>
             <button className="icon-btn bare" style={{ width: 20, height: 20, marginLeft: 'auto' }} onClick={() => setRefreshErr(null)}><Icon name="x" size={12} /></button>
+          </div>
+        )}
+        {schemaErr && (
+          /* 库结构加载失败:不再静默回落到 mock 演示树,而是明确报错。 */
+          <div className="row gap6" style={{ position: 'absolute', left: 12, bottom: 12 + (createErr ? 46 : 0) + (refreshErr ? 46 : 0), zIndex: 80, maxWidth: 460, padding: '9px 12px', borderRadius: 10, border: '1px solid var(--danger-border)', background: 'var(--danger-soft)', color: 'var(--danger-fg)', fontSize: 12, boxShadow: 'var(--shadow-window)' }}>
+            <Icon name="alert-triangle" size={14} style={{ flex: 'none' }} />
+            <span>{t('workbench.schemaLoadFailed', { message: schemaErr })}</span>
+            <button className="icon-btn bare" style={{ width: 20, height: 20, marginLeft: 'auto' }} onClick={() => setSchemaErr(null)}><Icon name="x" size={12} /></button>
           </div>
         )}
       </div>
