@@ -85,7 +85,9 @@ interface BlockCodeProps {
 function BlockCode({ lang, code, mode, onInsert }: BlockCodeProps) {
   const { t } = useTranslation()
   const { copied, copy } = useCopied()
-  const isSqlBlock = SQL_LANGS.has(lang) || (lang === '' && mode === 'sql')
+  // In database mode every assistant code block is a runnable DB block (mongo
+  // shell / ES REST / SQL) — insert/run target the query editor, not a terminal.
+  const isSqlBlock = mode === 'sql' || SQL_LANGS.has(lang)
   const tone = isSqlBlock ? 'var(--signal-blue)' : 'var(--signal-amber)'
 
   // Insert / run dispatch via window CustomEvents (terminal pane / SQL console listen).

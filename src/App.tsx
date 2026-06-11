@@ -27,6 +27,7 @@ import { useTweaks, TWEAK_DEFAULTS } from './state/useTweaks'
 import { nextTheme, useApplyTheme } from './state/ThemeContext'
 import { usePrefs, uiFontStack, monoFontStack } from './state/preferences'
 import { readTermBufferTail } from './services/termBuffers'
+import { buildAgentSystemPrompt } from './services/agentPrompt'
 import { useData } from './state/DataContext'
 import { dbConnect, dbDisconnect, getHistory as getDbHistory, clearDbHistory, deleteDbHistory, dbErrMsg } from './services/db'
 import {
@@ -934,9 +935,15 @@ export default function App() {
     const termBlock = termTail
       ? `\n\n当前终端最近输出（最多 ${prefs.termBufferLines} 行，供参考）:\n\`\`\`\n${termTail}\n\`\`\``
       : ''
+    // Database tabs (kind !== 'terminal') get the engine-aware DB assistant prompt
+    // so the model answers in the connection's real query syntax (mongo shell /
+    // ES REST+DSL / SQL dialect) — runnable directly in the editor, not a CLI.
+    const agentMode = tab.kind === 'terminal' ? 'shell' : 'sql'
+    const tabEngine = vaultConns.find(c => c.id === tab.connId)?.engine
+      ?? liveConns[tab.connId]?.engine ?? D.byId[tab.connId]?.engine
     const system: ChatMsg = {
       role: 'system',
-      content: `You are a terminal/shell assistant for host "${hostName}". When you suggest a shell command, put it in a fenced code block.${sysinfoBlock}${termBlock}`,
+      content: `${buildAgentSystemPrompt(agentMode, hostName, tabEngine)}${sysinfoBlock}${termBlock}`,
     }
     const outgoing: ChatMsg[] = [
       system,
