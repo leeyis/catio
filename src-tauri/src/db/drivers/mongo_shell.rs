@@ -140,8 +140,10 @@ fn parse_find_chain(mut chain: &str) -> Result<(Option<Value>, Option<u64>, Opti
             "sort" => sort = Some(normalize_loose_json(&arg)?),
             "skip" => skip = Some(arg.trim().parse::<u64>().map_err(|_| hint())?),
             "limit" => limit = Some(arg.trim().parse::<i64>().map_err(|_| hint())?),
+            // 纯展示性方法,无害 —— 静默忽略(参数直接丢弃),不影响查询语义。
+            "pretty" | "toArray" => {}
             _ => return Err(format!(
-                "Unsupported chained method `.{name}()` — only .sort() / .skip() / .limit() may follow find()"
+                "Unsupported chained method `.{name}()` — only .sort() / .skip() / .limit() / .pretty() may follow find()"
             )),
         }
         chain = tail;
@@ -428,6 +430,23 @@ mod tests {
             }
             other => panic!("expected Find, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn ignores_harmless_pretty_and_to_array_chain() {
+        // .pretty() / .toArray() are display-only no-ops and must not error.
+        assert!(matches!(parse("db.teams.find().pretty()").unwrap(), MongoCommand::Find { .. }));
+        assert!(matches!(parse("db.teams.find().toArray()").unwrap(), MongoCommand::Find { .. }));
+        // mixed with real chain methods
+        match parse("db.users.find({}).sort({_id: -1}).pretty().limit(5)").unwrap() {
+            MongoCommand::Find { sort, limit, .. } => {
+                assert_eq!(sort, Some(json!({"_id": -1})));
+                assert_eq!(limit, Some(5));
+            }
+            other => panic!("expected Find, got {other:?}"),
+        }
+        // a semantically-meaningful unknown method still errors
+        assert!(parse("db.users.find().count()").is_err());
     }
 
     #[test]

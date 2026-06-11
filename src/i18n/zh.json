@@ -234,7 +234,7 @@
     "attachedOutput": "已附加输出 · {{target}}",
     "removeAttachment": "移除",
     "composerPlaceholderAttached": "就这段输出提问，例如：为什么会失败？如何修复？",
-    "composerPlaceholderSql": "输入 @ 选择表/视图作为上下文,描述你的需求 · 优化 / 解释当前查询…",
+    "composerPlaceholderSql": "输入 @ 选表作上下文,或描述需求…",
     "composerPlaceholderShell": "为 {{target}} 生成 shell 命令 · 解释 / 排错…",
     "attachContext": "附加上下文",
     "removeTable": "移除表",
