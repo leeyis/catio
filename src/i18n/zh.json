@@ -237,6 +237,8 @@
     "composerPlaceholderSql": "描述需求生成 SQL · 优化 / 解释 / 注释当前查询…",
     "composerPlaceholderShell": "为 {{target}} 生成 shell 命令 · 解释 / 排错…",
     "attachContext": "附加上下文",
+    "removeTable": "移除表",
+    "mentionNoTables": "无匹配的表",
     "selectModel": "选择模型",
     "modelInfo": "claude · 自动安全校验",
     "agentNoModel": "未配置模型，去设置 → Catio Agent 配置 Ollama/OpenAI",

@@ -237,6 +237,8 @@
     "composerPlaceholderSql": "Describe what you need to generate SQL · optimize / explain / comment current query…",
     "composerPlaceholderShell": "Generate shell commands for {{target}} · explain / debug…",
     "attachContext": "Attach context",
+    "removeTable": "Remove table",
+    "mentionNoTables": "No matching tables",
     "selectModel": "Select model",
     "modelInfo": "claude · auto safety check",
     "agentNoModel": "No model configured. Go to Settings → Catio Agent to set up Ollama/OpenAI",

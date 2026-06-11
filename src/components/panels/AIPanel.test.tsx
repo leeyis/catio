@@ -1,4 +1,4 @@
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { LanguageProvider } from '../../state/LanguageContext'
 import type { AgentConfig } from '../../state/agentConfig'
@@ -16,7 +16,25 @@ vi.mock('../../state/agentConfig', () => ({
   useAgentConfig: () => ({ config: mockConfig, update: () => {} }),
 }))
 
+// db service — drives the "@ 选表" dropdown (getSchema) and DDL context (tableStructure).
+vi.mock('../../services/db', () => ({
+  getSchema: vi.fn(async () => ({
+    db: 'd1',
+    schemas: [{ name: 'public', open: false, tables: [{ name: 'orders', rows: '', cols: 0 }], views: [], functions: [] }],
+  })),
+  tableStructure: vi.fn(async () => ({
+    comment: '',
+    columns: [{ name: 'id', type: 'bigint', nullable: false, default: null, key: 'PK', extra: '' }],
+    indexes: [],
+    fks: [],
+  })),
+}))
+
 import { AIPanel } from './AIPanel'
+import { getSchema, tableStructure } from '../../services/db'
+
+// A connected DB tab — required for the SQL-mode @ feature.
+const dbConn: Connection = { id: 'd1', group: '', kind: 'db', name: 'prod-orders', sub: 'pg', icon: 'database', status: 'up', engine: 'postgres' }
 
 const wrap = (ui: React.ReactNode) => render(<LanguageProvider>{ui}</LanguageProvider>)
 
@@ -103,6 +121,49 @@ describe('AIPanel controlled conversation view', () => {
     // composer + actions are hidden
     expect(screen.queryByRole('textbox')).toBeNull()
     expect(screen.queryByTitle('新建对话')).toBeNull()
+  })
+
+  it('SQL 模式输入 @ 弹出表名下拉(来自 getSchema)', async () => {
+    wrap(<AIPanel onClose={() => {}} mode="sql" conn={dbConn} connId="d1" engine="postgres"
+      attachment={null} onClearAttachment={() => {}} conversation={conv([])} onSend={() => {}} />)
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '@' } })
+    expect(await screen.findByText('orders')).toBeTruthy()
+    expect(getSchema).toHaveBeenCalledWith('d1')
+  })
+
+  it('选中表加入 chip 并清除 @token', async () => {
+    wrap(<AIPanel onClose={() => {}} mode="sql" conn={dbConn} connId="d1" engine="postgres"
+      attachment={null} onClearAttachment={() => {}} conversation={conv([])} onSend={() => {}} />)
+    const ta = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(ta, { target: { value: 'explain @or' } })
+    fireEvent.click(await screen.findByText('orders'))
+    // token removed from the draft, leaving the leading text
+    expect(ta.value).toBe('explain ')
+    // a removable chip now represents the picked table
+    expect(screen.getByTitle('移除表')).toBeTruthy()
+  })
+
+  it('发送时对所选表调用 tableStructure 并把 DDL 上下文追加到消息,发送后清空 chip', async () => {
+    const onSend = vi.fn()
+    wrap(<AIPanel onClose={() => {}} mode="sql" conn={dbConn} connId="d1" engine="postgres"
+      attachment={null} onClearAttachment={() => {}} conversation={conv([])} onSend={onSend} />)
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'explain @' } })
+    fireEvent.click(await screen.findByText('orders'))
+    fireEvent.click(screen.getByTitle('发送'))
+    await waitFor(() => expect(onSend).toHaveBeenCalled())
+    expect(tableStructure).toHaveBeenCalledWith('d1', 'public', 'orders')
+    const sent = onSend.mock.calls[0][0] as string
+    expect(sent).toContain('explain')
+    expect(sent).toContain('CREATE TABLE')
+    // one-time context: chip cleared after send
+    expect(screen.queryByTitle('移除表')).toBeNull()
+  })
+
+  it('shell 模式输入 @ 不弹表名下拉', () => {
+    wrap(<AIPanel onClose={() => {}} mode="shell" conn={hostConn} connId="d1" engine="postgres"
+      attachment={null} onClearAttachment={() => {}} conversation={conv([])} onSend={() => {}} />)
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '@' } })
+    expect(screen.queryByText('orders')).toBeNull()
   })
 
   it('shows the no-model hint and wires the configure button', () => {

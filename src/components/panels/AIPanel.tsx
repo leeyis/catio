@@ -8,6 +8,8 @@ import { Icon } from '../Icon'
 import { IconBtn } from '../atoms'
 import { highlightSQL } from '../dbviews'
 import { useAgentConfig } from '../../state/agentConfig'
+import { getSchema, tableStructure } from '../../services/db'
+import { buildTableContext } from '../dbviews/tableContext'
 import type { Connection } from '../../services/types'
 import type { Conversation } from '../../state/conversations'
 import { PanelShell } from './PanelShell'
@@ -22,6 +24,12 @@ export interface AIPanelProps {
   onClose: () => void
   mode?: 'sql' | 'shell'
   conn?: Connection
+  /** Backend connId for the active DB tab — enables the SQL-mode "@ 选表" picker
+   *  (fetches the table list via getSchema and per-table DDL via tableStructure). */
+  connId?: string
+  /** Engine/DbType of the active connection — selects how the injected table
+   *  context is rendered (relational CREATE TABLE vs mongo/es field lists). */
+  engine?: string
   attachment: Attachment | null
   onClearAttachment: () => void
   onInsert?: (code: string) => void
@@ -310,7 +318,13 @@ function HistoryDropdown({ history, currentId, onRestore, onDelete, onClose }: H
   )
 }
 
-export function AIPanel({ onClose, mode = 'sql', conn, attachment, onClearAttachment, onInsert, canInsert, onOpenSettings, conversation, busy = false, history = [], onSend, onAbort, onNewConversation, onRestoreConversation, onDeleteConversation }: AIPanelProps) {
+interface MentionTable {
+  schema: string
+  name: string
+  kind: 'table' | 'view'
+}
+
+export function AIPanel({ onClose, mode = 'sql', conn, connId, engine, attachment, onClearAttachment, onInsert, canInsert, onOpenSettings, conversation, busy = false, history = [], onSend, onAbort, onNewConversation, onRestoreConversation, onDeleteConversation }: AIPanelProps) {
   const { t } = useTranslation()
   const { config: cfg } = useAgentConfig()
   const isSql = mode !== 'shell'
@@ -323,13 +337,64 @@ export function AIPanel({ onClose, mode = 'sql', conn, attachment, onClearAttach
   const [histOpen, setHistOpen] = useState(false)
   const taRef = useRef<HTMLTextAreaElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+  // "@ 选表" state — only meaningful in SQL mode with a live connId.
+  const [tableList, setTableList] = useState<MentionTable[]>([])
+  const [selectedTables, setSelectedTables] = useState<{ schema: string; table: string; kind: 'table' | 'view' }[]>([])
+  // null = mention dropdown closed; otherwise the current filter text after '@'.
+  const [mentionFilter, setMentionFilter] = useState<string | null>(null)
 
   const msgs = conversation?.messages ?? []
 
   useEffect(() => { if (attachment && taRef.current) taRef.current.focus() }, [attachment])
   useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight }, [msgs])
 
-  function send() {
+  // Fetch the table/view list for the @ picker when the SQL-mode connection changes.
+  useEffect(() => {
+    if (!isSql || !connId) { setTableList([]); return }
+    let alive = true
+    getSchema(connId)
+      .then(s => {
+        if (!alive) return
+        const list: MentionTable[] = []
+        for (const ns of s.schemas) {
+          for (const tbl of ns.tables) list.push({ schema: ns.name, name: tbl.name, kind: 'table' })
+          for (const v of ns.views) list.push({ schema: ns.name, name: v.name, kind: 'view' })
+        }
+        setTableList(list)
+      })
+      .catch(() => { if (alive) setTableList([]) })
+    return () => { alive = false }
+  }, [isSql, connId])
+
+  // Reset @ state when leaving SQL mode or switching connection.
+  useEffect(() => { setSelectedTables([]); setMentionFilter(null) }, [isSql, connId])
+
+  // Tables matching the current '@' filter (case-insensitive, name or schema).
+  const mentionMatches = useMemo(() => {
+    if (mentionFilter == null) return []
+    const f = mentionFilter.toLowerCase()
+    return tableList.filter(t => t.name.toLowerCase().includes(f) || t.schema.toLowerCase().includes(f))
+  }, [mentionFilter, tableList])
+
+  // Detect an in-progress '@token' at the caret (end of draft) and open the picker.
+  function onDraftChange(value: string) {
+    setDraft(value)
+    if (!isSql || !connId) { setMentionFilter(null); return }
+    const m = /(^|\s)@(\S*)$/.exec(value)
+    setMentionFilter(m ? m[2] : null)
+  }
+
+  // Pick a table from the dropdown: add a chip and strip the '@token' from the draft.
+  function pickTable(item: MentionTable) {
+    setSelectedTables(prev =>
+      prev.some(s => s.schema === item.schema && s.table === item.name)
+        ? prev
+        : [...prev, { schema: item.schema, table: item.name, kind: item.kind }])
+    setDraft(prev => prev.replace(/(^|\s)@(\S*)$/, (_m, lead) => lead))
+    setMentionFilter(null)
+  }
+
+  async function send() {
     const text = draft.trim()
     if (!text || !cfg.model || busy) return
 
@@ -337,6 +402,17 @@ export function AIPanel({ onClose, mode = 'sql', conn, attachment, onClearAttach
     if (attachment) {
       userContent += `\n\n---\n${attachment.text}`
       onClearAttachment()
+    }
+    // Inject the selected tables' structure as one-time context (best-effort:
+    // a failed fetch skips that table rather than blocking the send).
+    if (isSql && connId && selectedTables.length > 0) {
+      for (const s of selectedTables) {
+        try {
+          const struct = await tableStructure(connId, s.schema, s.table)
+          userContent += `\n\n---\n${buildTableContext(engine, s.schema, s.table, struct)}`
+        } catch { /* skip this table */ }
+      }
+      setSelectedTables([])
     }
     onSend?.(userContent)
     setDraft('')
@@ -409,7 +485,40 @@ export function AIPanel({ onClose, mode = 'sql', conn, attachment, onClearAttach
         </div>
       )}
       {/* composer */}
-      <div style={{ padding: 10, borderTop: '1px solid var(--border-hairline)' }}>
+      <div style={{ padding: 10, borderTop: '1px solid var(--border-hairline)', position: 'relative' }}>
+        {/* @ 选表下拉 — anchored above the composer (SQL mode only). */}
+        {isSql && mentionFilter != null && (
+          <div className="pop-in" style={{ position: 'absolute', left: 10, right: 10, bottom: '100%', marginBottom: 6, zIndex: 50, background: 'var(--surface-elevated)', border: '1px solid var(--border-hairline-alt)', borderRadius: 10, boxShadow: 'var(--shadow-dropdown)', maxHeight: 220, overflowY: 'auto', padding: 5 }}>
+            {mentionMatches.length === 0
+              ? <div style={{ padding: '10px 8px', fontSize: 12, color: 'var(--text-faint)' }}>{t('panels.mentionNoTables')}</div>
+              : mentionMatches.map((item, i) => (
+                <button key={`${item.schema}.${item.name}.${i}`} className="row gap6" style={{ width: '100%', textAlign: 'left', padding: '6px 8px', borderRadius: 7, background: 'transparent', border: 'none', cursor: 'pointer' }}
+                  onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = 'var(--surface-sunken)' }}
+                  onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}
+                  onMouseDown={e => e.preventDefault()} onClick={() => pickTable(item)}>
+                  <Icon name={item.kind === 'view' ? 'eye' : 'database'} size={13} style={{ color: 'var(--accent-primary)' }} />
+                  <span style={{ fontSize: 12.5, color: 'var(--text-secondary)' }}>{item.name}</span>
+                  <span className="grow" />
+                  <span style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{item.schema}</span>
+                </button>
+              ))}
+          </div>
+        )}
+        {/* selected-table chips — one-time DDL context for the next message. */}
+        {isSql && selectedTables.length > 0 && (
+          <div className="row" style={{ flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+            {selectedTables.map((s, i) => (
+              <span key={`${s.schema}.${s.table}.${i}`} className="row gap5 chip" style={{ background: 'var(--accent-soft-alt)', color: 'var(--accent-primary)', fontWeight: 600, paddingRight: 4 }}>
+                <Icon name={s.kind === 'view' ? 'eye' : 'database'} size={11} />
+                {s.table}
+                <button className="icon-btn bare" style={{ width: 16, height: 16 }} title={t('panels.removeTable')}
+                  onClick={() => setSelectedTables(prev => prev.filter((_, j) => j !== i))}>
+                  <Icon name="x" size={11} />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
         {/* attached terminal/SQL output — piped in via "问 AI" */}
         {attachment && (
           <div className="col pop-in" style={{ border: '1px solid var(--accent-border)', background: 'var(--accent-soft-alt)', borderRadius: 11, padding: '8px 10px', marginBottom: 8 }}>
@@ -423,7 +532,7 @@ export function AIPanel({ onClose, mode = 'sql', conn, attachment, onClearAttach
           </div>
         )}
         <div className="col" style={{ background: 'var(--surface-sunken)', border: `1px solid ${attachment ? 'var(--accent-border)' : 'var(--border-hairline)'}`, borderRadius: 12, padding: 8 }}>
-          <textarea ref={taRef} value={draft} onChange={e => setDraft(e.target.value)} onKeyDown={onKeyDown}
+          <textarea ref={taRef} value={draft} onChange={e => onDraftChange(e.target.value)} onKeyDown={onKeyDown}
             placeholder={attachment ? t('panels.composerPlaceholderAttached') : (isSql ? t('panels.composerPlaceholderSql') : t('panels.composerPlaceholderShell', { target }))}
             rows={2} style={{ border: 'none', outline: 'none', background: 'transparent', resize: 'none', fontSize: 13, color: 'var(--text-primary)', fontFamily: 'inherit' }} />
           <div className="row" style={{ justifyContent: 'space-between', marginTop: 4 }}>
