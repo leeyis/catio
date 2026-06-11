@@ -116,9 +116,11 @@ pub fn download_spec(profile: &str) -> Option<DriverDownload> {
         "databricks" => maven("com.databricks", "databricks-jdbc", "2.6.40", None),
         "tdengine"   => maven("com.taosdata.jdbc", "taos-jdbcdriver", "3.4.0", None),
         "kylin"      => maven("org.apache.kylin", "kylin-jdbc", "4.0.4", None),
+        "dameng"     => maven("com.dameng", "DmJdbcDriver18", "8.1.3.140", None),
+        "kingbase"   => maven("cn.com.kingbase", "kingbase8", "9.0.1", None),
         // Not a clean single-jar download → user supplies the JAR:
         //   cassandra (needs the driver + deps; no published uber-jar),
-        //   dameng/yashandb/gbase8s/xugu/sundb/bigquery/access (proprietary /
+        //   yashandb/gbase8s/xugu/sundb/bigquery/access (proprietary /
         //   not on Maven Central). h2 is bundled in the plugin.
         _ => return None,
     })
@@ -179,9 +181,20 @@ mod tests {
 
     #[test]
     fn proprietary_engines_have_no_download() {
-        for p in ["dameng", "yashandb", "gbase8s", "xugu", "sundb", "bigquery", "access", "cassandra", "h2"] {
+        // 仍无 Maven Central 自包含 jar 的引擎保持手动。
+        for p in ["yashandb", "gbase8s", "xugu", "sundb", "bigquery", "access", "cassandra", "h2"] {
             assert!(download_spec(p).is_none(), "{p} should be manual");
         }
+    }
+
+    #[test]
+    fn chinese_db_downloads_resolve_maven_central() {
+        let dm = download_spec("dameng").unwrap();
+        assert_eq!(dm.file_name, "DmJdbcDriver18-8.1.3.140.jar");
+        assert_eq!(dm.url, "https://repo1.maven.org/maven2/com/dameng/DmJdbcDriver18/8.1.3.140/DmJdbcDriver18-8.1.3.140.jar");
+        let kb = download_spec("kingbase").unwrap();
+        assert_eq!(kb.file_name, "kingbase8-9.0.1.jar");
+        assert_eq!(kb.url, "https://repo1.maven.org/maven2/cn/com/kingbase/kingbase8/9.0.1/kingbase8-9.0.1.jar");
     }
 
     #[test]
