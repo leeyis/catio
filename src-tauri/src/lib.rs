@@ -90,7 +90,10 @@ pub fn run() {
                 use tauri::Manager;
                 use tauri::path::BaseDirectory;
                 if let Ok(jar) = app.path().resolve("catio-jdbc-plugin.jar", BaseDirectory::Resource) {
-                    if jar.exists() {
+                    // 仅当资源 jar 存在且非空才注入——避免 0 字节占位/损坏 jar 让运行时
+                    // 报模糊的 Java 错误，而不是清晰的"jar not found"。
+                    let usable = std::fs::metadata(&jar).map(|m| m.is_file() && m.len() > 0).unwrap_or(false);
+                    if usable {
                         std::env::set_var("CATIO_JDBC_PLUGIN_JAR", jar);
                     }
                 }

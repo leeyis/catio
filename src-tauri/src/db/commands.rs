@@ -424,7 +424,16 @@ pub fn import_driver_to_dir(profile: &str, src: &std::path::Path, dir: &std::pat
     let file_name = src.file_name()
         .ok_or_else(|| DbError::Io("无效的文件名".into()))?;
     std::fs::create_dir_all(dir).map_err(|e| DbError::Io(e.to_string()))?;
-    std::fs::copy(src, dir.join(file_name)).map_err(|e| DbError::Io(e.to_string()))?;
+    let target = dir.join(file_name);
+    // 用户可能选中的就是驱动目录里已有的同一个 jar（如先下载再点"选择 JAR"）。
+    // 此时 fs::copy 自我复制会报 OS 错误甚至截断文件——视为已就位，直接返回。
+    let same_file = std::fs::canonicalize(src).ok()
+        .zip(std::fs::canonicalize(&target).ok())
+        .map(|(a, b)| a == b)
+        .unwrap_or(false);
+    if !same_file {
+        std::fs::copy(src, &target).map_err(|e| DbError::Io(e.to_string()))?;
+    }
     Ok(jdbc_status(profile, dir))
 }
 
@@ -495,5 +504,16 @@ mod jdbc_status_tests {
         fs::write(&txt, b"x").unwrap();
         let dst = tempfile::tempdir().unwrap();
         assert!(super::import_driver_to_dir("dameng", &txt, dst.path()).is_err());
+    }
+
+    #[test]
+    fn import_of_jar_already_in_dir_is_a_noop_success() {
+        // 用户选中的就是驱动目录里已有的 jar：不应自我复制报错或截断文件。
+        let dir = tempfile::tempdir().unwrap();
+        let jar = dir.path().join("DmJdbcDriver18-8.1.3.62.jar");
+        fs::write(&jar, b"JARBYTES").unwrap();
+        let status = super::import_driver_to_dir("dameng", &jar, dir.path()).unwrap();
+        assert!(status.jars.contains(&"DmJdbcDriver18-8.1.3.62.jar".to_string()));
+        assert_eq!(fs::read(&jar).unwrap(), b"JARBYTES", "原文件内容未被破坏");
     }
 }
