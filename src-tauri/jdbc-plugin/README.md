@@ -6,23 +6,37 @@ a newline-delimited JSON line protocol over stdin/stdout; catio's
 `db::drivers::jdbc::JdbcDriver` drives it. Adapted from dbx `plugins/jdbc`
 (Apache-2.0).
 
-## Build
+## Build / vendoring
 
-Requires JDK 17+ and Maven:
+The built fat jar is **vendored** at `src-tauri/resources/catio-jdbc-plugin.jar`
+and committed to the repo, so `tauri build` needs only Node + Rust — no Maven on
+the packaging machine. `tauri.conf.json` bundles that file as an app resource.
+
+Rebuild it (only when the Java source under `src/` changes) with JDK 17+ and Maven:
 
 ```sh
-mvn -q -DskipTests package
-# → target/catio-jdbc-plugin.jar  (fat jar: jackson + H2 bundled)
+# from src-tauri/jdbc-plugin
+mvn -q -DskipTests package                       # → target/catio-jdbc-plugin.jar
+cp target/catio-jdbc-plugin.jar ../resources/    # re-vendor, then commit
+# or, from the repo root, run the helper:  scripts/build-jdbc-plugin.ps1
 ```
+
+No system Maven? A portable Apache Maven zip + an installed JDK 17 is enough
+(no install/PATH changes): point the wrapper at it via `JAVA_HOME` and run `mvn`.
 
 ## Runtime
 
 catio locates the jar via, in order:
-1. `CATIO_JDBC_PLUGIN_JAR` (absolute path) — used by tests/dev,
-2. `<crate>/jdbc-plugin/target/catio-jdbc-plugin.jar` (the build output above).
+1. `CATIO_JDBC_PLUGIN_JAR` (absolute path) — set at app startup to the bundled
+   resource (`<resources>/catio-jdbc-plugin.jar`); also used by tests/dev. A
+   missing or **0-byte** jar is treated as absent, so a broken bundle surfaces a
+   clear "plugin jar not found" instead of a cryptic Java error.
+2. `<crate>/jdbc-plugin/target/catio-jdbc-plugin.jar` (a fresh `mvn package`
+   output) — the dev fallback.
 
 The JVM is located via `CATIO_JAVA_BIN`, then `JAVA_HOME/bin/java`, then `java`
-on `PATH`.
+on `PATH`. **End users still need a JRE/JDK 17+ installed** (catio bundles the
+plugin jar, not a JVM).
 
 ## Driver JARs
 
