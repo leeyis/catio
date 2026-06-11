@@ -325,6 +325,8 @@ pub struct JdbcDriverStatus {
     pub driver_class: Option<String>,
     /// directory the user can drop a manual JAR into.
     pub drivers_dir: String,
+    /// 驱动目录下现有的全部 `*.jar` 文件名（让用户确认 jar 是否放对位置）。
+    pub jars: Vec<String>,
 }
 
 fn jdbc_status(profile: &str, dir: &std::path::Path) -> JdbcDriverStatus {
@@ -334,6 +336,16 @@ fn jdbc_status(profile: &str, dir: &std::path::Path) -> JdbcDriverStatus {
         Some(s) => (dir.join(&s.file_name).exists(), Some(s.file_name.clone())),
         None => (false, None),
     };
+    let mut jars: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|x| x.to_str())
+            .map(|x| x.eq_ignore_ascii_case("jar")) == Some(true))
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect();
+    jars.sort();
     JdbcDriverStatus {
         profile: profile.to_string(),
         installed,
@@ -341,6 +353,7 @@ fn jdbc_status(profile: &str, dir: &std::path::Path) -> JdbcDriverStatus {
         downloadable: spec.is_some(),
         driver_class: jdbc_config::driver_class(profile),
         drivers_dir: dir.to_string_lossy().into_owned(),
+        jars,
     }
 }
 
@@ -400,3 +413,25 @@ pub async fn download_driver_to_dir(profile: &str, dir: &std::path::Path)
 }
 
 // qualified-table tests moved to dialect.rs (`qualified_table`).
+
+#[cfg(test)]
+mod jdbc_status_tests {
+    use super::jdbc_status;
+    use std::fs;
+
+    #[test]
+    fn lists_jars_present_in_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("DmJdbcDriver18-8.1.3.62.jar"), b"x").unwrap();
+        fs::write(dir.path().join("notes.txt"), b"x").unwrap();
+        let s = jdbc_status("dameng", dir.path());
+        assert_eq!(s.jars, vec!["DmJdbcDriver18-8.1.3.62.jar".to_string()]);
+    }
+
+    #[test]
+    fn empty_dir_yields_no_jars() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = jdbc_status("yashandb", dir.path());
+        assert!(s.jars.is_empty());
+    }
+}
