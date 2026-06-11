@@ -37,11 +37,15 @@ export function TablePane({ conn, connId, caps, schema, table, density }: TableP
   const [live, setLive] = useState<{ columns: ResultColumn[]; rows: unknown[][] } | null>(null)
   const [liveErr, setLiveErr] = useState<string | null>(null)
   const [rowKeys, setRowKeys] = useState<string[] | null>(null)
+  // True while (re)fetching a table's preview — drives the result-area loading
+  // overlay so fast table switches show a transition instead of stale rows.
+  const [loading, setLoading] = useState(false)
 
   useEffect(() => {
-    if (!connId) { setLive(null); setLiveErr(null); setRowKeys(null); return }
+    if (!connId) { setLive(null); setLiveErr(null); setRowKeys(null); setLoading(false); return }
     let cancelled = false
     setLiveErr(null)
+    setLoading(true)
     Promise.all([
       tablePreview(connId, schema, table, PREVIEW_PAGE, 0),
       tableStructure(connId, schema ?? '', table).catch(() => null),
@@ -65,6 +69,7 @@ export function TablePane({ conn, connId, caps, schema, table, density }: TableP
         setRowKeys(keys)
       })
       .catch(e => { if (!cancelled) { setLiveErr(dbErrMsg(e)); setRowKeys(null) } })
+      .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
   }, [connId, schema, table])
 
@@ -88,7 +93,13 @@ export function TablePane({ conn, connId, caps, schema, table, density }: TableP
           { value: 'structure', label: t('workbench.tabStructure'), icon: 'columns', testId: 'seg-structure' },
         ]} />
       </div>
-      <div className="grow" style={{ minHeight: 0 }}>
+      <div className="grow" style={{ minHeight: 0, position: 'relative' }}>
+        {/* result-area loading overlay — shown while a table's data is (re)fetching */}
+        {connId && loading && tableTab === 'data' && (
+          <div className="col" style={{ position: 'absolute', inset: 0, zIndex: 5, alignItems: 'center', justifyContent: 'center', gap: 10, background: 'color-mix(in srgb, var(--surface-base) 62%, transparent)', backdropFilter: 'blur(1px)', color: 'var(--text-tertiary)' }}>
+            <Icon name="loader" size={24} style={{ animation: 'spin 1s linear infinite' }} />
+          </div>
+        )}
         {tableTab === 'data' && (connId
           ? <DataGrid
               columns={(live?.columns ?? [])}

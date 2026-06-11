@@ -130,9 +130,6 @@ export function TitleBar({ theme, onToggleTheme, onOpenSettings, settingsActive 
         <button className="tb-iconbtn" title={t('shell.toggleTheme')} onClick={onToggleTheme}>
           <Icon name={theme === 'dawn' ? 'moon' : 'sun'} size={17} />
         </button>
-        <button className="tb-iconbtn" title={t('shell.notifications')}>
-          <Icon name="bell" size={17} />
-        </button>
         <button className={`tb-iconbtn ${settingsActive ? 'active' : ''}`} title={t('shell.settings')} onClick={onOpenSettings}>
           <Icon name="settings" size={17} />
         </button>

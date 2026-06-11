@@ -111,10 +111,14 @@ fn parse_collection(rest: &str) -> Result<(String, &str), String> {
         let after = after.trim_start().strip_prefix('.').ok_or_else(hint)?;
         Ok((name, after))
     } else {
-        let dot = rest.find('.').ok_or_else(hint)?;
+        // Bare identifier collection — may itself contain dots (e.g. "system.users").
+        // The method is the identifier immediately before the first '(', so the
+        // collection is everything up to that method's leading dot.
+        let paren = rest.find('(').ok_or_else(hint)?;
+        let dot = rest[..paren].rfind('.').ok_or_else(hint)?;
         let name = &rest[..dot];
         let valid = !name.is_empty()
-            && name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-');
+            && name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.');
         if !valid { return Err(hint()); }
         Ok((name.to_string(), &rest[dot + 1..]))
     }
@@ -421,6 +425,23 @@ mod tests {
                 assert_eq!(sort, Some(json!({"name": 1})));
                 assert_eq!(skip, Some(10));
                 assert_eq!(limit, Some(20));
+            }
+            other => panic!("expected Find, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_dotted_bare_collection_name() {
+        // A bare collection name containing dots (e.g. "system.users") must be
+        // recognized — the method is the last segment before '('.
+        match parse("db.system.users.countDocuments()").unwrap() {
+            MongoCommand::Count { collection, .. } => assert_eq!(collection, "system.users"),
+            other => panic!("expected Count, got {other:?}"),
+        }
+        match parse("db.a.b.c.find({}).limit(5)").unwrap() {
+            MongoCommand::Find { collection, limit, .. } => {
+                assert_eq!(collection, "a.b.c");
+                assert_eq!(limit, Some(5));
             }
             other => panic!("expected Find, got {other:?}"),
         }
