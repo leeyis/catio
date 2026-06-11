@@ -41,16 +41,24 @@ pub struct JdbcDriver {
 
 // ── process / jar / java location ────────────────────────────────────────────
 
-/// Locate the bundled plugin jar. Env override first (tests/dev), then the
-/// build output relative to the crate, then a Tauri-resource-style fallback.
+/// A jar is usable only if it exists *and* is non-empty — a 0-byte file (e.g. the
+/// gitignored dev placeholder, or a `mvn package` that failed mid-bundle) must be
+/// treated as absent so we surface the clear "not found" error instead of spawning
+/// Java against an empty jar.
+fn jar_is_usable(p: &std::path::Path) -> bool {
+    std::fs::metadata(p).map(|m| m.is_file() && m.len() > 0).unwrap_or(false)
+}
+
+/// Locate the bundled plugin jar. Env override first (tests/dev + the resource path
+/// the app injects at startup), then the build output relative to the crate.
 fn plugin_jar_path() -> Result<PathBuf, DbError> {
     if let Ok(p) = std::env::var("CATIO_JDBC_PLUGIN_JAR") {
         let pb = PathBuf::from(p);
-        if pb.exists() { return Ok(pb); }
+        if jar_is_usable(&pb) { return Ok(pb); }
     }
     let built = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("jdbc-plugin/target/catio-jdbc-plugin.jar");
-    if built.exists() { return Ok(built); }
+    if jar_is_usable(&built) { return Ok(built); }
     Err(DbError::ConnectFailed(
         "JDBC plugin jar not found — build src-tauri/jdbc-plugin (mvn package) \
          or set CATIO_JDBC_PLUGIN_JAR".into()))
@@ -111,7 +119,9 @@ impl JdbcDriver {
             cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
         }
         let mut child = cmd.spawn().map_err(|e| {
-            DbError::ConnectFailed(format!("failed to spawn Java JDBC sidecar ({}): {e}", java_bin()))
+            DbError::ConnectFailed(format!(
+                "无法启动 Java JDBC sidecar（{}）：{e}。请确认已安装 JDK/JRE 17+ 并在 PATH 中，\
+                 或设置 JAVA_HOME / CATIO_JAVA_BIN。", java_bin()))
         })?;
         let stdin = BufWriter::new(child.stdin.take().ok_or_else(|| DbError::ConnectFailed("no sidecar stdin".into()))?);
         let stdout = BufReader::new(child.stdout.take().ok_or_else(|| DbError::ConnectFailed("no sidecar stdout".into()))?);

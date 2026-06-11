@@ -163,11 +163,19 @@ describe('NewConnectionModal — multi-engine catalog', () => {
     expect(screen.getByText('JDBC 驱动未安装')).toBeTruthy()
   })
 
-  it('shows a manual hint (no download button) for a proprietary engine', async () => {
+  it('shows a download button for 达梦 (now on Maven Central)', async () => {
     wrap(<NewConnectionModal onClose={() => {}} />)
     fireEvent.click(screen.getByText('PostgreSQL'))
     fireEvent.click(screen.getByText('达梦 DM'))
-    // 达梦 is proprietary → manual hint, no download button.
+    // 达梦驱动已在 Maven Central → 显示下载按钮。
+    await waitFor(() => expect(screen.getByText('下载驱动')).toBeTruthy())
+  })
+
+  it('shows a manual hint (no download button) for a proprietary engine', async () => {
+    wrap(<NewConnectionModal onClose={() => {}} />)
+    fireEvent.click(screen.getByText('PostgreSQL'))
+    fireEvent.click(screen.getByText('Cassandra'))
+    // Cassandra 无自包含 Maven jar → 手动提示，无下载按钮。
     await waitFor(() => expect(screen.getByText('需手动提供驱动 JAR')).toBeTruthy())
     expect(screen.queryByText('下载驱动')).toBeNull()
   })

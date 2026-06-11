@@ -8,7 +8,7 @@ import type { AuthMethod, SshConnectArgs, SshTestResult } from '../../services/s
 import { sshTest } from '../../services/ssh'
 import { dbConnect, testConnection, dbErrMsg } from '../../services/db'
 import { enginesByGroup, findEngine, matchEngineId } from '../../services/dbEngines'
-import { jdbcDriverStatus, downloadJdbcDriver, JDBC_DOWNLOADABLE, type JdbcDriverStatus } from '../../services/jdbcDrivers'
+import { jdbcDriverStatus, downloadJdbcDriver, openJdbcDriversDir, importJdbcDriver, JDBC_DOWNLOADABLE, type JdbcDriverStatus } from '../../services/jdbcDrivers'
 import { dbLogo } from '../../services/logos'
 import { saveProfile } from '../../state/connections'
 import type { ConnectionProfile, JumpProfile } from '../../state/connections'
@@ -240,6 +240,22 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
     } finally {
       setDriverBusy(false)
     }
+  }
+
+  const handleImportDriver = async () => {
+    if (!jdbcProfile) return
+    setDriverBusy(true); setDriverErr(null)
+    try {
+      setDriverStatus(await importJdbcDriver(jdbcProfile))
+    } catch (e) {
+      setDriverErr(dbErrMsg(e))
+    } finally {
+      setDriverBusy(false)
+    }
+  }
+
+  const handleOpenDriversDir = async () => {
+    try { await openJdbcDriversDir() } catch (e) { setDriverErr(dbErrMsg(e)) }
   }
 
   // Any change to DB connection params invalidates a prior test result.
@@ -536,34 +552,59 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
             </div>
           )}
 
-          {/* JDBC driver row — install-status + one-click download (DBeaver-style) */}
+          {/* JDBC driver row — install-status + one-click download / manual import */}
           {kind === 'db' && isJdbc && (
-            <div className="row" style={{ alignItems: 'center', gap: 10, marginBottom: 16, padding: '10px 12px', borderRadius: 10, border: '1px solid var(--border-hairline)', background: 'var(--surface-subtle)' }}>
-              <Icon name={driverStatus?.installed ? 'circle-check' : 'hard-drive'} size={16}
-                style={{ color: driverStatus?.installed ? 'var(--signal-green)' : 'var(--text-tertiary)', flex: 'none' }} />
-              <div className="col" style={{ gap: 1, flex: 1, minWidth: 0 }}>
-                <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text-primary)' }}>
-                  {driverStatus?.installed
-                    ? t('modals.jdbcDriverReady')
-                    : driverStatus?.downloadable ?? JDBC_DOWNLOADABLE.has(jdbcProfile ?? '')
-                      ? t('modals.jdbcDriverMissing')
-                      : t('modals.jdbcDriverManual')}
-                </span>
-                <span className="mono" style={{ fontSize: 10.5, color: 'var(--text-faint)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {driverStatus?.installed
-                    ? driverStatus.fileName
-                    : driverStatus && !driverStatus.downloadable
-                      ? t('modals.jdbcDriverManualHint', { cls: driverStatus.driverClass ?? '' })
-                      : (driverStatus?.driverClass ?? currentEngine?.label)}
-                </span>
-                {driverErr && <span style={{ fontSize: 11, color: 'var(--danger-fg)' }}>{driverErr}</span>}
+            <div className="col" style={{ gap: 8, marginBottom: 16, padding: '10px 12px', borderRadius: 10, border: '1px solid var(--border-hairline)', background: 'var(--surface-subtle)' }}>
+              <div className="row" style={{ alignItems: 'center', gap: 10 }}>
+                <Icon name={driverStatus?.installed ? 'circle-check' : 'hard-drive'} size={16}
+                  style={{ color: driverStatus?.installed ? 'var(--signal-green)' : 'var(--text-tertiary)', flex: 'none' }} />
+                <div className="col" style={{ gap: 1, flex: 1, minWidth: 0 }}>
+                  <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text-primary)' }}>
+                    {driverStatus?.installed
+                      ? t('modals.jdbcDriverReady')
+                      : driverStatus?.downloadable ?? JDBC_DOWNLOADABLE.has(jdbcProfile ?? '')
+                        ? t('modals.jdbcDriverMissing')
+                        : t('modals.jdbcDriverManual')}
+                  </span>
+                  <span className="mono" style={{ fontSize: 10.5, color: 'var(--text-faint)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {driverStatus?.installed
+                      ? driverStatus.fileName
+                      : driverStatus && !driverStatus.downloadable
+                        ? t('modals.jdbcDriverManualHint', { cls: driverStatus.driverClass ?? '' })
+                        : (driverStatus?.driverClass ?? currentEngine?.label)}
+                  </span>
+                  {driverErr && <span style={{ fontSize: 11, color: 'var(--danger-fg)' }}>{driverErr}</span>}
+                </div>
+                {!driverStatus?.installed && (driverStatus?.downloadable ?? JDBC_DOWNLOADABLE.has(jdbcProfile ?? '')) && (
+                  <button className="btn btn-secondary" onClick={handleDownloadDriver} disabled={driverBusy} style={{ flex: 'none' }}>
+                    {driverBusy
+                      ? <><Icon name="refresh-cw" size={14} className="spin" /> {t('modals.jdbcDriverDownloading')}</>
+                      : <><Icon name="arrow-down" size={14} /> {t('modals.jdbcDriverDownload')}</>}
+                  </button>
+                )}
               </div>
-              {!driverStatus?.installed && (driverStatus?.downloadable ?? JDBC_DOWNLOADABLE.has(jdbcProfile ?? '')) && (
-                <button className="btn btn-secondary" onClick={handleDownloadDriver} disabled={driverBusy} style={{ flex: 'none' }}>
-                  {driverBusy
-                    ? <><Icon name="refresh-cw" size={14} className="spin" /> {t('modals.jdbcDriverDownloading')}</>
-                    : <><Icon name="arrow-down" size={14} /> {t('modals.jdbcDriverDownload')}</>}
-                </button>
+              {/* 驱动目录路径 + 手动导入/打开目录 */}
+              {driverStatus?.driversDir && (
+                <div className="row" style={{ alignItems: 'center', gap: 8 }}>
+                  <span style={{ fontSize: 11, color: 'var(--text-tertiary)', flex: 'none' }}>{t('modals.jdbcDriverDir')}</span>
+                  <span className="mono" style={{ fontSize: 10.5, color: 'var(--text-faint)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', userSelect: 'all' }} title={driverStatus.driversDir}>
+                    {driverStatus.driversDir}
+                  </span>
+                  <button className="btn btn-ghost" onClick={handleOpenDriversDir} style={{ flex: 'none' }}>
+                    <Icon name="folder-open" size={13} /> {t('modals.jdbcOpenDir')}
+                  </button>
+                  <button className="btn btn-ghost" onClick={handleImportDriver} disabled={driverBusy} style={{ flex: 'none' }}>
+                    {driverBusy
+                      ? <><Icon name="refresh-cw" size={13} className="spin" /> {t('modals.jdbcImporting')}</>
+                      : <><Icon name="folder-plus" size={13} /> {t('modals.jdbcImportJar')}</>}
+                  </button>
+                </div>
+              )}
+              {/* 目录内已有的 jar */}
+              {driverStatus && !driverStatus.installed && (
+                <span className="mono" style={{ fontSize: 10, color: 'var(--text-faint)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {driverStatus.jars.length > 0 ? driverStatus.jars.join('  ·  ') : t('modals.jdbcDriverJarsEmpty')}
+                </span>
               )}
             </div>
           )}

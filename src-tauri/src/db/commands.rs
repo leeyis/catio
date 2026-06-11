@@ -325,6 +325,8 @@ pub struct JdbcDriverStatus {
     pub driver_class: Option<String>,
     /// directory the user can drop a manual JAR into.
     pub drivers_dir: String,
+    /// 驱动目录下现有的全部 `*.jar` 文件名（让用户确认 jar 是否放对位置）。
+    pub jars: Vec<String>,
 }
 
 fn jdbc_status(profile: &str, dir: &std::path::Path) -> JdbcDriverStatus {
@@ -334,6 +336,16 @@ fn jdbc_status(profile: &str, dir: &std::path::Path) -> JdbcDriverStatus {
         Some(s) => (dir.join(&s.file_name).exists(), Some(s.file_name.clone())),
         None => (false, None),
     };
+    let mut jars: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|x| x.to_str())
+            .map(|x| x.eq_ignore_ascii_case("jar")) == Some(true))
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect();
+    jars.sort();
     JdbcDriverStatus {
         profile: profile.to_string(),
         installed,
@@ -341,6 +353,7 @@ fn jdbc_status(profile: &str, dir: &std::path::Path) -> JdbcDriverStatus {
         downloadable: spec.is_some(),
         driver_class: jdbc_config::driver_class(profile),
         drivers_dir: dir.to_string_lossy().into_owned(),
+        jars,
     }
 }
 
@@ -399,4 +412,108 @@ pub async fn download_driver_to_dir(profile: &str, dir: &std::path::Path)
     Ok(jdbc_status(profile, dir))
 }
 
+/// 核心（AppHandle-free）驱动导入：把用户选中的 `src` jar 复制进驱动目录。
+/// 非 `.jar` 后缀直接拒绝；同名覆盖（用户主动选择即视为意图替换）。
+pub fn import_driver_to_dir(profile: &str, src: &std::path::Path, dir: &std::path::Path)
+    -> Result<JdbcDriverStatus, DbError> {
+    let is_jar = src.extension().and_then(|x| x.to_str())
+        .map(|x| x.eq_ignore_ascii_case("jar")) == Some(true);
+    if !is_jar {
+        return Err(DbError::Unsupported("只能导入 .jar 驱动文件".into()));
+    }
+    let file_name = src.file_name()
+        .ok_or_else(|| DbError::Io("无效的文件名".into()))?;
+    std::fs::create_dir_all(dir).map_err(|e| DbError::Io(e.to_string()))?;
+    let target = dir.join(file_name);
+    // 用户可能选中的就是驱动目录里已有的同一个 jar（如先下载再点"选择 JAR"）。
+    // 此时 fs::copy 自我复制会报 OS 错误甚至截断文件——视为已就位，直接返回。
+    let same_file = std::fs::canonicalize(src).ok()
+        .zip(std::fs::canonicalize(&target).ok())
+        .map(|(a, b)| a == b)
+        .unwrap_or(false);
+    if !same_file {
+        std::fs::copy(src, &target).map_err(|e| DbError::Io(e.to_string()))?;
+    }
+    Ok(jdbc_status(profile, dir))
+}
+
+/// 把用户选中的驱动 jar 复制进驱动目录，返回刷新后的状态。
+#[tauri::command]
+pub async fn jdbc_import_driver(profile: String, path: String, app: tauri::AppHandle)
+    -> Result<JdbcDriverStatus, DbError> {
+    let dir = jdbc_drivers_dir(&app)?;
+    import_driver_to_dir(&profile, std::path::Path::new(&path), &dir)
+}
+
+/// 在系统文件管理器中打开驱动目录（Windows explorer / macOS open / Linux xdg-open）。
+#[tauri::command]
+pub async fn jdbc_open_drivers_dir(app: tauri::AppHandle) -> Result<(), DbError> {
+    let dir = jdbc_drivers_dir(&app)?;
+    #[cfg(target_os = "windows")]
+    let program = "explorer";
+    #[cfg(target_os = "macos")]
+    let program = "open";
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let program = "xdg-open";
+    std::process::Command::new(program)
+        .arg(&dir)
+        .spawn()
+        .map_err(|e| DbError::Io(format!("打开驱动目录失败: {e}")))?;
+    Ok(())
+}
+
 // qualified-table tests moved to dialect.rs (`qualified_table`).
+
+#[cfg(test)]
+mod jdbc_status_tests {
+    use super::jdbc_status;
+    use std::fs;
+
+    #[test]
+    fn lists_jars_present_in_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("DmJdbcDriver18-8.1.3.62.jar"), b"x").unwrap();
+        fs::write(dir.path().join("notes.txt"), b"x").unwrap();
+        let s = jdbc_status("dameng", dir.path());
+        assert_eq!(s.jars, vec!["DmJdbcDriver18-8.1.3.62.jar".to_string()]);
+    }
+
+    #[test]
+    fn empty_dir_yields_no_jars() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = jdbc_status("yashandb", dir.path());
+        assert!(s.jars.is_empty());
+    }
+
+    #[test]
+    fn import_copies_jar_into_dir() {
+        let src = tempfile::tempdir().unwrap();
+        let jar = src.path().join("DmJdbcDriver18-8.1.3.62.jar");
+        fs::write(&jar, b"JARBYTES").unwrap();
+        let dst = tempfile::tempdir().unwrap();
+
+        let status = super::import_driver_to_dir("dameng", &jar, dst.path()).unwrap();
+        assert!(dst.path().join("DmJdbcDriver18-8.1.3.62.jar").exists());
+        assert!(status.jars.contains(&"DmJdbcDriver18-8.1.3.62.jar".to_string()));
+    }
+
+    #[test]
+    fn import_rejects_non_jar() {
+        let src = tempfile::tempdir().unwrap();
+        let txt = src.path().join("driver.txt");
+        fs::write(&txt, b"x").unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        assert!(super::import_driver_to_dir("dameng", &txt, dst.path()).is_err());
+    }
+
+    #[test]
+    fn import_of_jar_already_in_dir_is_a_noop_success() {
+        // 用户选中的就是驱动目录里已有的 jar：不应自我复制报错或截断文件。
+        let dir = tempfile::tempdir().unwrap();
+        let jar = dir.path().join("DmJdbcDriver18-8.1.3.62.jar");
+        fs::write(&jar, b"JARBYTES").unwrap();
+        let status = super::import_driver_to_dir("dameng", &jar, dir.path()).unwrap();
+        assert!(status.jars.contains(&"DmJdbcDriver18-8.1.3.62.jar".to_string()));
+        assert_eq!(fs::read(&jar).unwrap(), b"JARBYTES", "原文件内容未被破坏");
+    }
+}
