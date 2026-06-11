@@ -111,7 +111,9 @@ impl JdbcDriver {
             cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
         }
         let mut child = cmd.spawn().map_err(|e| {
-            DbError::ConnectFailed(format!("failed to spawn Java JDBC sidecar ({}): {e}", java_bin()))
+            DbError::ConnectFailed(format!(
+                "无法启动 Java JDBC sidecar（{}）：{e}。请确认已安装 JDK/JRE 17+ 并在 PATH 中，\
+                 或设置 JAVA_HOME / CATIO_JAVA_BIN。", java_bin()))
         })?;
         let stdin = BufWriter::new(child.stdin.take().ok_or_else(|| DbError::ConnectFailed("no sidecar stdin".into()))?);
         let stdout = BufReader::new(child.stdout.take().ok_or_else(|| DbError::ConnectFailed("no sidecar stdout".into()))?);
