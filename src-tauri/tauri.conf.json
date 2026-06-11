@@ -7,7 +7,7 @@
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
     "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build && mvn -q -DskipTests -f src-tauri/jdbc-plugin/pom.xml package"
+    "beforeBuildCommand": "npm run build"
   },
   "app": {
     "windows": [{
@@ -20,6 +20,6 @@
     "active": true,
     "targets": "all",
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
-    "resources": { "jdbc-plugin/target/catio-jdbc-plugin.jar": "catio-jdbc-plugin.jar" }
+    "resources": { "resources/catio-jdbc-plugin.jar": "catio-jdbc-plugin.jar" }
   }
 }
