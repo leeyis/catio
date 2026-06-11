@@ -93,13 +93,19 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
   // used to fall back to the mock demo tree, which then let the user query tables
   // the real database doesn't have.
   const [schemaErr, setSchemaErr] = useState<string | null>(null)
+  // True while the backend is introspecting — drives the tree's skeleton placeholder
+  // so a freshly-connected DB shows a loading state, not a blank/empty tree.
+  const [schemaLoading, setSchemaLoading] = useState(false)
   useEffect(() => {
-    if (!connId) { setLiveSchema(null); setSchemaErr(null); return }
+    if (!connId) { setLiveSchema(null); setSchemaErr(null); setSchemaLoading(false); return }
     let cancelled = false
     setSchemaErr(null)
+    setLiveSchema(null)
+    setSchemaLoading(true)
     getSchema(connId)
       .then(sc => { if (!cancelled) { setLiveSchema(sc); setSchemaErr(null) } })
       .catch(e => { if (!cancelled) { setLiveSchema(null); setSchemaErr(dbErrMsg(e)) } })
+      .finally(() => { if (!cancelled) setSchemaLoading(false) })
     return () => { cancelled = true }
   }, [connId])
 
@@ -217,7 +223,7 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
         refreshing={refreshing}
         erActive={activeTab?.kind === 'er'} sqlActive={activeTab?.kind === 'sql'}
         disabledSql={!caps.sqlConsole} disabledEr={!caps.er}
-        schemas={connId ? namespaces : undefined} conn={connId ? conn : undefined} live={!!connId} />
+        schemas={connId ? namespaces : undefined} conn={connId ? conn : undefined} live={!!connId} loading={schemaLoading} />
       <div className="col grow" style={{ minWidth: 0, minHeight: 0, overflow: 'hidden', position: 'relative' }}>
         {/* 统一 tab strip:表 / 对象 / 查询 / ER 平级,身份复用,全部保持 mounted。 */}
         {tabs.length > 0 && (

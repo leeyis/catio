@@ -37,9 +37,11 @@ export interface SchemaBrowserProps {
   live?: boolean
   /** True while the schema tree is being re-introspected — spins the refresh icon. */
   refreshing?: boolean
+  /** True while the INITIAL introspection is in flight — shows a skeleton instead of a blank tree. */
+  loading?: boolean
 }
 
-export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, schemas, conn, live, refreshing }: SchemaBrowserProps) {
+export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, schemas, conn, live, refreshing, loading }: SchemaBrowserProps) {
   const { t } = useTranslation()
   const D = useData()
   // Live path: render every supplied namespace; mock path: the single seeded schema (pixel-identical).
@@ -70,9 +72,25 @@ export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpen
         <input value={q} onChange={e => setQ(e.target.value)} placeholder={t('workbench.searchTablesViews')} style={{ flex: 1, border: 'none', outline: 'none', background: 'transparent', fontSize: 12, color: 'var(--text-primary)' }} />
       </div>
       {/* New query / ER moved into each schema's "⋯" hover menu (see SchemaNode). */}
-      {/* tree — one collapsible top-level DB node per schema namespace */}
+      {/* tree — one collapsible top-level DB node per schema namespace.
+          Live connection: skeleton while introspecting, empty-state when it returns
+          nothing, otherwise the real tree. Mock path always has namespaces. */}
       <div className="grow" style={{ overflowY: 'auto', padding: '0 6px 10px' }}>
-        {namespaces.map(ns => (
+        {loading && namespaces.length === 0 ? (
+          <div className="col" style={{ gap: 9, padding: '8px 6px' }} aria-busy="true" data-testid="schema-skeleton">
+            {[0, 1, 2, 3, 4, 5, 6].map(i => (
+              <div key={i} className="row gap8" style={{ alignItems: 'center', paddingLeft: i % 3 === 0 ? 0 : 22 }}>
+                <div className="skel" style={{ width: 13, height: 13, borderRadius: 4, flex: 'none' }} />
+                <div className="skel" style={{ height: 10, width: i % 3 === 0 ? 110 : 140, maxWidth: '70%' }} />
+              </div>
+            ))}
+          </div>
+        ) : live && namespaces.length === 0 ? (
+          <div className="col" style={{ alignItems: 'center', justifyContent: 'center', gap: 6, padding: '34px 12px', color: 'var(--text-faint)', textAlign: 'center' }}>
+            <Icon name="database" size={22} />
+            <span style={{ fontSize: 11.5 }}>{t('workbench.noSchemas')}</span>
+          </div>
+        ) : namespaces.map(ns => (
           <SchemaNode key={ns.name} ns={ns} query={query} active={active} onPick={onPick} onPickObject={onPickObject} live={!!live}
             onNewQuery={onNewQuery} onOpenER={onOpenER} onNewObjectTemplate={onNewObjectTemplate} onRefresh={onRefresh} />
         ))}

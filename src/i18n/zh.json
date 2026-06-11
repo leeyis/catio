@@ -198,6 +198,7 @@
     "refresh": "刷新",
     "refreshFailed": "刷新失败：{{message}}",
     "schemaLoadFailed": "加载库结构失败：{{message}}",
+    "noSchemas": "未发现表或视图",
     "scrollLeft": "向左滚动",
     "scrollRight": "向右滚动",
     "erDiagram": "ER 图",
