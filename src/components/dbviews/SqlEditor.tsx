@@ -8,7 +8,7 @@ import { useTranslation } from 'react-i18next'
 import { EditorView, keymap, placeholder as cmPlaceholder, lineNumbers, highlightActiveLineGutter } from '@codemirror/view'
 import { EditorState, Compartment, type Extension } from '@codemirror/state'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
-import { autocompletion, completionKeymap, closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete'
+import { autocompletion, completionKeymap, closeBrackets, closeBracketsKeymap, type CompletionSource } from '@codemirror/autocomplete'
 import { syntaxHighlighting, HighlightStyle, bracketMatching, indentOnInput } from '@codemirror/language'
 import { tags as t } from '@lezer/highlight'
 import { sql, PostgreSQL, MySQL, SQLite, MSSQL, type SQLDialect, type SQLNamespace } from '@codemirror/lang-sql'
@@ -32,6 +32,8 @@ export interface SqlEditorProps {
   placeholder?: string
   /** true → 非 SQL 模式:不挂 lang-sql(无 SQL 补全),用于 mongo/es 控制台。 */
   plain?: boolean
+  /** plain 模式下的自定义补全源(如 mongo shell 补全)。非 plain 时忽略。 */
+  completion?: CompletionSource
 }
 
 /** Imperative handle exposed to parents (e.g. SqlConsole) for cursor-aware
@@ -134,7 +136,7 @@ const catioTheme = EditorView.theme(
 )
 
 export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function SqlEditor(
-  { code, onChange, minHeight, target = 'prod-orders', schema, onRun, onRunSelection, placeholder, plain },
+  { code, onChange, minHeight, target = 'prod-orders', schema, onRun, onRunSelection, placeholder, plain, completion },
   ref,
 ) {
   const { t: tr } = useTranslation()
@@ -142,6 +144,12 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
   const rootRef = useRef<HTMLDivElement>(null)
   const viewRef = useRef<EditorView | null>(null)
   const sqlCompartment = useRef(new Compartment())
+  // Build the language/completion extension for the SQL compartment. Plain mode
+  // (mongo/es) drops lang-sql; it gets a custom completion source when provided.
+  function langExt(): Extension {
+    if (plain) return completion ? autocompletion({ override: [completion] }) : []
+    return [sql({ dialect: PostgreSQL, schema, upperCaseKeywords: true }), autocompletion()]
+  }
   // Keep the latest callbacks without re-running the mount effect.
   const onChangeRef = useRef(onChange)
   onChangeRef.current = onChange
@@ -160,7 +168,6 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
       bracketMatching(),
       closeBrackets(),
       indentOnInput(),
-      autocompletion(),
       syntaxHighlighting(catioHighlight),
       catioTheme,
       ...(placeholder ? [cmPlaceholder(placeholder)] : []),
@@ -176,7 +183,7 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
         ...defaultKeymap,
         indentWithTab,
       ]),
-      sqlCompartment.current.of(plain ? [] : sql({ dialect: PostgreSQL, upperCaseKeywords: true })),
+      sqlCompartment.current.of(langExt()),
       EditorView.updateListener.of(update => {
         if (update.docChanged) {
           onChangeRef.current(update.state.doc.toString())
@@ -212,16 +219,14 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Reconfigure the sql() extension when the schema changes (compartment swap).
+  // Reconfigure the language/completion extension when schema, plain mode, or
+  // the custom completion source changes (compartment swap).
   useEffect(() => {
     const view = viewRef.current
     if (!view) return
-    view.dispatch({
-      effects: sqlCompartment.current.reconfigure(
-        plain ? [] : sql({ dialect: PostgreSQL, schema, upperCaseKeywords: true }),
-      ),
-    })
-  }, [schema, plain])
+    view.dispatch({ effects: sqlCompartment.current.reconfigure(langExt()) })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [schema, plain, completion])
 
   // Sync external `code` changes (e.g. AI-inserted SQL, Clear button) into the
   // doc without clobbering the cursor while the user types locally.

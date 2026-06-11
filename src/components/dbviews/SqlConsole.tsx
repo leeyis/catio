@@ -7,6 +7,7 @@ import { useData } from '../../state/DataContext'
 import { runQuery, getSchema, schemaColumns, dbErrMsg } from '../../services/db'
 import type { ResultColumn, Schema } from '../../services/types'
 import { SqlEditor, type SqlEditorHandle } from './SqlEditor'
+import { mongoCompletion } from './mongoCompletion'
 import type { SQLNamespace } from '@codemirror/lang-sql'
 import { DataGrid } from './DataGrid'
 
@@ -56,6 +57,10 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
   const [liveColumns, setLiveColumns] = useState<Record<string, Record<string, string[]>>>({})
   // Imperative handle to the CodeMirror editor for cursor-aware insertion.
   const editorRef = useRef<SqlEditorHandle>(null)
+  // Live collection names for the plain-mode mongo completion source. Held in a
+  // ref so the (stable-identity) completion source reads the latest list without
+  // rebuilding the editor extension on every schema change.
+  const collectionsRef = useRef<string[]>([])
 
   useEffect(() => {
     if (!connId || plain) { setLiveSchema(null); return }
@@ -63,6 +68,33 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
     getSchema(connId).then(s => { if (alive) setLiveSchema(s) }).catch(() => {})
     return () => { alive = false }
   }, [connId, plain])
+
+  // Plain-mode (mongo) collection names for autocompletion — union of every
+  // database's collections/views. Best-effort: a failed fetch leaves the list
+  // empty (completion degrades to methods/chains only).
+  useEffect(() => {
+    if (!connId || engine !== 'mongodb') { collectionsRef.current = []; return }
+    let alive = true
+    getSchema(connId)
+      .then(s => {
+        if (!alive) return
+        const names = new Set<string>()
+        for (const ns of s.schemas) {
+          for (const tbl of ns.tables) names.add(tbl.name)
+          for (const v of ns.views) names.add(v.name)
+        }
+        collectionsRef.current = [...names]
+      })
+      .catch(() => { if (alive) collectionsRef.current = [] })
+    return () => { alive = false }
+  }, [connId, engine])
+
+  // Stable completion source for the editor (mongo only for now). Identity is
+  // keyed on engine so the editor extension isn't rebuilt as collections load.
+  const completion = useMemo(
+    () => (engine === 'mongodb' ? mongoCompletion(() => collectionsRef.current) : undefined),
+    [engine],
+  )
 
   // Stable identity of the schema namespaces (names only) so the column fetch
   // re-runs when connId or the schema list changes, but NOT on every keystroke.
@@ -214,7 +246,7 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
           When there are no results yet it fills the whole console; once a run
           starts it shares the space with the results region below (a split). */}
       <div style={{ flex: 1, minHeight: 140, width: '100%', borderBottom: phase === 'idle' ? 'none' : '1px solid var(--border-hairline)' }}>
-        <SqlEditor ref={editorRef} code={code} onChange={setCode} schema={editorSchema} onRun={run} onRunSelection={connId ? (sql => run(sql)) : undefined} placeholder={editorPlaceholder} plain={plain} />
+        <SqlEditor ref={editorRef} code={code} onChange={setCode} schema={editorSchema} onRun={run} onRunSelection={connId ? (sql => run(sql)) : undefined} placeholder={editorPlaceholder} plain={plain} completion={completion} />
       </div>
       {/* results — only rendered once a run has started (running/done). While
           idle (fresh query) the editor above fills everything. */}
