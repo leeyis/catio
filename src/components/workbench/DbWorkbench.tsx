@@ -65,11 +65,15 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
   const connId = active?.connId ?? null
 
   // ---- Unified tab state ----
-  // Mock/demo path initial: a single public.orders table tab (pixel-identical demo).
-  const [tabs, setTabs] = useState<WorkbenchTab[]>([
-    { id: tabIdOf.table('public', 'orders'), kind: 'table', schema: 'public', table: 'orders' },
-  ])
-  const [activeId, setActiveId] = useState<string | null>(tabIdOf.table('public', 'orders'))
+  // No live connection → seed the pixel-identical mock demo tab (public.orders).
+  // A LIVE connection starts with NO table tab: the real first table is opened once
+  // introspection returns (reconciliation effect below). Seeding the mock tab for a
+  // real connection would auto-run `SELECT * FROM "public"."orders"` against a DB
+  // that lacks it (达梦 reports 无效的模式名[public]).
+  const [tabs, setTabs] = useState<WorkbenchTab[]>(
+    connId ? [] : [{ id: tabIdOf.table('public', 'orders'), kind: 'table', schema: 'public', table: 'orders' }],
+  )
+  const [activeId, setActiveId] = useState<string | null>(connId ? null : tabIdOf.table('public', 'orders'))
   const [queryN, setQueryN] = useState(0)
   const [queryInitialCode, setQueryInitialCode] = useState<Record<number, string>>({})
   const activeTab = tabs.find(tb => tb.id === activeId) ?? null

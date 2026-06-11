@@ -62,7 +62,7 @@ describe('DbWorkbench capability-gating', () => {
     expect(screen.getByTestId('seg-structure')).not.toBeDisabled()
   })
 
-  it('keeps the structure tab viewable even when structureEdit is false', () => {
+  it('keeps the structure tab viewable even when structureEdit is false', async () => {
     // MongoDB/ClickHouse/… can VIEW structure (sampled columns) but not ALTER it;
     // the tab must stay clickable — editing is gated inside StructureView instead.
     h.list.mockReturnValue([
@@ -83,11 +83,12 @@ describe('DbWorkbench capability-gating', () => {
     ])
     wrap(<DbWorkbench conn={CONN} />)
 
-    // Structure tab is viewable regardless of structureEdit.
-    expect(screen.getByTestId('seg-structure')).not.toBeDisabled()
+    // Structure tab is viewable regardless of structureEdit. (A live connection
+    // opens its first table after introspection resolves → findByTestId awaits it.)
+    expect(await screen.findByTestId('seg-structure')).not.toBeDisabled()
   })
 
-  it('structure tab stays viewable with structureEdit=false (edit gated separately)', () => {
+  it('structure tab stays viewable with structureEdit=false (edit gated separately)', async () => {
     h.list.mockReturnValue([
       {
         connId: 'conn-2',
@@ -106,10 +107,10 @@ describe('DbWorkbench capability-gating', () => {
     ])
     wrap(<DbWorkbench conn={CONN} />)
 
-    expect(screen.getByTestId('seg-structure')).not.toBeDisabled()
+    expect(await screen.findByTestId('seg-structure')).not.toBeDisabled()
   })
 
-  it('all tabs enabled when all capabilities are true', () => {
+  it('all tabs enabled when all capabilities are true', async () => {
     h.list.mockReturnValue([
       {
         connId: 'conn-3',
@@ -128,7 +129,7 @@ describe('DbWorkbench capability-gating', () => {
     ])
     wrap(<DbWorkbench conn={CONN} />)
 
-    expect(screen.getByTestId('seg-structure')).not.toBeDisabled()
+    expect(await screen.findByTestId('seg-structure')).not.toBeDisabled()
   })
 })
 
