@@ -832,6 +832,13 @@ export default function App() {
   // OR a live SSH session resolve to its Connection.
   const curConn = cur ? (vaultConns.find(c => c.id === cur.connId) ?? liveConns[cur.connId] ?? D.byId[cur.connId] ?? null) : null
   const aiMode = cur && cur.kind === 'terminal' ? 'shell' : 'sql'
+  // The AI panel's "@ 选表" needs the BACKEND live connId, not the tab's profile
+  // id (cur.connId). Resolve it the same way DbWorkbench does — first active
+  // connection whose profileId matches the tab. Undefined for terminal tabs or
+  // when the DB connection isn't live.
+  const aiConnId = cur && cur.kind !== 'terminal'
+    ? listActiveDbConnections().find(a => a.profileId === cur.connId)?.connId
+    : undefined
 
   // Write text into the active terminal's live PTY channel (no trailing newline).
   async function insertToTerminal(code: string) {
@@ -1076,7 +1083,7 @@ export default function App() {
           {/* panel slot */}
           {panelOpen && (aiForm === 'side' || activePanel !== 'ai') && (
             <div className="fade-in" style={{ display: 'flex' }}>
-              {activePanel === 'ai' && <AIPanel onClose={() => setPanelOpen(false)} mode={aiMode} conn={curConn ?? undefined} connId={cur?.connId} engine={curConn?.engine} attachment={aiAttachment} onClearAttachment={() => setAiAttachment(null)} onInsert={insertToTerminal} canInsert={canInsert} onOpenSettings={() => goSettings('ai')}
+              {activePanel === 'ai' && <AIPanel onClose={() => setPanelOpen(false)} mode={aiMode} conn={curConn ?? undefined} connId={aiConnId} engine={curConn?.engine} attachment={aiAttachment} onClearAttachment={() => setAiAttachment(null)} onInsert={insertToTerminal} canInsert={canInsert} onOpenSettings={() => goSettings('ai')}
                 conversation={activeConversation} busy={activeConvBusy} history={agentHistory}
                 onSend={cur ? (text => void sendAgentMessage(cur.id, text)) : undefined}
                 onAbort={cur ? (() => agentAborts.current[cur.id]?.abort()) : undefined}
