@@ -5,7 +5,7 @@
  * optional `schema` map (table → columns) wired into @codemirror/lang-sql. */
 import React, { useEffect, useImperativeHandle, useRef, useState, forwardRef } from 'react'
 import { useTranslation } from 'react-i18next'
-import { EditorView, keymap, placeholder as cmPlaceholder } from '@codemirror/view'
+import { EditorView, keymap, placeholder as cmPlaceholder, lineNumbers, highlightActiveLineGutter } from '@codemirror/view'
 import { EditorState, Compartment, type Extension } from '@codemirror/state'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
 import { autocompletion, completionKeymap, closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete'
@@ -13,6 +13,7 @@ import { syntaxHighlighting, HighlightStyle, bracketMatching, indentOnInput } fr
 import { tags as t } from '@lezer/highlight'
 import { sql, PostgreSQL, MySQL, SQLite, MSSQL, type SQLDialect, type SQLNamespace } from '@codemirror/lang-sql'
 import { Icon } from '../Icon'
+import { editorStats, type EditorStats } from './editorStats'
 
 export interface SqlEditorProps {
   code: string
@@ -99,7 +100,18 @@ const catioTheme = EditorView.theme(
     '&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection': {
       backgroundColor: 'var(--accent-soft-alt, rgba(99,102,241,.22))',
     },
-    '.cm-gutters': { display: 'none' },
+    // Line-number gutter — themed to the app's dim tokens (was hidden before).
+    '.cm-gutters': {
+      background: 'transparent',
+      border: 'none',
+      color: 'var(--text-faint)',
+    },
+    '.cm-lineNumbers .cm-gutterElement': {
+      padding: '0 6px 0 10px',
+      fontSize: '12px',
+      minWidth: '24px',
+    },
+    '.cm-activeLineGutter': { background: 'transparent', color: 'var(--text-secondary)' },
     // Completion popup — match the app's elevated surface tokens.
     '.cm-tooltip.cm-tooltip-autocomplete': {
       background: 'var(--surface-elevated)',
@@ -136,11 +148,14 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
   const onRunRef = useRef(onRun)
   onRunRef.current = onRun
   const [selBar, setSelBar] = useState<{ left: number; top: number; text: string; below: boolean } | null>(null)
+  const [stats, setStats] = useState<EditorStats>(() => editorStats(code, 0))
 
   // Mount once.
   useEffect(() => {
     if (!hostRef.current) return
     const extensions: Extension[] = [
+      lineNumbers(),
+      highlightActiveLineGutter(),
       history(),
       bracketMatching(),
       closeBrackets(),
@@ -169,6 +184,9 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
         if (update.selectionSet || update.docChanged) {
           // Hide the selection toolbar on any caret movement / edit; mouseup re-shows it.
           setSelBar(null)
+          // Refresh the status-bar stats (line count / chars / caret line:col).
+          const s = update.state
+          setStats(editorStats(s.doc.toString(), s.selection.main.head))
         }
       }),
     ]
@@ -275,8 +293,8 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
   }
 
   return (
-    <div ref={rootRef} style={{ position: 'relative', background: 'var(--surface-subtle)', minHeight: minHeight || 0, height: '100%', width: '100%', overflow: 'hidden' }}>
-      <div ref={hostRef} onMouseUp={onMouseUp} onMouseDown={() => setSelBar(null)} style={{ height: '100%', width: '100%' }} />
+    <div ref={rootRef} className="col" style={{ position: 'relative', background: 'var(--surface-subtle)', minHeight: minHeight || 0, height: '100%', width: '100%', overflow: 'hidden' }}>
+      <div ref={hostRef} onMouseUp={onMouseUp} onMouseDown={() => setSelBar(null)} style={{ flex: 1, minHeight: 0, width: '100%', overflow: 'hidden' }} />
       {/* selection toolbar — copy / ask AI / run. Flips below the cursor when there
           isn't room above, and is clamped horizontally, so it's never clipped. */}
       {selBar && (
@@ -301,6 +319,10 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
           <span style={{ position: 'absolute', left: '50%', ...(selBar.below ? { top: -5 } : { bottom: -5 }), transform: 'translateX(-50%) rotate(45deg)', width: 8, height: 8, background: 'var(--surface-elevated)', borderRight: '1px solid var(--border-hairline-alt)', borderBottom: '1px solid var(--border-hairline-alt)' }} />
         </div>
       )}
+      {/* status bar — caret line:col · line count · char count (engine-agnostic) */}
+      <div className="row" style={{ flex: 'none', justifyContent: 'flex-end', padding: '3px 12px', borderTop: '1px solid var(--border-hairline)', background: 'var(--surface-subtle)', fontSize: 11, color: 'var(--text-faint)', fontFamily: "'Geist Mono', monospace", userSelect: 'none' }}>
+        {tr('dbviews.editorStats', { line: stats.line, col: stats.col, lines: stats.lines, chars: stats.chars })}
+      </div>
     </div>
   )
 })

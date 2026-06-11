@@ -89,6 +89,7 @@
     "executingOn": "Executing on prod-orders…",
     "runToSeeResults": "Run a query to see results",
     "runHint": "⌘↵ or click Run",
+    "editorStats": "Ln {{line}}:{{col}} · {{lines}} lines · {{chars}} chars",
     "tabColumns": "Columns",
     "tabIndexes": "Indexes",
     "tabFks": "Foreign keys",

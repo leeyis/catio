@@ -89,6 +89,7 @@
     "executingOn": "正在 prod-orders 上执行…",
     "runToSeeResults": "运行查询以查看结果",
     "runHint": "⌘↵ 或点击「运行」",
+    "editorStats": "行 {{line}}:{{col}} · {{lines}} 行 · {{chars}} 字符",
     "tabColumns": "列",
     "tabIndexes": "索引",
     "tabFks": "外键",
