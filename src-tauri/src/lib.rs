@@ -62,6 +62,8 @@ pub fn run() {
             db::commands::export_file,
             db::commands::jdbc_driver_status,
             db::commands::jdbc_download_driver,
+            db::commands::jdbc_import_driver,
+            db::commands::jdbc_open_drivers_dir,
             mcp::mcp_start,
             mcp::mcp_stop,
             mcp::mcp_status,
