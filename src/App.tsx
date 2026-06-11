@@ -914,7 +914,7 @@ export default function App() {
     }
   }
 
-  async function sendAgentMessage(tabId: string, text: string) {
+  async function sendAgentMessage(tabId: string, text: string, opts?: { hasSelection?: boolean }) {
     const tab = tabs.find(tb => tb.id === tabId)
     if (!tab) return
     const convId = ensureConvId(tab)
@@ -941,7 +941,9 @@ export default function App() {
       : ''
     // ---- Read terminal buffer (opt-in pref): feed the agent the active
     // terminal's most recent output so it can reason about what just happened.
-    const termTail = prefs.termBufferEnabled && liveSessionId
+    // Skip it when the message already carries user-selected text — the user
+    // pointed at exactly the context they want, so dumping N more lines is noise.
+    const termTail = prefs.termBufferEnabled && liveSessionId && !opts?.hasSelection
       ? readTermBufferTail(liveSessionId, prefs.termBufferLines)
       : ''
     const termBlock = termTail
@@ -1104,7 +1106,7 @@ export default function App() {
             <div className="fade-in" style={{ display: 'flex' }}>
               {activePanel === 'ai' && <AIPanel onClose={() => setPanelOpen(false)} mode={aiMode} conn={curConn ?? undefined} connId={aiConnId} engine={curConn?.engine} attachment={aiAttachment} onClearAttachment={() => setAiAttachment(null)} onInsert={insertToTerminal} canInsert={canInsert} onOpenSettings={() => goSettings('ai')}
                 conversation={activeConversation} busy={activeConvBusy} history={agentHistory}
-                onSend={cur ? (text => void sendAgentMessage(cur.id, text)) : undefined}
+                onSend={cur ? ((text, opts) => void sendAgentMessage(cur.id, text, opts)) : undefined}
                 onAbort={cur ? (() => agentAborts.current[cur.id]?.abort()) : undefined}
                 onNewConversation={cur ? (() => newAgentConversation(cur.id)) : undefined}
                 onRestoreConversation={cur ? (convId => restoreConversation(cur.id, convId)) : undefined}

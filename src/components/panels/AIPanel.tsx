@@ -41,8 +41,10 @@ export interface AIPanelProps {
   busy?: boolean
   /** Past conversations for the active tab's host (newest first). */
   history?: Conversation[]
-  /** Send a user message in the current conversation. */
-  onSend?: (text: string) => void
+  /** Send a user message in the current conversation. `hasSelection` is true when
+   * the message carries user-selected text (attachment), so the agent can skip
+   * injecting the terminal buffer tail — the user already pointed at the context. */
+  onSend?: (text: string, opts?: { hasSelection?: boolean }) => void
   /** Abort the in-flight streaming response (wired by App). */
   onAbort?: () => void
   /** Start a fresh conversation for the active tab's host. */
@@ -401,6 +403,7 @@ export function AIPanel({ onClose, mode = 'sql', conn, connId, engine, attachmen
     if (!text || !cfg.model || busy) return
 
     let userContent = text
+    const hasSelection = !!attachment
     if (attachment) {
       userContent += `\n\n---\n${attachment.text}`
       onClearAttachment()
@@ -416,7 +419,7 @@ export function AIPanel({ onClose, mode = 'sql', conn, connId, engine, attachmen
       }
       setSelectedTables([])
     }
-    onSend?.(userContent)
+    onSend?.(userContent, { hasSelection })
     setDraft('')
   }
 
