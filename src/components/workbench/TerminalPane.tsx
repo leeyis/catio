@@ -303,6 +303,22 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
     term.open(hostEl)
     try { fitAddon.fit() } catch { /* jsdom has no layout */ }
 
+    // 字体度量时序修正:首次 fit 发生在等宽 web 字体加载完成之前,xterm 用回退字体
+    // 测得的 cell 高度偏小 → 算出的 rows 偏多;字体就绪后 cell 变高但 rows 不会自动
+    // 重算,导致最底一行超出容器被 overflow:hidden 裁切(用户报告的"命令被下边框遮挡")。
+    // 字体就绪后重新 fit 一次并把新尺寸推给 PTY。系统字体场景 fonts.ready 立即 resolve,无副作用。
+    const refitToFont = () => {
+      if (disposed) return
+      try { fitAddon.fit() } catch { /* no layout */ }
+      if (live && sessionId && chanIdRef.current) {
+        try { termResize(sessionId, chanIdRef.current, term.cols, term.rows) } catch { /* best-effort */ }
+      }
+    }
+    try {
+      const fonts = (document as unknown as { fonts?: { ready?: Promise<unknown> } }).fonts
+      if (fonts?.ready && typeof fonts.ready.then === 'function') fonts.ready.then(refitToFont)
+    } catch { /* no FontFaceSet (e.g. jsdom) */ }
+
     // ---- 历史补全:输入捕获 + 候选 ----
     // 节流计时器(~40ms),onData 触发提取时合并。
     let extractTimer: ReturnType<typeof setTimeout> | null = null
