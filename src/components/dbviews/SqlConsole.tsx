@@ -61,6 +61,9 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
     defaultNamespace?: string
   } | null>(null)
   const [runErr, setRunErr] = useState<string | null>(null)
+  // 每次出结果(成功或失败)自增,用作 DataGrid 的 key:换 key → 重新挂载 →
+  // 清掉上一次查询残留的分页(serverRows)/编辑/排序状态。
+  const [runSeq, setRunSeq] = useState(0)
   // Live schema/database namespaces (table names) fetched from the backend when connected.
   const [liveSchema, setLiveSchema] = useState<Schema | null>(null)
   const [defaultNamespace, setDefaultNamespace] = useState(initialDefaultSchema ?? '')
@@ -224,11 +227,16 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
         .then(res => {
           if (myToken !== runToken.current) return // 已被停止/被新运行取代
           setResult({ columns: res.columns, rows: res.rows, sql, defaultNamespace: runDefaultNamespace })
+          setRunSeq(s => s + 1)
           setPhase('done')
         })
         .catch(e => {
           if (myToken !== runToken.current) return
-          setRunErr(dbErrMsg(e)); setPhase('done')
+          // 失败时清空上一次的结果,避免旧数据与错误信息并存(误导)。
+          setResult(null)
+          setRunErr(dbErrMsg(e))
+          setRunSeq(s => s + 1)
+          setPhase('done')
         })
       return
     }
@@ -338,6 +346,7 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
               </div>
             : (connId
                 ? <DataGrid
+                    key={runSeq}
                     columns={result?.columns ?? []}
                     rows={result?.rows ?? []}
                     statusTones={D.statusTones} density={density}
