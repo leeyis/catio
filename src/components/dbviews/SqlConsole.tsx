@@ -265,6 +265,14 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
       {/* console toolbar — the query name lives in the tab strip above, so it's not
           repeated here; just the editor actions, right-aligned. */}
       <div className="row" style={{ justifyContent: 'space-between', gap: 10, padding: '7px 12px', borderBottom: '1px solid var(--border-hairline)', flex: 'none' }}>
+        <div className="row gap6">
+          <Btn size="sm" variant="primary" icon={phase === 'running' ? 'loader' : 'play'} onClick={() => run()}>
+            {phase === 'running' ? t('dbviews.running') : t('dbviews.run')} <span style={{ opacity: .6, fontSize: 10, marginLeft: 2 }}>Alt↵</span>
+          </Btn>
+          <div style={{ width: 1, height: 18, background: 'var(--border-hairline)' }} />
+          <button className="icon-btn bare" title={t('dbviews.format')}><Icon name="wrench" size={15} /></button>
+          <button className="icon-btn bare" title={t('dbviews.clear')} onClick={() => setCode('')}><Icon name="eraser" size={15} /></button>
+        </div>
         <div className="row gap6" style={{ minWidth: 0 }}>
           {supportsDefaultNamespace && schemaOptions.length > 1 && (
             <label className="row gap6" title={t('workbench.defaultSchema')}
@@ -281,14 +289,6 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
               </select>
             </label>
           )}
-        </div>
-        <div className="row gap6">
-          <button className="icon-btn bare" title={t('dbviews.format')}><Icon name="wrench" size={15} /></button>
-          <button className="icon-btn bare" title={t('dbviews.clear')} onClick={() => setCode('')}><Icon name="eraser" size={15} /></button>
-          <div style={{ width: 1, height: 18, background: 'var(--border-hairline)' }} />
-          <Btn size="sm" variant="primary" icon={phase === 'running' ? 'loader' : 'play'} onClick={() => run()}>
-            {phase === 'running' ? t('dbviews.running') : t('dbviews.run')} <span style={{ opacity: .6, fontSize: 10, marginLeft: 2 }}>Alt↵</span>
-          </Btn>
         </div>
       </div>
       {/* editor — always grows to fill the available area (full width + height).
