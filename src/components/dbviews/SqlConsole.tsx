@@ -21,6 +21,8 @@ export interface SqlConsoleProps {
   connId?: string
   /** Seed text for a fresh console (e.g. a CREATE TABLE/VIEW template). Falls back to empty. */
   initialCode?: string
+  /** Namespace selected when this query tab is opened from a scoped action. */
+  initialDefaultSchema?: string
   /**
    * True when this console is the currently-shown query tab. Consoles stay
    * MOUNTED while hidden, so only the active one may consume the global
@@ -32,12 +34,13 @@ export interface SqlConsoleProps {
   engine?: string
 }
 
-export function SqlConsole({ density, fresh, writable = true, connId, initialCode, active, engine }: SqlConsoleProps) {
+export function SqlConsole({ density, fresh, writable = true, connId, initialCode, initialDefaultSchema, active, engine }: SqlConsoleProps) {
   const { t } = useTranslation()
   // mongodb/elasticsearch 用各自语法(mongo shell / REST+SQL),编辑器走 plain 模式:
   // 不挂 SQL 补全、显示语法占位提示、结果网格只读(mongo 的 _id 带 pk 标记,
   // 会让 DataGrid 误开 SQL DML 编辑——对 mongo 必然失败)。
   const plain = engine === 'mongodb' || engine === 'elasticsearch'
+  const supportsDefaultNamespace = engine !== 'elasticsearch'
   const editorPlaceholder = engine === 'mongodb' ? t('dbviews.mongoPlaceholder')
     : engine === 'elasticsearch' ? t('dbviews.esPlaceholder')
     : undefined
@@ -49,10 +52,16 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
   )
   const [phase, setPhase] = useState<'idle' | 'running' | 'done'>(fresh ? 'idle' : 'done')
   // Live result of the last successful run (only used when connId is set).
-  const [result, setResult] = useState<{ columns: ResultColumn[]; rows: unknown[][]; sql: string } | null>(null)
+  const [result, setResult] = useState<{
+    columns: ResultColumn[]
+    rows: unknown[][]
+    sql: string
+    defaultNamespace?: string
+  } | null>(null)
   const [runErr, setRunErr] = useState<string | null>(null)
-  // Live schema (table names) fetched from the backend when connected.
+  // Live schema/database namespaces (table names) fetched from the backend when connected.
   const [liveSchema, setLiveSchema] = useState<Schema | null>(null)
+  const [defaultNamespace, setDefaultNamespace] = useState(initialDefaultSchema ?? '')
   // Live columns per schema namespace: { [schemaName]: { [table]: columns } }.
   const [liveColumns, setLiveColumns] = useState<Record<string, Record<string, string[]>>>({})
   // Imperative handle to the CodeMirror editor for cursor-aware insertion.
@@ -63,11 +72,11 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
   const collectionsRef = useRef<string[]>([])
 
   useEffect(() => {
-    if (!connId || plain) { setLiveSchema(null); return }
+    if (!connId || !supportsDefaultNamespace) { setLiveSchema(null); return }
     let alive = true
     getSchema(connId).then(s => { if (alive) setLiveSchema(s) }).catch(() => {})
     return () => { alive = false }
-  }, [connId, plain])
+  }, [connId, supportsDefaultNamespace])
 
   // Plain-mode (mongo) collection names for autocompletion — union of every
   // database's collections/views. Best-effort: a failed fetch leaves the list
@@ -103,6 +112,23 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
     [liveSchema],
   )
   const namespaceKey = namespaceNames.join(',')
+  const schemaOptions = useMemo(
+    () => (liveSchema ?? D.schema).schemas.map(ns => ns.name).filter(Boolean),
+    [liveSchema, D.schema],
+  )
+  const schemaOptionsKey = schemaOptions.join('\u0000')
+
+  useEffect(() => {
+    if (!supportsDefaultNamespace || schemaOptions.length === 0) { setDefaultNamespace(''); return }
+    setDefaultNamespace(cur => {
+      if (cur && schemaOptions.includes(cur)) return cur
+      if (initialDefaultSchema && schemaOptions.includes(initialDefaultSchema)) return initialDefaultSchema
+      return schemaOptions[0] ?? ''
+    })
+    // schemaOptionsKey captures option identity; avoid re-running just because
+    // the memoized array identity changed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [supportsDefaultNamespace, schemaOptionsKey, initialDefaultSchema])
 
   // Fetch REAL column names for each schema namespace from the live backend.
   // Best-effort: on rejection we leave that namespace out (editor falls back to
@@ -176,11 +202,17 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
     setRunErr(null)
     // A selection-run passes just the highlighted SQL; otherwise run the whole editor.
     const sql = sqlOverride && sqlOverride.trim() ? sqlOverride : code
+    const runDefaultNamespace = supportsDefaultNamespace && defaultNamespace && schemaOptions.includes(defaultNamespace)
+      ? defaultNamespace
+      : undefined
     if (connId) {
       // Live path: execute the typed SQL against the backend.
       setPhase('running')
-      runQuery(connId, sql)
-        .then(res => { setResult({ columns: res.columns, rows: res.rows, sql }); setPhase('done') })
+      runQuery(connId, sql, runDefaultNamespace)
+        .then(res => {
+          setResult({ columns: res.columns, rows: res.rows, sql, defaultNamespace: runDefaultNamespace })
+          setPhase('done')
+        })
         .catch(e => { setRunErr(dbErrMsg(e)); setPhase('done') })
       return
     }
@@ -232,13 +264,30 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
     <div className="col" style={{ height: '100%', width: '100%', minHeight: 0, minWidth: 0 }}>
       {/* console toolbar — the query name lives in the tab strip above, so it's not
           repeated here; just the editor actions, right-aligned. */}
-      <div className="row" style={{ justifyContent: 'flex-end', padding: '7px 12px', borderBottom: '1px solid var(--border-hairline)', flex: 'none' }}>
+      <div className="row" style={{ justifyContent: 'space-between', gap: 10, padding: '7px 12px', borderBottom: '1px solid var(--border-hairline)', flex: 'none' }}>
+        <div className="row gap6" style={{ minWidth: 0 }}>
+          {supportsDefaultNamespace && schemaOptions.length > 1 && (
+            <label className="row gap6" title={t('workbench.defaultSchema')}
+              style={{ height: 30, minWidth: 0, maxWidth: 260, padding: '0 8px', border: '1px solid var(--border-hairline)', borderRadius: 9, background: 'var(--surface-sunken)', color: 'var(--text-tertiary)', fontSize: 11.5 }}>
+              <Icon name="database" size={13} style={{ flex: 'none', color: 'var(--text-faint)' }} />
+              <span style={{ flex: 'none' }}>{t('workbench.defaultSchema')}</span>
+              <select
+                data-testid="sql-default-schema"
+                aria-label={t('workbench.defaultSchema')}
+                value={defaultNamespace}
+                onChange={e => setDefaultNamespace(e.target.value)}
+                style={{ minWidth: 82, maxWidth: 130, border: 'none', outline: 'none', background: 'transparent', color: 'var(--text-primary)', fontSize: 12, fontFamily: "'Geist Mono', monospace" }}>
+                {schemaOptions.map(schema => <option key={schema} value={schema}>{schema}</option>)}
+              </select>
+            </label>
+          )}
+        </div>
         <div className="row gap6">
           <button className="icon-btn bare" title={t('dbviews.format')}><Icon name="wrench" size={15} /></button>
           <button className="icon-btn bare" title={t('dbviews.clear')} onClick={() => setCode('')}><Icon name="eraser" size={15} /></button>
           <div style={{ width: 1, height: 18, background: 'var(--border-hairline)' }} />
           <Btn size="sm" variant="primary" icon={phase === 'running' ? 'loader' : 'play'} onClick={() => run()}>
-            {phase === 'running' ? t('dbviews.running') : t('dbviews.run')} <span style={{ opacity: .6, fontSize: 10, marginLeft: 2 }}>⌘↵</span>
+            {phase === 'running' ? t('dbviews.running') : t('dbviews.run')} <span style={{ opacity: .6, fontSize: 10, marginLeft: 2 }}>Alt↵</span>
           </Btn>
         </div>
       </div>
@@ -265,6 +314,7 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
                     writable={writable && !plain} connId={connId}
                     // plain 引擎(mongo/es)不传 sql:服务端分页会拼 SQL LIMIT/OFFSET 必败,回落客户端分页。
                     sql={plain ? undefined : result?.sql}
+                    defaultNamespace={result?.defaultNamespace}
                     resultLabel={t('dbviews.queryResult')}
                     loadError={runErr ?? undefined} />
                 : <DataGrid

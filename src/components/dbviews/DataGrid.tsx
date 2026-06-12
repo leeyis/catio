@@ -24,6 +24,8 @@ export interface DataGridProps {
   schema?: string
   /** Base SQL re-run for server-side pagination (when connId is set, legacy raw-SQL path). */
   sql?: string
+  /** Default database/schema namespace to reuse when paginating an ad-hoc query. */
+  defaultNamespace?: string
   /**
    * When set, pagination uses the dialect-correct `tablePreview` (schema/table)
    * backend command instead of re-running a raw `sql`. Preferred for the live
@@ -96,7 +98,7 @@ function colIcon(col: ResultColumn): string {
   return 'type'
 }
 
-export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortable', writable = true, connId, table = 'orders', schema, sql, livePreview, onRefresh, truncated, loadError, resultLabel, rowKeys, keyColumn }: DataGridProps) {
+export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortable', writable = true, connId, table = 'orders', schema, sql, defaultNamespace, livePreview, onRefresh, truncated, loadError, resultLabel, rowKeys, keyColumn }: DataGridProps) {
   const { t } = useTranslation()
   const [sel, setSel] = useState({ r: 2, c: 3 })
   const [sortCol, setSortCol] = useState<string | null>(null)
@@ -193,10 +195,10 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
       return (limit: number, offset: number) => tablePreview(connId, schema, table, limit, offset)
     }
     if (connId && sql) {
-      return (limit: number, offset: number) => queryPage(connId, sql, limit, offset)
+      return (limit: number, offset: number) => queryPage(connId, sql, limit, offset, defaultNamespace)
     }
     return null
-  }, [connId, livePreview, sql, schema, table])
+  }, [connId, livePreview, sql, schema, table, defaultNamespace])
 
   // Apply a freshly-fetched server page. The Postgres live preview ALWAYS returns a
   // leading `__ctid` system column (for EVERY table, PK or not) — the parent strips

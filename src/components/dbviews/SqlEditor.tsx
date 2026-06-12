@@ -24,9 +24,9 @@ export interface SqlEditorProps {
    * tables → columns). The nesting lets lang-sql assign distinct completion
    * types/icons to schemas, tables, and columns. */
   schema?: SQLNamespace
-  /** Invoked on Cmd/Ctrl+Enter (the "run query" shortcut). */
+  /** Invoked on Alt+Enter (the "run query" shortcut). */
   onRun?: () => void
-  /** Run just the currently-selected SQL (from the selection toolbar's Run action). */
+  /** Run just the currently-selected SQL (from the selection toolbar or Alt+Enter with a selection). */
   onRunSelection?: (sql: string) => void
   /** 空文档占位提示(mongo/es 控制台展示各自语法示例)。 */
   placeholder?: string
@@ -155,6 +155,8 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
   onChangeRef.current = onChange
   const onRunRef = useRef(onRun)
   onRunRef.current = onRun
+  const onRunSelectionRef = useRef(onRunSelection)
+  onRunSelectionRef.current = onRunSelection
   const [selBar, setSelBar] = useState<{ left: number; top: number; text: string; below: boolean } | null>(null)
   const [stats, setStats] = useState<EditorStats>(() => editorStats(code, 0))
 
@@ -173,8 +175,21 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
       ...(placeholder ? [cmPlaceholder(placeholder)] : []),
       keymap.of([
         {
-          key: 'Mod-Enter',
-          run: () => { onRunRef.current?.(); return true },
+          key: 'Alt-Enter',
+          run: view => {
+            const sel = view.state.selection.main
+            if (!sel.empty && onRunSelectionRef.current) {
+              const text = view.state.sliceDoc(sel.from, sel.to).trim()
+              if (text) {
+                onRunSelectionRef.current(text)
+                setSelBar(null)
+                return true
+              }
+            }
+            onRunRef.current?.()
+            setSelBar(null)
+            return true
+          },
           preventDefault: true,
         },
         ...closeBracketsKeymap,

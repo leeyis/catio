@@ -74,11 +74,11 @@ pub async fn db_disconnect(conn_id: String, mgr: tauri::State<'_, ConnManager>)
 }
 
 #[tauri::command]
-pub async fn db_query(conn_id: String, sql: String, max_rows: Option<u32>,
+pub async fn db_query(conn_id: String, sql: String, max_rows: Option<u32>, default_namespace: Option<String>,
     mgr: tauri::State<'_, ConnManager>, app: tauri::AppHandle) -> Result<QueryResult, DbError> {
     let drv = mgr.get(&conn_id).await.ok_or_else(|| DbError::NotFound(conn_id.clone()))?;
     let started = Instant::now();
-    let result = drv.query(&sql, max_rows.unwrap_or(1000)).await?;
+    let result = drv.query_with_default_namespace(&sql, max_rows.unwrap_or(1000), default_namespace.as_deref()).await?;
     let dur = format!("{}ms", started.elapsed().as_millis());
 
     // Best-effort: record a history entry on success. Never fail the query if
@@ -269,10 +269,10 @@ pub async fn db_apply_edits(conn_id: String, reqs: Vec<EditRequest>,
 }
 
 #[tauri::command]
-pub async fn db_query_page(conn_id: String, sql: String, limit: u32, offset: u32,
+pub async fn db_query_page(conn_id: String, sql: String, limit: u32, offset: u32, default_namespace: Option<String>,
     mgr: tauri::State<'_, ConnManager>) -> Result<QueryResult, DbError> {
     let drv = mgr.get(&conn_id).await.ok_or(DbError::NotFound(conn_id))?;
-    drv.paginated_query(&sql, limit, offset).await
+    drv.paginated_query_with_default_namespace(&sql, limit, offset, default_namespace.as_deref()).await
 }
 
 /// Paginated table-data preview. Delegates to the driver's `table_data`, which

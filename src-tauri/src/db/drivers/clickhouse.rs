@@ -41,13 +41,13 @@ struct ChMeta {
 }
 
 /// POST SQL to ClickHouse `/?default_format=JSONCompact`.
-async fn ch_query(http: &HttpClient, sql: &str) -> Result<ChJsonCompact, DbError> {
+async fn ch_query_in(http: &HttpClient, sql: &str, database: Option<&str>) -> Result<ChJsonCompact, DbError> {
     let url = "/?default_format=JSONCompact";
-    let resp = http
-        .post(url)
-        .body(sql.to_string())
-        .send()
-        .await
+    let mut req = http.post(url);
+    if let Some(db) = database.map(str::trim).filter(|s| !s.is_empty()) {
+        req = req.query(&[("database", db)]);
+    }
+    let resp = req.body(sql.to_string()).send().await
         .map_err(|e| DbError::QueryFailed(format!("ClickHouse request failed: {e}")))?;
     let resp = check_response_query(resp).await?;
     let result: ChJsonCompact = resp
@@ -55,6 +55,10 @@ async fn ch_query(http: &HttpClient, sql: &str) -> Result<ChJsonCompact, DbError
         .await
         .map_err(|e| DbError::QueryFailed(format!("ClickHouse parse error: {e}")))?;
     Ok(result)
+}
+
+async fn ch_query(http: &HttpClient, sql: &str) -> Result<ChJsonCompact, DbError> {
+    ch_query_in(http, sql, None).await
 }
 
 fn is_nullable(type_name: &str) -> bool {
@@ -81,6 +85,11 @@ impl Driver for ClickhouseDriver {
     }
 
     async fn query(&self, sql: &str, max_rows: u32) -> Result<QueryResult, DbError> {
+        self.query_with_default_namespace(sql, max_rows, None).await
+    }
+
+    async fn query_with_default_namespace(&self, sql: &str, max_rows: u32, default_namespace: Option<&str>)
+        -> Result<QueryResult, DbError> {
         let sql_upper = sql.trim_start().to_uppercase();
 
         // For read statements use JSONCompact and parse result set
@@ -90,7 +99,7 @@ impl Driver for ClickhouseDriver {
             || sql_upper.starts_with("EXPLAIN")
             || sql_upper.starts_with("WITH")
         {
-            let result = ch_query(&self.http, sql).await?;
+            let result = ch_query_in(&self.http, sql, default_namespace).await?;
             let columns: Vec<ColumnInfo> = result.meta.iter().map(|m| ColumnInfo {
                 name: m.name.clone(),
                 type_name: m.type_name.clone(),
@@ -106,11 +115,11 @@ impl Driver for ClickhouseDriver {
         } else {
             // DDL/DML — POST plain text, ClickHouse returns empty body on success
             let url = "/?default_format=JSONCompact";
-            let resp = self.http
-                .post(url)
-                .body(sql.to_string())
-                .send()
-                .await
+            let mut req = self.http.post(url);
+            if let Some(db) = default_namespace.map(str::trim).filter(|s| !s.is_empty()) {
+                req = req.query(&[("database", db)]);
+            }
+            let resp = req.body(sql.to_string()).send().await
                 .map_err(|e| DbError::QueryFailed(format!("ClickHouse request failed: {e}")))?;
             let _ = check_response_query(resp).await?;
             Ok(QueryResult {

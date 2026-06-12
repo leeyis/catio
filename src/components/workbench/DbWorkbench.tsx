@@ -40,7 +40,7 @@ const ALL_ENABLED: DbCapabilities = {
 export type WorkbenchTab =
   | { id: string; kind: 'table'; schema: string; table: string }
   | { id: string; kind: 'object'; schema: string; name: string; objKind: 'view' | 'function' | 'procedure' }
-  | { id: string; kind: 'sql'; qid: number }
+  | { id: string; kind: 'sql'; qid: number; defaultSchema?: string }
   | { id: string; kind: 'er'; schema: string }
 
 const tabIdOf = {
@@ -145,12 +145,12 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
   function pickObject(schema: string, name: string, kind: 'view' | 'function' | 'procedure') {
     openTab({ id: tabIdOf.object(kind, schema, name), kind: 'object', schema, name, objKind: kind })
   }
-  function newQuery(seed?: string) {
+  function newQuery(seed?: string, defaultSchema?: string) {
     if (!caps.sqlConsole) return
     const id = queryN + 1
     setQueryN(id)
     if (seed != null) setQueryInitialCode(m => ({ ...m, [id]: seed }))
-    openTab({ id: tabIdOf.sql(id), kind: 'sql', qid: id })
+    openTab({ id: tabIdOf.sql(id), kind: 'sql', qid: id, defaultSchema })
   }
   /** Open the CREATE TABLE/VIEW form modal for `schema`. No-op without a live connection. */
   function onNewObjectTemplate(schema: string, kind: 'table' | 'view') {
@@ -219,7 +219,7 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
     <div style={{ display: 'flex', alignItems: 'stretch', height: '100%', width: '100%', flex: 1, minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
       <SchemaBrowser onPick={pickTable} onPickObject={pickObject}
         active={activeTab?.kind === 'table' ? { schema: activeTab.schema, table: activeTab.table } : null}
-        onNewQuery={() => newQuery()} onOpenER={openER} onNewObjectTemplate={onNewObjectTemplate} onRefresh={refreshSchema}
+        onNewQuery={(schema) => newQuery(undefined, schema ?? namespace.name)} onOpenER={openER} onNewObjectTemplate={onNewObjectTemplate} onRefresh={refreshSchema}
         refreshing={refreshing}
         erActive={activeTab?.kind === 'er'} sqlActive={activeTab?.kind === 'sql'}
         disabledSql={!caps.sqlConsole} disabledEr={!caps.er}
@@ -251,7 +251,6 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
               })}
             </div>
             <button className="icon-btn bare" style={{ width: 24, height: 24, flex: 'none' }} title={t('workbench.scrollRight')} onClick={() => scrollTabs(160)}><Icon name="chevron-right" size={14} /></button>
-            <button className="icon-btn bare" style={{ width: 24, height: 24, flex: 'none' }} title={t('workbench.newQuery')} onClick={() => newQuery()} disabled={!caps.sqlConsole}><Icon name="plus" size={14} /></button>
           </div>
         )}
         {/* panes — 全部 mounted,display 切换,切回状态原样(与原 SQL console 同款机制)。 */}
@@ -266,7 +265,8 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
               )}
               {tb.kind === 'sql' && (
                 <SqlConsole density={density} fresh queryN={tb.qid} writable={caps.writable} connId={connId ?? undefined}
-                  initialCode={queryInitialCode[tb.qid]} active={shown && tb.id === activeId} engine={conn.engine} />
+                  initialCode={queryInitialCode[tb.qid]} initialDefaultSchema={tb.defaultSchema}
+                  active={shown && tb.id === activeId} engine={conn.engine} />
               )}
               {tb.kind === 'er' && (
                 <ERDiagram connId={connId ?? undefined} schema={tb.schema} onOpenTable={tname => pickTable(tb.schema, tname)} />

@@ -120,4 +120,28 @@ describe('DataGrid generic rows', () => {
     wrap(<DataGrid columns={columns} rows={rows} writable />)
     expect(screen.queryByTitle(/Save edits/i)).not.toBeInTheDocument()
   })
+
+  it('reuses the default namespace for raw-query pagination', async () => {
+    queryPage.mockResolvedValue({ columns: [{ name: 'id', type: 'int' }], rows: [[101]], truncated: false })
+    const columns: ResultColumn[] = [{ name: 'id', type: 'int' }]
+    wrap(
+      <DataGrid
+        columns={columns}
+        rows={Array.from({ length: 100 }, (_, i) => [i + 1])}
+        connId="c1"
+        sql="SELECT id FROM orders ORDER BY id"
+        defaultNamespace="dwd"
+        truncated
+      />,
+    )
+    const buttons = screen.getAllByRole('button')
+    fireEvent.click(buttons[buttons.length - 1])
+    await waitFor(() => expect(queryPage).toHaveBeenCalledWith(
+      'c1',
+      'SELECT id FROM orders ORDER BY id',
+      100,
+      100,
+      'dwd',
+    ))
+  })
 })

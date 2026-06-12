@@ -13,7 +13,7 @@ export interface SchemaBrowserProps {
   onPickObject?: (schema: string, name: string, kind: 'view' | 'function' | 'procedure') => void
   /** Currently-selected object as schema+table, or null when not viewing a table. */
   active: { schema: string; table: string } | null
-  onNewQuery: () => void
+  onNewQuery: (schema?: string) => void
   /** Open the ER diagram. With no arg → current namespace; with a schema name → that schema's ER. */
   onOpenER: (schema?: string) => void
   /** Open a fresh query tab seeded with a CREATE TABLE/VIEW template for the given schema. */
@@ -60,7 +60,12 @@ export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpen
       <div className="row" style={{ padding: '10px 10px 8px', justifyContent: 'space-between' }}>
         <div className="row gap6" style={{ minWidth: 0 }}><ConnGlyph conn={headerGlyph} size={24} radius={7} /><div className="col" style={{ lineHeight: 1.2, minWidth: 0 }}><span className="ell" style={{ fontSize: 12.5, fontWeight: 700 }}>{headerName}</span><span className="mono ell" style={{ fontSize: 9.5, color: 'var(--text-faint)' }}>{headerEngine}</span></div></div>
         <div className="row gap2">
-          <button className="icon-btn bare" data-testid="wb-new-query" style={{ width: 26, height: 26 }} title={t('workbench.newQuery')} onClick={onNewQuery}><Icon name="plus" size={14} /></button>
+          <button className="row gap5" data-testid="wb-new-query"
+            style={{ height: 28, padding: '0 9px', borderRadius: 9, border: '1px solid var(--accent-border)', background: 'var(--accent-soft)', color: 'var(--accent-primary)', fontSize: 12, fontWeight: 650, flex: 'none' }}
+            title={t('workbench.newQuery')} onClick={() => onNewQuery()}>
+            <Icon name="plus" size={13} />
+            <span>{t('workbench.queryShort')}</span>
+          </button>
           <button className="icon-btn bare" data-testid="wb-refresh" style={{ width: 26, height: 26 }} title={t('workbench.refresh')} onClick={onRefresh} disabled={refreshing}>
             <Icon name="refresh-cw" size={13} style={refreshing ? { animation: 'spin 1s linear infinite' } : undefined} />
           </button>
@@ -111,7 +116,7 @@ interface SchemaNodeProps {
   onPick: (schema: string, name: string) => void
   onPickObject?: (schema: string, name: string, kind: 'view' | 'function' | 'procedure') => void
   live: boolean
-  onNewQuery: () => void
+  onNewQuery: (schema?: string) => void
   onOpenER: (schema?: string) => void
   onNewObjectTemplate?: (schema: string, kind: 'table' | 'view') => void
   onRefresh?: () => void
@@ -142,7 +147,7 @@ function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery,
   }, [menuOpen])
 
   const menuItems: { icon: string; label: string; action: () => void }[] = [
-    { icon: 'terminal', label: t('workbench.newQuery'), action: () => onNewQuery() },
+    { icon: 'terminal', label: t('workbench.newQuery'), action: () => onNewQuery(ns.name) },
     { icon: 'network', label: t('workbench.erDiagram'), action: () => onOpenER(ns.name) },
     ...(onNewObjectTemplate ? [
       { icon: 'table-2', label: t('workbench.newTable'), action: () => onNewObjectTemplate(ns.name, 'table') },

@@ -105,9 +105,11 @@ function mockQueryResult(): QueryResult {
   return { columns, rows }
 }
 
-export async function runQuery(connId: string, sql: string): Promise<QueryResult> {
+export async function runQuery(connId: string, sql: string, defaultNamespace?: string): Promise<QueryResult> {
   if (!isTauri()) return mockQueryResult()
-  return tauriInvoke<QueryResult>('db_query', { connId, sql })
+  const args: Record<string, unknown> = { connId, sql }
+  if (defaultNamespace) args.defaultNamespace = defaultNamespace
+  return tauriInvoke<QueryResult>('db_query', args)
 }
 
 // ---- Edits (DML preview / apply) ----
@@ -144,9 +146,11 @@ export async function applyEdits(connId: string, reqs: EditRequest[]): Promise<n
 }
 
 /** Paginated query — same shape as runQuery but with limit/offset windowing. */
-export async function queryPage(connId: string, sql: string, limit: number, offset: number): Promise<QueryResult> {
+export async function queryPage(connId: string, sql: string, limit: number, offset: number, defaultNamespace?: string): Promise<QueryResult> {
   if (!isTauri()) return mockQueryResult()
-  return tauriInvoke<QueryResult>('db_query_page', { connId, sql, limit, offset })
+  const args: Record<string, unknown> = { connId, sql, limit, offset }
+  if (defaultNamespace) args.defaultNamespace = defaultNamespace
+  return tauriInvoke<QueryResult>('db_query_page', args)
 }
 
 /**

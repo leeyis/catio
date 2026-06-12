@@ -282,6 +282,23 @@ impl Driver for JdbcDriver {
         Ok(map_query_result(&r, max_rows))
     }
 
+    async fn query_with_default_namespace(&self, sql: &str, max_rows: u32, default_namespace: Option<&str>)
+        -> Result<QueryResult, DbError> {
+        let plugin_max = if max_rows == 0 { 1_000_000 } else { max_rows };
+        let mut params = json!({ "sql": sql, "maxRows": plugin_max });
+        if let Some(namespace) = default_namespace.map(str::trim).filter(|s| !s.is_empty()) {
+            if let Value::Object(ref mut m) = params {
+                // The sidecar mirrors DBX's execution context support:
+                // JDBC catalog/database engines consume `database`, schema-aware
+                // engines consume `schema`, unsupported drivers ignore either.
+                m.insert("database".into(), json!(namespace));
+                m.insert("schema".into(), json!(namespace));
+            }
+        }
+        let r = self.rpc("executeQuery", params).await?;
+        Ok(map_query_result(&r, max_rows))
+    }
+
     async fn list_schemas(&self) -> Result<Vec<String>, DbError> {
         let r = self.rpc("listSchemas", self.meta_params("")).await?;
         let mut out: Vec<String> = r.as_array().map(|arr| {

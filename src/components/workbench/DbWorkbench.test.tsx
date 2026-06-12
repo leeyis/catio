@@ -9,6 +9,7 @@ const h = vi.hoisted(() => ({
   list: vi.fn(() => [] as import('../../state/dbConnections').ActiveDbConnection[]),
   tablePreview: vi.fn(),
   getSchema: vi.fn(),
+  runQuery: vi.fn(),
   objectSource: vi.fn(),
 }))
 
@@ -20,7 +21,7 @@ vi.mock('../../state/dbConnections', async (importOriginal) => {
 // ---- mock the db service so the live-connection data path can be driven without Tauri ----
 vi.mock('../../services/db', async (importOriginal) => {
   const mod = await importOriginal<typeof import('../../services/db')>()
-  return { ...mod, tablePreview: h.tablePreview, getSchema: h.getSchema, objectSource: h.objectSource }
+  return { ...mod, tablePreview: h.tablePreview, getSchema: h.getSchema, runQuery: h.runQuery, objectSource: h.objectSource }
 })
 
 import { DbWorkbench } from './DbWorkbench'
@@ -45,11 +46,13 @@ describe('DbWorkbench capability-gating', () => {
     h.list.mockReset()
     h.tablePreview.mockReset()
     h.getSchema.mockReset()
+    h.runQuery.mockReset()
     h.objectSource.mockReset()
     // Defaults so capability-gating tests (which now have an active connection →
     // live fetch + schema load) don't crash on an undefined promise.
     h.tablePreview.mockResolvedValue({ columns: [], rows: [] })
     h.getSchema.mockResolvedValue(LIVE_SCHEMA)
+    h.runQuery.mockResolvedValue({ columns: [], rows: [] })
     h.objectSource.mockResolvedValue('CREATE FUNCTION calc_total() ...')
   })
 
@@ -138,9 +141,11 @@ describe('DbWorkbench live-connection data path', () => {
     h.list.mockReset()
     h.tablePreview.mockReset()
     h.getSchema.mockReset()
+    h.runQuery.mockReset()
     h.objectSource.mockReset()
     h.tablePreview.mockResolvedValue({ columns: [], rows: [] })
     h.getSchema.mockResolvedValue(LIVE_SCHEMA)
+    h.runQuery.mockResolvedValue({ columns: [], rows: [] })
     h.objectSource.mockResolvedValue('CREATE FUNCTION calc_total() ...')
   })
 
@@ -206,7 +211,7 @@ describe('DbWorkbench unified tabs', () => {
   }
 
   beforeEach(() => {
-    h.list.mockReset(); h.tablePreview.mockReset(); h.getSchema.mockReset(); h.objectSource.mockReset()
+    h.list.mockReset(); h.tablePreview.mockReset(); h.getSchema.mockReset(); h.runQuery.mockReset(); h.objectSource.mockReset()
     h.list.mockReturnValue([LIVE_CONN])
     h.getSchema.mockResolvedValue(SCHEMA_WITH_FN)
     h.tablePreview.mockResolvedValue({
@@ -214,6 +219,7 @@ describe('DbWorkbench unified tabs', () => {
       rows: [[101]],
     })
     h.objectSource.mockResolvedValue('CREATE FUNCTION calc_total() RETURNS int ...')
+    h.runQuery.mockResolvedValue({ columns: [], rows: [] })
   })
 
   it('新建查询与表预览 tab 共存,切回表预览数据仍在', async () => {
@@ -228,6 +234,60 @@ describe('DbWorkbench unified tabs', () => {
     // 切回表 tab → 数据仍然渲染(pane 保持 mounted)
     fireEvent.click(tableChip)
     expect(screen.getByText('101')).toBeVisible()
+  })
+
+  it('新建查询入口在左侧更明显,tab strip 不再渲染右侧新建查询按钮', async () => {
+    wrap(<DbWorkbench conn={CONN} />)
+    await screen.findByTestId('wbtab-table:public.orders')
+    const newQueryButtons = screen.getAllByTitle(/新建查询|New query/)
+    expect(screen.getByTestId('wb-new-query')).toBeInTheDocument()
+    expect(newQueryButtons.filter(el => el.getAttribute('data-testid') === 'wb-new-query')).toHaveLength(1)
+  })
+
+  it('多库/Schema 连接的新建查询显示默认选项并随执行传给 runQuery', async () => {
+    h.getSchema.mockResolvedValue({
+      db: 'conn',
+      schemas: [
+        { name: 'ads', open: false, tables: [{ name: 'company', rows: '', cols: 0 }], views: [], functions: [] },
+        { name: 'dwd', open: false, tables: [{ name: 'fund', rows: '', cols: 0 }], views: [], functions: [] },
+      ],
+    })
+    wrap(<DbWorkbench conn={CONN} />)
+    await screen.findByTestId('wbtab-table:ads.company')
+    fireEvent.click(screen.getByTestId('wb-new-query'))
+    const select = await screen.findByTestId('sql-default-schema')
+    expect(select).toHaveValue('ads')
+    fireEvent.change(select, { target: { value: 'dwd' } })
+    fireEvent.click(screen.getByText(/运行|Run/))
+    await waitFor(() => expect(h.runQuery).toHaveBeenCalled())
+    expect(h.runQuery).toHaveBeenCalledWith('conn-live', expect.any(String), 'dwd')
+  })
+
+  it('MongoDB 多 database 查询也显示默认库选择并传给 runQuery', async () => {
+    h.list.mockReturnValue([{
+      ...LIVE_CONN,
+      dbType: 'mongodb',
+      capabilities: {
+        writable: true, transactions: false, schemas: true,
+        sqlConsole: true, er: false, structureEdit: false,
+      },
+    }])
+    h.getSchema.mockResolvedValue({
+      db: 'conn',
+      schemas: [
+        { name: 'admin', open: false, tables: [{ name: 'system.users', rows: '', cols: 0 }], views: [], functions: [] },
+        { name: 'app', open: false, tables: [{ name: 'orders', rows: '', cols: 0 }], views: [], functions: [] },
+      ],
+    })
+    wrap(<DbWorkbench conn={CONN} />)
+    await screen.findByTestId('wbtab-table:admin.system.users')
+    fireEvent.click(screen.getByTestId('wb-new-query'))
+    const select = await screen.findByTestId('sql-default-schema')
+    expect(select).toHaveValue('admin')
+    fireEvent.change(select, { target: { value: 'app' } })
+    fireEvent.click(screen.getByText(/运行|Run/))
+    await waitFor(() => expect(h.runQuery).toHaveBeenCalled())
+    expect(h.runQuery).toHaveBeenCalledWith('conn-live', expect.any(String), 'app')
   })
 
   it('再次单击同一表复用已开 tab,不重复新开', async () => {

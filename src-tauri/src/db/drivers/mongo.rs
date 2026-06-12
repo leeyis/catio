@@ -241,11 +241,20 @@ impl Driver for MongoDriver {
     /// mongo shell 风格查询控制台(语法行为照 dbx):输入由 mongo_shell::parse
     /// 解析为结构化命令后用 mongodb crate 执行。database 取连接配置的 default_db。
     async fn query(&self, sql: &str, max_rows: u32) -> Result<QueryResult, DbError> {
+        self.query_with_default_namespace(sql, max_rows, None).await
+    }
+
+    async fn query_with_default_namespace(&self, sql: &str, max_rows: u32, default_namespace: Option<&str>)
+        -> Result<QueryResult, DbError> {
         use futures_util::TryStreamExt;
         use crate::db::drivers::mongo_shell::{self, MongoCommand};
 
         let cmd = mongo_shell::parse(sql).map_err(DbError::QueryFailed)?;
-        let db = self.client.database(&self.default_db);
+        let dbname = default_namespace
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(self.default_db.as_str());
+        let db = self.client.database(dbname);
         let map_err = |e: mongodb::error::Error| DbError::QueryFailed(e.to_string());
 
         // 写命令的统一回执:空表格 + rows_affected。

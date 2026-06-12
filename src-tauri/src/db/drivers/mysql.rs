@@ -225,6 +225,92 @@ fn mysql_value_to_json(row: &mysql_async::Row, idx: usize) -> serde_json::Value 
     Value::Null
 }
 
+async fn mysql_query_on_conn(
+    conn: &mut mysql_async::Conn,
+    sql: &str,
+    max_rows: u32,
+) -> Result<QueryResult, DbError> {
+    use crate::db::result::ColumnInfo;
+    use serde_json::Value;
+
+    // Use query_iter for both SELECT and DML
+    let mut result = conn.query_iter(sql).await
+        .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+
+    // Build column list from the result set metadata
+    let col_names: Vec<String> = result
+        .columns()
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .map(|c| c.name_str().to_string())
+        .collect();
+
+    let col_types: Vec<String> = result
+        .columns()
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .map(|c| format!("{:?}", c.column_type()))
+        .collect();
+
+    // No columns means this is a write statement
+    if col_names.is_empty() {
+        let affected = result.affected_rows();
+        result.drop_result().await
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        return Ok(QueryResult {
+            columns: vec![],
+            rows: vec![],
+            rows_affected: Some(affected),
+            truncated: false,
+        });
+    }
+
+    let columns: Vec<ColumnInfo> = col_names.iter().zip(col_types.iter()).map(|(name, type_name)| {
+        ColumnInfo {
+            name: name.clone(),
+            type_name: type_name.clone(),
+            pk: false,
+        }
+    }).collect();
+
+    // Stream rows
+    let mut rows: Vec<Vec<Value>> = Vec::new();
+    let mut truncated = false;
+    let stream = result
+        .stream::<mysql_async::Row>()
+        .await
+        .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+
+    // stream() returns None if no result set (DML); treat as 0 rows
+    if let Some(mut stream) = stream {
+        while let Some(row_result) = stream.next().await {
+            let row = row_result.map_err(|e| DbError::QueryFailed(e.to_string()))?;
+            if rows.len() as u32 >= max_rows {
+                truncated = true;
+                break;
+            }
+            let values: Vec<Value> = (0..row.len()).map(|i| mysql_value_to_json(&row, i)).collect();
+            rows.push(values);
+        }
+    }
+
+    Ok(QueryResult { columns, rows, rows_affected: None, truncated })
+}
+
+fn quote_mysql_ident(s: &str) -> String {
+    format!("`{}`", s.replace('`', "``"))
+}
+
+async fn current_mysql_database(conn: &mut mysql_async::Conn) -> Result<Option<String>, DbError> {
+    let row: Option<mysql_async::Row> = conn
+        .query_first("SELECT DATABASE()")
+        .await
+        .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+    Ok(row.and_then(|r| get_opt_str_by_name(&r, "DATABASE()").or_else(|| row_get::<String, _>(&r, 0))))
+}
+
 #[async_trait]
 impl Driver for MySqlDriver {
     fn db_type(&self) -> DatabaseType {
@@ -245,76 +331,42 @@ impl Driver for MySqlDriver {
     }
 
     async fn query(&self, sql: &str, max_rows: u32) -> Result<QueryResult, DbError> {
-        use crate::db::result::ColumnInfo;
-        use serde_json::Value;
-
         let mut conn = self.pool.get_conn().await
             .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
+        mysql_query_on_conn(&mut conn, sql, max_rows).await
+    }
 
-        // Use query_iter for both SELECT and DML
-        let mut result = conn.query_iter(sql).await
-            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
-
-        // Build column list from the result set metadata
-        let col_names: Vec<String> = result
-            .columns()
-            .as_deref()
-            .unwrap_or(&[])
-            .iter()
-            .map(|c| c.name_str().to_string())
-            .collect();
-
-        let col_types: Vec<String> = result
-            .columns()
-            .as_deref()
-            .unwrap_or(&[])
-            .iter()
-            .map(|c| format!("{:?}", c.column_type()))
-            .collect();
-
-        // No columns means this is a write statement
-        if col_names.is_empty() {
-            let affected = result.affected_rows();
-            result.drop_result().await
+    async fn query_with_default_namespace(&self, sql: &str, max_rows: u32, default_namespace: Option<&str>)
+        -> Result<QueryResult, DbError> {
+        let Some(database) = default_namespace.map(str::trim).filter(|s| !s.is_empty()) else {
+            return self.query(sql, max_rows).await;
+        };
+        let mut conn = self.pool.get_conn().await
+            .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
+        let original_database = current_mysql_database(&mut conn).await?;
+        if original_database.as_deref() != Some(database) {
+            conn.query_drop(format!("USE {}", quote_mysql_ident(database))).await
                 .map_err(|e| DbError::QueryFailed(e.to_string()))?;
-            return Ok(QueryResult {
-                columns: vec![],
-                rows: vec![],
-                rows_affected: Some(affected),
-                truncated: false,
-            });
         }
-
-        let columns: Vec<ColumnInfo> = col_names.iter().zip(col_types.iter()).map(|(name, type_name)| {
-            ColumnInfo {
-                name: name.clone(),
-                type_name: type_name.clone(),
-                pk: false,
-            }
-        }).collect();
-
-        // Stream rows
-        let mut rows: Vec<Vec<Value>> = Vec::new();
-        let mut truncated = false;
-        let stream = result
-            .stream::<mysql_async::Row>()
-            .await
-            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
-
-        // stream() returns None if no result set (DML); treat as 0 rows
-        if let Some(mut stream) = stream {
-            while let Some(row_result) = stream.next().await {
-                let row = row_result.map_err(|e| DbError::QueryFailed(e.to_string()))?;
-                if rows.len() as u32 >= max_rows {
-                    truncated = true;
-                    break;
+        let result = mysql_query_on_conn(&mut conn, sql, max_rows).await;
+        if original_database.as_deref() != Some(database) {
+            let reset = match original_database.as_deref().filter(|s| !s.is_empty()) {
+                Some(db) => conn.query_drop(format!("USE {}", quote_mysql_ident(db))).await,
+                None => {
+                    // MySQL has no "USE none"; dropping the connection is safer
+                    // than returning a database-scoped session to the pool.
+                    return match conn.disconnect().await {
+                        Ok(()) => result,
+                        Err(e) => Err(DbError::QueryFailed(e.to_string())),
+                    };
                 }
-                let values: Vec<Value> = (0..row.len()).map(|i| mysql_value_to_json(&row, i)).collect();
-                rows.push(values);
+            };
+            if let Err(e) = reset {
+                let _ = conn.disconnect().await;
+                return Err(DbError::QueryFailed(e.to_string()));
             }
         }
-
-        Ok(QueryResult { columns, rows, rows_affected: None, truncated })
+        result
     }
 
     // ── Introspection ──────────────────────────────────────────────────────────
@@ -338,11 +390,26 @@ impl Driver for MySqlDriver {
                 .collect_and_drop()
                 .await
                 .map_err(|e| DbError::QueryFailed(e.to_string()))?;
-            Ok(rows.iter().map(|r| get_str(r, 0)).collect())
-        } else {
-            // Standard MySQL: no schema namespace, return connected database name
-            Ok(vec![self.database.clone()])
+            return Ok(rows.iter().map(|r| get_str(r, 0)).collect());
         }
+        // Standard MySQL: expose databases as namespaces so the query console can
+        // choose a default database, matching DBX's catalog-scoped execution model.
+        let mut conn = self.pool.get_conn().await
+            .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
+        let result = conn.query_iter(
+            "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA \
+             WHERE SCHEMA_NAME NOT IN ('information_schema','mysql','performance_schema','sys') \
+             ORDER BY CASE WHEN SCHEMA_NAME = DATABASE() THEN 0 ELSE 1 END, SCHEMA_NAME"
+        ).await.map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        let rows: Vec<mysql_async::Row> = result
+            .collect_and_drop()
+            .await
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        let mut schemas: Vec<String> = rows.iter().map(|r| get_str(r, 0)).filter(|s| !s.is_empty()).collect();
+        if schemas.is_empty() && !self.database.is_empty() {
+            schemas.push(self.database.clone());
+        }
+        Ok(schemas)
     }
 
     async fn list_tables(&self, schema: &str) -> Result<Vec<TableInfo>, DbError> {
@@ -374,6 +441,15 @@ impl Driver for MySqlDriver {
                 rows_estimate: None,
             }
         }).collect())
+    }
+
+    async fn table_data(&self, schema: Option<&str>, table: &str, limit: u32, offset: u32)
+        -> Result<QueryResult, DbError> {
+        let qualified = match schema.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(s) => format!("{}.{}", quote_mysql_ident(s), quote_mysql_ident(table)),
+            None => quote_mysql_ident(table),
+        };
+        self.paginated_query(&format!("SELECT * FROM {}", qualified), limit, offset).await
     }
 
     async fn table_structure(&self, schema: &str, table: &str) -> Result<TableStructure, DbError> {

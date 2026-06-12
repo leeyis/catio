@@ -20,6 +20,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::db::{DbError, DatabaseType};
+use crate::db::dialect::quote_ident;
 use crate::db::driver::{ConnectArgs, Driver, TableInfo, TableStructure, ColumnDef, IndexDef, ForeignKeyDef, ErRelation};
 use crate::db::result::{QueryResult, ColumnInfo, safe_i64_to_json, binary_to_json};
 
@@ -119,6 +120,67 @@ fn resolve_catalog(conn: &Connection, database: &str) -> Result<String, DbError>
     }
 }
 
+fn duckdb_query_on_conn(conn: &Connection, sql: &str, max_rows: u32) -> Result<QueryResult, DbError> {
+    // DuckDB's column_count() panics if the statement has not been executed yet
+    // (unlike rusqlite). We always use stmt.query() which internally calls execute()
+    // and then wraps the result. After query() returns, column_count() is safe via
+    // rows.as_ref(). DDL/DML statements return col_count == 0, SELECT returns > 0.
+    let mut stmt = conn.prepare(sql)
+        .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+
+    let mut query_rows = stmt.query([])
+        .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+
+    // After query(), the statement is executed; column_count() is now safe.
+    let col_count = query_rows.as_ref()
+        .map(|s| s.column_count())
+        .unwrap_or(0);
+
+    // Non-row-returning statement (DDL, INSERT, UPDATE, DELETE): col_count == 0
+    if col_count == 0 {
+        // rows_changed is available via raw_statement row_count but is 0 for DDL.
+        // For DML, we can get rows changed via conn.execute(); however since we already
+        // ran via query(), we return None for rows_affected (consistent behavior).
+        return Ok(QueryResult {
+            columns: vec![],
+            rows: vec![],
+            rows_affected: None,
+            truncated: false,
+        });
+    }
+
+    // Build column info from the executed statement
+    let columns: Vec<ColumnInfo> = (0..col_count).map(|i| {
+        let name = query_rows.as_ref()
+            .and_then(|s| s.column_name(i).ok())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("col{}", i));
+        ColumnInfo { name, type_name: String::new(), pk: false }
+    }).collect();
+
+    let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
+    let mut truncated = false;
+
+    while let Some(row) = query_rows.next()
+        .map_err(|e| DbError::QueryFailed(e.to_string()))?
+    {
+        if rows.len() as u32 >= max_rows {
+            truncated = true;
+            break;
+        }
+        let mut out = Vec::with_capacity(col_count);
+        for i in 0..col_count {
+            let val = row.get_ref(i)
+                .map(value_ref_to_json)
+                .unwrap_or(serde_json::Value::Null);
+            out.push(val);
+        }
+        rows.push(out);
+    }
+
+    Ok(QueryResult { columns, rows, rows_affected: None, truncated })
+}
+
 #[async_trait]
 impl Driver for DuckDbDriver {
     fn db_type(&self) -> DatabaseType { DatabaseType::Duckdb }
@@ -133,65 +195,28 @@ impl Driver for DuckDbDriver {
 
     async fn query(&self, sql: &str, max_rows: u32) -> Result<QueryResult, DbError> {
         let conn = self.conn.lock().await;
+        duckdb_query_on_conn(&conn, sql, max_rows)
+    }
 
-        // DuckDB's column_count() panics if the statement has not been executed yet
-        // (unlike rusqlite). We always use stmt.query() which internally calls execute()
-        // and then wraps the result. After query() returns, column_count() is safe via
-        // rows.as_ref(). DDL/DML statements return col_count == 0, SELECT returns > 0.
-        let mut stmt = conn.prepare(sql)
+    async fn query_with_default_namespace(&self, sql: &str, max_rows: u32, default_namespace: Option<&str>)
+        -> Result<QueryResult, DbError> {
+        let Some(schema) = default_namespace.map(str::trim).filter(|s| !s.is_empty()) else {
+            return self.query(sql, max_rows).await;
+        };
+        let conn = self.conn.lock().await;
+        let original_schema = conn
+            .query_row("SELECT current_schema()", [], |row| row.get::<_, String>(0))
             .map_err(|e| DbError::QueryFailed(e.to_string()))?;
-
-        let mut query_rows = stmt.query([])
-            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
-
-        // After query(), the statement is executed; column_count() is now safe.
-        let col_count = query_rows.as_ref()
-            .map(|s| s.column_count())
-            .unwrap_or(0);
-
-        // Non-row-returning statement (DDL, INSERT, UPDATE, DELETE): col_count == 0
-        if col_count == 0 {
-            // rows_changed is available via raw_statement row_count but is 0 for DDL.
-            // For DML, we can get rows changed via conn.execute(); however since we already
-            // ran via query(), we return None for rows_affected (consistent behavior).
-            return Ok(QueryResult {
-                columns: vec![],
-                rows: vec![],
-                rows_affected: None,
-                truncated: false,
-            });
+        if original_schema != schema {
+            conn.execute_batch(&format!("USE {}", quote_ident(DatabaseType::Duckdb, schema)))
+                .map_err(|e| DbError::QueryFailed(e.to_string()))?;
         }
-
-        // Build column info from the executed statement
-        let columns: Vec<ColumnInfo> = (0..col_count).map(|i| {
-            let name = query_rows.as_ref()
-                .and_then(|s| s.column_name(i).ok())
-                .map(|s| s.clone())
-                .unwrap_or_else(|| format!("col{}", i));
-            ColumnInfo { name, type_name: String::new(), pk: false }
-        }).collect();
-
-        let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
-        let mut truncated = false;
-
-        while let Some(row) = query_rows.next()
-            .map_err(|e| DbError::QueryFailed(e.to_string()))?
-        {
-            if rows.len() as u32 >= max_rows {
-                truncated = true;
-                break;
-            }
-            let mut out = Vec::with_capacity(col_count);
-            for i in 0..col_count {
-                let val = row.get_ref(i)
-                    .map(value_ref_to_json)
-                    .unwrap_or(serde_json::Value::Null);
-                out.push(val);
-            }
-            rows.push(out);
+        let result = duckdb_query_on_conn(&conn, sql, max_rows);
+        if original_schema != schema {
+            conn.execute_batch(&format!("USE {}", quote_ident(DatabaseType::Duckdb, &original_schema)))
+                .map_err(|e| DbError::QueryFailed(e.to_string()))?;
         }
-
-        Ok(QueryResult { columns, rows, rows_affected: None, truncated })
+        result
     }
 
     async fn list_schemas(&self) -> Result<Vec<String>, DbError> {

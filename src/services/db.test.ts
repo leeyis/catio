@@ -41,6 +41,19 @@ describe('services/db', () => {
     expect(Array.isArray(r.rows)).toBe(true)
   })
 
+  it('runQuery forwards default namespace under Tauri', async () => {
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+    invokeMock.mockResolvedValue({ columns: [], rows: [] })
+    const { runQuery } = await import('./db')
+    await runQuery('conn-1', 'SELECT * FROM orders', 'dwd')
+    expect(invokeMock).toHaveBeenCalledWith('db_query', {
+      connId: 'conn-1',
+      sql: 'SELECT * FROM orders',
+      defaultNamespace: 'dwd',
+    })
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
+
   it('previewDml forwards to db_preview_dml under Tauri and returns the SQL', async () => {
     ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
     invokeMock.mockResolvedValue('UPDATE public.orders SET status = $1 WHERE id = $2')
@@ -60,6 +73,21 @@ describe('services/db', () => {
     const { queryPage } = await import('./db')
     const r = await queryPage('any', 'SELECT 1', 50, 0)
     expect(r.columns.length).toBeGreaterThan(0)
+  })
+
+  it('queryPage forwards default namespace under Tauri', async () => {
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+    invokeMock.mockResolvedValue({ columns: [], rows: [] })
+    const { queryPage } = await import('./db')
+    await queryPage('conn-1', 'SELECT * FROM orders', 100, 100, 'dwd')
+    expect(invokeMock).toHaveBeenCalledWith('db_query_page', {
+      connId: 'conn-1',
+      sql: 'SELECT * FROM orders',
+      limit: 100,
+      offset: 100,
+      defaultNamespace: 'dwd',
+    })
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
   })
 
   it('getHistory falls back to mock (DATA.history) outside Tauri', async () => {

@@ -117,10 +117,31 @@ pub trait Driver: Send + Sync {
     async fn test(&self) -> Result<String, DbError>;
     /// 执行任意 SQL（读+写）。max_rows 触达即 truncated。
     async fn query(&self, sql: &str, max_rows: u32) -> Result<QueryResult, DbError>;
+    /// Execute SQL with an optional default namespace selected by the UI.
+    ///
+    /// Engines that can reliably scope a single query/session override this
+    /// (e.g. Postgres search_path, MySQL/ClickHouse/MongoDB database, JDBC
+    /// setCatalog/setSchema). Others keep the plain query path rather than
+    /// rewriting user SQL.
+    async fn query_with_default_namespace(&self, sql: &str, max_rows: u32, _default_namespace: Option<&str>)
+        -> Result<QueryResult, DbError> {
+        self.query(sql, max_rows).await
+    }
     /// 分页查询：用方言 paginate 包裹 SQL 后调 query。
     async fn paginated_query(&self, sql: &str, limit: u32, offset: u32) -> Result<QueryResult, DbError> {
         let paged = crate::db::dialect::paginate(self.db_type(), sql, limit, offset);
         self.query(&paged, limit).await
+    }
+    /// 分页查询，同时沿用查询控制台选择的默认命名空间。
+    async fn paginated_query_with_default_namespace(
+        &self,
+        sql: &str,
+        limit: u32,
+        offset: u32,
+        default_namespace: Option<&str>,
+    ) -> Result<QueryResult, DbError> {
+        let paged = crate::db::dialect::paginate(self.db_type(), sql, limit, offset);
+        self.query_with_default_namespace(&paged, limit, default_namespace).await
     }
 
     /// 表格数据预览：取一张表（或集合 / index / key 空间）的分页行。

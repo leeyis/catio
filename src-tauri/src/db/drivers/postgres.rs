@@ -4,6 +4,7 @@ use deadpool_postgres::{Manager, ManagerConfig, Pool, PoolError, RecyclingMethod
 use tokio_postgres::NoTls; // 起步用 NoTls；TLS 变体见 Step 4 备注
 use tokio_postgres::error::SqlState;
 use crate::db::{DbError, DatabaseType};
+use crate::db::dialect::quote_ident;
 use crate::db::driver::{ConnectArgs, Driver, TableInfo, TableStructure, ErRelation};
 use crate::db::result::QueryResult;
 
@@ -65,6 +66,56 @@ fn pg_query_err(e: &tokio_postgres::Error) -> DbError {
     } else {
         DbError::QueryFailed(e.to_string())
     }
+}
+
+async fn pg_query_on_client(
+    client: &tokio_postgres::Client,
+    sql: &str,
+    max_rows: u32,
+) -> Result<QueryResult, DbError> {
+    use crate::db::result::{ColumnInfo, safe_i64_to_json, binary_to_json};
+    use serde_json::Value;
+
+    let stmt = client.prepare(sql).await
+        .map_err(|e| pg_query_err(&e))?;
+
+    // Write statements (UPDATE/INSERT/DELETE/DDL) have no result columns.
+    // Use execute() to get rows_affected count instead of fetching rows.
+    if stmt.columns().is_empty() {
+        let affected = client.execute(&stmt, &[]).await
+            .map_err(|e| pg_query_err(&e))?;
+        return Ok(QueryResult {
+            columns: vec![],
+            rows: vec![],
+            rows_affected: Some(affected),
+            truncated: false,
+        });
+    }
+
+    let cols: Vec<ColumnInfo> = stmt.columns().iter().map(|c| ColumnInfo {
+        name: c.name().to_string(),
+        type_name: c.type_().name().to_string(),
+        pk: false,
+    }).collect();
+
+    let pg_rows = client.query(&stmt, &[]).await
+        .map_err(|e| pg_query_err(&e))?;
+
+    let mut rows: Vec<Vec<Value>> = Vec::new();
+    let mut truncated = false;
+    for (i, row) in pg_rows.iter().enumerate() {
+        if i as u32 >= max_rows {
+            truncated = true;
+            break;
+        }
+        let mut out = Vec::with_capacity(cols.len());
+        for (idx, col) in stmt.columns().iter().enumerate() {
+            let v = pg_value_to_json(row, idx, col.type_(), &safe_i64_to_json, &binary_to_json);
+            out.push(v);
+        }
+        rows.push(out);
+    }
+    Ok(QueryResult { columns: cols, rows, rows_affected: None, truncated })
 }
 
 /// 协议族默认库名（照搬 dbx models/connection.rs default_database）。
@@ -206,50 +257,23 @@ impl Driver for PostgresDriver {
     }
 
     async fn query(&self, sql: &str, max_rows: u32) -> Result<QueryResult, DbError> {
-        use crate::db::result::{ColumnInfo, safe_i64_to_json, binary_to_json};
-        use serde_json::Value;
         let client = self.pool.get().await
             .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
-        let stmt = client.prepare(sql).await
-            .map_err(|e| pg_query_err(&e))?;
+        pg_query_on_client(&client, sql, max_rows).await
+    }
 
-        // Write statements (UPDATE/INSERT/DELETE/DDL) have no result columns.
-        // Use execute() to get rows_affected count instead of fetching rows.
-        if stmt.columns().is_empty() {
-            let affected = client.execute(&stmt, &[]).await
-                .map_err(|e| pg_query_err(&e))?;
-            return Ok(QueryResult {
-                columns: vec![],
-                rows: vec![],
-                rows_affected: Some(affected),
-                truncated: false,
-            });
-        }
-
-        let cols: Vec<ColumnInfo> = stmt.columns().iter().map(|c| ColumnInfo {
-            name: c.name().to_string(),
-            type_name: c.type_().name().to_string(),
-            pk: false,
-        }).collect();
-
-        let pg_rows = client.query(&stmt, &[]).await
-            .map_err(|e| pg_query_err(&e))?;
-
-        let mut rows: Vec<Vec<Value>> = Vec::new();
-        let mut truncated = false;
-        for (i, row) in pg_rows.iter().enumerate() {
-            if i as u32 >= max_rows {
-                truncated = true;
-                break;
-            }
-            let mut out = Vec::with_capacity(cols.len());
-            for (idx, col) in stmt.columns().iter().enumerate() {
-                let v = pg_value_to_json(row, idx, col.type_(), &safe_i64_to_json, &binary_to_json);
-                out.push(v);
-            }
-            rows.push(out);
-        }
-        Ok(QueryResult { columns: cols, rows, rows_affected: None, truncated })
+    async fn query_with_default_namespace(&self, sql: &str, max_rows: u32, default_namespace: Option<&str>)
+        -> Result<QueryResult, DbError> {
+        let Some(schema) = default_namespace.map(str::trim).filter(|s| !s.is_empty()) else {
+            return self.query(sql, max_rows).await;
+        };
+        let client = self.pool.get().await
+            .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
+        let set_sql = format!("SET search_path TO {}", quote_ident(DatabaseType::Postgres, schema));
+        client.batch_execute(&set_sql).await.map_err(|e| pg_query_err(&e))?;
+        let result = pg_query_on_client(&client, sql, max_rows).await;
+        let _ = client.batch_execute("RESET search_path").await;
+        result
     }
     // ---- A7: schema / structure / ER introspection ----
     // SQL adapted from dbx crates/dbx-core/src/db/postgres.rs, Apache-2.0
