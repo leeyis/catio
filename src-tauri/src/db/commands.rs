@@ -153,8 +153,12 @@ pub async fn db_schema(conn_id: String, mgr: tauri::State<'_, ConnManager>)
     -> Result<Vec<(String, Vec<TableInfo>)>, DbError> {
     let drv = mgr.get(&conn_id).await.ok_or(DbError::NotFound(conn_id))?;
     let mut out = Vec::new();
+    // 单个 schema 的表枚举失败不应拖垮整棵库结构树：达梦/Oracle 等会把系统
+    // schema（SYS/SYSDBA…）一并列出，其中某个 list_tables 抛错时跳过它即可（该
+    // schema 表为空），否则整个 db_schema 报错、前端回落 mock，"默认库/Schema"
+    // 下拉会因 schemaOptions 退化为 1 项而消失。
     for s in drv.list_schemas().await? {
-        let tables = drv.list_tables(&s).await?;
+        let tables = drv.list_tables(&s).await.unwrap_or_default();
         out.push((s, tables));
     }
     Ok(out)
