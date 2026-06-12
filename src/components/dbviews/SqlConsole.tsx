@@ -202,6 +202,9 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
     setRunErr(null)
     // A selection-run passes just the highlighted SQL; otherwise run the whole editor.
     const sql = sqlOverride && sqlOverride.trim() ? sqlOverride : code
+    // 空 / 纯空白 SQL 不执行：拦在所有入口（按钮 / Alt+Enter / 片段运行）之前，
+    // 避免把空语句发给后端报错，或 mock 路径空转出现"执行中"。
+    if (!sql.trim()) return
     const runDefaultNamespace = supportsDefaultNamespace && defaultNamespace && schemaOptions.includes(defaultNamespace)
       ? defaultNamespace
       : undefined
@@ -266,7 +269,7 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
           repeated here; just the editor actions, right-aligned. */}
       <div className="row" style={{ justifyContent: 'space-between', gap: 10, padding: '7px 12px', borderBottom: '1px solid var(--border-hairline)', flex: 'none' }}>
         <div className="row gap6">
-          <Btn size="sm" variant="primary" icon={phase === 'running' ? 'loader' : 'play'} onClick={() => run()}>
+          <Btn size="sm" variant="primary" disabled={phase === 'running' || !code.trim()} icon={phase === 'running' ? 'loader' : 'play'} onClick={() => run()}>
             {phase === 'running' ? t('dbviews.running') : t('dbviews.run')} <span style={{ opacity: .6, fontSize: 10, marginLeft: 2 }}>Alt↵</span>
           </Btn>
           <div style={{ width: 1, height: 18, background: 'var(--border-hairline)' }} />
