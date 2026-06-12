@@ -60,9 +60,6 @@
     "quickConnect": "Quick connect",
     "quickConnectHint": "By recent use",
     "quickConnectEmpty": "No saved connections yet",
-    "automation": "Automation",
-    "automationHint": "Ansible · OpenTofu",
-    "automationEmpty": "Automation orchestration coming soon",
     "connect": "Connect",
     "ago": "{{time}} ago"
   },

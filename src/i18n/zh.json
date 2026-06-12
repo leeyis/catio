@@ -60,9 +60,6 @@
     "quickConnect": "快速连接",
     "quickConnectHint": "按最近使用",
     "quickConnectEmpty": "暂无已保存连接",
-    "automation": "自动化",
-    "automationHint": "Ansible · OpenTofu",
-    "automationEmpty": "自动化编排即将推出",
     "connect": "连接",
     "ago": "{{time}} 前"
   },

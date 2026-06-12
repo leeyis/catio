@@ -125,20 +125,14 @@ export function HomeView({ onOpen, onNew, owned = true, userName = '', authEnabl
           </div>
         </div>
 
-        {/* Recent activity + Automation — the saved connections already live in the
-            left VAULT sidebar, so the home no longer duplicates them as a
-            "quick connect" list. Two honest, balanced sections instead. */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 16 }}>
-          <div>
-            <SectionHead title={t('home.recentSessions')} count={recent.length} />
-            {recent.length
-              ? <div className="col gap8">{recent.map(c => <RecentRow key={c.id} conn={c} onOpen={onOpen} />)}</div>
-              : <EmptySection icon="history" text={t('home.recentEmpty')} />}
-          </div>
-          <div>
-            <SectionHead title={t('home.automation')} hint={t('home.automationHint')} />
-            <EmptySection icon="box" text={t('home.automationEmpty')} />
-          </div>
+        {/* Recent activity — the saved connections already live in the left
+            VAULT sidebar, so the home no longer duplicates them as a
+            "quick connect" list. */}
+        <div>
+          <SectionHead title={t('home.recentSessions')} count={recent.length} />
+          {recent.length
+            ? <div className="col gap8">{recent.map(c => <RecentRow key={c.id} conn={c} onOpen={onOpen} />)}</div>
+            : <EmptySection icon="history" text={t('home.recentEmpty')} />}
         </div>
       </div>
     </div>
