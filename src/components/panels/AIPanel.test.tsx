@@ -60,7 +60,8 @@ describe('AIPanel controlled conversation view', () => {
       conversation={conv([])} onSend={onSend} />)
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'hi' } })
     fireEvent.click(screen.getByTitle('发送'))
-    expect(onSend).toHaveBeenCalledWith('hi')
+    // 发送时附带 hasSelection 标记(无选中文本附件时为 false)
+    expect(onSend).toHaveBeenCalledWith('hi', { hasSelection: false })
   })
 
   it('renders a shell code block with an insert-into-terminal button that calls onInsert', () => {
