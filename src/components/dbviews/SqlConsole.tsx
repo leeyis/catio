@@ -32,9 +32,11 @@ export interface SqlConsoleProps {
   active?: boolean
   /** 连接引擎(conn.engine = dbType)。mongodb/elasticsearch → plain 模式(Task 10 实装)。 */
   engine?: string
+  /** 连接名,用于"正在 X 上执行…"提示。缺省回落到当前默认命名空间。 */
+  connName?: string
 }
 
-export function SqlConsole({ density, fresh, writable = true, connId, initialCode, initialDefaultSchema, active, engine }: SqlConsoleProps) {
+export function SqlConsole({ density, fresh, writable = true, connId, initialCode, initialDefaultSchema, active, engine, connName }: SqlConsoleProps) {
   const { t } = useTranslation()
   // mongodb/elasticsearch 用各自语法(mongo shell / REST+SQL),编辑器走 plain 模式:
   // 不挂 SQL 补全、显示语法占位提示、结果网格只读(mongo 的 _id 带 pk 标记,
@@ -198,7 +200,13 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
     return top
   }, [connId, liveSchema, liveColumns, D.schema, D.tableStructures])
 
+  // 自增运行令牌：每次运行/停止都 +1，在途的 then/catch 只有令牌仍匹配时才落地。
+  // 这样"停止"或被新一次运行取代时，旧结果会被丢弃,UI 立即交还控制权。
+  const runToken = useRef(0)
+
   function run(sqlOverride?: string) {
+    // 运行中不重复触发（避免 Alt↵ 在执行中再起一次）。
+    if (phase === 'running') return
     setRunErr(null)
     // A selection-run passes just the highlighted SQL; otherwise run the whole editor.
     const sql = sqlOverride && sqlOverride.trim() ? sqlOverride : code
@@ -208,20 +216,33 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
     const runDefaultNamespace = supportsDefaultNamespace && defaultNamespace && schemaOptions.includes(defaultNamespace)
       ? defaultNamespace
       : undefined
+    const myToken = ++runToken.current
     if (connId) {
       // Live path: execute the typed SQL against the backend.
       setPhase('running')
       runQuery(connId, sql, runDefaultNamespace)
         .then(res => {
+          if (myToken !== runToken.current) return // 已被停止/被新运行取代
           setResult({ columns: res.columns, rows: res.rows, sql, defaultNamespace: runDefaultNamespace })
           setPhase('done')
         })
-        .catch(e => { setRunErr(dbErrMsg(e)); setPhase('done') })
+        .catch(e => {
+          if (myToken !== runToken.current) return
+          setRunErr(dbErrMsg(e)); setPhase('done')
+        })
       return
     }
     // Mock path: unchanged demo timing.
     setPhase('running')
-    setTimeout(() => setPhase('done'), 450)
+    setTimeout(() => { if (myToken === runToken.current) setPhase('done') }, 450)
+  }
+
+  // 停止：作废在途结果并把 UI 交还到就绪态。注意——这是前端层面的"停止等待"，
+  // 后端/JDBC sidecar 当前不支持中断已发出的语句，服务端查询可能仍会跑完。
+  function stop() {
+    runToken.current++
+    setPhase('idle')
+    setRunErr(null)
   }
 
   // Keep the latest run() in a ref so the (active-gated) event listener always
@@ -269,9 +290,15 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
           repeated here; just the editor actions, right-aligned. */}
       <div className="row" style={{ justifyContent: 'space-between', gap: 10, padding: '7px 12px', borderBottom: '1px solid var(--border-hairline)', flex: 'none' }}>
         <div className="row gap6">
-          <Btn size="sm" variant="primary" disabled={phase === 'running' || !code.trim()} icon={phase === 'running' ? 'loader' : 'play'} onClick={() => run()}>
-            {phase === 'running' ? t('dbviews.running') : t('dbviews.run')} <span style={{ opacity: .6, fontSize: 10, marginLeft: 2 }}>Alt↵</span>
-          </Btn>
+          {phase === 'running' ? (
+            <Btn size="sm" variant="danger" style={{ height: 26, padding: '0 10px', fontSize: 11.5 }} icon="square" onClick={stop}>
+              {t('dbviews.stop')}
+            </Btn>
+          ) : (
+            <Btn size="sm" variant="primary" disabled={!code.trim()} style={{ height: 26, padding: '0 10px', fontSize: 11.5 }} icon="play" onClick={() => run()}>
+              {t('dbviews.run')} <span style={{ opacity: .6, fontSize: 10, marginLeft: 2 }}>Alt↵</span>
+            </Btn>
+          )}
           <div style={{ width: 1, height: 18, background: 'var(--border-hairline)' }} />
           <button className="icon-btn bare" title={t('dbviews.format')}><Icon name="wrench" size={15} /></button>
           <button className="icon-btn bare" title={t('dbviews.clear')} onClick={() => setCode('')}><Icon name="eraser" size={15} /></button>
@@ -307,7 +334,7 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
           {phase === 'running'
             ? <div className="col" style={{ alignItems: 'center', justifyContent: 'center', height: '100%', gap: 10, color: 'var(--text-tertiary)' }}>
                 <Icon name="loader" size={26} style={{ animation: 'spin 1s linear infinite' }} />
-                <span style={{ fontSize: 13 }}>{t('dbviews.executingOn')}</span>
+                <span style={{ fontSize: 13 }}>{t('dbviews.executingOn', { target: connName || defaultNamespace || '—' })}</span>
               </div>
             : (connId
                 ? <DataGrid
