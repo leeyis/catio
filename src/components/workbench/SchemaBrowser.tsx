@@ -60,11 +60,9 @@ export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpen
       <div className="row" style={{ padding: '10px 10px 8px', justifyContent: 'space-between' }}>
         <div className="row gap6" style={{ minWidth: 0 }}><ConnGlyph conn={headerGlyph} size={24} radius={7} /><div className="col" style={{ lineHeight: 1.2, minWidth: 0 }}><span className="ell" style={{ fontSize: 12.5, fontWeight: 700 }}>{headerName}</span><span className="mono ell" style={{ fontSize: 9.5, color: 'var(--text-faint)' }}>{headerEngine}</span></div></div>
         <div className="row gap2">
-          <button className="row gap5" data-testid="wb-new-query"
-            style={{ height: 28, padding: '0 10px', borderRadius: 9, border: '1px solid var(--accent-primary)', background: 'var(--accent-primary)', color: 'var(--on-accent)', fontSize: 12, fontWeight: 650, flex: 'none' }}
+          <button className="icon-btn bare" data-testid="wb-new-query" style={{ width: 26, height: 26 }}
             title={t('workbench.newQuery')} onClick={() => onNewQuery()}>
-            <Icon name="terminal-square" size={14} />
-            <span>{t('workbench.queryShort')}</span>
+            <Icon name="terminal-square" size={15} style={{ color: 'var(--accent-primary)' }} />
           </button>
           <button className="icon-btn bare" data-testid="wb-refresh" style={{ width: 26, height: 26 }} title={t('workbench.refresh')} onClick={onRefresh} disabled={refreshing}>
             <Icon name="refresh-cw" size={13} style={refreshing ? { animation: 'spin 1s linear infinite' } : undefined} />
