@@ -215,7 +215,8 @@
     "tabData": "Data",
     "tabStructure": "Structure",
     "noTabs": "No open tabs",
-    "noTabsHint": "Pick a table, view or function from the sidebar, or open a new query"
+    "noTabsHint": "Pick a table, view or function from the sidebar, or open a new query",
+    "historySuggestHint": "↑↓ select · Tab/↵ complete · Esc close"
   },
   "panels": {
     "sessionHistory": "Session history",

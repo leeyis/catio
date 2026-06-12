@@ -12,6 +12,9 @@ import { termOpen, termWrite, termResize, termClose, listen, getTermBuffer, mult
 import { usePrefs, monoFontStack } from '../../state/preferences'
 import { registerTermBuffer, unregisterTermBuffer } from '../../services/termBuffers'
 import type { Connection, TermLine as TermLineType, MultiExecTarget } from '../../services/types'
+import { loadHistory } from '../../state/history'
+import { planHistoryCompletion, type ShellHistoryEntry, type HistoryMatch } from '../shell/historyCompletion'
+import { HistorySuggest } from '../shell/HistorySuggest'
 
 export interface TerminalPaneProps {
   conn: Connection | null
@@ -45,7 +48,28 @@ const isTauri = (): boolean =>
   ('__TAURI_INTERNALS__' in window || '__TAURI__' in window)
 
 // term:// event payload shape (A7 contract): data frame OR close notice.
-interface TermEvent { bytesBase64?: string; closed?: boolean }
+// inputStart/execStart carry OSC 633;B / 633;C signals from the backend so the
+// frontend knows when the prompt finished (start capturing input) and when a
+// command was submitted (hide candidates).
+interface TermEvent { bytesBase64?: string; closed?: boolean; inputStart?: boolean; execStart?: boolean }
+
+// 从 conn.sub(`user@host:port`)解析出裸 host/IP。这是后端 term.rs 写入 history.target
+// 的口径(s.host),前后两侧用同一字段才能匹配到候选。无 `@` 时整串视为主机段;
+// 去掉末尾 `:port`(IPv6 不在此支持范围,真实连接 sub 均为 user@host:port 形)。
+function hostFromSub(sub: string): string {
+  const afterAt = sub.includes('@') ? sub.slice(sub.lastIndexOf('@') + 1) : sub
+  const colon = afterAt.lastIndexOf(':')
+  return colon > 0 ? afterAt.slice(0, colon) : afterAt
+}
+
+// 当前主机的 shell 历史 → ShellHistoryEntry[]。复用 App.tsx 的写入口径:
+// target === host || (conn && target === conn.name)。
+function loadShellHistory(host: string, conn: Connection | null): ShellHistoryEntry[] {
+  const connName = conn ? conn.name : null
+  return loadHistory()
+    .filter(h => h.kind === 'shell' && (h.target === host || (connName != null && h.target === connName)))
+    .map(h => ({ text: h.text, ts: typeof h.ts === 'number' ? h.ts : 0 }))
+}
 
 // UTF-8 string -> base64 (keystrokes out)
 function bytesToBase64(s: string): string {
@@ -132,6 +156,28 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
   const onChannelRef = useRef<TerminalPaneProps['onChannel']>(onChannel)
   onChannelRef.current = onChannel
   const [selBar, setSelBar] = useState<{ left: number; top: number; text: string } | null>(null)
+  // ---- 历史补全(Phase 1:候选下拉,无幽灵文本)----
+  // suggest:可见时的候选列表 + 坐标;为 null 时不渲染。selectedIndex 单独存以便键盘移动。
+  const [suggest, setSuggest] = useState<{ items: HistoryMatch[]; left: number; top: number; flipUp: boolean; input: string } | null>(null)
+  const [suggestIndex, setSuggestIndex] = useState(0)
+  // ---- Phase 2:行内灰色「幽灵文本」(DOM 浮层,绝不写入终端)----
+  // ghost:engine 返回的 items[0] 剩余后缀(仅严格前缀命中时非空);left/top 为光标像素位置。
+  // 仅单行输入且不会换行时渲染。
+  const [ghost, setGhost] = useState<{ text: string; left: number; top: number } | null>(null)
+  // ghost 镜像到 ref,供 attachCustomKeyEventHandler 在按键时同步读取(→/Ctrl+E 接受)。
+  const ghostRef = useRef<typeof ghost>(null)
+  ghostRef.current = ghost
+  // 输入起点标记:OSC 633;B 命中后记录的光标行 marker + 列,用于提取「当前输入」。
+  const inputMarkerRef = useRef<{ marker: { line: number; dispose(): void } | null; startCol: number } | null>(null)
+  // 本次输入是否被 Esc 忽略(直到输入再次变化才恢复)。
+  const suppressedInputRef = useRef<string | null>(null)
+  // 最近一次提取到的输入,供键盘交互读取(避免闭包过期)。
+  const currentInputRef = useRef<string>('')
+  // suggest 状态镜像到 ref,供 attachCustomKeyEventHandler 在按键时同步读取。
+  const suggestRef = useRef<typeof suggest>(null)
+  suggestRef.current = suggest
+  const suggestIndexRef = useRef(0)
+  suggestIndexRef.current = suggestIndex
   // Multiexec run state — per-target progress; held here for ORCH to consume via a future prop/callback.
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [mxRunState, setMxRunState] = useState<MxRunState>({})
@@ -140,6 +186,10 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
   const [bcSending, setBcSending] = useState(false)
 
   const host = conn ? (conn.sub.split(' ')[0].replace('ssh ', '')) : 'jump@db-bastion'
+  // 裸主机标识(host/IP),仅用于历史补全的「按主机隔离」匹配——与后端写入 history.target
+  // 的口径一致:conn.sub 形如 `user@host:port`,后端 term.rs 写入的 target 即 s.host(裸 host/IP),
+  // 取 @ 后、: 前的主机段二者方可相等匹配。不复用于工具栏显示,避免改动既有 UI。
+  const matchHost = conn ? hostFromSub(conn.sub) : 'db-bastion'
   const live = !!sessionId && isTauri()
 
   /**
@@ -253,6 +303,187 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
     term.open(hostEl)
     try { fitAddon.fit() } catch { /* jsdom has no layout */ }
 
+    // ---- 历史补全:输入捕获 + 候选 ----
+    // 节流计时器(~40ms),onData 触发提取时合并。
+    let extractTimer: ReturnType<typeof setTimeout> | null = null
+
+    // 清掉输入标记并隐藏候选(execStart / closed / 失活时调用)。
+    const clearInputCapture = () => {
+      try { inputMarkerRef.current?.marker?.dispose() } catch { /* best-effort */ }
+      inputMarkerRef.current = null
+      currentInputRef.current = ''
+      suppressedInputRef.current = null
+      setSuggest(null)
+      setGhost(null)
+    }
+
+    // 在「输入起点」处记录 marker + 列。OSC 633;B 命中后调用。
+    const beginInputCapture = () => {
+      try {
+        const buf = term.buffer.active
+        const startCol = typeof buf.cursorX === 'number' ? buf.cursorX : 0
+        // registerMarker(0) 锚定当前光标行;测试里 xterm 是 mock,做存在性保护。
+        const marker = typeof term.registerMarker === 'function' ? term.registerMarker(0) : null
+        inputMarkerRef.current = { marker, startCol }
+        suppressedInputRef.current = null
+      } catch { inputMarkerRef.current = null }
+    }
+
+    // 从 marker 行/startCol 提取到光标行/cursorX 的可见文本,即「当前输入」。
+    const readCurrentInput = (): string | null => {
+      const cap = inputMarkerRef.current
+      if (!cap) return null
+      try {
+        const buf = term.buffer.active
+        const marker = cap.marker
+        // marker 失效(被回收)→ 放弃。
+        if (marker && (marker as { isDisposed?: boolean }).isDisposed) return null
+        const startLine = marker && typeof marker.line === 'number' ? marker.line : buf.cursorY + buf.baseY
+        const endLine = buf.cursorY + buf.baseY
+        const endCol = typeof buf.cursorX === 'number' ? buf.cursorX : 0
+        let out = ''
+        for (let ln = startLine; ln <= endLine; ln++) {
+          const line = buf.getLine(ln)
+          if (!line) continue
+          const full = line.translateToString(true)
+          if (ln === startLine && ln === endLine) out += full.slice(cap.startCol, endCol)
+          else if (ln === startLine) out += full.slice(cap.startCol)
+          else if (ln === endLine) out += '\n' + full.slice(0, endCol)
+          else out += '\n' + full
+        }
+        return out
+      } catch { return null }
+    }
+
+    // 计算候选下拉的绝对坐标(相对 rootRef)+ 上方/下方翻转。
+    const computeSuggestPos = (): { left: number; top: number; flipUp: boolean } | null => {
+      const root = rootRef.current
+      if (!root || !hostEl) return null
+      try {
+        const rootRect = root.getBoundingClientRect()
+        const hostRect = hostEl.getBoundingClientRect()
+        const scale = (rootRect.width / root.offsetWidth) || 1
+        const buf = term.buffer.active
+        const cellW = hostEl.clientWidth / term.cols
+        const cellH = hostEl.clientHeight / term.rows
+        const rowInView = Math.max(0, (buf.cursorY ?? 0))
+        const cursorPxX = (buf.cursorX ?? 0) * cellW
+        const left = (hostRect.left + cursorPxX - rootRect.left) / scale
+        // 候选默认在光标行下方一行;若离底部太近则翻到上方。
+        const belowTopPx = (rowInView + 1) * cellH
+        const flipUp = belowTopPx + 200 > hostEl.clientHeight
+        const anchorPx = flipUp ? rowInView * cellH : belowTopPx
+        const top = (hostRect.top + anchorPx - rootRect.top) / scale
+        return { left: Math.max(left, 0), top, flipUp }
+      } catch { return null }
+    }
+
+    // Phase 2:计算「幽灵文本」浮层的像素坐标 + 是否安全可渲染。
+    // 仅当 ghost 非空、输入为单行、且补全后不会越过行尾换行时才返回坐标;
+    // 否则返回 null(只保留下拉,避免错位)。坐标与 selection toolbar 同口径
+    // (cellW=clientWidth/cols),以等宽 cell 估算光标像素位置。
+    const computeGhostPos = (ghostText: string, input: string): { left: number; top: number } | null => {
+      if (!ghostText) return null
+      // 多行输入:输入里含换行 → 不渲染 ghost。
+      if (input.includes('\n')) return null
+      const root = rootRef.current
+      if (!root || !hostEl) return null
+      try {
+        const rootRect = root.getBoundingClientRect()
+        const hostRect = hostEl.getBoundingClientRect()
+        const scale = (rootRect.width / root.offsetWidth) || 1
+        const buf = term.buffer.active
+        const cellW = hostEl.clientWidth / term.cols
+        const cellH = hostEl.clientHeight / term.rows
+        const cursorX = buf.cursorX ?? 0
+        // 接近行尾:补全后会越过 cols 触发换行 → 不渲染 ghost(避免错位)。
+        if (cursorX + ghostText.length > term.cols) return null
+        const rowInView = Math.max(0, (buf.cursorY ?? 0))
+        const cursorPxX = cursorX * cellW
+        const cursorPxY = rowInView * cellH
+        const left = (hostRect.left + cursorPxX - rootRect.left) / scale
+        const top = (hostRect.top + cursorPxY - rootRect.top) / scale
+        return { left, top }
+      } catch { return null }
+    }
+
+    // 提取当前输入 → planHistoryCompletion → 更新候选 state(+ Phase 2 ghost 浮层)。
+    const refreshSuggest = () => {
+      if (!(live && sessionId)) { setSuggest(null); setGhost(null); return }
+      const input = readCurrentInput()
+      if (input == null) { clearInputCapture(); return }
+      currentInputRef.current = input
+      // Esc 忽略本次输入,直到输入文本变化才恢复。
+      if (suppressedInputRef.current != null && suppressedInputRef.current === input) { setSuggest(null); setGhost(null); return }
+      if (suppressedInputRef.current != null && suppressedInputRef.current !== input) suppressedInputRef.current = null
+      if (!input) { setSuggest(null); setGhost(null); return }
+      const entries = loadShellHistory(matchHost, conn)
+      const { items, ghost: ghostSuffix } = planHistoryCompletion(input, entries)
+      if (!items.length) { setSuggest(null); setGhost(null); return }
+      const pos = computeSuggestPos()
+      if (!pos) { setSuggest(null); setGhost(null); return }
+      setSuggest({ items, left: pos.left, top: pos.top, flipUp: pos.flipUp, input })
+      setSuggestIndex(0)
+      // Phase 2:engine 已给出 ghost 后缀(仅严格前缀命中时非空)。
+      const gpos = ghostSuffix ? computeGhostPos(ghostSuffix, input) : null
+      setGhost(gpos ? { text: ghostSuffix as string, left: gpos.left, top: gpos.top } : null)
+    }
+
+    // 把字符写入 PTY(补全用)。沿用 onData 的 base64 编码路径。
+    const termWrite0 = (s: string) => {
+      if (live && sessionId && chanIdRef.current) termWrite(sessionId, chanIdRef.current, bytesToBase64(s))
+    }
+
+    // attachCustomKeyEventHandler:候选可见时拦截 ↑/↓/Enter/Tab/Esc(在抵达 PTY 前)。
+    // 测试里 xterm mock 没有这个方法 → 存在性保护。
+    if (typeof term.attachCustomKeyEventHandler === 'function') {
+      term.attachCustomKeyEventHandler((ev) => {
+        if (ev.type !== 'keydown') return true
+        // Phase 2:幽灵文本可见时,→ 或 Ctrl+E 接受 ghost 串(写入 PTY 并吞键)。
+        const gh = ghostRef.current
+        if (gh && gh.text && (ev.key === 'ArrowRight' || (ev.ctrlKey && (ev.key === 'e' || ev.key === 'E')))) {
+          termWrite0(gh.text)
+          setGhost(null)
+          setSuggest(null)
+          return false
+        }
+        const sg = suggestRef.current
+        if (!sg || !sg.items.length) return true // 候选不可见时一律放行
+        const idx = suggestIndexRef.current
+        switch (ev.key) {
+          case 'ArrowUp':
+            setSuggestIndex(i => (i - 1 + sg.items.length) % sg.items.length)
+            return false
+          case 'ArrowDown':
+            setSuggestIndex(i => (i + 1) % sg.items.length)
+            return false
+          case 'Enter':
+          case 'Tab': {
+            // 只补全不执行:写入「选中项相对当前输入的剩余差额」。
+            const sel = sg.items[idx]
+            const input = currentInputRef.current
+            if (sel && sel.text.startsWith(input)) {
+              const tail = sel.text.slice(input.length)
+              if (tail) termWrite0(tail)
+            } else if (sel) {
+              // 非前缀命中:无法安全 diff,直接忽略键(关闭候选)。
+            }
+            setSuggest(null)
+            setGhost(null)
+            return false
+          }
+          case 'Escape':
+            // 忽略本次输入,直到输入再次变化。
+            suppressedInputRef.current = currentInputRef.current
+            setSuggest(null)
+            setGhost(null)
+            return false
+          default:
+            return true
+        }
+      })
+    }
+
     // Selection toolbar (copy / ask AI) — driven by xterm's own selection.
     term.onSelectionChange(() => {
       const text = term.getSelection()
@@ -296,10 +527,23 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
         onChannelRef.current?.(sessionId, openedChanId)
         unlisten = await listen<TermEvent>(`term://${openedChanId}`, (p) => {
           if (typeof p.bytesBase64 === 'string') {
-            term.write(base64ToBytes(p.bytesBase64))
+            // 同帧可能携带 inputStart(此时这些字节即提示符本身)。先 write 提示符,
+            // 在 write 回调里(光标已落到输入起点)再捕获 marker。
+            if (p.inputStart) {
+              term.write(base64ToBytes(p.bytesBase64), () => beginInputCapture())
+            } else {
+              term.write(base64ToBytes(p.bytesBase64))
+            }
+          } else if (p.inputStart) {
+            // 单发的 inputStart 帧(无字节):直接捕获。
+            beginInputCapture()
+          } else if (p.execStart) {
+            // 命令已提交开始执行:清标记 + 隐藏候选。
+            clearInputCapture()
           } else if (p.closed) {
             // Server-initiated close: write notice, close channel, then mark it dead so
             // keystrokes and unmount cleanup don't call termClose on a dead channel.
+            clearInputCapture()
             term.write('\r\n\x1b[2m[connection closed]\x1b[0m\r\n')
             if (chanIdRef.current) { termClose(sessionId, chanIdRef.current); chanIdRef.current = null }
             onChannelRef.current?.(sessionId, null)
@@ -310,6 +554,11 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
           // Drop keystrokes after a server-initiated close (channel already torn down).
           if (!chanIdRef.current) return
           termWrite(sessionId, chanIdRef.current, bytesToBase64(d))
+          // 节流(~40ms)提取当前输入并刷新候选。延迟一拍,让 PTY 回显落到缓冲区。
+          if (inputMarkerRef.current) {
+            if (extractTimer) clearTimeout(extractTimer)
+            extractTimer = setTimeout(() => { extractTimer = null; refreshSuggest() }, 40)
+          }
         })
         if (typeof ResizeObserver !== 'undefined') {
           ro = new ResizeObserver(() => {
@@ -334,6 +583,9 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
 
     return () => {
       disposed = true
+      if (extractTimer) clearTimeout(extractTimer)
+      try { inputMarkerRef.current?.marker?.dispose() } catch { /* best-effort */ }
+      inputMarkerRef.current = null
       if (ro) ro.disconnect()
       if (unlisten) unlisten()
       // Only call termClose if the channel is still live (not already closed by server).
@@ -546,6 +798,55 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
       {/* terminal surface — xterm.js host */}
       <div ref={xtermHost} className="grow" onMouseDown={() => setSelBar(null)}
         style={{ overflow: 'hidden', background: 'var(--term-bg)', padding: '12px 14px', fontFamily: monoFontStack(prefs.monoFont), fontSize: prefs.termFontPx, lineHeight: 1.65, minHeight: 0 }} />
+
+      {/* 历史补全候选下拉(仅 live + 输入激活 + 有匹配时显示) */}
+      {live && suggest && (
+        <HistorySuggest
+          items={suggest.items}
+          selectedIndex={suggestIndex}
+          left={suggest.left}
+          top={suggest.top}
+          flipUp={suggest.flipUp}
+          input={suggest.input}
+          onPick={(i) => {
+            const sel = suggest.items[i]
+            const input = currentInputRef.current
+            if (sel && sel.text.startsWith(input) && sessionId && chanIdRef.current) {
+              const tail = sel.text.slice(input.length)
+              if (tail) termWrite(sessionId, chanIdRef.current, bytesToBase64(tail))
+            }
+            setSuggest(null)
+            setGhost(null)
+            try { termRef.current?.focus() } catch { /* best-effort */ }
+          }}
+        />
+      )}
+
+      {/* Phase 2:行内灰色「幽灵文本」浮层 —— 纯视觉叠加,绝不写入终端。
+          字体/字号跟随终端(prefs.monoFont/termFontPx)+ lineHeight 与 xterm host 同口径,
+          颜色用 var(--text-faint) 跟随主题。仅 live + ghost 可见时渲染。 */}
+      {live && ghost && (
+        <span
+          aria-hidden
+          className="mono"
+          style={{
+            position: 'absolute',
+            left: ghost.left,
+            top: ghost.top,
+            zIndex: 24,
+            pointerEvents: 'none',
+            fontFamily: monoFontStack(prefs.monoFont),
+            fontSize: prefs.termFontPx,
+            lineHeight: 1.65,
+            color: 'var(--text-faint)',
+            opacity: 0.6,
+            whiteSpace: 'pre',
+            userSelect: 'none',
+          }}
+        >
+          {ghost.text}
+        </span>
+      )}
 
       {/* buffer search overlay (xterm SearchAddon) */}
       {searchOpen && (

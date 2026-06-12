@@ -1,0 +1,95 @@
+/**
+ * HistorySuggest — 终端历史补全的下拉候选列表(纯展示组件)。
+ *
+ * 不持有任何 xterm / 业务状态:候选、选中项、坐标、当前输入全部由 TerminalPane
+ * 通过 props 传入,交互(点选)通过 onPick 回调上抛。样式复用 TerminalPane 里
+ * Multi-Exec 弹窗的下拉风格(pop-in + surface-elevated + shadow-dropdown),
+ * 全部走 CSS 变量,跟随主题。
+ */
+import { useTranslation } from 'react-i18next'
+import type { HistoryMatch } from './historyCompletion'
+
+export interface HistorySuggestProps {
+  /** 候选列表(已排序、去重、截断)。 */
+  items: HistoryMatch[]
+  /** 当前高亮项的下标。 */
+  selectedIndex: number
+  /** 绝对定位坐标(相对于 TerminalPane 根容器)。 */
+  left: number
+  top: number
+  /** 当 true 时锚点在 top 处向「上」展开(光标下方空间不足时翻转)。 */
+  flipUp?: boolean
+  /** 当前输入,用于把匹配到的前缀加粗高亮。 */
+  input: string
+  /** 点选某一项(传入其下标)。 */
+  onPick: (index: number) => void
+}
+
+export function HistorySuggest({ items, selectedIndex, left, top, flipUp, input, onPick }: HistorySuggestProps) {
+  const { t } = useTranslation()
+  if (!items.length) return null
+
+  return (
+    <div
+      className="pop-in col"
+      style={{
+        position: 'absolute',
+        left,
+        top,
+        transform: flipUp ? 'translateY(-100%)' : undefined,
+        zIndex: 28,
+        minWidth: 220,
+        maxWidth: 420,
+        maxHeight: 240,
+        overflowY: 'auto',
+        background: 'var(--surface-elevated)',
+        border: '1px solid var(--border-hairline-alt)',
+        borderRadius: 10,
+        boxShadow: 'var(--shadow-dropdown)',
+        padding: 4,
+      }}
+    >
+      {items.map((m, i) => {
+        const on = i === selectedIndex
+        // 严格大小写前缀命中时把前缀部分加粗;否则整体常规渲染。
+        const hasPrefix = m.text.startsWith(input)
+        return (
+          <button
+            key={`${m.text}-${i}`}
+            // mousedown.preventDefault 避免点击候选时终端失焦
+            onMouseDown={e => e.preventDefault()}
+            onClick={() => onPick(i)}
+            className="row mono"
+            title={m.text}
+            style={{
+              textAlign: 'left',
+              gap: 0,
+              width: '100%',
+              padding: '5px 9px',
+              borderRadius: 7,
+              fontSize: 12.5,
+              lineHeight: 1.5,
+              color: 'var(--text-secondary)',
+              background: on ? 'var(--accent-soft-alt)' : 'transparent',
+              whiteSpace: 'pre',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+            }}
+          >
+            {hasPrefix ? (
+              <>
+                <span style={{ fontWeight: 700, color: 'var(--accent-primary)' }}>{input}</span>
+                <span>{m.text.slice(input.length)}</span>
+              </>
+            ) : (
+              <span>{m.text}</span>
+            )}
+          </button>
+        )
+      })}
+      <div style={{ padding: '4px 9px 2px', fontSize: 10, color: 'var(--text-faint)', whiteSpace: 'nowrap' }}>
+        {t('workbench.historySuggestHint')}
+      </div>
+    </div>
+  )
+}
