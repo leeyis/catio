@@ -21,6 +21,7 @@ const INTEGRATION_TEMPLATE: &str = r#"if [ -n "${ZSH_VERSION:-}" ]; then
   __catio_pc(){ local e=$?; print -rn -- $'\e]633;D;'"$e"$'\a\e]633;P;Cwd='"$(__catio_esc "$PWD")"$'\a'; }
   autoload -Uz add-zsh-hook 2>/dev/null
   add-zsh-hook preexec __catio_pe; add-zsh-hook precmd __catio_pc
+  case "$PS1" in *'633;B'*) ;; *) PS1="$PS1"$'%{\e]633;B\a%}';; esac
 elif [ -n "${BASH_VERSION:-}" ]; then
   __catio_n='__CATIO_NONCE__'
   __catio_esc(){ local s=${1//\\/\\\\}; s=${s//;/\\x3b}; s=${s//$'\n'/\\x0a}; printf '%s' "$s"; }
@@ -29,6 +30,7 @@ elif [ -n "${BASH_VERSION:-}" ]; then
   __catio_pc(){ local e=$?; __catio_in=0; printf '\e]633;D;%s\a\e]633;P;Cwd=%s\a' "$e" "$(__catio_esc "$PWD")"; }
   trap '__catio_pe' DEBUG
   case "${PROMPT_COMMAND:-}" in *__catio_pc*) ;; *) PROMPT_COMMAND="__catio_pc${PROMPT_COMMAND:+;$PROMPT_COMMAND}";; esac
+  case "$PS1" in *'633;B'*) ;; *) PS1="$PS1"$'\[\e]633;B\a\]';; esac
 fi"#;
 
 /// Returns ONE line to write to the PTY that installs the shell-integration
@@ -80,6 +82,29 @@ mod tests {
         assert!(
             body.contains(r#"local e=$?; __catio_in=0;"#),
             "__catio_pc must reset __catio_in before its printfs: {body}"
+        );
+    }
+
+    #[test]
+    fn ps1_decorated_with_input_start_marker() {
+        // Both shells must append a non-printing OSC 633;B (input start) marker to
+        // PS1 so the prompt-end / input-begin position reaches the frontend.
+        let body = INTEGRATION_TEMPLATE.replace("__CATIO_NONCE__", "N");
+        // zsh: wrapped in %{ ... %} (zsh non-printing markers).
+        assert!(
+            body.contains(r#"PS1="$PS1"$'%{\e]633;B\a%}'"#),
+            "zsh PS1 must append %{{ ESC]633;B BEL %}}: {body}"
+        );
+        // bash: wrapped in \[ ... \] (readline non-printing markers).
+        assert!(
+            body.contains(r#"PS1="$PS1"$'\[\e]633;B\a\]'"#),
+            "bash PS1 must append \\[ ESC]633;B BEL \\]: {body}"
+        );
+        // Idempotent guard: don't append twice on re-bootstrap.
+        assert_eq!(
+            body.matches(r#"case "$PS1" in *'633;B'*"#).count(),
+            2,
+            "both shells must guard PS1 decoration against double-append: {body}"
         );
     }
 }

@@ -186,8 +186,18 @@ fn emit_scanned(
             *muted = false;
         }
     }
+    // Does this batch contain a prompt-end / input-start marker? If so we want to
+    // tag it onto the visible frame (when there is one) so the frontend writes the
+    // prompt bytes BEFORE capturing the input-start cursor position.
+    let has_input_start = events.iter().any(|e| matches!(e, osc::OscEvent::InputStart));
+    let mut input_start_emitted = false;
     if !*muted && !visible.is_empty() {
-        let _ = app.emit(evt, serde_json::json!({ "bytesBase64": B64.encode(&visible) }));
+        let mut frame = serde_json::json!({ "bytesBase64": B64.encode(&visible) });
+        if has_input_start {
+            frame["inputStart"] = serde_json::Value::Bool(true);
+            input_start_emitted = true;
+        }
+        let _ = app.emit(evt, frame);
     }
     // Always process events for the audit state machine regardless of mute.
     for ev in events {
@@ -199,7 +209,18 @@ fn emit_scanned(
             osc::OscEvent::Cwd(d) => {
                 *cur_cwd = d;
             }
-            osc::OscEvent::ExecStart => {}
+            osc::OscEvent::InputStart => {
+                // If there was no visible frame to piggyback on, send a standalone
+                // input-start frame. (Multiple InputStart in one batch collapse into
+                // a single emitted frame — the flag is idempotent for the UI.)
+                if !input_start_emitted {
+                    let _ = app.emit(evt, serde_json::json!({ "inputStart": true }));
+                    input_start_emitted = true;
+                }
+            }
+            osc::OscEvent::ExecStart => {
+                let _ = app.emit(evt, serde_json::json!({ "execStart": true }));
+            }
             osc::OscEvent::ExecEnd(code) => {
                 if let Some(cmd) = cur_cmd.take() {
                     // Definitive dedup: skip emitting if this is the same command we

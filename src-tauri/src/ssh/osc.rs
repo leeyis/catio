@@ -6,6 +6,7 @@
 #[derive(Debug, PartialEq, Clone)]
 pub enum OscEvent {
     CommandLine(String),
+    InputStart,
     ExecStart,
     ExecEnd(Option<i32>),
     Cwd(String),
@@ -62,8 +63,12 @@ impl Scanner {
         };
 
         // Match on the first token (the command letter).
-        if rest == "A" || rest == "B" {
-            // prompt start/end -> no event
+        if rest == "A" {
+            // prompt start -> no event
+        } else if rest == "B" {
+            // prompt end / input start -> emit so the UI knows the prompt is done
+            // and the cursor now marks where user input begins.
+            events.push(OscEvent::InputStart);
         } else if rest == "C" {
             events.push(OscEvent::ExecStart);
         } else if rest == "D" {
@@ -211,6 +216,17 @@ mod tests {
         let (_v, ev) = sc.feed(b"\x1b]133;C\x07\x1b]133;D;2\x07");
         assert!(ev.contains(&OscEvent::ExecStart));
         assert!(ev.contains(&OscEvent::ExecEnd(Some(2))));
+    }
+    #[test] fn input_start_event_and_stripped() {
+        let mut sc = Scanner::new("N");
+        // 633;B (prompt end / input start) must emit InputStart and be stripped.
+        let (vis, ev) = sc.feed(b"$ \x1b]633;B\x07");
+        assert_eq!(s(&vis), "$ ");
+        assert!(ev.contains(&OscEvent::InputStart));
+        // 633;A (prompt start) must NOT emit an event but is still stripped.
+        let (vis2, ev2) = sc.feed(b"\x1b]633;A\x07x");
+        assert_eq!(s(&vis2), "x");
+        assert!(!ev2.iter().any(|e| matches!(e, OscEvent::InputStart)));
     }
     #[test] fn cwd_event() {
         let mut sc = Scanner::new("N");
