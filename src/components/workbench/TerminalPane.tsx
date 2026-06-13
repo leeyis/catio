@@ -329,9 +329,22 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
         try { termResize(sessionId, chanIdRef.current, term.cols, term.rows) } catch { /* best-effort */ }
       }
     }
+    // document.fonts.ready 只等待「已发起请求」的字体,而 xterm 在 open 渲染时才请求
+    // Geist Mono,ready 可能已先 resolve(竞态)→ 重测扑空(实测:初次仍被裁,手动 resize
+    // 才好)。改用 document.fonts.load 主动发起并等待该具体字体加载完成后再重测 + fit;
+    // ready 作为兜底。两条路径都调用 refitToFont(幂等)。
     try {
-      const fonts = (document as unknown as { fonts?: { ready?: Promise<unknown> } }).fonts
-      if (fonts?.ready && typeof fonts.ready.then === 'function') fonts.ready.then(refitToFont)
+      const fonts = (document as unknown as {
+        fonts?: { ready?: Promise<unknown>; load?: (font: string) => Promise<unknown> }
+      }).fonts
+      if (fonts) {
+        // 从字体栈取首个家族名(去引号)拼成 CSS font shorthand 主动加载。
+        const family = monoFontStack(prefs.monoFont).split(',')[0].trim().replace(/^['"]|['"]$/g, '')
+        if (typeof fonts.load === 'function') {
+          fonts.load(`${prefs.termFontPx}px "${family}"`).then(refitToFont).catch(() => { /* 系统/通用字体无需加载 */ })
+        }
+        if (fonts.ready && typeof fonts.ready.then === 'function') fonts.ready.then(refitToFont)
+      }
     } catch { /* no FontFaceSet (e.g. jsdom) */ }
 
     // ---- 历史补全:输入捕获 + 候选 ----
