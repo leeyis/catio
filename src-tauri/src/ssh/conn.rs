@@ -208,7 +208,14 @@ async fn connect_core(
     ),
     SshError,
 > {
-    let config = Arc::new(client::Config::default());
+    // 启用 SSH keepalive:russh 默认 keepalive_interval=None、inactivity_timeout=None,
+    // 即空闲时不发任何保活包,服务端的 SSH 空闲断开策略一触发连接就掉线(用户停下查看
+    // 命令候选时尤为明显)。每 30s 发一次 keepalive 维持空闲连接;keepalive_max 用默认值
+    // (连续多次无响应才判定断开)。注:这维持的是 SSH 传输层活跃,不影响远端 shell 的
+    // TMOUT(那是终端输入空闲计时,需服务端配置)。
+    let mut config = client::Config::default();
+    config.keepalive_interval = Some(std::time::Duration::from_secs(30));
+    let config = Arc::new(config);
 
     match &args.jump {
         // ── 直连路径（与历史行为等价）─────────────────────────────────────
