@@ -540,9 +540,8 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
 
     // Selection toolbar (copy / ask AI) — driven by xterm's own selection.
     let selBarTimer: ReturnType<typeof setTimeout> | null = null
-    // 防抖:拖选过程中 onSelectionChange 会随选区增长连续触发,若每次都 setSelBar,工具栏会
-    // 跟着选区"跳一下"(先在文本中间闪现、再跳到上方)。改为:每次变化先隐藏,选区稳定
-    // ~150ms 后只在选区上方弹一次。
+    // 之前用 onSelectionChange + 防抖仍会跳:拖选/结算过程中它会多次触发,位置不稳。改为只在
+    // 鼠标松开(选区最终确定)那一刻定位并弹一次;onSelectionChange 仅负责"选区被清空时隐藏"。
     const showSelBar = () => {
       const text = term.getSelection()
       if (!text || !text.trim() || !rootRef.current || !hostEl) { setSelBar(null); return }
@@ -573,13 +572,20 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
       const top = Math.max((hostRect.top + selTopPx - rootRect.top) / scale, 24)
       setSelBar({ left, top, text: text.trim() })
     }
+    // 鼠标松开 = 选区确定 → 只此时定位弹一次。延一拍让 xterm 在其自身 mouseup 里结算完
+    // 最终选区。监听挂在 hostEl(内层 xterm 容器)上,选区在终端内释放即触发。
+    const onSelMouseUp = () => {
+      if (selBarTimer) clearTimeout(selBarTimer)
+      selBarTimer = setTimeout(() => { selBarTimer = null; showSelBar() }, 0)
+    }
+    hostEl.addEventListener('mouseup', onSelMouseUp)
+    // onSelectionChange 只在选区被清空(点击别处等)时隐藏工具栏;显示交给 mouseup。
     term.onSelectionChange(() => {
-      if (selBarTimer) { clearTimeout(selBarTimer); selBarTimer = null }
-      // 拖选中先隐藏(避免跟随跳动);无选区直接返回,不再排程。
-      setSelBar(null)
       const text = term.getSelection()
-      if (!text || !text.trim()) return
-      selBarTimer = setTimeout(() => { selBarTimer = null; showSelBar() }, 150)
+      if (!text || !text.trim()) {
+        if (selBarTimer) { clearTimeout(selBarTimer); selBarTimer = null }
+        setSelBar(null)
+      }
     })
 
     if (live && sessionId) {
@@ -655,6 +661,7 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
       if (extractTimer) clearTimeout(extractTimer)
       if (selBarTimer) clearTimeout(selBarTimer)
       clearTimeout(fontSettleTimer)
+      try { hostEl.removeEventListener('mouseup', onSelMouseUp) } catch { /* best-effort */ }
       try { inputMarkerRef.current?.marker?.dispose() } catch { /* best-effort */ }
       inputMarkerRef.current = null
       if (ro) ro.disconnect()
