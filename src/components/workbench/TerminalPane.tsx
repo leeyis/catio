@@ -539,7 +539,11 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
     }
 
     // Selection toolbar (copy / ask AI) — driven by xterm's own selection.
-    term.onSelectionChange(() => {
+    let selBarTimer: ReturnType<typeof setTimeout> | null = null
+    // 防抖:拖选过程中 onSelectionChange 会随选区增长连续触发,若每次都 setSelBar,工具栏会
+    // 跟着选区"跳一下"(先在文本中间闪现、再跳到上方)。改为:每次变化先隐藏,选区稳定
+    // ~150ms 后只在选区上方弹一次。
+    const showSelBar = () => {
       const text = term.getSelection()
       if (!text || !text.trim() || !rootRef.current || !hostEl) { setSelBar(null); return }
       const root = rootRef.current
@@ -568,6 +572,14 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
       // it doesn't get clipped off the top of the surface.
       const top = Math.max((hostRect.top + selTopPx - rootRect.top) / scale, 24)
       setSelBar({ left, top, text: text.trim() })
+    }
+    term.onSelectionChange(() => {
+      if (selBarTimer) { clearTimeout(selBarTimer); selBarTimer = null }
+      // 拖选中先隐藏(避免跟随跳动);无选区直接返回,不再排程。
+      setSelBar(null)
+      const text = term.getSelection()
+      if (!text || !text.trim()) return
+      selBarTimer = setTimeout(() => { selBarTimer = null; showSelBar() }, 150)
     })
 
     if (live && sessionId) {
@@ -641,6 +653,7 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
     return () => {
       disposed = true
       if (extractTimer) clearTimeout(extractTimer)
+      if (selBarTimer) clearTimeout(selBarTimer)
       clearTimeout(fontSettleTimer)
       try { inputMarkerRef.current?.marker?.dispose() } catch { /* best-effort */ }
       inputMarkerRef.current = null
