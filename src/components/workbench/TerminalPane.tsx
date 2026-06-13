@@ -946,19 +946,24 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
         </div>
       )}
 
-      {/* selection toolbar — copy / ask AI */}
+      {/* selection toolbar — copy / ask AI。
+          定位与动画分离:外层只用 transform:translate(-50%,-100%) 定位且不带动画;内层才带
+          pop-in。否则 popIn 的关键帧(transform: scale(.98)→none)会在动画期间覆盖定位用的
+          translate,造成工具栏「先在左上角锚定、动画结束再跳到居中悬浮」的跳动。 */}
       {selBar && (
-        <div className="row gap2 pop-in" style={{ position: 'absolute', left: selBar.left, top: selBar.top - 8, transform: 'translate(-50%, -100%)', zIndex: 25, background: 'var(--surface-elevated)', border: '1px solid var(--border-hairline-alt)', borderRadius: 9, boxShadow: 'var(--shadow-dropdown)', padding: 3 }}>
-          <button className="row gap5 sel-pill" onMouseDown={e => e.preventDefault()} onClick={copySel}
-            style={{ height: 27, padding: '0 10px', borderRadius: 7, fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>
-            <Icon name="copy" size={13} /> {t('workbench.copy')}
-          </button>
-          <div style={{ width: 1, background: 'var(--border-hairline)', margin: '3px 1px' }} />
-          <button className="row gap5 sel-pill" onMouseDown={e => e.preventDefault()} onClick={askSelAI}
-            style={{ height: 27, padding: '0 10px', borderRadius: 7, fontSize: 12, fontWeight: 600, color: 'var(--accent-primary)' }}>
-            <Icon name="wand" size={13} /> {t('workbench.askAI')}
-          </button>
-          <span style={{ position: 'absolute', left: '50%', bottom: -5, transform: 'translateX(-50%) rotate(45deg)', width: 8, height: 8, background: 'var(--surface-elevated)', borderRight: '1px solid var(--border-hairline-alt)', borderBottom: '1px solid var(--border-hairline-alt)' }} />
+        <div style={{ position: 'absolute', left: selBar.left, top: selBar.top - 8, transform: 'translate(-50%, -100%)', zIndex: 25 }}>
+          <div className="row gap2 pop-in" style={{ position: 'relative', background: 'var(--surface-elevated)', border: '1px solid var(--border-hairline-alt)', borderRadius: 9, boxShadow: 'var(--shadow-dropdown)', padding: 3 }}>
+            <button className="row gap5 sel-pill" onMouseDown={e => e.preventDefault()} onClick={copySel}
+              style={{ height: 27, padding: '0 10px', borderRadius: 7, fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>
+              <Icon name="copy" size={13} /> {t('workbench.copy')}
+            </button>
+            <div style={{ width: 1, background: 'var(--border-hairline)', margin: '3px 1px' }} />
+            <button className="row gap5 sel-pill" onMouseDown={e => e.preventDefault()} onClick={askSelAI}
+              style={{ height: 27, padding: '0 10px', borderRadius: 7, fontSize: 12, fontWeight: 600, color: 'var(--accent-primary)' }}>
+              <Icon name="wand" size={13} /> {t('workbench.askAI')}
+            </button>
+            <span style={{ position: 'absolute', left: '50%', bottom: -5, transform: 'translateX(-50%) rotate(45deg)', width: 8, height: 8, background: 'var(--surface-elevated)', borderRight: '1px solid var(--border-hairline-alt)', borderBottom: '1px solid var(--border-hairline-alt)' }} />
+          </div>
         </div>
       )}
 
