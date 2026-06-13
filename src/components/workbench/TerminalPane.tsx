@@ -64,10 +64,16 @@ function hostFromSub(sub: string): string {
 
 // 当前主机的 shell 历史 → ShellHistoryEntry[]。复用 App.tsx 的写入口径:
 // target === host || (conn && target === conn.name)。
+// 排除执行失败(已知非零退出码)的指令——未知(undefined)与成功(0)保留;在去重之前
+// 过滤,使「曾成功、最近一次失败」的命令仍能凭其成功记录被补全。
 function loadShellHistory(host: string, conn: Connection | null): ShellHistoryEntry[] {
   const connName = conn ? conn.name : null
   return loadHistory()
-    .filter(h => h.kind === 'shell' && (h.target === host || (connName != null && h.target === connName)))
+    .filter(h =>
+      h.kind === 'shell'
+      && (h.exitCode === undefined || h.exitCode === 0)
+      && (h.target === host || (connName != null && h.target === connName)),
+    )
     .map(h => ({ text: h.text, ts: typeof h.ts === 'number' ? h.ts : 0 }))
 }
 
@@ -309,6 +315,15 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
     // 字体就绪后重新 fit 一次并把新尺寸推给 PTY。系统字体场景 fonts.ready 立即 resolve,无副作用。
     const refitToFont = () => {
       if (disposed) return
+      try {
+        // xterm 仅在 open / 字体选项「变化」时重新测量 cell 尺寸,且 OptionsService 对相同值
+        // 短路(rawOptions[k] !== v 才 fire onOptionChange),web font 异步加载完成不会自动重测。
+        // 用一次「改值再改回」强制 CharSizeService 用已加载的字体重新测量;否则 rows 仍按回退
+        // 字体的旧(偏小)cell 高度计算,导致最底一行超出容器被裁。
+        const f = monoFontStack(prefs.monoFont)
+        term.options.fontFamily = f + ' '
+        term.options.fontFamily = f
+      } catch { /* mocked terminal / no options */ }
       try { fitAddon.fit() } catch { /* no layout */ }
       if (live && sessionId && chanIdRef.current) {
         try { termResize(sessionId, chanIdRef.current, term.cols, term.rows) } catch { /* best-effort */ }
