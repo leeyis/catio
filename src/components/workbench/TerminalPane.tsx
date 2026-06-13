@@ -842,9 +842,15 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
         </div>
       )}
 
-      {/* terminal surface — xterm.js host */}
-      <div ref={xtermHost} className="grow" onMouseDown={() => setSelBar(null)}
-        style={{ overflow: 'hidden', background: 'var(--term-bg)', padding: '12px 14px', fontFamily: monoFontStack(prefs.monoFont), fontSize: prefs.termFontPx, lineHeight: 1.65, minHeight: 0 }} />
+      {/* terminal surface — 外层 wrapper 承载 padding/背景/overflow,xterm 开进无 padding 的
+          内层 div。让 padding 完全脱离 xterm 度量的元素,杜绝 padding 干扰 FitAddon 的高度
+          计算导致最底一行被裁;内层 clientWidth/Height 即真实终端区域,浮层 cellW/cellH 换算
+          也随之精确对齐。 */}
+      <div className="grow col" onMouseDown={() => setSelBar(null)}
+        style={{ overflow: 'hidden', background: 'var(--term-bg)', padding: '12px 14px', minHeight: 0 }}>
+        <div ref={xtermHost} className="grow"
+          style={{ minHeight: 0, overflow: 'hidden', fontFamily: monoFontStack(prefs.monoFont), fontSize: prefs.termFontPx, lineHeight: 1.65 }} />
+      </div>
 
       {/* 历史补全候选下拉(仅 live + 输入激活 + 有匹配时显示) */}
       {live && suggest && (
