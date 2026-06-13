@@ -309,36 +309,37 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
     term.open(hostEl)
     try { fitAddon.fit() } catch { /* jsdom has no layout */ }
 
-    // 字体度量时序修正:首次 fit 发生在等宽 web 字体加载完成之前,xterm 用回退字体
-    // 测得的 cell 高度偏小 → 算出的 rows 偏多;字体就绪后 cell 变高但 rows 不会自动
-    // 重算,导致最底一行超出容器被 overflow:hidden 裁切(用户报告的"命令被下边框遮挡")。
-    // 字体就绪后重新 fit 一次并把新尺寸推给 PTY。系统字体场景 fonts.ready 立即 resolve,无副作用。
+    // 底部命令被裁的根因:首次 fit 发生在等宽 web 字体(Geist Mono)加载完成之前,xterm 用
+    // 回退字体测得的 cell 高度偏小 → 算出的 rows 偏多;字体加载后 cell 变高但 rows 不会自动
+    // 重算,最底一行超出容器被 overflow:hidden 裁掉。短输出时多出的底行是空的、看不出来,
+    // 长输出填满才暴露(伴随纵向滚动条);手动 resize 触发 fit 重算即恢复。
     const refitToFont = () => {
       if (disposed) return
       try {
-        // xterm 仅在 open / 字体选项「变化」时重新测量 cell 尺寸,且 OptionsService 对相同值
-        // 短路(rawOptions[k] !== v 才 fire onOptionChange),web font 异步加载完成不会自动重测。
-        // 用一次「改值再改回」强制 CharSizeService 用已加载的字体重新测量;否则 rows 仍按回退
-        // 字体的旧(偏小)cell 高度计算,导致最底一行超出容器被裁。
+        // xterm 仅在 open / 字体选项「变化」时重测 cell(OptionsService 对相同值短路:
+        // rawOptions[k] !== v 才 fire onOptionChange),web font 异步加载完成不会自动重测。
+        // 用一次「改值再改回」强制 CharSizeService 用已加载的字体重新测量。
         const f = monoFontStack(prefs.monoFont)
-        term.options.fontFamily = f + ' '
-        term.options.fontFamily = f
+        if (term.options) { term.options.fontFamily = f + ' '; term.options.fontFamily = f }
       } catch { /* mocked terminal / no options */ }
-      try { fitAddon.fit() } catch { /* no layout */ }
-      if (live && sessionId && chanIdRef.current) {
-        try { termResize(sessionId, chanIdRef.current, term.cols, term.rows) } catch { /* best-effort */ }
-      }
+      // 重测后 renderService 的 dimensions 可能在下一帧才更新,延到下一帧 fit 才读得到新 cell 高度。
+      const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (cb: () => void) => setTimeout(cb, 16)
+      raf(() => {
+        if (disposed) return
+        try { fitAddon.fit() } catch { /* no layout */ }
+        if (live && sessionId && chanIdRef.current) {
+          try { termResize(sessionId, chanIdRef.current, term.cols, term.rows) } catch { /* best-effort */ }
+        }
+      })
     }
-    // document.fonts.ready 只等待「已发起请求」的字体,而 xterm 在 open 渲染时才请求
-    // Geist Mono,ready 可能已先 resolve(竞态)→ 重测扑空(实测:初次仍被裁,手动 resize
-    // 才好)。改用 document.fonts.load 主动发起并等待该具体字体加载完成后再重测 + fit;
-    // ready 作为兜底。两条路径都调用 refitToFont(幂等)。
+    // 触发时机:① document.fonts.load 主动发起并等待 Geist Mono 加载(document.fonts.ready 只
+    // 等「已发起请求」的字体,xterm 在 open 才请求,ready 易先 resolve 而扑空);② ready 兜底;
+    // ③ 延时兜底,复刻"手动 resize",覆盖前两条因竞态/不支持而错过的情况。refitToFont 幂等。
     try {
       const fonts = (document as unknown as {
         fonts?: { ready?: Promise<unknown>; load?: (font: string) => Promise<unknown> }
       }).fonts
       if (fonts) {
-        // 从字体栈取首个家族名(去引号)拼成 CSS font shorthand 主动加载。
         const family = monoFontStack(prefs.monoFont).split(',')[0].trim().replace(/^['"]|['"]$/g, '')
         if (typeof fonts.load === 'function') {
           fonts.load(`${prefs.termFontPx}px "${family}"`).then(refitToFont).catch(() => { /* 系统/通用字体无需加载 */ })
@@ -346,6 +347,7 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
         if (fonts.ready && typeof fonts.ready.then === 'function') fonts.ready.then(refitToFont)
       }
     } catch { /* no FontFaceSet (e.g. jsdom) */ }
+    const fontSettleTimer = setTimeout(refitToFont, 400)
 
     // ---- 历史补全:输入捕获 + 候选 ----
     // 节流计时器(~40ms),onData 触发提取时合并。
@@ -628,6 +630,7 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
     return () => {
       disposed = true
       if (extractTimer) clearTimeout(extractTimer)
+      clearTimeout(fontSettleTimer)
       try { inputMarkerRef.current?.marker?.dispose() } catch { /* best-effort */ }
       inputMarkerRef.current = null
       if (ro) ro.disconnect()
