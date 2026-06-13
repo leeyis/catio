@@ -50,6 +50,10 @@ vi.mock('@xterm/xterm', () => ({
 vi.mock('@xterm/addon-fit', () => ({
   FitAddon: class { fit() {} activate() {} dispose() {} },
 }))
+// addon-webgl touches a real canvas at module load (jsdom has no WebGL) — stub it.
+vi.mock('@xterm/addon-webgl', () => ({
+  WebglAddon: class { onContextLoss() {} activate() {} dispose() {} },
+}))
 // xterm.css import — stub so the bundler/test doesn't choke
 vi.mock('@xterm/xterm/css/xterm.css', () => ({}))
 

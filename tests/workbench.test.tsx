@@ -17,6 +17,7 @@ vi.mock('@xterm/xterm', () => ({
   },
 }))
 vi.mock('@xterm/addon-fit', () => ({ FitAddon: class { fit() {} activate() {} dispose() {} } }))
+vi.mock('@xterm/addon-webgl', () => ({ WebglAddon: class { onContextLoss() {} activate() {} dispose() {} } }))
 vi.mock('@xterm/xterm/css/xterm.css', () => ({}))
 
 const wrap = (ui: React.ReactNode) => render(<LanguageProvider><DataProvider>{ui}</DataProvider></LanguageProvider>)

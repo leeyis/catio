@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
+import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
 import { Icon } from '../Icon'
 import { ConnGlyph, StatusDot } from '../atoms'
@@ -297,6 +298,10 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
       theme: { background: cssVar('--term-bg', '#0B1020'), foreground: cssVar('--term-fg', '#E2E8F0') },
       fontFamily: monoFontStack(prefs.monoFont),
       fontSize: prefs.termFontPx,
+      // lineHeight 1.0 + letterSpacing 0:行紧贴、字距为零,框线字符上下/左右无缝相连,
+      // 列严格对齐(对标 MobaXterm 的方正观感);WebGL renderer 才能真正吃到这套度量。
+      lineHeight: 1.0,
+      letterSpacing: 0,
       cursorBlink: true,
     })
     termRef.current = term
@@ -307,6 +312,16 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
     searchAddonRef.current = searchAddon
     try { term.loadAddon(searchAddon) } catch { /* mocked terminal in tests */ }
     term.open(hostEl)
+    // WebGL renderer:把每个字符严格画进等宽 cell 网格,并对 ─│┼ 及 +|=- 等框线字符做矢量
+    // 自绘填满 cell,得到「方方正正、边框连续、列严格对齐」的专业终端观感——这是 xterm 默认
+    // DOM renderer 做不到的(DOM 靠字体在文档流里自然排版,既受外部 CSS 污染又不自绘框线)。
+    // 必须在 open() 之后挂载。上下文丢失(GPU reset / 标签后台化)时 dispose,xterm 自动
+    // 回退到 DOM renderer;WebGL 完全不可用的环境(极少)走 catch,同样留在 DOM renderer。
+    try {
+      const webgl = new WebglAddon()
+      webgl.onContextLoss(() => { try { webgl.dispose() } catch { /* already disposed */ } })
+      term.loadAddon(webgl)
+    } catch { /* no WebGL → fall back to default DOM renderer */ }
     try { fitAddon.fit() } catch { /* jsdom has no layout */ }
 
     // 底部命令被裁的根因:首次 fit 发生在等宽 web 字体(Geist Mono)加载完成之前,xterm 用
@@ -880,7 +895,7 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
       <div className="grow col" onMouseDown={() => setSelBar(null)}
         style={{ overflow: 'hidden', background: 'var(--term-bg)', padding: '12px 14px', minHeight: 0 }}>
         <div ref={xtermHost} className="grow"
-          style={{ minHeight: 0, overflow: 'hidden', fontFamily: monoFontStack(prefs.monoFont), fontSize: prefs.termFontPx, lineHeight: 1.65 }} />
+          style={{ minHeight: 0, overflow: 'hidden', fontFamily: monoFontStack(prefs.monoFont), fontSize: prefs.termFontPx, lineHeight: 1 }} />
       </div>
 
       {/* 历史补全候选下拉(仅 live + 输入激活 + 有匹配时显示) */}
@@ -921,7 +936,7 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
             pointerEvents: 'none',
             fontFamily: monoFontStack(prefs.monoFont),
             fontSize: prefs.termFontPx,
-            lineHeight: 1.65,
+            lineHeight: 1,
             color: 'var(--text-faint)',
             opacity: 0.6,
             whiteSpace: 'pre',
