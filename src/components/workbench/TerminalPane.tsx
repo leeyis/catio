@@ -485,13 +485,21 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
     if (typeof term.attachCustomKeyEventHandler === 'function') {
       term.attachCustomKeyEventHandler((ev) => {
         if (ev.type !== 'keydown') return true
+        // 吞键:除了让 xterm 不处理(return false),还必须 preventDefault 阻止浏览器默认行为
+        // ——尤其 Tab 的默认是「焦点移到下一个可聚焦元素」,否则补全后焦点会跳到右侧 Agent 面板;
+        // stopPropagation 阻止冒泡到可能切换面板的全局快捷键。最后把焦点收回终端。
+        const swallow = () => {
+          try { ev.preventDefault(); ev.stopPropagation() } catch { /* noop */ }
+          try { term.focus() } catch { /* best-effort */ }
+          return false
+        }
         // Phase 2:幽灵文本可见时,→ 或 Ctrl+E 接受 ghost 串(写入 PTY 并吞键)。
         const gh = ghostRef.current
         if (gh && gh.text && (ev.key === 'ArrowRight' || (ev.ctrlKey && (ev.key === 'e' || ev.key === 'E')))) {
           termWrite0(gh.text)
           setGhost(null)
           setSuggest(null)
-          return false
+          return swallow()
         }
         const sg = suggestRef.current
         if (!sg || !sg.items.length) return true // 候选不可见时一律放行
@@ -499,10 +507,10 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
         switch (ev.key) {
           case 'ArrowUp':
             setSuggestIndex(i => (i - 1 + sg.items.length) % sg.items.length)
-            return false
+            return swallow()
           case 'ArrowDown':
             setSuggestIndex(i => (i + 1) % sg.items.length)
-            return false
+            return swallow()
           case 'Enter':
           case 'Tab': {
             // 只补全不执行:写入「选中项相对当前输入的剩余差额」。
@@ -516,14 +524,14 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
             }
             setSuggest(null)
             setGhost(null)
-            return false
+            return swallow()
           }
           case 'Escape':
             // 忽略本次输入,直到输入再次变化。
             suppressedInputRef.current = currentInputRef.current
             setSuggest(null)
             setGhost(null)
-            return false
+            return swallow()
           default:
             return true
         }
@@ -571,6 +579,9 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
         chanIdRef.current = openedChanId
         if (disposed) { termClose(sessionId, openedChanId); chanIdRef.current = null; return }
         onChannelRef.current?.(sessionId, openedChanId)
+        // 连接建立后立即激活终端焦点,免去用户手动点一下终端才能输入(仅当本 pane 是当前
+        // 显示的 tab 时,避免在后台打开时抢焦点)。
+        if (active) { try { term.focus() } catch { /* best-effort */ } }
         unlisten = await listen<TermEvent>(`term://${openedChanId}`, (p) => {
           if (typeof p.bytesBase64 === 'string') {
             // 同帧可能携带 inputStart(此时这些字节即提示符本身)。先 write 提示符,
