@@ -665,7 +665,10 @@ function AboutSettings() {
       <div className="row gap16" style={{ padding: 20, border: '1px solid var(--border-hairline)', borderRadius: 16, background: 'var(--surface-subtle)' }}>
         <BrandMark size={56} style={{ borderRadius: 18 }} />
         <div className="col" style={{ gap: 4 }}>
-          <span style={{ fontSize: 18, fontWeight: 700, letterSpacing: '-0.3px' }}>Catio</span>
+          <span className="row gap8" style={{ alignItems: 'baseline' }}>
+            <span style={{ fontSize: 18, fontWeight: 700, letterSpacing: '-0.3px' }}>Catio</span>
+            <span className="mono" style={{ fontSize: 12.5, fontWeight: 500, color: 'var(--text-faint)' }}>v{__APP_VERSION__}</span>
+          </span>
           <span style={{ fontSize: 12.5, color: 'var(--text-secondary)', lineHeight: 1.5, maxWidth: 420 }}><Trans i18nKey="settings.aboutDesc" components={{ b: <b /> }} /></span>
           <div className="row gap6" style={{ marginTop: 6 }}><span className="chip mono">Tauri</span><span className="chip mono">Rust</span><span className="chip mono">40+ databases</span><span className="chip mono">15 MB</span></div>
         </div>
@@ -697,11 +700,6 @@ export function SettingsView({ theme, onTheme, onClose, authEnabled, users, curr
               </button>
             )
           })}
-        </div>
-        <div className="grow" />
-        <div className="row gap8" style={{ padding: '10px 10px', background: 'var(--surface-sunken)', borderRadius: 12 }}>
-          <BrandMark size={30} style={{ borderRadius: 9 }} />
-          <div className="col" style={{ lineHeight: 1.25 }}><span style={{ fontSize: 12, fontWeight: 600 }}>Catio</span><span className="mono" style={{ fontSize: 10, color: 'var(--text-faint)' }}>v0.1.0</span></div>
         </div>
       </div>
 
