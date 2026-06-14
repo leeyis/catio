@@ -236,6 +236,10 @@
     "broadcastNeedsAuth": "需认证",
     "broadcastConnect": "连接",
     "broadcastFailed": "连接失败",
+    "broadcastStatusRunning": "执行中",
+    "broadcastStatusDone": "成功",
+    "broadcastStatusError": "失败",
+    "broadcastDetailHint": "明细请打开对应节点标签查看",
     "connected": "已连接",
     "disconnected": "未连接",
     "broadcastRisk": {

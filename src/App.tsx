@@ -703,6 +703,36 @@ export default function App() {
     if (c) void openConn(c)
   }
 
+  // tabs/chanMap 的最新值镜像到 ref —— sendToPty 在 await 轮询期间需读到刷新后的
+  // chan（自动建连的新标签 PTY 通道注册有延迟），闭包里的 state 会过期，必须用 ref。
+  const tabsRef = useRef(tabs)
+  tabsRef.current = tabs
+  const chanMapRef = useRef(chanMap)
+  chanMapRef.current = chanMap
+
+  // sendToPty — 把命令写进目标会话的交互式 PTY，与用户手动输入完全同一通道：
+  // 命令与执行结果会出现在该会话对应的终端标签里（广播明细去标签看）。命令末尾补 \r
+  // 触发执行。自动建连的新标签 PTY 通道需片刻才注册，故轮询等待最多 ~6s。
+  async function sendToPty(sessionId: string, cmd: string): Promise<boolean> {
+    const resolveChan = (): string | undefined => {
+      const tab = tabsRef.current.find(tb => tb.sessionId === sessionId && chanMapRef.current[tb.id])
+      return tab ? chanMapRef.current[tab.id] : undefined
+    }
+    let chan = resolveChan()
+    for (let i = 0; i < 60 && !chan; i++) {
+      await new Promise(r => setTimeout(r, 100))
+      chan = resolveChan()
+    }
+    if (!chan) return false
+    try {
+      const { termWrite } = await import('./services/ssh')
+      await termWrite(sessionId, chan, btoa(unescape(encodeURIComponent(cmd + '\r'))))
+      return true
+    } catch {
+      return false
+    }
+  }
+
   // If a closing tab held a live session that no remaining tab shares, drop it.
   function reapSession(closing: Tab | undefined, remaining: Tab[]) {
     // Abort any in-flight agent stream + drop this tab's current-conversation map.
@@ -1264,7 +1294,7 @@ export default function App() {
                     return (
                       <div key={tab.id} style={{ height: '100%', display: isShown ? 'flex' : 'none', position: 'absolute', inset: 0 }}>
                         {tab.kind === 'terminal' && (
-                          <TerminalPane conn={tabConn} sessionId={tab.sessionId} active={isShown} resolveSessionId={resolveSessionId} mxCandidates={mxCandidates} ensureSession={ensureSession} onConnectTarget={onConnectTarget} onChannel={(_sid, chan) => setChanMap(m => { const n = { ...m }; if (chan) n[tab.id] = chan; else delete n[tab.id]; return n })} />
+                          <TerminalPane conn={tabConn} sessionId={tab.sessionId} active={isShown} resolveSessionId={resolveSessionId} mxCandidates={mxCandidates} ensureSession={ensureSession} onConnectTarget={onConnectTarget} sendToPty={sendToPty} onChannel={(_sid, chan) => setChanMap(m => { const n = { ...m }; if (chan) n[tab.id] = chan; else delete n[tab.id]; return n })} />
                         )}
                         {tab.kind === 'sql' && tabConn && (
                           <DbWorkbench conn={tabConn} density={density} active={isShown} />

@@ -1,5 +1,5 @@
 /* ported from ref-ui/_extract/blob7.txt — chrome verbatim; middle surface swapped to xterm.js (A10) */
-import { useState, useMemo, useRef, useEffect } from 'react'
+import { useState, useMemo, useRef, useEffect, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
@@ -9,10 +9,10 @@ import '@xterm/xterm/css/xterm.css'
 import { Icon } from '../Icon'
 import { ConnGlyph, StatusDot } from '../atoms'
 import { useData } from '../../state/DataContext'
-import { termOpen, termWrite, termResize, termClose, listen, getTermBuffer, multiexecRun } from '../../services/ssh'
+import { termOpen, termWrite, termResize, termClose, listen, getTermBuffer, onHistory } from '../../services/ssh'
 import { usePrefs, monoFontStack } from '../../state/preferences'
 import { registerTermBuffer, unregisterTermBuffer } from '../../services/termBuffers'
-import type { Connection, TermLine as TermLineType, MultiExecTarget } from '../../services/types'
+import type { Connection, TermLine as TermLineType } from '../../services/types'
 import { loadHistory } from '../../state/history'
 import { planHistoryCompletion, type ShellHistoryEntry, type HistoryMatch } from '../shell/historyCompletion'
 import { HistorySuggest } from '../shell/HistorySuggest'
@@ -31,10 +31,8 @@ export interface TerminalPaneProps {
    */
   active?: boolean
   /**
-   * ORCH seam: maps a connection id to its live session id.
-   * When provided, the Multi-Exec broadcast bar uses real multiexecRun IPC.
-   * When absent (pre-ORCH), broadcast stays UI-only (existing behavior).
-   * ORCH will pass this once the connection→session map is managed centrally.
+   * 把连接 id 映射到其 live session id。用于广播候选显示「已连接/未连接」状态；
+   * 缺省（demo）时回退到候选自身 status。
    */
   resolveSessionId?: (connId: string) => string | undefined
   /**
@@ -49,6 +47,11 @@ export interface TerminalPaneProps {
   ensureSession?: (connId: string) => Promise<string | 'needs-auth' | 'failed'>
   /** 结果面板「连接」按钮：走正常交互建连流程（会弹认证 modal）。 */
   onConnectTarget?: (connId: string) => void
+  /**
+   * 把命令写进指定会话的交互式 PTY（与手动输入同一通道，命令/结果出现在该会话的终端标签）。
+   * 由 App 解析该会话的 chan 并 termWrite；自动建连的新标签通道注册有延迟，内部会轮询等待。
+   */
+  sendToPty?: (sessionId: string, cmd: string) => Promise<boolean>
   /**
    * Surfaces the live PTY channel id to App so it can write into the active
    * terminal (e.g. snippet/history "insert"). Called with the chanId once
@@ -143,18 +146,24 @@ function termLinesToText(lines: TermLineType[]): string {
     .join('\r\n')
 }
 
-// 本组件本地扩展的目标状态：在 MultiExecTarget('done'|'running'|'queued'|'error')之外
-// 增加 'needs-auth'（需交互认证、本次不参与 exec）与 'failed'（静默建连异常）两态。
-// 不改 types.ts，仅在本组件用本地联合类型表达广播结果面板的额外状态。
-type MxTargetState = MultiExecTarget['state'] | 'needs-auth' | 'failed'
-interface MxTarget extends Omit<MultiExecTarget, 'state'> {
-  state: MxTargetState
-  /** 对应的连接 id —— needs-auth 行的「连接」按钮用它建连。 */
-  connId?: string
+// 广播结果看板的单目标状态（不再持有命令输出明细——明细去对应节点的终端标签看）：
+//  running 执行中 / done 成功(exit 0) / error 失败(exit≠0) / needs-auth 需认证 / failed 通道异常。
+// 状态来源：写入 PTY 后由该会话的 history:// 事件回填 exitCode 与 durationMs。
+type MxState = 'running' | 'done' | 'error' | 'needs-auth' | 'failed'
+interface MxTarget {
+  /** 连接 id（同时作 key）。 */
+  id: string
+  connId: string
+  name: string
+  state: MxState
+  /** 退出码（history 事件回填，非零即失败）。 */
+  exitCode?: number
+  /** 执行耗时 ms（history 事件回填）。 */
+  durationMs?: number
 }
 type MxRunState = Record<string, MxTarget>
 
-export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCandidates, ensureSession, onConnectTarget, onChannel }: TerminalPaneProps) {
+export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCandidates, ensureSession, onConnectTarget, sendToPty, onChannel }: TerminalPaneProps) {
   const { t } = useTranslation()
   const D = useData()
   const { prefs } = usePrefs()
@@ -219,6 +228,9 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
   // The command typed into the broadcast bar (Multi-Exec).
   const [bcCmd, setBcCmd] = useState('')
   const [bcSending, setBcSending] = useState(false)
+  // 广播输入条的历史命令候选（参考终端命令补全的交互）。bcSuggestIdx=-1 表示未选中任何项。
+  const [bcSuggest, setBcSuggest] = useState<{ items: HistoryMatch[] } | null>(null)
+  const [bcSuggestIdx, setBcSuggestIdx] = useState(-1)
   // 确认网关：点发送先打开确认弹窗（含敏感检测结果），用户确认后才真正执行。
   const [bcConfirm, setBcConfirm] = useState<{ cmd: string; sensitive: boolean; reasons: RiskCode[]; targets: { id: string; name: string }[] } | null>(null)
 
@@ -236,81 +248,76 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
   /**
    * broadcastCommand — 真正执行一次广播（已通过确认网关）。
    *
-   * 对每个目标 connId 确保一个 ready 的 sessionId：
-   *  - 当前会话 selfId 用现有 sessionId prop 直接视为 ready；
-   *  - 其余调 ensureSession(connId)：返回 sessionId → 收进 ready；'needs-auth'/'failed'
-   *    → 写入结果面板对应状态、不参与 exec。
-   * 用广播时构建的 sessionId↔connId 映射回填结果（自动建连的新 session 不在旧 resolveSessionId
-   * 映射里，必须用这份当场构建的映射）。
+   * 执行模型：把命令写进每个目标会话的「交互式 PTY」——与用户手动在终端输入完全同一通道，
+   * 因此命令与执行结果会原样出现在各自的终端标签里（结果面板只看状态，明细去标签看）。
+   *  - 当前会话用本组件持有的 chanIdRef 直接写（保证落在当前可视终端）；
+   *  - 其余目标先 ensureSession（已连复用 / 未连自动开标签），再经 App.sendToPty 写入其 PTY；
+   *    'needs-auth'/'failed' 的目标写入结果面板对应状态、不参与执行。
+   * 状态/耗时来源：对每个就绪目标订阅其 history:// 事件，匹配本次命令后用 exitCode 与
+   * durationMs 回填（exit 0=成功，非零=失败）。
    */
   const broadcastCommandRef = useRef<(cmd: string) => Promise<void>>(async () => { /* no-op until wired */ })
   broadcastCommandRef.current = async (cmd: string) => {
-    if (!resolveSessionId) return
-
-    // 广播时构建的 sessionId → connId 映射（含当前会话），结果回填只认这份映射。
-    const sidToConn = new Map<string, string>()
-    const readySessionIds: string[] = []
+    // 就绪目标（已有可用 sessionId）：isSelf 标记当前会话（走本地 chan 写入）。
+    const ready: { connId: string; sid: string; isSelf: boolean }[] = []
     const initial: MxRunState = {}
 
-    // 当前会话：用现有 sessionId prop 直接视为 ready（不重连）。
+    // 当前会话（锁定目标）：直接视为 ready。
     if (sessionId && live) {
-      sidToConn.set(sessionId, selfId)
-      readySessionIds.push(sessionId)
-      initial[selfId] = { id: selfId, connId: selfId, name: conn?.name ?? t('workbench.currentSession'), state: 'running', out: '' }
+      ready.push({ connId: selfId, sid: sessionId, isSelf: true })
+      initial[selfId] = { id: selfId, connId: selfId, name: conn?.name ?? t('workbench.currentSession'), state: 'running' }
     }
 
-    // 其余目标：静默建连。先把所有目标置为 running，建连结果再逐个回写。
-    for (const connId of mxHosts) {
-      initial[connId] = { id: connId, connId, name: nameForConn(connId), state: 'running', out: '' }
-    }
-    setMxRunState(initial)
-
-    // 逐个 ensureSession（静默路径）。ready 的收集进 readySessionIds + 映射；
-    // needs-auth/failed 的写入结果面板对应状态，不参与 exec。
+    // 其余目标：静默建连（已连复用、未连自动开标签）。
     for (const connId of mxHosts) {
       let res: string | 'needs-auth' | 'failed'
       try {
-        res = ensureSession ? await ensureSession(connId) : (resolveSessionId(connId) ?? 'needs-auth')
+        res = ensureSession ? await ensureSession(connId) : (resolveSessionId?.(connId) ?? 'needs-auth')
       } catch {
         res = 'failed'
       }
       if (res === 'needs-auth' || res === 'failed') {
-        setMxRunState(prev => ({
-          ...prev,
-          [connId]: { ...(prev[connId] ?? { id: connId, connId, name: nameForConn(connId), out: '' }), state: res },
-        }))
+        initial[connId] = { id: connId, connId, name: nameForConn(connId), state: res }
       } else {
-        sidToConn.set(res, connId)
-        readySessionIds.push(res)
+        ready.push({ connId, sid: res, isSelf: false })
+        initial[connId] = { id: connId, connId, name: nameForConn(connId), state: 'running' }
       }
     }
+    setMxRunState(initial)
+    if (ready.length === 0) return
 
-    if (readySessionIds.length === 0) return
+    // 对每个就绪目标：先订阅 history（拿 exitCode/耗时），再把命令写进其 PTY。
+    for (const { connId, sid, isSelf } of ready) {
+      let resolved = false
+      let un: (() => void) | null = null
+      const settle = (state: MxState, exitCode?: number, durationMs?: number) => {
+        if (resolved) return
+        resolved = true
+        setMxRunState(prev => (prev[connId] ? { ...prev, [connId]: { ...prev[connId], state, exitCode, durationMs } } : prev))
+        if (un) un()
+      }
+      // 订阅该会话的 history：只认本次广播的命令（按 trim 后文本匹配），命中即回填并解除监听。
+      un = await onHistory(sid, (e) => {
+        if (resolved || e.command.trim() !== cmd.trim()) return
+        settle(e.exitCode === 0 ? 'done' : 'error', e.exitCode ?? undefined, e.durationMs)
+      })
+      if (resolved && un) un() // 订阅期间已命中的兜底
 
-    try {
-      const runId = await multiexecRun(readySessionIds, cmd)
-      const unlisten = await listen<{ sessionId: string; state: 'running' | 'done' | 'error'; chunk?: string }>(
-        'multiexec://' + runId,
-        (ev) => {
-          setMxRunState(prev => {
-            // 用广播时构建的 sessionId→connId 映射回填（自动建连的新 session 也在内）。
-            const connId = sidToConn.get(ev.sessionId) ?? ev.sessionId
-            const existing = prev[connId] ?? { id: connId, connId, name: nameForConn(connId), state: 'running', out: '' }
-            return {
-              ...prev,
-              [connId]: {
-                ...existing,
-                state: ev.state,
-                out: existing.out + (ev.chunk ?? ''),
-              },
-            }
-          })
-        },
-      )
-      // 兜底：30 秒后解除监听。
-      setTimeout(() => unlisten(), 30_000)
-    } catch {
-      // best-effort
+      // 写入 PTY：当前会话用本地 chan，其它会话经 App.sendToPty。
+      let ok = false
+      try {
+        if (isSelf && chanIdRef.current && sessionId) {
+          await termWrite(sessionId, chanIdRef.current, bytesToBase64(cmd + '\r'))
+          ok = true
+        } else if (sendToPty) {
+          ok = await sendToPty(sid, cmd)
+        }
+      } catch {
+        ok = false
+      }
+      if (!ok) settle('failed')
+      // 兜底：60s 内无 history 事件则停止监听（状态保持 running，明细去标签看）。
+      setTimeout(() => { if (!resolved && un) un() }, 60_000)
     }
   }
 
@@ -343,6 +350,42 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
     setBcSending(true)
     try { await broadcastCommandRef.current(pending.cmd) } finally { setBcSending(false) }
     setBcCmd('')
+  }
+
+  // 广播输入条：输入变化时刷新历史候选（参考终端补全），重置选中项。
+  function onBcCmdChange(v: string) {
+    setBcCmd(v)
+    const plan = planHistoryCompletion(v, loadShellHistory(matchHost, conn), { limit: 8 })
+    setBcSuggest(plan.items.length ? { items: plan.items } : null)
+    setBcSuggestIdx(-1)
+  }
+
+  // 接受第 i 条候选填入输入条并关闭候选。
+  function acceptBcSuggest(i: number) {
+    const sel = bcSuggest?.items[i]
+    if (!sel) return
+    setBcCmd(sel.text)
+    setBcSuggest(null)
+    setBcSuggestIdx(-1)
+  }
+
+  // 广播输入条键盘：候选打开时方向键导航、Tab/选中后回车接受、Esc 关闭；
+  // 否则回车触发广播确认网关。
+  function onBcKeyDown(e: ReactKeyboardEvent<HTMLInputElement>) {
+    if (bcSuggest && bcSuggest.items.length) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); setBcSuggestIdx(i => Math.min(i + 1, bcSuggest.items.length - 1)); return }
+      if (e.key === 'ArrowUp') { e.preventDefault(); setBcSuggestIdx(i => Math.max(i - 1, -1)); return }
+      if (e.key === 'Escape') { e.preventDefault(); setBcSuggest(null); setBcSuggestIdx(-1); return }
+      if (e.key === 'Tab') { e.preventDefault(); acceptBcSuggest(bcSuggestIdx < 0 ? 0 : bcSuggestIdx); return }
+      if (e.key === 'Enter') {
+        e.preventDefault()
+        if (bcSuggestIdx >= 0) acceptBcSuggest(bcSuggestIdx)
+        else { setBcSuggest(null); sendBroadcast() }
+        return
+      }
+      return
+    }
+    if (e.key === 'Enter') sendBroadcast()
   }
 
   // ---- xterm lifecycle (once per session/chan) ----
@@ -929,46 +972,69 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
       {broadcast && (
         <div className="row gap8" style={{ padding: '8px 12px', borderBottom: '1px solid var(--border-hairline)', background: 'var(--surface-subtle)', flex: 'none', alignItems: 'center' }}>
           <Icon name="radar" size={14} style={{ color: 'var(--accent-primary)', flex: 'none' }} />
-          <input value={bcCmd} onChange={e => setBcCmd(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') sendBroadcast() }}
-            placeholder={t('workbench.broadcastCmdPlaceholder', { count: mxHosts.length + 1 })}
-            className="mono" style={{ flex: 1, height: 32, padding: '0 10px', borderRadius: 8, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-card)', fontSize: 12.5, color: 'var(--text-primary)', outline: 'none' }} />
+          {/* 输入条包一层相对定位容器，历史候选下拉锚定其下方 */}
+          <div style={{ position: 'relative', flex: 1 }}>
+            <input value={bcCmd} onChange={e => onBcCmdChange(e.target.value)}
+              onKeyDown={onBcKeyDown}
+              onBlur={() => setTimeout(() => setBcSuggest(null), 120)}
+              placeholder={t('workbench.broadcastCmdPlaceholder', { count: mxHosts.length + 1 })}
+              className="mono" style={{ width: '100%', height: 32, padding: '0 10px', borderRadius: 8, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-card)', fontSize: 12.5, color: 'var(--text-primary)', outline: 'none' }} />
+            {bcSuggest && bcSuggest.items.length > 0 && (
+              <HistorySuggest
+                items={bcSuggest.items}
+                selectedIndex={bcSuggestIdx}
+                left={0}
+                top={36}
+                input={bcCmd}
+                onPick={(i) => acceptBcSuggest(i)}
+              />
+            )}
+          </div>
           <button className="btn btn-primary sm" style={{ flex: 'none' }} disabled={!bcCmd.trim() || bcSending || !!bcConfirm} onClick={() => sendBroadcast()}>
             <Icon name="radar" size={13} /> {t('workbench.broadcastSend', { count: mxHosts.length + 1 })}
           </button>
         </div>
       )}
 
-      {/* Multi-Exec per-target results */}
+      {/* Multi-Exec 状态看板 —— 只展示每个目标的执行状态/退出码/耗时，命令明细去对应节点标签看。 */}
       {Object.keys(mxRunState).length > 0 && (
         <div className="col" style={{ maxHeight: 190, overflowY: 'auto', borderBottom: '1px solid var(--border-hairline)', background: 'var(--surface-sunken)', flex: 'none' }}>
           <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', padding: '5px 12px', borderBottom: '1px solid var(--border-hairline)' }}>
-            <span style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '0.3px', textTransform: 'uppercase', color: 'var(--text-faint)' }}>{t('workbench.broadcastResults')}</span>
+            <span className="row gap6" style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '0.3px', textTransform: 'uppercase', color: 'var(--text-faint)' }}>
+              {t('workbench.broadcastResults')}
+              <span style={{ fontWeight: 500, textTransform: 'none', letterSpacing: 0, color: 'var(--text-faint)' }}>· {t('workbench.broadcastDetailHint')}</span>
+            </span>
             <button className="icon-btn bare" title={t('workbench.clearAll')} style={{ width: 18, height: 18 }} onClick={() => setMxRunState({})}><Icon name="x" size={12} /></button>
           </div>
           {Object.values(mxRunState).map(tg => {
-            // 状态点颜色：done 绿 / error|failed 红 / needs-auth 灰 / running 琥珀。
-            const dotColor = tg.state === 'done' ? 'var(--signal-green)'
+            // 状态点/标签颜色：done 绿 / error|failed 红 / needs-auth 灰 / running 琥珀。
+            const color = tg.state === 'done' ? 'var(--signal-green)'
               : (tg.state === 'error' || tg.state === 'failed') ? 'var(--danger-fg)'
               : tg.state === 'needs-auth' ? 'var(--text-faint)'
               : 'var(--signal-amber)'
-            // 状态标签文案：needs-auth/failed 走 i18n，其余直接展示后端状态枚举。
-            const stateLabel = tg.state === 'needs-auth' ? t('workbench.broadcastNeedsAuth')
+            const label = tg.state === 'done' ? t('workbench.broadcastStatusDone')
+              : tg.state === 'error' ? t('workbench.broadcastStatusError')
+              : tg.state === 'needs-auth' ? t('workbench.broadcastNeedsAuth')
               : tg.state === 'failed' ? t('workbench.broadcastFailed')
-              : tg.state
+              : t('workbench.broadcastStatusRunning')
             return (
-              <div key={tg.id} className="col" style={{ padding: '6px 12px', borderBottom: '1px solid var(--border-hairline)', gap: 3 }}>
-                <div className="row gap6" style={{ alignItems: 'center' }}>
-                  <span className="dot" style={{ background: dotColor }} />
-                  <span className="ell" style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-primary)' }}>{tg.name}</span>
-                  <span className="mono" style={{ marginLeft: 'auto', fontSize: 9.5, color: 'var(--text-faint)', textTransform: 'uppercase' }}>{stateLabel}</span>
-                  {tg.state === 'needs-auth' && tg.connId && (
-                    <button className="btn btn-ghost sm" style={{ height: 22, padding: '0 8px', fontSize: 10.5, flex: 'none' }} onClick={() => onConnectTarget?.(tg.connId as string)}>
+              <div key={tg.id} className="row gap8" style={{ padding: '7px 12px', borderBottom: '1px solid var(--border-hairline)', alignItems: 'center' }}>
+                <span className="dot" style={{ background: color, flex: 'none' }} />
+                <span className="ell" style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)', minWidth: 0 }}>{tg.name}</span>
+                <span className="row gap8" style={{ marginLeft: 'auto', flex: 'none', alignItems: 'center' }}>
+                  {tg.state === 'error' && typeof tg.exitCode === 'number' && (
+                    <span className="mono" style={{ fontSize: 10, color: 'var(--danger-fg)' }}>exit {tg.exitCode}</span>
+                  )}
+                  {typeof tg.durationMs === 'number' && (
+                    <span className="mono" style={{ fontSize: 10, color: 'var(--text-faint)' }}>{tg.durationMs}ms</span>
+                  )}
+                  <span style={{ fontSize: 11, fontWeight: 600, color }}>{label}</span>
+                  {tg.state === 'needs-auth' && (
+                    <button className="btn btn-ghost sm" style={{ height: 22, padding: '0 8px', fontSize: 10.5, flex: 'none' }} onClick={() => onConnectTarget?.(tg.connId)}>
                       <Icon name="plug" size={11} /> {t('workbench.broadcastConnect')}
                     </button>
                   )}
-                </div>
-                {tg.out && <pre className="mono" style={{ margin: 0, fontSize: 10.5, lineHeight: 1.5, color: 'var(--text-tertiary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: 90, overflow: 'auto' }}>{tg.out}</pre>}
+                </span>
               </div>
             )
           })}

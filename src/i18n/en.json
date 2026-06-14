@@ -236,6 +236,10 @@
     "broadcastNeedsAuth": "Needs auth",
     "broadcastConnect": "Connect",
     "broadcastFailed": "Connection failed",
+    "broadcastStatusRunning": "Running",
+    "broadcastStatusDone": "Success",
+    "broadcastStatusError": "Failed",
+    "broadcastDetailHint": "Open the node's tab to view details",
     "connected": "Connected",
     "disconnected": "Not connected",
     "broadcastRisk": {
