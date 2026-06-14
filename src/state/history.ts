@@ -30,3 +30,10 @@ export function deleteHistory(id: string): void {
   const next = loadHistory().filter(h => h.id !== id)
   localStorage.setItem(KEY, JSON.stringify(next))
 }
+
+/** Delete all (shell) history entries for a saved profile — used when the
+ *  connection profile is deleted so its history doesn't linger. */
+export function deleteHistoryForProfile(profileId: string): void {
+  const next = loadHistory().filter(h => h.profileId !== profileId)
+  localStorage.setItem(KEY, JSON.stringify(next))
+}

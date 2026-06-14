@@ -373,6 +373,14 @@ export interface HistoryItem {
   exitCode?: number
   /** Absolute epoch seconds — used to interleave SSH + DB history into one timeline. */
   ts?: number
+  /** Database engine/dbType recorded at query time (DB rows only). Drives the
+   *  history panel's "filter to the active tab's database type". */
+  engine?: string
+  /** Friendly connection name recorded at write time, so closed connections show
+   *  a readable label rather than the internal connId. */
+  name?: string
+  /** Stable saved-profile id — lets history be deleted alongside its connection. */
+  profileId?: string
 }
 
 // ---- Automation ----

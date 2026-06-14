@@ -266,7 +266,7 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
               {tb.kind === 'sql' && (
                 <SqlConsole density={density} fresh queryN={tb.qid} writable={caps.writable} connId={connId ?? undefined}
                   initialCode={queryInitialCode[tb.qid]} initialDefaultSchema={tb.defaultSchema}
-                  active={shown && tb.id === activeId} engine={conn.engine} connName={conn.name} />
+                  active={shown && tb.id === activeId} engine={conn.engine} connName={conn.name} profileId={conn.id} />
               )}
               {tb.kind === 'er' && (
                 <ERDiagram connId={connId ?? undefined} schema={tb.schema} onOpenTable={tname => pickTable(tb.schema, tname)} />

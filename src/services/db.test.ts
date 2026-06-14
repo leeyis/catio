@@ -54,6 +54,21 @@ describe('services/db', () => {
     delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
   })
 
+  it('runQuery forwards connection meta (name/engine/profileId) under Tauri', async () => {
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+    invokeMock.mockResolvedValue({ columns: [], rows: [] })
+    const { runQuery } = await import('./db')
+    await runQuery('conn-1', 'SELECT 1', undefined, { name: 'ttfund', engine: 'mongodb', profileId: 'db-7' })
+    expect(invokeMock).toHaveBeenCalledWith('db_query', {
+      connId: 'conn-1',
+      sql: 'SELECT 1',
+      connName: 'ttfund',
+      engine: 'mongodb',
+      profileId: 'db-7',
+    })
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
+
   it('previewDml forwards to db_preview_dml under Tauri and returns the SQL', async () => {
     ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
     invokeMock.mockResolvedValue('UPDATE public.orders SET status = $1 WHERE id = $2')

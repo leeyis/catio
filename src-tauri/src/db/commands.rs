@@ -75,6 +75,7 @@ pub async fn db_disconnect(conn_id: String, mgr: tauri::State<'_, ConnManager>)
 
 #[tauri::command]
 pub async fn db_query(conn_id: String, sql: String, max_rows: Option<u32>, default_namespace: Option<String>,
+    conn_name: Option<String>, engine: Option<String>, profile_id: Option<String>,
     mgr: tauri::State<'_, ConnManager>, app: tauri::AppHandle) -> Result<QueryResult, DbError> {
     let drv = mgr.get(&conn_id).await.ok_or_else(|| DbError::NotFound(conn_id.clone()))?;
     let started = Instant::now();
@@ -82,7 +83,9 @@ pub async fn db_query(conn_id: String, sql: String, max_rows: Option<u32>, defau
     let dur = format!("{}ms", started.elapsed().as_millis());
 
     // Best-effort: record a history entry on success. Never fail the query if
-    // history persistence has a problem.
+    // history persistence has a problem. The friendly name / engine / profile id
+    // are persisted so the history panel can show readable labels and filter by
+    // database type even after the connection is closed.
     if let Ok(dir) = app_data_dir(&app) {
         let entry = HistoryEntry {
             id: HISTORY_IDS.next(),
@@ -91,6 +94,9 @@ pub async fn db_query(conn_id: String, sql: String, max_rows: Option<u32>, defau
             text: sql,
             when: now_stamp(),
             dur,
+            name: conn_name,
+            engine,
+            profile_id,
         };
         let list = history::append_capped(history::load_history(&dir), entry, history::MAX_HISTORY);
         let _ = history::save_history(&dir, &list);
@@ -121,6 +127,18 @@ pub async fn db_delete_history(id: String, app: tauri::AppHandle) -> Result<(), 
     let list: Vec<HistoryEntry> = history::load_history(&dir)
         .into_iter()
         .filter(|h| h.id != id)
+        .collect();
+    history::save_history(&dir, &list).map_err(|e| DbError::Io(e.to_string()))
+}
+
+/// Delete all persisted DB history entries belonging to a saved profile — invoked
+/// when the connection profile itself is deleted, so its history doesn't linger.
+#[tauri::command]
+pub async fn db_delete_history_for_profile(profile_id: String, app: tauri::AppHandle) -> Result<(), DbError> {
+    let dir = app_data_dir(&app)?;
+    let list: Vec<HistoryEntry> = history::load_history(&dir)
+        .into_iter()
+        .filter(|h| h.profile_id.as_deref() != Some(profile_id.as_str()))
         .collect();
     history::save_history(&dir, &list).map_err(|e| DbError::Io(e.to_string()))
 }

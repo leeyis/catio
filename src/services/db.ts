@@ -105,10 +105,22 @@ function mockQueryResult(): QueryResult {
   return { columns, rows }
 }
 
-export async function runQuery(connId: string, sql: string, defaultNamespace?: string): Promise<QueryResult> {
+/** Connection metadata recorded alongside a query's history entry. Lets the
+ *  history panel show a friendly name and filter by database type even after the
+ *  connection is closed. */
+export interface QueryHistoryMeta {
+  name?: string
+  engine?: string
+  profileId?: string
+}
+
+export async function runQuery(connId: string, sql: string, defaultNamespace?: string, meta?: QueryHistoryMeta): Promise<QueryResult> {
   if (!isTauri()) return mockQueryResult()
   const args: Record<string, unknown> = { connId, sql }
   if (defaultNamespace) args.defaultNamespace = defaultNamespace
+  if (meta?.name) args.connName = meta.name
+  if (meta?.engine) args.engine = meta.engine
+  if (meta?.profileId) args.profileId = meta.profileId
   return tauriInvoke<QueryResult>('db_query', args)
 }
 
@@ -204,6 +216,12 @@ export async function clearDbHistory(): Promise<void> {
 export async function deleteDbHistory(id: string): Promise<void> {
   if (!isTauri()) return
   return tauriInvoke('db_delete_history', { id })
+}
+
+/** Delete all persisted DB history for a saved profile (on profile delete). No-op outside Tauri. */
+export async function deleteDbHistoryForProfile(profileId: string): Promise<void> {
+  if (!isTauri()) return
+  return tauriInvoke('db_delete_history_for_profile', { profileId })
 }
 
 /** Saved SQL snippets. Falls back to mock outside Tauri. */

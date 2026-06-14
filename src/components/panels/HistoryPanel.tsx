@@ -2,7 +2,7 @@
 import React, { useState, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
-import { IconBtn, Segmented, ConnGlyph, Btn } from '../atoms'
+import { IconBtn, ConnGlyph, Btn } from '../atoms'
 import { useData } from '../../state/DataContext'
 import type { Snippet, HistoryItem, Connection } from '../../services/types'
 import { PanelShell } from './PanelShell'
@@ -23,6 +23,14 @@ export interface HistoryPanelProps {
   canInsertEditor?: boolean
   /** Called when the user deletes a single history row. */
   onDelete?: (h: HistoryItem) => void
+  /** Kind of the active tab. When set, the panel hides the kind filter tabs and
+   *  auto-scopes the list to this kind (shell ↔ host terminal, sql ↔ DB). */
+  activeKind?: 'shell' | 'sql'
+  /** Engine/dbType of the active DB tab. When set, DB rows are further filtered
+   *  to this database type (so a MySQL tab doesn't show MongoDB history). */
+  activeEngine?: string
+  /** True when no tab is active — the panel shows a "connect first" hint instead. */
+  noActiveConnection?: boolean
 }
 
 interface MenuItemProps {
@@ -172,11 +180,10 @@ function SaveSnippetModal({ row, onClose, onSave }: SaveSnippetModalProps) {
   )
 }
 
-export function HistoryPanel({ onClose, onAddSnippet, items, onClear, onInsert, canInsert, canInsertEditor, onDelete }: HistoryPanelProps) {
+export function HistoryPanel({ onClose, onAddSnippet, items, onClear, onInsert, canInsert, canInsertEditor, onDelete, activeKind, activeEngine, noActiveConnection }: HistoryPanelProps) {
   const { t } = useTranslation()
   const D = useData()
   const [q, setQ] = useState('')
-  const [kind, setKind] = useState('all') // all | sql | shell
   const [target, setTarget] = useState('all')
   const [menuOpen, setMenuOpen] = useState(false)
   const [saveRow, setSaveRow] = useState<HistoryItem | null>(null)
@@ -184,18 +191,38 @@ export function HistoryPanel({ onClose, onAddSnippet, items, onClear, onInsert, 
   const byName = useMemo(() => Object.fromEntries(D.connections.map(c => [c.name, c])), [D.connections])
   // Prefer real store items passed in; fall back to mock D.history (demo / H4 not yet wired).
   const historyItems = items ?? D.history
-  // distinct targets present in history
+  // Scope to the active tab's kind/engine: a host terminal only shows shell
+  // history, a DB tab only its own database type's SQL history. Legacy DB rows
+  // that predate the engine field (engine undefined) are kept rather than hidden,
+  // so existing history doesn't silently vanish after the upgrade.
+  const scopedItems = useMemo(() => historyItems.filter(h => {
+    if (activeKind && h.kind !== activeKind) return false
+    if (activeKind === 'sql' && activeEngine && h.engine && h.engine !== activeEngine) return false
+    return true
+  }), [historyItems, activeKind, activeEngine])
+  // distinct targets present in the scoped history (feeds the connection dropdown)
   const targets = useMemo(() => {
     const seen: Array<{ name: string; kind: string }> = []
-    historyItems.forEach(h => { if (!seen.find(t2 => t2.name === h.target)) seen.push({ name: h.target, kind: h.kind }) })
+    scopedItems.forEach(h => { if (!seen.find(t2 => t2.name === h.target)) seen.push({ name: h.target, kind: h.kind }) })
     return seen
-  }, [historyItems])
-  const rows = historyItems.filter(h => {
-    if (kind !== 'all' && h.kind !== kind) return false
+  }, [scopedItems])
+  const rows = scopedItems.filter(h => {
     if (target !== 'all' && h.target !== target) return false
     if (q && !(h.text.toLowerCase().includes(q.toLowerCase()) || h.target.toLowerCase().includes(q.toLowerCase()))) return false
     return true
   })
+  // No active connection → empty panel with a "connect first" hint (req 2).
+  if (noActiveConnection) {
+    return (
+      <PanelShell icon="history" title={t('panels.historyTitle')} sub={t('panels.historySub')} onClose={onClose}
+        actions={<IconBtn name="download" size={15} variant="bare" title={t('panels.export')} />}>
+        <div className="grow col" style={{ alignItems: 'center', justifyContent: 'center', padding: '30px 0', gap: 10, color: 'var(--text-faint)' }}>
+          <Icon name="history" size={26} />
+          <span style={{ fontSize: 12.5 }}>{t('panels.noActiveConnection')}</span>
+        </div>
+      </PanelShell>
+    )
+  }
   return (
     <PanelShell icon="history" title={t('panels.historyTitle')} sub={t('panels.historySub')} onClose={onClose}
       actions={<IconBtn name="download" size={15} variant="bare" title={t('panels.export')} />}>
@@ -207,13 +234,7 @@ export function HistoryPanel({ onClose, onAddSnippet, items, onClear, onInsert, 
           {q && <button className="icon-btn bare" style={{ width: 20, height: 20 }} onClick={() => setQ('')}><Icon name="x" size={12} /></button>}
         </div>
         <div className="row gap8">
-          {/* kind filter */}
-          <Segmented size="sm" value={kind} onChange={setKind} options={[
-            { value: 'all', label: t('panels.filterAll') },
-            { value: 'sql', label: t('panels.filterDb'), icon: 'database' },
-            { value: 'shell', label: t('panels.filterHost'), icon: 'terminal' },
-          ]} />
-          {/* connection dropdown */}
+          {/* connection dropdown — scoped to the active kind/engine (req 3/4) */}
           <div style={{ position: 'relative', flex: 1, minWidth: 0 }}>
             <button onClick={() => setMenuOpen(o => !o)} className="row gap6"
               style={{ width: '100%', height: 30, padding: '0 8px 0 10px', background: 'var(--surface-sunken)', border: `1px solid ${menuOpen ? 'var(--accent-border)' : 'var(--border-hairline)'}`, borderRadius: 9, color: 'var(--text-secondary)' }}>
@@ -227,10 +248,10 @@ export function HistoryPanel({ onClose, onAddSnippet, items, onClear, onInsert, 
               <>
                 <div style={{ position: 'fixed', inset: 0, zIndex: 40 }} onClick={() => setMenuOpen(false)} />
                 <div className="pop-in" style={{ position: 'absolute', top: 34, left: 0, right: 0, zIndex: 50, background: 'var(--surface-elevated)', border: '1px solid var(--border-hairline-alt)', borderRadius: 10, boxShadow: 'var(--shadow-dropdown)', padding: 5, maxHeight: 260, overflowY: 'auto' }}>
-                  <MenuItem active={target === 'all'} onClick={() => { setTarget('all'); setMenuOpen(false) }} icon="filter" label={t('panels.allConnections')} count={historyItems.length} />
+                  <MenuItem active={target === 'all'} onClick={() => { setTarget('all'); setMenuOpen(false) }} icon="filter" label={t('panels.allConnections')} count={scopedItems.length} />
                   {targets.map(t2 => {
                     const conn = byName[t2.name]
-                    const n = historyItems.filter(h => h.target === t2.name).length
+                    const n = scopedItems.filter(h => h.target === t2.name).length
                     return <MenuItem key={t2.name} active={target === t2.name} onClick={() => { setTarget(t2.name); setMenuOpen(false) }} conn={conn} kind={t2.kind} label={t2.name} count={n} />
                   })}
                 </div>
@@ -249,8 +270,8 @@ export function HistoryPanel({ onClose, onAddSnippet, items, onClear, onInsert, 
       </div>
       {/* footer count */}
       <div className="row gap6" style={{ padding: '8px 12px', borderTop: '1px solid var(--border-hairline)', fontSize: 11, color: 'var(--text-faint)' }}>
-        <Icon name="history" size={12} /> {t('panels.showingCount', { shown: rows.length, total: historyItems.length })}
-        {(kind !== 'all' || target !== 'all' || q) && <button className="btn btn-ghost sm" style={{ height: 22, padding: '0 8px', fontSize: 11 }} onClick={() => { setKind('all'); setTarget('all'); setQ('') }}>{t('panels.clearFilters')}</button>}
+        <Icon name="history" size={12} /> {t('panels.showingCount', { shown: rows.length, total: scopedItems.length })}
+        {(target !== 'all' || q) && <button className="btn btn-ghost sm" style={{ height: 22, padding: '0 8px', fontSize: 11 }} onClick={() => { setTarget('all'); setQ('') }}>{t('panels.clearFilters')}</button>}
         {onClear && historyItems.length > 0 && (
           <button className="btn btn-ghost sm" style={{ marginLeft: 'auto', height: 22, padding: '0 8px', fontSize: 11, color: 'var(--danger-fg)' }} onClick={() => setConfirmClear(true)}>
             {t('panels.clearHistory')}

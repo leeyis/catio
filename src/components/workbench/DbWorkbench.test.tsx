@@ -261,7 +261,7 @@ describe('DbWorkbench unified tabs', () => {
     // 运行按钮在编辑器为空时置灰;经 catio-run 事件注入并运行一条语句(等价 snippet/历史运行)
     window.dispatchEvent(new CustomEvent('catio-run', { detail: { kind: 'sql', text: 'select 1' } }))
     await waitFor(() => expect(h.runQuery).toHaveBeenCalled())
-    expect(h.runQuery).toHaveBeenCalledWith('conn-live', expect.any(String), 'dwd')
+    expect(h.runQuery).toHaveBeenCalledWith('conn-live', expect.any(String), 'dwd', expect.objectContaining({ profileId: 'd-orders' }))
   })
 
   it('MongoDB 多 database 查询也显示默认库选择并传给 runQuery', async () => {
@@ -289,7 +289,7 @@ describe('DbWorkbench unified tabs', () => {
     // 运行按钮在编辑器为空时置灰;经 catio-run 事件注入并运行一条语句(等价 snippet/历史运行)
     window.dispatchEvent(new CustomEvent('catio-run', { detail: { kind: 'sql', text: 'db.orders.find()' } }))
     await waitFor(() => expect(h.runQuery).toHaveBeenCalled())
-    expect(h.runQuery).toHaveBeenCalledWith('conn-live', expect.any(String), 'app')
+    expect(h.runQuery).toHaveBeenCalledWith('conn-live', expect.any(String), 'app', expect.objectContaining({ profileId: 'd-orders' }))
   })
 
   it('再次单击同一表复用已开 tab,不重复新开', async () => {

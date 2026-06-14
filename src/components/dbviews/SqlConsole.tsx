@@ -34,9 +34,11 @@ export interface SqlConsoleProps {
   engine?: string
   /** 连接名,用于"正在 X 上执行…"提示。缺省回落到当前默认命名空间。 */
   connName?: string
+  /** 保存档 profile id — 随历史记录持久化,使历史可按连接删除/友好显示。 */
+  profileId?: string
 }
 
-export function SqlConsole({ density, fresh, writable = true, connId, initialCode, initialDefaultSchema, active, engine, connName }: SqlConsoleProps) {
+export function SqlConsole({ density, fresh, writable = true, connId, initialCode, initialDefaultSchema, active, engine, connName, profileId }: SqlConsoleProps) {
   const { t } = useTranslation()
   // mongodb/elasticsearch 用各自语法(mongo shell / REST+SQL),编辑器走 plain 模式:
   // 不挂 SQL 补全、显示语法占位提示、结果网格只读(mongo 的 _id 带 pk 标记,
@@ -223,7 +225,7 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
     if (connId) {
       // Live path: execute the typed SQL against the backend.
       setPhase('running')
-      runQuery(connId, sql, runDefaultNamespace)
+      runQuery(connId, sql, runDefaultNamespace, { name: connName, engine, profileId })
         .then(res => {
           if (myToken !== runToken.current) return // 已被停止/被新运行取代
           setResult({ columns: res.columns, rows: res.rows, sql, defaultNamespace: runDefaultNamespace })

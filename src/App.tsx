@@ -29,7 +29,7 @@ import { usePrefs, uiFontStack, monoFontStack } from './state/preferences'
 import { readTermBufferTail } from './services/termBuffers'
 import { buildAgentSystemPrompt } from './services/agentPrompt'
 import { useData } from './state/DataContext'
-import { dbConnect, dbDisconnect, getHistory as getDbHistory, clearDbHistory, deleteDbHistory, dbErrMsg } from './services/db'
+import { dbConnect, dbDisconnect, getHistory as getDbHistory, clearDbHistory, deleteDbHistory, deleteDbHistoryForProfile, dbErrMsg } from './services/db'
 import {
   useDbConnections, dbProfileToConnection, listActiveDbConnections,
   setActiveDbConnection, removeDbConnection, removeActiveDbConnection,
@@ -39,7 +39,7 @@ import { sshConnect, sshDisconnect, sshTrustHost, isTauri, onHistory, sshSysinfo
 import type { SshConnectArgs, AuthMethod } from './services/ssh'
 import { mcpSyncTargets } from './services/mcp'
 import { createVaultCredential, unlockVault, lockVault, isVaultUnlocked, recallSecret, rememberSecret } from './state/vault'
-import { appendHistory, loadHistory, clearHistory, deleteHistory } from './state/history'
+import { appendHistory, loadHistory, clearHistory, deleteHistory, deleteHistoryForProfile } from './state/history'
 import { loadRecentSessions, recordRecentSession } from './state/recentSessions'
 import type { HistoryItem } from './services/types'
 import { loadProfiles, saveProfile, deleteProfile } from './state/connections'
@@ -148,16 +148,17 @@ export default function App() {
   const [dbHistory, setDbHistory] = useState<HistoryItem[]>([])
   // Recently-opened connections (for the home "最近会话" section), newest-first.
   const [recentSessions, setRecentSessions] = useState(() => loadRecentSessions())
-  // Refresh DB history whenever the History panel is opened. Map the recorded
-  // backend connId → a friendly connection name (when the conn is still active)
-  // so the panel's per-connection filter shows real names.
+  // Refresh DB history whenever the History panel is opened. Resolve a friendly
+  // connection name for each row: prefer the name persisted with the entry (works
+  // for closed connections), then the live connId→name map, finally the raw
+  // connId. `engine`/`profileId` ride along for the panel's type filter + delete.
   useEffect(() => {
     if (!(activePanel === 'history' && panelOpen)) return
     const nameByConnId: Record<string, string> = Object.fromEntries(
       listActiveDbConnections().map(a => [a.connId, a.name]),
     )
     getDbHistory('')
-      .then(items => setDbHistory(items.map(h => ({ ...h, target: nameByConnId[h.target] ?? h.target }))))
+      .then(items => setDbHistory(items.map(h => ({ ...h, target: h.name ?? nameByConnId[h.target] ?? h.target }))))
       .catch(() => setDbHistory([]))
   }, [activePanel, panelOpen])
   // Unified, newest-first timeline (SSH commands + DB queries).
@@ -466,6 +467,9 @@ export default function App() {
           dur: e.durationMs + 'ms',
           exitCode: e.exitCode ?? undefined,
           ts: Date.now() / 1000,
+          // Stable profile id (when this live conn maps to a saved host) so the
+          // entry can be deleted alongside its connection profile.
+          ...(pid ? { profileId: pid } : {}),
         })
         setHistory(loadHistory())
       }).then(unlisten => {
@@ -747,6 +751,9 @@ export default function App() {
       .filter(a => a.profileId === profile.id)
       .forEach(a => removeActiveDbConnection(a.connId))
     removeDbConnection(profile.id)
+    // Drop this profile's persisted query history too (req: 删连接同步删历史).
+    void deleteDbHistoryForProfile(profile.id)
+    setDbHistory(prev => prev.filter(h => h.profileId !== profile.id))
     syncMcpTargets()
     // The reactive store updates the list; close the details panel.
     setPanelOpen(false)
@@ -918,6 +925,9 @@ export default function App() {
   function confirmDelete(conn: Connection) {
     if (sessionMap[conn.id]) teardownSession(conn.id)
     try { deleteProfile(conn.id) } catch { /* localStorage unavailable — ignore */ }
+    // Drop this host's shell command history too (req: 删连接同步删历史).
+    deleteHistoryForProfile(conn.id)
+    setHistory(loadHistory())
     reloadProfiles()
     if (detailConn?.id === conn.id) { setDetailConn(null); setPanelOpen(false) }
   }
@@ -1213,6 +1223,11 @@ export default function App() {
               {activePanel === 'tunnels' && <TunnelsPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} activeConnId={cur?.connId} profiles={profiles} />}
               {activePanel === 'snippets' && <SnippetsPanel onClose={() => setPanelOpen(false)} snippets={snippets} onChange={() => setSnippets(loadSnippets())} onInsert={insertToTerminal} canInsert={canInsert} canInsertEditor={canInsertEditor} />}
               {activePanel === 'history' && <HistoryPanel onClose={() => setPanelOpen(false)} onAddSnippet={addSnippet} items={mergedHistory} onClear={() => { clearHistory(); setHistory([]); setDbHistory([]); void clearDbHistory() }}
+                // History is scoped to the active tab: no active tab → empty hint;
+                // a host tab → shell history; a DB tab → that engine's SQL history.
+                noActiveConnection={!cur}
+                activeKind={cur ? (cur.kind === 'terminal' ? 'shell' : 'sql') : undefined}
+                activeEngine={cur && cur.kind === 'sql' ? curConn?.engine : undefined}
                 onDelete={h => {
                   // Route the delete to the right store by kind: SQL queries live in
                   // the backend history file; shell commands live in localStorage.

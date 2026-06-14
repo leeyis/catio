@@ -23,6 +23,20 @@ pub struct HistoryEntry {
     pub when: String,
     /// Elapsed time, e.g. "12ms".
     pub dur: String,
+    /// Friendly connection name at record time (so closed connections still show
+    /// a readable label instead of the internal `conn-N` id). Optional for
+    /// backward compatibility with entries written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Database engine/dbType (e.g. "mysql", "mongodb") recorded at query time,
+    /// used by the history panel to filter to the active tab's database type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
+    /// Stable saved-profile id — survives reconnects and process restarts (unlike
+    /// the ephemeral `target` connId), so history can be deleted alongside its
+    /// connection profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
 }
 
 /// One saved SQL snippet. Mirrors the frontend `Snippet`.
@@ -111,6 +125,9 @@ mod tests {
             text: "SELECT 1".into(),
             when: "2026-06-07T00:00:00Z".into(),
             dur: "1ms".into(),
+            name: None,
+            engine: None,
+            profile_id: None,
         }
     }
 

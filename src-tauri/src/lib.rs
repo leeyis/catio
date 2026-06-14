@@ -57,6 +57,7 @@ pub fn run() {
             db::commands::db_history,
             db::commands::db_clear_history,
             db::commands::db_delete_history,
+            db::commands::db_delete_history_for_profile,
             db::commands::db_snippets,
             db::commands::db_save_snippet,
             db::commands::export_file,

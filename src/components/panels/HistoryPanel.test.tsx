@@ -131,4 +131,34 @@ describe('HistoryPanel', () => {
     wrap(<HistoryPanel onClose={() => {}} items={[]} />)
     expect(screen.getByText('无匹配的历史记录')).toBeTruthy()
   })
+
+  it('shows the "connect first" hint and no rows when no connection is active', () => {
+    wrap(<HistoryPanel onClose={() => {}} items={ITEMS} noActiveConnection />)
+    expect(screen.getByText('请先连接主机或数据库')).toBeTruthy()
+    expect(screen.queryByText('ls -la')).toBeNull()
+  })
+
+  it('scopes to shell history when a host tab is active', () => {
+    const mixed: HistoryItem[] = [
+      { id: 'sh', kind: 'shell', target: 'prod-web', text: 'whoami', when: '10:00', dur: '1ms' },
+      { id: 'sq', kind: 'sql', target: 'pg', text: 'select 1', when: '10:01', dur: '2ms' },
+    ]
+    wrap(<HistoryPanel onClose={() => {}} items={mixed} activeKind="shell" />)
+    expect(screen.getByText('whoami')).toBeTruthy()
+    expect(screen.queryByText('select 1')).toBeNull()
+  })
+
+  it('scopes DB history to the active tab database type (engine)', () => {
+    const mixed: HistoryItem[] = [
+      { id: 'm', kind: 'sql', target: 'ttfund', text: 'db.apps.find({})', when: '10:00', dur: '1ms', engine: 'mongodb' },
+      { id: 'p', kind: 'sql', target: 'pg', text: 'select 1', when: '10:01', dur: '2ms', engine: 'postgres' },
+      { id: 'legacy', kind: 'sql', target: 'conn-9', text: 'select legacy', when: '10:02', dur: '3ms' },
+    ]
+    wrap(<HistoryPanel onClose={() => {}} items={mixed} activeKind="sql" activeEngine="mongodb" />)
+    expect(screen.getByText('db.apps.find({})')).toBeTruthy()
+    // other database type is filtered out…
+    expect(screen.queryByText('select 1')).toBeNull()
+    // …but legacy rows without a recorded engine are kept (can't be classified)
+    expect(screen.getByText('select legacy')).toBeTruthy()
+  })
 })
