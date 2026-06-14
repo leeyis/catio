@@ -148,6 +148,29 @@ describe('HistoryPanel', () => {
     expect(screen.queryByText('select 1')).toBeNull()
   })
 
+  it('offers to prune orphan history (raw conn-N) and reports their ids on confirm', () => {
+    const onPruneOrphans = vi.fn()
+    const mixed: HistoryItem[] = [
+      { id: 'o1', kind: 'sql', target: 'conn-1', text: 'select orphan 1', when: '10:00', dur: '1ms' },
+      { id: 'o2', kind: 'sql', target: 'conn-2', text: 'select orphan 2', when: '10:01', dur: '1ms' },
+      { id: 'keep', kind: 'sql', target: 'ttfund', text: 'select keep', when: '10:02', dur: '1ms', engine: 'mongodb' },
+    ]
+    wrap(<HistoryPanel onClose={() => {}} items={mixed} onPruneOrphans={onPruneOrphans} />)
+    fireEvent.click(screen.getByText('清理失效连接 (2)'))
+    // ConfirmModal appears; confirm via the (last) matching button label
+    const btns = screen.getAllByText('清理失效连接 (2)')
+    fireEvent.click(btns[btns.length - 1])
+    expect(onPruneOrphans).toHaveBeenCalledWith(['o1', 'o2'])
+  })
+
+  it('does not offer prune when there are no orphan rows', () => {
+    const clean: HistoryItem[] = [
+      { id: 'a', kind: 'sql', target: 'ttfund', text: 'select 1', when: '10:00', dur: '1ms', engine: 'mongodb' },
+    ]
+    wrap(<HistoryPanel onClose={() => {}} items={clean} onPruneOrphans={vi.fn()} />)
+    expect(screen.queryByText(/清理失效连接/)).toBeNull()
+  })
+
   it('scopes DB history to the active tab database type (engine)', () => {
     const mixed: HistoryItem[] = [
       { id: 'm', kind: 'sql', target: 'ttfund', text: 'db.apps.find({})', when: '10:00', dur: '1ms', engine: 'mongodb' },

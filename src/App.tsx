@@ -1234,6 +1234,14 @@ export default function App() {
                   if (h.kind === 'sql') { setDbHistory(prev => prev.filter(x => x.id !== h.id)); void deleteDbHistory(h.id) }
                   else { deleteHistory(h.id); setHistory(loadHistory()) }
                 }}
+                onPruneOrphans={ids => {
+                  // Garbage history of deleted DB connections (legacy rows with no
+                  // persisted name/profileId, still showing a raw connId). Drop from
+                  // the view immediately, then delete each from the backend file.
+                  const idSet = new Set(ids)
+                  setDbHistory(prev => prev.filter(h => !idSet.has(h.id)))
+                  void (async () => { for (const id of ids) await deleteDbHistory(id) })()
+                }}
                 onInsert={insertToTerminal} canInsert={canInsert} canInsertEditor={canInsertEditor} />}
               {/* DetailsPanel branches internally on conn.kind === 'db': DB conns use the
                   onEditDb/onDeleteDb/onConnectDb handlers; host conns use the SSH handlers. */}

@@ -31,6 +31,9 @@ export interface HistoryPanelProps {
   activeEngine?: string
   /** True when no tab is active — the panel shows a "connect first" hint instead. */
   noActiveConnection?: boolean
+  /** Delete the given history-entry ids belonging to connections that no longer
+   *  exist (legacy rows still showing a raw `conn-N` id). */
+  onPruneOrphans?: (ids: string[]) => void
 }
 
 interface MenuItemProps {
@@ -180,7 +183,7 @@ function SaveSnippetModal({ row, onClose, onSave }: SaveSnippetModalProps) {
   )
 }
 
-export function HistoryPanel({ onClose, onAddSnippet, items, onClear, onInsert, canInsert, canInsertEditor, onDelete, activeKind, activeEngine, noActiveConnection }: HistoryPanelProps) {
+export function HistoryPanel({ onClose, onAddSnippet, items, onClear, onInsert, canInsert, canInsertEditor, onDelete, activeKind, activeEngine, noActiveConnection, onPruneOrphans }: HistoryPanelProps) {
   const { t } = useTranslation()
   const D = useData()
   const [q, setQ] = useState('')
@@ -188,9 +191,18 @@ export function HistoryPanel({ onClose, onAddSnippet, items, onClear, onInsert, 
   const [menuOpen, setMenuOpen] = useState(false)
   const [saveRow, setSaveRow] = useState<HistoryItem | null>(null)
   const [confirmClear, setConfirmClear] = useState(false)
+  const [confirmPrune, setConfirmPrune] = useState(false)
   const byName = useMemo(() => Object.fromEntries(D.connections.map(c => [c.name, c])), [D.connections])
   // Prefer real store items passed in; fall back to mock D.history (demo / H4 not yet wired).
   const historyItems = items ?? D.history
+  // Orphan rows: DB history whose connection no longer exists, so it still shows a
+  // raw `conn-N` id (the parent resolves a friendly name for live/named entries;
+  // anything left as a raw connId is unresolvable). Computed over ALL items, not
+  // the scoped view, so cleanup removes orphans of every database type at once.
+  const orphanIds = useMemo(
+    () => historyItems.filter(h => h.kind === 'sql' && /^conn-\d+$/.test(h.target)).map(h => h.id),
+    [historyItems],
+  )
   // Scope to the active tab's kind/engine: a host terminal only shows shell
   // history, a DB tab only its own database type's SQL history. Legacy DB rows
   // that predate the engine field (engine undefined) are kept rather than hidden,
@@ -272,8 +284,14 @@ export function HistoryPanel({ onClose, onAddSnippet, items, onClear, onInsert, 
       <div className="row gap6" style={{ padding: '8px 12px', borderTop: '1px solid var(--border-hairline)', fontSize: 11, color: 'var(--text-faint)' }}>
         <Icon name="history" size={12} /> {t('panels.showingCount', { shown: rows.length, total: scopedItems.length })}
         {(target !== 'all' || q) && <button className="btn btn-ghost sm" style={{ height: 22, padding: '0 8px', fontSize: 11 }} onClick={() => { setTarget('all'); setQ('') }}>{t('panels.clearFilters')}</button>}
+        <span className="grow" />
+        {onPruneOrphans && orphanIds.length > 0 && (
+          <button className="btn btn-ghost sm" style={{ height: 22, padding: '0 8px', fontSize: 11, color: 'var(--text-tertiary)' }} title={t('panels.pruneOrphansHint')} onClick={() => setConfirmPrune(true)}>
+            <Icon name="trash-2" size={12} /> {t('panels.pruneOrphans', { count: orphanIds.length })}
+          </button>
+        )}
         {onClear && historyItems.length > 0 && (
-          <button className="btn btn-ghost sm" style={{ marginLeft: 'auto', height: 22, padding: '0 8px', fontSize: 11, color: 'var(--danger-fg)' }} onClick={() => setConfirmClear(true)}>
+          <button className="btn btn-ghost sm" style={{ height: 22, padding: '0 8px', fontSize: 11, color: 'var(--danger-fg)' }} onClick={() => setConfirmClear(true)}>
             {t('panels.clearHistory')}
           </button>
         )}
@@ -287,6 +305,16 @@ export function HistoryPanel({ onClose, onAddSnippet, items, onClear, onInsert, 
           danger
           onConfirm={() => { setConfirmClear(false); onClear?.() }}
           onCancel={() => setConfirmClear(false)}
+        />
+      )}
+      {confirmPrune && (
+        <ConfirmModal
+          title={t('panels.pruneOrphansTitle')}
+          message={t('panels.pruneOrphansMsg', { count: orphanIds.length })}
+          confirmLabel={t('panels.pruneOrphans', { count: orphanIds.length })}
+          danger
+          onConfirm={() => { setConfirmPrune(false); onPruneOrphans?.(orphanIds) }}
+          onCancel={() => setConfirmPrune(false)}
         />
       )}
     </PanelShell>
