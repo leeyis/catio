@@ -51,7 +51,7 @@ export interface TerminalPaneProps {
    * 把命令写进指定会话的交互式 PTY（与手动输入同一通道，命令/结果出现在该会话的终端标签）。
    * 由 App 解析该会话的 chan 并 termWrite；自动建连的新标签通道注册有延迟，内部会轮询等待。
    */
-  sendToPty?: (sessionId: string, cmd: string, cols?: number, rows?: number) => Promise<boolean>
+  sendToPty?: (sessionId: string, cmd: string) => Promise<boolean>
   /**
    * Surfaces the live PTY channel id to App so it can write into the active
    * terminal (e.g. snippet/history "insert"). Called with the chanId once
@@ -286,10 +286,6 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
     setMxRunState(initial)
     if (ready.length === 0) return
 
-    // 广播来源终端的真实列宽——用它对齐各目标 PTY，保证渲染与手工执行一致。
-    const cols = termRef.current?.cols
-    const rows = termRef.current?.rows
-
     // 对每个就绪目标：先订阅 history（拿 exitCode/耗时），再把命令写进其 PTY。
     for (const { connId, sid, isSelf } of ready) {
       let resolved = false
@@ -314,7 +310,7 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
           await termWrite(sessionId, chanIdRef.current, bytesToBase64(cmd + '\r'))
           ok = true
         } else if (sendToPty) {
-          ok = await sendToPty(sid, cmd, cols, rows)
+          ok = await sendToPty(sid, cmd)
         }
       } catch {
         ok = false
@@ -396,6 +392,13 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
   useEffect(() => {
     const hostEl = xtermHost.current
     if (!hostEl) return
+    // 容器是否有真实尺寸。隐藏标签(display:none)尺寸为 0，此时 fit() 会把 xterm 压成 ~0 列
+    // 并 termResize 把 PTY 也压成 ~0 宽，后台运行的命令(如广播)会按极窄宽度折行错乱
+    // （prompt 渲染成竖排单字符）。因此尺寸为 0 时一律跳过 fit/resize，保持上次的可用宽度。
+    const hasSize = () => {
+      const r = hostEl.getBoundingClientRect()
+      return r.width > 0 && r.height > 0
+    }
     let disposed = false
     let unlisten: (() => void) | null = null
     chanIdRef.current = null
@@ -429,7 +432,7 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
       webgl.onContextLoss(() => { try { webgl.dispose() } catch { /* already disposed */ } })
       term.loadAddon(webgl)
     } catch { /* no WebGL → fall back to default DOM renderer */ }
-    try { fitAddon.fit() } catch { /* jsdom has no layout */ }
+    if (hasSize()) { try { fitAddon.fit() } catch { /* jsdom has no layout */ } }
 
     // 底部命令被裁的根因:首次 fit 发生在等宽 web 字体(Geist Mono)加载完成之前,xterm 用
     // 回退字体测得的 cell 高度偏小 → 算出的 rows 偏多;字体加载后 cell 变高但 rows 不会自动
@@ -447,7 +450,7 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
       // 重测后 renderService 的 dimensions 可能在下一帧才更新,延到下一帧 fit 才读得到新 cell 高度。
       const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (cb: () => void) => setTimeout(cb, 16)
       raf(() => {
-        if (disposed) return
+        if (disposed || !hasSize()) return
         try { fitAddon.fit() } catch { /* no layout */ }
         if (live && sessionId && chanIdRef.current) {
           try { termResize(sessionId, chanIdRef.current, term.cols, term.rows) } catch { /* best-effort */ }
@@ -759,6 +762,7 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
         })
         if (typeof ResizeObserver !== 'undefined') {
           ro = new ResizeObserver(() => {
+            if (!hasSize()) return // 隐藏标签尺寸为 0：跳过，保持 PTY 上次的可用宽度
             try { fitAddon.fit() } catch { /* no layout */ }
             if (chanIdRef.current) termResize(sessionId, chanIdRef.current, term.cols, term.rows)
           })
@@ -773,7 +777,7 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
         term.write(termLinesToText(buf))
       })()
       if (typeof ResizeObserver !== 'undefined') {
-        ro = new ResizeObserver(() => { try { fitAddon.fit() } catch { /* no layout */ } })
+        ro = new ResizeObserver(() => { if (hasSize()) { try { fitAddon.fit() } catch { /* no layout */ } } })
         ro.observe(hostEl)
       }
     }

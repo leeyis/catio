@@ -713,9 +713,9 @@ export default function App() {
   // sendToPty — 把命令写进目标会话的交互式 PTY，与用户手动输入完全同一通道：
   // 命令与执行结果会出现在该会话对应的终端标签里（广播明细去标签看）。命令末尾补 \r
   // 触发执行。自动建连的新标签 PTY 通道需片刻才注册，故轮询等待最多 ~6s。
-  // cols/rows：发送前先把目标 PTY 调到与广播来源终端一致的列宽——后台(隐藏)标签的 pane
-  // 尺寸为 0、PTY 宽度是默认窄值，否则 docker 之类按 TTY 宽度排版的命令会换行错乱。
-  async function sendToPty(sessionId: string, cmd: string, cols?: number, rows?: number): Promise<boolean> {
+  // 不在此处强制 resize：目标按自身终端的真实宽度渲染（隐藏标签的尺寸守卫已避免被压成 ~0 宽），
+  // 与手工在该标签输入一致；强行只改 PTY 不改 xterm 反而会造成宽度错位、折行错乱。
+  async function sendToPty(sessionId: string, cmd: string): Promise<boolean> {
     const resolveChan = (): string | undefined => {
       const tab = tabsRef.current.find(tb => tb.sessionId === sessionId && chanMapRef.current[tb.id])
       return tab ? chanMapRef.current[tab.id] : undefined
@@ -727,11 +727,7 @@ export default function App() {
     }
     if (!chan) return false
     try {
-      const { termWrite, termResize } = await import('./services/ssh')
-      // 先对齐列宽再发命令，保证渲染与手工执行一致。
-      if (cols && rows) {
-        try { await termResize(sessionId, chan, cols, rows) } catch { /* best-effort */ }
-      }
+      const { termWrite } = await import('./services/ssh')
       await termWrite(sessionId, chan, btoa(unescape(encodeURIComponent(cmd + '\r'))))
       return true
     } catch {
