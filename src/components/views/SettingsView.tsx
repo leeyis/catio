@@ -670,7 +670,6 @@ function AboutSettings() {
             <span className="mono" style={{ fontSize: 12.5, fontWeight: 500, color: 'var(--text-faint)' }}>v{__APP_VERSION__}</span>
           </span>
           <span style={{ fontSize: 12.5, color: 'var(--text-secondary)', lineHeight: 1.5, maxWidth: 420 }}><Trans i18nKey="settings.aboutDesc" components={{ b: <b /> }} /></span>
-          <div className="row gap6" style={{ marginTop: 6 }}><span className="chip mono">Tauri</span><span className="chip mono">Rust</span><span className="chip mono">40+ databases</span><span className="chip mono">15 MB</span></div>
         </div>
       </div>
     </Block>
