@@ -1373,7 +1373,7 @@ export default function App() {
           )}
 
           {/* icon rail */}
-          <IconRail active={activePanel} onSelect={selectPanel} panelOpen={panelOpen} />
+          <IconRail active={activePanel} onSelect={selectPanel} panelOpen={panelOpen} onMcp={() => { setSettingsSection('mcp'); if (view !== 'settings') setPrevView(view); setView('settings') }} />
         </div>
 
         {/* Settings overlay — covers the body region (below the title bar) without

@@ -53,6 +53,8 @@ export interface IconRailProps {
   active?: string
   onSelect?: (id: string) => void
   panelOpen?: boolean
+  /** 点击底部 ⌘ 按钮：一键直达 MCP 服务（设置 → MCP 区块）。 */
+  onMcp?: () => void
 }
 
 // ---- buildSidebarTree return type ----
@@ -391,7 +393,7 @@ interface RailItem {
   label: string
 }
 
-export function IconRail({ active, onSelect, panelOpen }: IconRailProps) {
+export function IconRail({ active, onSelect, panelOpen, onMcp }: IconRailProps) {
   const { t } = useTranslation()
 
   const top: RailItem[] = [
@@ -432,7 +434,7 @@ export function IconRail({ active, onSelect, panelOpen }: IconRailProps) {
         {bottom.map(it => <Item key={it.id} it={it} />)}
       </div>
       <div className="col" style={{ gap: 10, alignItems: 'center' }}>
-        <button title={t('shell.railMcp')} style={{ width: 32, height: 32, borderRadius: 8, display: 'grid', placeItems: 'center', color: 'var(--text-tertiary)' }}
+        <button title={t('shell.railMcp')} onClick={onMcp} style={{ width: 32, height: 32, borderRadius: 8, display: 'grid', placeItems: 'center', color: 'var(--text-tertiary)', cursor: 'pointer' }}
           onMouseEnter={e => (e.currentTarget.style.background = 'var(--surface-sunken)')}
           onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
           <Icon name="command" size={17} />
