@@ -1,5 +1,5 @@
 import type { AgentConfig } from '../state/agentConfig'
-import { resolveFetch, trimSlash } from './models'
+import { resolveFetch, trimSlash, openaiBase } from './models'
 
 export interface ChatMsg { role: 'system' | 'user' | 'assistant'; content: string }
 export interface ChatOptions { onToken?: (t: string) => void; signal?: AbortSignal }
@@ -87,7 +87,7 @@ export async function chat(
     body = JSON.stringify({ model: cfg.model, messages, stream: true })
   } else {
     // openai-compatible
-    url = `${trimSlash(cfg.openaiBaseUrl)}/v1/chat/completions`
+    url = `${openaiBase(cfg.openaiBaseUrl)}/v1/chat/completions`
     headers = { 'Content-Type': 'application/json' }
     if (cfg.openaiKey) {
       headers['Authorization'] = `Bearer ${cfg.openaiKey}`

@@ -19,6 +19,15 @@ export function trimSlash(url: string): string {
   return url.replace(/\/+$/, '')
 }
 
+/**
+ * 规范化 OpenAI-compatible 服务端点：去掉尾部斜杠并剥离已有的 `/v1` 后缀。
+ * 这样无论用户填 `https://api.openai.com` 还是 `https://api.openai.com/v1`,
+ * 再拼接 `/v1/...` 都不会出现 `/v1/v1`。
+ */
+export function openaiBase(url: string): string {
+  return trimSlash(url).replace(/\/v1$/i, '')
+}
+
 function isOllamaTagsResponse(v: unknown): v is OllamaTagsResponse {
   return (
     typeof v === 'object' &&
@@ -124,7 +133,7 @@ export async function testModel(cfg: AgentConfig): Promise<ModelTestResult> {
     }
 
     // OpenAI-compatible
-    const base = trimSlash(cfg.openaiBaseUrl)
+    const base = openaiBase(cfg.openaiBaseUrl)
     const url = `${base}/v1/chat/completions`
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
     if (cfg.openaiKey) {
@@ -175,7 +184,7 @@ export async function fetchModels(cfg: AgentConfig): Promise<string[]> {
   }
 
   // OpenAI-compatible
-  const base = trimSlash(cfg.openaiBaseUrl)
+  const base = openaiBase(cfg.openaiBaseUrl)
   const url = `${base}/v1/models`
   const headers: Record<string, string> = {}
   if (cfg.openaiKey) {
