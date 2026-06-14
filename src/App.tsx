@@ -630,6 +630,79 @@ export default function App() {
     }
     setView('workbench')
   }
+
+  // ---- 多主机广播候选 (Multi-host broadcast targets) ----
+  // 真实广播候选：合并 live SSH 会话 (liveConns) 与已保存的 host profiles，按 id 去重，
+  // 仅取 kind==='host'。profile→Connection 镜像 openLiveTab 里的构造方式（sub=user@host:port、
+  // proto='ssh'），status 由 sessionMap[id] 是否存在决定。
+  const mxCandidates: Connection[] = (() => {
+    const byId = new Map<string, Connection>()
+    // 已保存的 host profiles（基础态，可被 live 覆盖）
+    for (const p of profiles) {
+      byId.set(p.id, {
+        id: p.id,
+        group: p.group ?? '',
+        kind: 'host',
+        name: p.name,
+        sub: `${p.user}@${p.host}:${p.port}`,
+        icon: 'server',
+        status: sessionMap[p.id] ? 'up' : 'down',
+        proto: 'ssh',
+        ...(p.os ? { os: p.os } : {}),
+      })
+    }
+    // 当前 live 连接（覆盖同 id 的 profile，携带最新状态/图标）
+    for (const c of Object.values(liveConns)) {
+      if (c.kind !== 'host') continue
+      byId.set(c.id, { ...c, status: sessionMap[c.id] ? 'up' : 'down' })
+    }
+    return [...byId.values()].filter(c => c.kind === 'host')
+  })()
+
+  // ensureSession — 静默路径：为广播目标确保一个可用的 SSH sessionId。
+  // 绝不弹任何交互 modal；需认证/失败按契约返回字符串字面量。
+  async function ensureSession(connId: string): Promise<string | 'needs-auth' | 'failed'> {
+    // 1) 已有 live 会话 → 直接复用，绝不重连/重开标签。
+    const existing = sessionMap[connId]
+    if (existing) return existing
+    // 2) 取该 profile，复用 openConn 的 profile→args 构造逻辑做静默连接。
+    const profile = profiles.find(p => p.id === connId)
+    if (!profile) return 'needs-auth'
+    if (!isTauri()) return 'failed'
+    const args: SshConnectArgs = {
+      host: profile.host,
+      port: profile.port,
+      user: profile.user,
+      auth: profile.auth,
+      jump: profile.jump,
+    }
+    // 仅当目标 secret 已缓存时才尝试静默连接。jump host 的 secret 从不入缓存
+    // （见 connectProfile：we only cache the target secret），故有 jump 时静默路径
+    // 无法补齐其凭据 → 返回 'needs-auth'，交给正常交互流程收集。
+    if (profile.jump) return 'needs-auth'
+    const cached = await cachedSecret(profile.id)
+    if (!cached) return 'needs-auth'
+    try {
+      const result = await sshConnect({ ...args, secret: cached })
+      // 首次信任未建立 → 静默路径不能弹信任框：断开并返回 'needs-auth'。
+      if (result.hostKeyTrusted === false) {
+        sshDisconnect(result.sessionId).catch(() => { /* best-effort */ })
+        return 'needs-auth'
+      }
+      // 成功 → openLiveTab 注册 sessionMap 并开标签，返回新 sessionId。
+      openLiveTab(args, profile.name, result.sessionId)
+      return result.sessionId
+    } catch {
+      return 'failed'
+    }
+  }
+
+  // onConnectTarget — 结果面板「连接」按钮：走正常交互建连。
+  function onConnectTarget(connId: string) {
+    const c = mxCandidates.find(x => x.id === connId)
+    if (c) void openConn(c)
+  }
+
   // If a closing tab held a live session that no remaining tab shares, drop it.
   function reapSession(closing: Tab | undefined, remaining: Tab[]) {
     // Abort any in-flight agent stream + drop this tab's current-conversation map.
@@ -1191,7 +1264,7 @@ export default function App() {
                     return (
                       <div key={tab.id} style={{ height: '100%', display: isShown ? 'flex' : 'none', position: 'absolute', inset: 0 }}>
                         {tab.kind === 'terminal' && (
-                          <TerminalPane conn={tabConn} sessionId={tab.sessionId} active={isShown} resolveSessionId={resolveSessionId} onChannel={(_sid, chan) => setChanMap(m => { const n = { ...m }; if (chan) n[tab.id] = chan; else delete n[tab.id]; return n })} />
+                          <TerminalPane conn={tabConn} sessionId={tab.sessionId} active={isShown} resolveSessionId={resolveSessionId} mxCandidates={mxCandidates} ensureSession={ensureSession} onConnectTarget={onConnectTarget} onChannel={(_sid, chan) => setChanMap(m => { const n = { ...m }; if (chan) n[tab.id] = chan; else delete n[tab.id]; return n })} />
                         )}
                         {tab.kind === 'sql' && tabConn && (
                           <DbWorkbench conn={tabConn} density={density} active={isShown} />

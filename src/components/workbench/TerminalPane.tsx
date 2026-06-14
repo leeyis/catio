@@ -16,6 +16,8 @@ import type { Connection, TermLine as TermLineType, MultiExecTarget } from '../.
 import { loadHistory } from '../../state/history'
 import { planHistoryCompletion, type ShellHistoryEntry, type HistoryMatch } from '../shell/historyCompletion'
 import { HistorySuggest } from '../shell/HistorySuggest'
+import { isSensitiveCommand, type RiskCode } from './sensitiveCommands'
+import { BroadcastConfirmModal } from './BroadcastConfirmModal'
 
 export interface TerminalPaneProps {
   conn: Connection | null
@@ -35,6 +37,18 @@ export interface TerminalPaneProps {
    * ORCH will pass this once the connection→session map is managed centrally.
    */
   resolveSessionId?: (connId: string) => string | undefined
+  /**
+   * 真实广播候选：来自 profiles + liveConns 合并去重的同协议 host 连接。
+   * 提供时取代 demo 回退的 D.connections 作为候选源。
+   */
+  mxCandidates?: Connection[]
+  /**
+   * 静默建连：为广播目标确保一个可用 sessionId。已连接则复用；可静默连上则自动开标签；
+   * 需要交互认证返回 'needs-auth'；其它异常返回 'failed'。绝不弹任何交互 modal。
+   */
+  ensureSession?: (connId: string) => Promise<string | 'needs-auth' | 'failed'>
+  /** 结果面板「连接」按钮：走正常交互建连流程（会弹认证 modal）。 */
+  onConnectTarget?: (connId: string) => void
   /**
    * Surfaces the live PTY channel id to App so it can write into the active
    * terminal (e.g. snippet/history "insert"). Called with the chanId once
@@ -129,11 +143,18 @@ function termLinesToText(lines: TermLineType[]): string {
     .join('\r\n')
 }
 
-// Per-target state for an active multiexec run (held but not yet rendered — ORCH will surface it).
-// Shape matches MultiExecTarget so the ORCH task can pass it directly to a results panel.
-type MxRunState = Record<string, MultiExecTarget>
+// 本组件本地扩展的目标状态：在 MultiExecTarget('done'|'running'|'queued'|'error')之外
+// 增加 'needs-auth'（需交互认证、本次不参与 exec）与 'failed'（静默建连异常）两态。
+// 不改 types.ts，仅在本组件用本地联合类型表达广播结果面板的额外状态。
+type MxTargetState = MultiExecTarget['state'] | 'needs-auth' | 'failed'
+interface MxTarget extends Omit<MultiExecTarget, 'state'> {
+  state: MxTargetState
+  /** 对应的连接 id —— needs-auth 行的「连接」按钮用它建连。 */
+  connId?: string
+}
+type MxRunState = Record<string, MxTarget>
 
-export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChannel }: TerminalPaneProps) {
+export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCandidates, ensureSession, onConnectTarget, onChannel }: TerminalPaneProps) {
   const { t } = useTranslation()
   const D = useData()
   const { prefs } = usePrefs()
@@ -143,8 +164,16 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
   const selfProto = conn ? (conn.proto || 'ssh') : 'ssh'
   // Broadcast targets must match the ACTIVE tab: same kind (host) AND same protocol —
   // you can't broadcast a shell command to a database node or a different transport.
-  const allHosts = useMemo(() => D.connections.filter(c => c.kind === 'host' && (c.proto || 'ssh') === selfProto && c.status !== 'down'), [D.connections, selfProto])
-  const [mxHosts, setMxHosts] = useState(() => allHosts.filter(h => h.id !== selfId).slice(0, 2).map(h => h.id))
+  // 候选源：mxCandidates 提供时用真实候选（再按同 proto + host + 排除自身过滤）；
+  // 未提供时维持现有 D.connections demo 回退（含 status !== 'down' 过滤）。
+  const allHosts = useMemo(() => {
+    if (mxCandidates) {
+      return mxCandidates.filter(c => c.kind === 'host' && (c.proto || 'ssh') === selfProto && c.id !== selfId)
+    }
+    return D.connections.filter(c => c.kind === 'host' && (c.proto || 'ssh') === selfProto && c.status !== 'down')
+  }, [mxCandidates, D.connections, selfProto, selfId])
+  // 取消默认预选：危险操作不该帮用户预选目标。
+  const [mxHosts, setMxHosts] = useState<string[]>([])
   const rootRef = useRef<HTMLDivElement>(null)
   const xtermHost = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
@@ -185,12 +214,13 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
   suggestRef.current = suggest
   const suggestIndexRef = useRef(0)
   suggestIndexRef.current = suggestIndex
-  // Multiexec run state — per-target progress; held here for ORCH to consume via a future prop/callback.
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  // Multiexec run state — 每个目标的进度/状态，渲染到结果面板。
   const [mxRunState, setMxRunState] = useState<MxRunState>({})
   // The command typed into the broadcast bar (Multi-Exec).
   const [bcCmd, setBcCmd] = useState('')
   const [bcSending, setBcSending] = useState(false)
+  // 确认网关：点发送先打开确认弹窗（含敏感检测结果），用户确认后才真正执行。
+  const [bcConfirm, setBcConfirm] = useState<{ cmd: string; sensitive: boolean; reasons: RiskCode[]; targets: { id: string; name: string }[] } | null>(null)
 
   const host = conn ? (conn.sub.split(' ')[0].replace('ssh ', '')) : 'jump@db-bastion'
   // 裸主机标识(host/IP),仅用于历史补全的「按主机隔离」匹配——与后端写入 history.target
@@ -199,55 +229,73 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
   const matchHost = conn ? hostFromSub(conn.sub) : 'db-bastion'
   const live = !!sessionId && isTauri()
 
-  /**
-   * broadcastCommand — sends `cmd` to all selected broadcast hosts.
-   *
-   * When `resolveSessionId` is provided (ORCH seam), resolves connection ids to
-   * session ids and calls multiexecRun. Also includes the current session if live.
-   * When `resolveSessionId` is absent, falls back to UI-only broadcast (no IPC) —
-   * the terminal itself will send the command via the existing onData handler.
-   *
-   * ORCH: call this from the keystroke handler / send button once the session
-   * map is available. e.g.: broadcastCommand(currentLine) before termWrite.
-   */
-  // ORCH seam: call broadcastCommandRef.current(cmd) from the keystroke handler once
-  // resolveSessionId is wired. Stored in a ref so the caller always has the latest closure.
-  const broadcastCommandRef = useRef<(cmd: string) => Promise<void>>(async () => { /* pre-ORCH no-op */ })
-  broadcastCommandRef.current = async (cmd: string) => {
-    if (!resolveSessionId) {
-      // Pre-ORCH: broadcast is UI-only; the keystroke handler already writes to the
-      // current terminal. No multiexec IPC yet.
-      return
-    }
-    const targetIds: string[] = []
-    // Include the current session if live.
-    if (sessionId && live) targetIds.push(sessionId)
-    // Resolve selected broadcast hosts to session ids.
-    for (const connId of mxHosts) {
-      const sid = resolveSessionId(connId)
-      if (sid) targetIds.push(sid)
-    }
-    if (targetIds.length === 0) return
+  // 把 connId 映射到显示名：优先候选列表，回退 D.byId，最后用 id 本身。
+  const nameForConn = (connId: string): string =>
+    allHosts.find(h => h.id === connId)?.name ?? D.byId[connId]?.name ?? connId
 
-    // Initialise run state for all targets (current session first, then hosts).
+  /**
+   * broadcastCommand — 真正执行一次广播（已通过确认网关）。
+   *
+   * 对每个目标 connId 确保一个 ready 的 sessionId：
+   *  - 当前会话 selfId 用现有 sessionId prop 直接视为 ready；
+   *  - 其余调 ensureSession(connId)：返回 sessionId → 收进 ready；'needs-auth'/'failed'
+   *    → 写入结果面板对应状态、不参与 exec。
+   * 用广播时构建的 sessionId↔connId 映射回填结果（自动建连的新 session 不在旧 resolveSessionId
+   * 映射里，必须用这份当场构建的映射）。
+   */
+  const broadcastCommandRef = useRef<(cmd: string) => Promise<void>>(async () => { /* no-op until wired */ })
+  broadcastCommandRef.current = async (cmd: string) => {
+    if (!resolveSessionId) return
+
+    // 广播时构建的 sessionId → connId 映射（含当前会话），结果回填只认这份映射。
+    const sidToConn = new Map<string, string>()
+    const readySessionIds: string[] = []
     const initial: MxRunState = {}
+
+    // 当前会话：用现有 sessionId prop 直接视为 ready（不重连）。
     if (sessionId && live) {
-      initial[sessionId] = { id: sessionId, name: `${conn?.name ?? t('workbench.currentSession')} ·`, state: 'running', out: '' }
+      sidToConn.set(sessionId, selfId)
+      readySessionIds.push(sessionId)
+      initial[selfId] = { id: selfId, connId: selfId, name: conn?.name ?? t('workbench.currentSession'), state: 'running', out: '' }
     }
+
+    // 其余目标：静默建连。先把所有目标置为 running，建连结果再逐个回写。
     for (const connId of mxHosts) {
-      initial[connId] = { id: connId, name: D.byId[connId]?.name ?? connId, state: 'running', out: '' }
+      initial[connId] = { id: connId, connId, name: nameForConn(connId), state: 'running', out: '' }
     }
     setMxRunState(initial)
 
+    // 逐个 ensureSession（静默路径）。ready 的收集进 readySessionIds + 映射；
+    // needs-auth/failed 的写入结果面板对应状态，不参与 exec。
+    for (const connId of mxHosts) {
+      let res: string | 'needs-auth' | 'failed'
+      try {
+        res = ensureSession ? await ensureSession(connId) : (resolveSessionId(connId) ?? 'needs-auth')
+      } catch {
+        res = 'failed'
+      }
+      if (res === 'needs-auth' || res === 'failed') {
+        setMxRunState(prev => ({
+          ...prev,
+          [connId]: { ...(prev[connId] ?? { id: connId, connId, name: nameForConn(connId), out: '' }), state: res },
+        }))
+      } else {
+        sidToConn.set(res, connId)
+        readySessionIds.push(res)
+      }
+    }
+
+    if (readySessionIds.length === 0) return
+
     try {
-      const runId = await multiexecRun(targetIds, cmd)
+      const runId = await multiexecRun(readySessionIds, cmd)
       const unlisten = await listen<{ sessionId: string; state: 'running' | 'done' | 'error'; chunk?: string }>(
         'multiexec://' + runId,
         (ev) => {
           setMxRunState(prev => {
-            // Find the connId that maps to this sessionId.
-            const connId = mxHosts.find(id => resolveSessionId(id) === ev.sessionId) ?? ev.sessionId
-            const existing = prev[connId] ?? { id: connId, name: connId, state: 'running', out: '' }
+            // 用广播时构建的 sessionId→connId 映射回填（自动建连的新 session 也在内）。
+            const connId = sidToConn.get(ev.sessionId) ?? ev.sessionId
+            const existing = prev[connId] ?? { id: connId, connId, name: nameForConn(connId), state: 'running', out: '' }
             return {
               ...prev,
               [connId]: {
@@ -259,11 +307,10 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
           })
         },
       )
-      // Unlisten once all targets have reported done or error.
-      // A 30-second timeout is a safe fallback; ORCH can replace this.
+      // 兜底：30 秒后解除监听。
       setTimeout(() => unlisten(), 30_000)
     } catch {
-      // best-effort; ORCH will add proper error surfaces
+      // best-effort
     }
   }
 
@@ -276,12 +323,25 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
     else sa.findPrevious(searchQuery, opts)
   }
 
-  // Send the typed command to every selected broadcast target (+ current session).
-  async function sendBroadcast() {
+  // 点发送：先做敏感检测、构建目标清单，打开确认弹窗（不直接执行）。
+  function sendBroadcast() {
     const cmd = bcCmd.trim()
-    if (!cmd || bcSending) return
+    if (!cmd || bcSending || bcConfirm) return
+    const { sensitive, reasons } = isSensitiveCommand(cmd)
+    // 目标清单：当前会话（锁定）+ 已选 mxHosts。
+    const targets: { id: string; name: string }[] = []
+    targets.push({ id: selfId, name: conn ? conn.name : 'db-bastion' })
+    for (const connId of mxHosts) targets.push({ id: connId, name: nameForConn(connId) })
+    setBcConfirm({ cmd, sensitive, reasons, targets })
+  }
+
+  // 用户在确认弹窗点「确认广播」后真正执行。
+  async function confirmBroadcast() {
+    const pending = bcConfirm
+    if (!pending) return
+    setBcConfirm(null)
     setBcSending(true)
-    try { await broadcastCommandRef.current(cmd) } finally { setBcSending(false) }
+    try { await broadcastCommandRef.current(pending.cmd) } finally { setBcSending(false) }
     setBcCmd('')
   }
 
@@ -827,7 +887,18 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
                             <span className="ell" style={{ fontSize: 12.5, fontWeight: 500, color: 'var(--text-primary)' }}>{h.name}</span>
                             <span className="ell mono" style={{ fontSize: 10, color: 'var(--text-faint)' }}>{h.sub}</span>
                           </div>
-                          <StatusDot status={h.status} size={6} />
+                          {/* 连接状态：有 resolveSessionId 时按是否解析到 sessionId 显示「已连接/未连接」；
+                              未提供时回退到候选自身 status 的圆点（demo）。 */}
+                          {resolveSessionId
+                            ? (() => {
+                                const connected = !!resolveSessionId(h.id)
+                                return (
+                                  <span className="chip" style={{ height: 18, fontSize: 9, flex: 'none', background: connected ? 'color-mix(in srgb, var(--signal-green) 13%, transparent)' : 'var(--surface-sunken)', color: connected ? 'var(--signal-green)' : 'var(--text-faint)' }}>
+                                    <span className="dot" style={{ background: connected ? 'var(--signal-green)' : 'var(--text-faint)' }} /> {connected ? t('workbench.connected') : t('workbench.disconnected')}
+                                  </span>
+                                )
+                              })()
+                            : <StatusDot status={h.status} size={6} />}
                         </button>
                       )
                     })}
@@ -859,10 +930,10 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
         <div className="row gap8" style={{ padding: '8px 12px', borderBottom: '1px solid var(--border-hairline)', background: 'var(--surface-subtle)', flex: 'none', alignItems: 'center' }}>
           <Icon name="radar" size={14} style={{ color: 'var(--accent-primary)', flex: 'none' }} />
           <input value={bcCmd} onChange={e => setBcCmd(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') void sendBroadcast() }}
+            onKeyDown={e => { if (e.key === 'Enter') sendBroadcast() }}
             placeholder={t('workbench.broadcastCmdPlaceholder', { count: mxHosts.length + 1 })}
             className="mono" style={{ flex: 1, height: 32, padding: '0 10px', borderRadius: 8, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-card)', fontSize: 12.5, color: 'var(--text-primary)', outline: 'none' }} />
-          <button className="btn btn-primary sm" style={{ flex: 'none' }} disabled={!bcCmd.trim() || bcSending} onClick={() => void sendBroadcast()}>
+          <button className="btn btn-primary sm" style={{ flex: 'none' }} disabled={!bcCmd.trim() || bcSending || !!bcConfirm} onClick={() => sendBroadcast()}>
             <Icon name="radar" size={13} /> {t('workbench.broadcastSend', { count: mxHosts.length + 1 })}
           </button>
         </div>
@@ -875,16 +946,32 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
             <span style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '0.3px', textTransform: 'uppercase', color: 'var(--text-faint)' }}>{t('workbench.broadcastResults')}</span>
             <button className="icon-btn bare" title={t('workbench.clearAll')} style={{ width: 18, height: 18 }} onClick={() => setMxRunState({})}><Icon name="x" size={12} /></button>
           </div>
-          {Object.values(mxRunState).map(tg => (
-            <div key={tg.id} className="col" style={{ padding: '6px 12px', borderBottom: '1px solid var(--border-hairline)', gap: 3 }}>
-              <div className="row gap6" style={{ alignItems: 'center' }}>
-                <span className="dot" style={{ background: tg.state === 'done' ? 'var(--signal-green)' : tg.state === 'error' ? 'var(--danger-fg)' : 'var(--signal-amber)' }} />
-                <span className="ell" style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-primary)' }}>{tg.name}</span>
-                <span className="mono" style={{ marginLeft: 'auto', fontSize: 9.5, color: 'var(--text-faint)', textTransform: 'uppercase' }}>{tg.state}</span>
+          {Object.values(mxRunState).map(tg => {
+            // 状态点颜色：done 绿 / error|failed 红 / needs-auth 灰 / running 琥珀。
+            const dotColor = tg.state === 'done' ? 'var(--signal-green)'
+              : (tg.state === 'error' || tg.state === 'failed') ? 'var(--danger-fg)'
+              : tg.state === 'needs-auth' ? 'var(--text-faint)'
+              : 'var(--signal-amber)'
+            // 状态标签文案：needs-auth/failed 走 i18n，其余直接展示后端状态枚举。
+            const stateLabel = tg.state === 'needs-auth' ? t('workbench.broadcastNeedsAuth')
+              : tg.state === 'failed' ? t('workbench.broadcastFailed')
+              : tg.state
+            return (
+              <div key={tg.id} className="col" style={{ padding: '6px 12px', borderBottom: '1px solid var(--border-hairline)', gap: 3 }}>
+                <div className="row gap6" style={{ alignItems: 'center' }}>
+                  <span className="dot" style={{ background: dotColor }} />
+                  <span className="ell" style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-primary)' }}>{tg.name}</span>
+                  <span className="mono" style={{ marginLeft: 'auto', fontSize: 9.5, color: 'var(--text-faint)', textTransform: 'uppercase' }}>{stateLabel}</span>
+                  {tg.state === 'needs-auth' && tg.connId && (
+                    <button className="btn btn-ghost sm" style={{ height: 22, padding: '0 8px', fontSize: 10.5, flex: 'none' }} onClick={() => onConnectTarget?.(tg.connId as string)}>
+                      <Icon name="plug" size={11} /> {t('workbench.broadcastConnect')}
+                    </button>
+                  )}
+                </div>
+                {tg.out && <pre className="mono" style={{ margin: 0, fontSize: 10.5, lineHeight: 1.5, color: 'var(--text-tertiary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: 90, overflow: 'auto' }}>{tg.out}</pre>}
               </div>
-              {tg.out && <pre className="mono" style={{ margin: 0, fontSize: 10.5, lineHeight: 1.5, color: 'var(--text-tertiary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: 90, overflow: 'auto' }}>{tg.out}</pre>}
-            </div>
-          ))}
+            )
+          })}
         </div>
       )}
 
@@ -893,7 +980,13 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
           计算导致最底一行被裁;内层 clientWidth/Height 即真实终端区域,浮层 cellW/cellH 换算
           也随之精确对齐。 */}
       <div className="grow col" onMouseDown={() => setSelBar(null)}
-        style={{ overflow: 'hidden', background: 'var(--term-bg)', padding: '12px 14px', minHeight: 0 }}>
+        style={{
+          overflow: 'hidden', background: 'var(--term-bg)', padding: '12px 14px', minHeight: 0,
+          // armed 状态（broadcast + 已选目标）给终端外圈加一圈 accent 描边，最醒目的「多机模式」标识。
+          outline: broadcast && mxHosts.length > 0 ? '2px solid var(--accent-primary)' : 'none',
+          outlineOffset: broadcast && mxHosts.length > 0 ? -2 : 0,
+          boxShadow: broadcast && mxHosts.length > 0 ? 'inset 0 0 0 1px var(--accent-primary)' : 'none',
+        }}>
         <div ref={xtermHost} className="grow"
           style={{ minHeight: 0, overflow: 'hidden', fontFamily: monoFontStack(prefs.monoFont), fontSize: prefs.termFontPx, lineHeight: 1 }} />
       </div>
@@ -988,8 +1081,20 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, onChan
           <span style={{ fontWeight: 600 }}>{t('workbench.broadcastMode')}</span>
           <span style={{ color: 'var(--text-tertiary)' }}>{t('workbench.broadcastSendTo')}</span>
           <span className="chip" style={{ height: 19, fontSize: 10, background: 'var(--surface-card)', color: 'var(--accent-primary)', fontWeight: 600 }}>{conn ? conn.name : 'db-bastion'}</span>
-          {mxHosts.map(id => <span key={id} className="chip" style={{ height: 19, fontSize: 10, background: 'var(--surface-card)', color: 'var(--text-secondary)' }}>{D.byId[id].name}</span>)}
+          {mxHosts.map(id => <span key={id} className="chip" style={{ height: 19, fontSize: 10, background: 'var(--surface-card)', color: 'var(--text-secondary)' }}>{nameForConn(id)}</span>)}
         </div>
+      )}
+
+      {/* 广播确认网关 —— 普通命令轻确认 / 敏感命令强警告（需输入 yes）。 */}
+      {bcConfirm && (
+        <BroadcastConfirmModal
+          cmd={bcConfirm.cmd}
+          targets={bcConfirm.targets}
+          sensitive={bcConfirm.sensitive}
+          reasons={bcConfirm.reasons}
+          onConfirm={() => { void confirmBroadcast() }}
+          onCancel={() => setBcConfirm(null)}
+        />
       )}
     </div>
   )

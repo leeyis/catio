@@ -222,7 +222,32 @@
     "tabStructure": "结构",
     "noTabs": "没有打开的标签",
     "noTabsHint": "从左侧选择表、视图或函数，或新建查询",
-    "historySuggestHint": "↑↓ 选择 · Tab/↵ 补全 · Esc 关闭"
+    "historySuggestHint": "↑↓ 选择 · Tab/↵ 补全 · Esc 关闭",
+    "broadcastConfirmTitle": "确认广播",
+    "broadcastConfirmDesc": "该命令将同时在 {{count}} 台主机上执行。",
+    "broadcastConfirmCmd": "将执行的命令",
+    "broadcastConfirmTargets": "目标主机",
+    "broadcastDangerTitle": "危险命令",
+    "broadcastDangerHint": "此命令具破坏性，请输入 yes 二次确认",
+    "broadcastTypeYes": "输入 yes 确认",
+    "broadcastConfirmBtn": "确认广播",
+    "broadcastCancel": "取消",
+    "broadcastStateless": "每次广播为独立一次性执行，不保留 shell 状态（cd 等不跨命令生效）",
+    "broadcastNeedsAuth": "需认证",
+    "broadcastConnect": "连接",
+    "broadcastFailed": "连接失败",
+    "connected": "已连接",
+    "disconnected": "未连接",
+    "broadcastRisk": {
+      "rmrf": "递归强制删除文件，可能不可逆地清空目录",
+      "diskWrite": "直接写入磁盘或裸设备，可能损毁数据与文件系统",
+      "power": "关机、重启或切换运行级别，将中断主机服务",
+      "kill": "强制结束进程，可能导致服务异常或数据丢失",
+      "chmodR": "递归修改权限或属主，可能破坏系统访问控制",
+      "forkbomb": "疑似 fork 炸弹，会耗尽系统资源致主机失去响应",
+      "overwrite": "重定向覆盖关键文件，可能损坏系统或敏感配置",
+      "dbDrop": "删除或清空数据库 / 数据表，将造成数据永久丢失"
+    }
   },
   "panels": {
     "sessionHistory": "会话历史",

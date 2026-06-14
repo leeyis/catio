@@ -222,7 +222,32 @@
     "tabStructure": "Structure",
     "noTabs": "No open tabs",
     "noTabsHint": "Pick a table, view or function from the sidebar, or open a new query",
-    "historySuggestHint": "↑↓ select · Tab/↵ complete · Esc close"
+    "historySuggestHint": "↑↓ select · Tab/↵ complete · Esc close",
+    "broadcastConfirmTitle": "Confirm broadcast",
+    "broadcastConfirmDesc": "This command will run on {{count}} hosts at the same time.",
+    "broadcastConfirmCmd": "Command to run",
+    "broadcastConfirmTargets": "Target hosts",
+    "broadcastDangerTitle": "Dangerous command",
+    "broadcastDangerHint": "This command is destructive. Type yes to confirm.",
+    "broadcastTypeYes": "Type yes to confirm",
+    "broadcastConfirmBtn": "Confirm broadcast",
+    "broadcastCancel": "Cancel",
+    "broadcastStateless": "Each broadcast is an independent one-off execution and keeps no shell state (cd and similar do not carry across commands)",
+    "broadcastNeedsAuth": "Needs auth",
+    "broadcastConnect": "Connect",
+    "broadcastFailed": "Connection failed",
+    "connected": "Connected",
+    "disconnected": "Not connected",
+    "broadcastRisk": {
+      "rmrf": "Recursive force delete of files; may irreversibly wipe directories",
+      "diskWrite": "Writes directly to disk or raw devices; may corrupt data and filesystems",
+      "power": "Shuts down, reboots or changes runlevel; will interrupt host services",
+      "kill": "Force-kills processes; may break services or lose data",
+      "chmodR": "Recursively changes permissions or ownership; may break system access control",
+      "forkbomb": "Looks like a fork bomb; will exhaust system resources and hang the host",
+      "overwrite": "Redirect overwrite of critical files; may corrupt the system or sensitive config",
+      "dbDrop": "Drops or truncates databases / tables; causes permanent data loss"
+    }
   },
   "panels": {
     "sessionHistory": "Session history",
