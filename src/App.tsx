@@ -198,8 +198,13 @@ export default function App() {
     try { return JSON.parse(localStorage.getItem('catio-users') || '[]') } catch (e) { return [] }
   })
   const [ownerUser, setOwnerUser] = useState<string>(() => localStorage.getItem('catio-owner') || '')
+  // 启用本地登录验证时，每次加载都从「未登录」起步（null → 显示 AuthGate）。
+  // 不能用 sessionStorage 恢复会话来跳过登录：vault 的解密密钥仅存内存（见
+  // state/vault.ts），重载/重启后必然丢失。若仅凭 sessionStorage 认为"已登录"，
+  // 就会进入"会话有效但 vault 已锁"的半状态——缓存的连接密码无法解密，于是每次
+  // 重连都要重输密码。要求登录才能重新派生 vault 密钥，凭据记忆才真正生效。
   const [sessionUser, setSessionUser] = useState<string | null>(() =>
-    sessionStorage.getItem('catio-session') || (localStorage.getItem('catio-auth') === '1' ? null : '__open')
+    localStorage.getItem('catio-auth') === '1' ? null : '__open'
   )
 
   const locked = authEnabled && !sessionUser
