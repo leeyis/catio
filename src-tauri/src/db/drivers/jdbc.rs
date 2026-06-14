@@ -115,6 +115,34 @@ fn driver_jar_paths() -> Vec<String> {
         .collect()
 }
 
+/// 把 sidecar 回传的驱动错误归类。连接/测试阶段的失败属于 `ConnectFailed`，
+/// 不该被包成 `QueryFailed`——否则前端把"连不上数据库"误显示成"query failed"，
+/// 误导用户以为是 SQL/库名问题。其余阶段（executeQuery 等）维持 `QueryFailed`。
+fn classify_sidecar_error(method: &str, msg: &str) -> DbError {
+    if matches!(method, "connect" | "testConnection") {
+        DbError::ConnectFailed(enrich_connect_message(msg))
+    } else {
+        DbError::QueryFailed(msg.to_string())
+    }
+}
+
+/// 为常见的网络层连接报错补一句可执行的定位提示。达梦（DM）等驱动在主机不可达、
+/// 端口错误、服务未启动或被防火墙/IP 白名单拦截时抛"网络通信异常"——这与"数据库
+/// 不存在"无关（达梦不在 URL 里带 database，库名/schema 不影响建连），提示如实指向网络层。
+fn enrich_connect_message(msg: &str) -> String {
+    let lower = msg.to_lowercase();
+    if msg.contains("网络通信异常")
+        || lower.contains("communication")
+        || lower.contains("connection refused")
+        || lower.contains("connection timed out")
+    {
+        format!("{msg}（无法与数据库服务器建立网络连接：请检查主机名/IP 与端口是否正确、\
+                 数据库服务是否已启动、网络与防火墙/IP 白名单是否放行）")
+    } else {
+        msg.to_string()
+    }
+}
+
 impl JdbcDriver {
     pub async fn connect(args: &ConnectArgs) -> Result<Self, DbError> {
         let profile = args.driver_profile.as_deref().ok_or_else(|| {
@@ -218,7 +246,7 @@ impl JdbcDriver {
                 .map_err(|e| DbError::QueryFailed(format!("bad JSON from JDBC sidecar: {e}")))?;
             if let Some(err) = v.get("error") {
                 let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("unknown JDBC error");
-                return Err(DbError::QueryFailed(msg.to_string()));
+                return Err(classify_sidecar_error(&method, msg));
             }
             Ok(v.get("result").cloned().unwrap_or(Value::Null))
         })
@@ -382,8 +410,30 @@ impl Driver for JdbcDriver {
 
 #[cfg(test)]
 mod tests {
-    use super::map_query_result;
+    use super::{classify_sidecar_error, map_query_result};
+    use crate::db::DbError;
     use serde_json::json;
+
+    #[test]
+    fn connect_phase_errors_are_connect_failed_not_query_failed() {
+        // 达梦在建连阶段抛"网络通信异常"应归为 ConnectFailed，且补网络层提示。
+        let e = classify_sidecar_error("connect", "网络通信异常");
+        assert!(matches!(e, DbError::ConnectFailed(_)));
+        let msg = e.to_string();
+        assert!(msg.contains("网络通信异常"));
+        assert!(msg.contains("防火墙"), "应补充可执行的网络层定位提示");
+
+        // testConnection 同样属于建连阶段。
+        assert!(matches!(classify_sidecar_error("testConnection", "boom"), DbError::ConnectFailed(_)));
+    }
+
+    #[test]
+    fn query_phase_errors_stay_query_failed() {
+        let e = classify_sidecar_error("executeQuery", "ORA-00942: table does not exist");
+        assert!(matches!(e, DbError::QueryFailed(_)));
+        // 非网络类报错不加提示，原样透传。
+        assert_eq!(e.to_string(), "query failed: ORA-00942: table does not exist");
+    }
 
     #[test]
     fn maps_select_result_columns_and_rows() {
