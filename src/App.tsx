@@ -81,6 +81,13 @@ export default function App() {
   // auto-opened mock host/db). Tabs are created on demand by openConn/openLiveTab.
   const [tabs, setTabs] = useState<Tab[]>([])
   const [activeTab, setActiveTab] = useState<string>('')
+  // Monotonic counter for unique tab ids. A connId can now own MULTIPLE tabs
+  // (复制标签), so `tab-${connId}` is no longer unique — append a fresh seq.
+  const tabSeq = useRef(0)
+  const newTabId = (connId: string) => `tab-${connId}-${tabSeq.current++}`
+  // MRU: connId -> the tab id last active for that connection. Tracked via an
+  // effect (below) so we don't have to touch the many setActiveTab call sites.
+  const mruRef = useRef<Record<string, string>>({})
   const [activePanel, setActivePanel] = useState<string>('ai')
   const [panelOpen, setPanelOpen] = useState<boolean>(false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false)
@@ -325,6 +332,71 @@ export default function App() {
 
   const setThemeBoth = (x: string) => setTweak('theme', x as 'dawn' | 'amber' | 'grove')
 
+  // Track the MRU tab per connection: whenever the active tab resolves to a Tab,
+  // remember it as that connection's most-recently-used. Avoids instrumenting the
+  // dozens of setActiveTab call sites.
+  useEffect(() => {
+    const tab = tabs.find(tb => tb.id === activeTab)
+    if (tab) mruRef.current[tab.connId] = activeTab
+  }, [activeTab, tabs])
+
+  // Resolve the tab a card click should activate for a connection: prefer the
+  // stored MRU id if it still exists among this conn's tabs; else the last one;
+  // undefined if the conn has no tabs.
+  function mruTabIdForConn(connId: string): string | undefined {
+    const candidates = tabs.filter(t => t.connId === connId)
+    if (!candidates.length) return undefined
+    const mru = mruRef.current[connId]
+    if (mru && candidates.some(t => t.id === mru)) return mru
+    return candidates[candidates.length - 1].id
+  }
+
+  // Compute a 复制标签 title: strip any trailing ` (k)` to get the base, then pick
+  // the smallest n ≥ 1 not already used by a sibling (same connId) titled
+  // `${base} (${n})`. The original (unnumbered) tab keeps its name; copies start at (1).
+  function computeDupTitle(source: Tab): string {
+    const base = source.title.replace(/ \(\d+\)$/, '')
+    const used = new Set<number>()
+    for (const t of tabs) {
+      if (t.connId !== source.connId) continue
+      const m = t.title.match(/^(.*) \((\d+)\)$/)
+      if (m && m[1] === base) used.add(Number(m[2]))
+    }
+    let n = 1
+    while (used.has(n)) n += 1
+    return `${base} (${n})`
+  }
+
+  // 复制标签: clone the source tab (same kind/connId/sessionId) under a fresh id with
+  // a numbered title, insert it immediately to the right of the source, and activate
+  // it. Terminal copies share the sessionId but each TerminalPane opens its own PTY
+  // channel (a fresh shell); DB copies share the live connection via a new workbench.
+  function duplicateTab(sourceId: string) {
+    setTabs(prev => {
+      const idx = prev.findIndex(tb => tb.id === sourceId)
+      if (idx < 0) return prev
+      const source = prev[idx]
+      const dup: Tab = {
+        id: newTabId(source.connId),
+        kind: source.kind,
+        connId: source.connId,
+        title: computeDupTitle(source),
+        ...(source.sessionId ? { sessionId: source.sessionId } : {}),
+      }
+      const next = [...prev]
+      next.splice(idx + 1, 0, dup)
+      setActiveTab(dup.id)
+      return next
+    })
+  }
+
+  // 重命名标签: update the tab's title. Empty/whitespace-only titles are ignored.
+  function renameTab(id: string, title: string) {
+    const trimmed = title.trim()
+    if (!trimmed) return
+    setTabs(prev => prev.map(tb => tb.id === id ? { ...tb, title: trimmed } : tb))
+  }
+
   // Build a display Connection for a live SSH session and open its terminal tab.
   function openLiveTab(args: SshConnectArgs, name: string, sessionId?: string) {
     const connId = `live-${args.host}:${args.port}-${args.user}`
@@ -340,11 +412,18 @@ export default function App() {
     }
     setLiveConns(prev => ({ ...prev, [connId]: conn }))
     if (sessionId) setSessionMap(prev => ({ ...prev, [connId]: sessionId }))
-    const tabId = 'tab-' + connId
-    setTabs(prev => prev.some(tb => tb.id === tabId)
-      ? prev.map(tb => tb.id === tabId ? { ...tb, sessionId } : tb)
-      : [...prev, { id: tabId, kind: 'terminal', connId, title: name, sessionId }])
-    setActiveTab(tabId)
+    // One conn can own multiple tabs now: if it already has a tab, re-activate its
+    // MRU tab (and refresh its sessionId) instead of creating another; only the
+    // first connect (no existing tab) creates a fresh terminal tab.
+    const existingTabId = mruTabIdForConn(connId)
+    if (existingTabId) {
+      setTabs(prev => prev.map(tb => tb.id === existingTabId ? { ...tb, sessionId } : tb))
+      setActiveTab(existingTabId)
+    } else {
+      const tabId = newTabId(connId)
+      setTabs(prev => [...prev, { id: tabId, kind: 'terminal', connId, title: name, sessionId }])
+      setActiveTab(tabId)
+    }
     setView('workbench')
     // Surface any newly-saved profile in the vault (saveProfile ran in the modal).
     reloadProfiles()
@@ -496,11 +575,15 @@ export default function App() {
     if (conn.kind === 'db') {
       const active = listActiveDbConnections().find(a => a.profileId === conn.id)
       if (active) {
-        const tabId = 'tab-' + conn.id
-        setTabs(prev => prev.some(tb => tb.id === tabId) ? prev : [...prev, {
-          id: tabId, kind: 'sql', connId: conn.id, title: conn.name,
-        }])
-        setActiveTab(tabId)
+        // Already-live DB: activate this conn's MRU tab if any, else open one.
+        const existingTabId = mruTabIdForConn(conn.id)
+        if (existingTabId) {
+          setActiveTab(existingTabId)
+        } else {
+          const tabId = newTabId(conn.id)
+          setTabs(prev => [...prev, { id: tabId, kind: 'sql', connId: conn.id, title: conn.name }])
+          setActiveTab(tabId)
+        }
         setView('workbench')
       } else {
         const dbp = dbProfiles.find(p => p.id === conn.id)
@@ -527,14 +610,20 @@ export default function App() {
       return
     }
     // Fallback: live display host conns without a saved profile just open a tab.
-    const tabId = 'tab-' + conn.id
-    setTabs(prev => prev.some(tb => tb.id === tabId) ? prev : [...prev, {
-      id: tabId,
-      kind: 'terminal',
-      connId: conn.id,
-      title: conn.name,
-    }])
-    setActiveTab(tabId)
+    // Activate this conn's MRU tab if one exists, else create a fresh terminal tab.
+    const existingTabId = mruTabIdForConn(conn.id)
+    if (existingTabId) {
+      setActiveTab(existingTabId)
+    } else {
+      const tabId = newTabId(conn.id)
+      setTabs(prev => [...prev, {
+        id: tabId,
+        kind: 'terminal',
+        connId: conn.id,
+        title: conn.name,
+      }])
+      setActiveTab(tabId)
+    }
     setView('workbench')
   }
   // If a closing tab held a live session that no remaining tab shares, drop it.
@@ -589,8 +678,9 @@ export default function App() {
       return next
     })
     setChanMap(prev => {
+      // chanMap is keyed by tab.id; drop the closing tab's channel entry.
       const next = { ...prev }
-      delete next[sid]
+      delete next[closing.id]
       return next
     })
   }
@@ -630,9 +720,9 @@ export default function App() {
     // If this connection already has an open tab, activate it so the focused
     // sidebar card and the middle workbench tab stay consistent (clicking a host
     // surfaces its terminal, a DB its workbench — not whatever tab was active).
-    const tab = tabs.find(tb => tb.connId === conn.id)
-    if (tab) {
-      setActiveTab(tab.id)
+    const mruId = mruTabIdForConn(conn.id)
+    if (mruId) {
+      setActiveTab(mruId)
       setView('workbench')
     }
     setDetailConn(conn)
@@ -714,7 +804,9 @@ export default function App() {
       try { await dbDisconnect(a.connId) } catch { /* best-effort */ }
       removeActiveDbConnection(a.connId)
     }
-    closeTab('tab-' + profile.id)
+    // A conn may own multiple tabs now — close every tab for this profile.
+    const closing = tabs.filter(tb => tb.connId === profile.id).map(tb => tb.id)
+    closing.forEach(id => closeTab(id))
     bumpDbActive()
     syncMcpTargets()
     // Reflect the new (disconnected) status in the open details panel.
@@ -809,8 +901,11 @@ export default function App() {
     if (sid) sshDisconnect(sid).catch(() => { /* best-effort */ })
     setSessionMap(prev => { const next = { ...prev }; delete next[connId]; return next })
     setLiveConns(prev => { const next = { ...prev }; delete next[connId]; return next })
-    if (sid) setChanMap(prev => { const next = { ...prev }; delete next[sid]; return next })
-    closeTab('tab-' + connId)
+    // chanMap is keyed by tab.id now; reapSession drops each closed tab's channel,
+    // so a delete-by-sid here would be a no-op. A conn may own multiple tabs — close
+    // every tab for this connId (snapshot ids first; closeTab mutates `tabs`).
+    const closing = tabs.filter(tb => tb.connId === connId).map(tb => tb.id)
+    closing.forEach(id => closeTab(id))
   }
 
   // 关闭会话 — disconnect the live session for this connection.
@@ -856,12 +951,14 @@ export default function App() {
   // Write text into the active terminal's live PTY channel (no trailing newline).
   async function insertToTerminal(code: string) {
     const sid = cur?.sessionId
-    const chan = sid ? chanMap[sid] : undefined
+    // chanMap is keyed by tab.id (not sessionId) so two terminal copies sharing one
+    // sessionId resolve to their OWN channel — the insert lands in the active copy.
+    const chan = cur ? chanMap[cur.id] : undefined
     if (!sid || !chan) return
     const { termWrite } = await import('./services/ssh')
     await termWrite(sid, chan, btoa(unescape(encodeURIComponent(code))))
   }
-  const canInsert = !!(cur?.sessionId && chanMap[cur.sessionId])
+  const canInsert = !!(cur?.sessionId && chanMap[cur.id])
   // Whether the focused tab is an active DB workbench — gates the SQL editor
   // insert affordance (mirrors `canInsert` for terminals). A DB tab has kind
   // 'sql'; the SqlConsole catio-insert listener lands the text in its active
@@ -1063,7 +1160,7 @@ export default function App() {
 
               {/* tab bar — only in workbench when there are tabs */}
               {view === 'workbench' && tabs.length > 0 && (
-                <WorkbenchTabs tabs={tabs} activeTab={activeTab} onActivate={setActiveTab} onClose={closeTab} onCloseOthers={closeOthers} onCloseAll={closeAll} onNew={() => setShowNew(true)} />
+                <WorkbenchTabs tabs={tabs} activeTab={activeTab} onActivate={setActiveTab} onClose={closeTab} onCloseOthers={closeOthers} onCloseAll={closeAll} onNew={() => setShowNew(true)} onDuplicate={duplicateTab} onRename={renameTab} />
               )}
               {view === 'workbench' && tabs.length === 0 && <EmptyWorkbench onNew={() => setShowNew(true)} />}
 
@@ -1084,7 +1181,7 @@ export default function App() {
                     return (
                       <div key={tab.id} style={{ height: '100%', display: isShown ? 'flex' : 'none', position: 'absolute', inset: 0 }}>
                         {tab.kind === 'terminal' && (
-                          <TerminalPane conn={tabConn} sessionId={tab.sessionId} active={isShown} resolveSessionId={resolveSessionId} onChannel={(sid, chan) => setChanMap(m => { const n = { ...m }; if (chan) n[sid] = chan; else delete n[sid]; return n })} />
+                          <TerminalPane conn={tabConn} sessionId={tab.sessionId} active={isShown} resolveSessionId={resolveSessionId} onChannel={(_sid, chan) => setChanMap(m => { const n = { ...m }; if (chan) n[tab.id] = chan; else delete n[tab.id]; return n })} />
                         )}
                         {tab.kind === 'sql' && tabConn && (
                           <DbWorkbench conn={tabConn} density={density} active={isShown} />
