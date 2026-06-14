@@ -1166,7 +1166,7 @@ export default function App() {
             {/* view body */}
             <div className="grow col" style={{ minHeight: 0 }}>
               {view === 'home' && <HomeView onOpen={openConn} onNew={() => setShowNew(true)} owned={ownsVault} userName={authEnabled ? currentName : ''} authEnabled={authEnabled} conns={vaultConns}
-                recent={recentSessions.map(r => vaultConns.find(c => c.id === r.connId)).filter((c): c is Connection => !!c)} />}
+                recent={recentSessions.map(r => { const conn = vaultConns.find(c => c.id === r.connId); return conn ? { conn, ts: r.ts } : null }).filter((x): x is { conn: Connection; ts: number } => !!x)} />}
 
               {/* tab bar — only in workbench when there are tabs */}
               {view === 'workbench' && tabs.length > 0 && (

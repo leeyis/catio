@@ -17,8 +17,17 @@ export interface HomeViewProps {
   authEnabled?: boolean
   /** Real saved connections (from the vault). Empty on a fresh install. */
   conns?: Connection[]
-  /** Recently-opened connections (most-recent first), resolved to live vault entries. */
-  recent?: Connection[]
+  /** Recently-opened connections (most-recent first), resolved to live vault
+   *  entries, each carrying the epoch-ms timestamp of when it was last opened. */
+  recent?: { conn: Connection; ts: number }[]
+}
+
+// Format an epoch-ms timestamp as "YYYY-MM-DD HH:mm:ss" — zero-padded and
+// language-neutral, so the recent-session card shows an unambiguous 年月日时分秒.
+function formatTs(ts: number): string {
+  const d = new Date(ts)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
 }
 
 interface StatProps {
@@ -40,7 +49,7 @@ function Stat({ n, label, icon }: StatProps) {
 }
 
 // Compact recent-session row — click to re-open/connect.
-function RecentRow({ conn, onOpen }: { conn: Connection; onOpen: (c: Connection) => void }) {
+function RecentRow({ conn, ts, onOpen }: { conn: Connection; ts: number; onOpen: (c: Connection) => void }) {
   const { t } = useTranslation()
   const [hover, setHover] = useState(false)
   return (
@@ -54,6 +63,7 @@ function RecentRow({ conn, onOpen }: { conn: Connection; onOpen: (c: Connection)
         </div>
         <span className="ell mono" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{conn.sub}</span>
       </div>
+      <span className="mono" style={{ fontSize: 11, color: 'var(--text-tertiary)', whiteSpace: 'nowrap', flexShrink: 0 }}>{formatTs(ts)}</span>
       {hover
         ? <button className="btn btn-primary sm" onClick={e => { e.stopPropagation(); onOpen(conn) }}><Icon name="play" size={12} /> {t('home.connect')}</button>
         : <Icon name="chevron-right" size={15} style={{ color: 'var(--text-disabled)' }} />}
@@ -131,7 +141,7 @@ export function HomeView({ onOpen, onNew, owned = true, userName = '', authEnabl
         <div>
           <SectionHead title={t('home.recentSessions')} count={recent.length} />
           {recent.length
-            ? <div className="col gap8">{recent.map(c => <RecentRow key={c.id} conn={c} onOpen={onOpen} />)}</div>
+            ? <div className="col gap8">{recent.map(({ conn, ts }) => <RecentRow key={conn.id} conn={conn} ts={ts} onOpen={onOpen} />)}</div>
             : <EmptySection icon="history" text={t('home.recentEmpty')} />}
         </div>
       </div>
