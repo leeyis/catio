@@ -176,6 +176,7 @@
     "renamePlaceholder": "标签标题",
     "renameConfirm": "确定",
     "renameCancel": "取消",
+    "multiExec": "多机执行",
     "broadcastTargetHosts": "广播目标主机",
     "machines": "台",
     "sameProtoOnly": "仅显示同协议主机",

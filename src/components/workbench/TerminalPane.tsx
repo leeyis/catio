@@ -897,7 +897,7 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
           <div style={{ position: 'relative' }}>
             <button onClick={() => setMxOpen(o => !o)}
               className="chip" style={{ cursor: 'pointer', height: 28, background: broadcast ? 'var(--accent-soft)' : 'var(--surface-sunken)', color: broadcast ? 'var(--accent-primary)' : 'var(--text-tertiary)', fontWeight: 600 }}>
-              <Icon name="radar" size={12} /> Multi-Exec{broadcast && mxHosts.length ? ` · ${mxHosts.length + 1} ${t('workbench.machines')}` : ''}
+              <Icon name="radar" size={12} /> {t('workbench.multiExec')}{broadcast && mxHosts.length ? ` · ${mxHosts.length + 1} ${t('workbench.machines')}` : ''}
               <Icon name="chevron-down" size={11} style={{ transition: 'transform .15s', transform: mxOpen ? 'rotate(180deg)' : 'none' }} />
             </button>
             {mxOpen && (

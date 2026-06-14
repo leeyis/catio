@@ -176,6 +176,7 @@
     "renamePlaceholder": "Tab title",
     "renameConfirm": "OK",
     "renameCancel": "Cancel",
+    "multiExec": "Multi-Exec",
     "broadcastTargetHosts": "Broadcast target hosts",
     "machines": "hosts",
     "sameProtoOnly": "Same protocol hosts only",
