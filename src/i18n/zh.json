@@ -232,7 +232,6 @@
     "broadcastTypeYes": "输入 yes 确认",
     "broadcastConfirmBtn": "确认广播",
     "broadcastCancel": "取消",
-    "broadcastStateless": "每次广播为独立一次性执行，不保留 shell 状态（cd 等不跨命令生效）",
     "broadcastNeedsAuth": "需认证",
     "broadcastConnect": "连接",
     "broadcastFailed": "连接失败",

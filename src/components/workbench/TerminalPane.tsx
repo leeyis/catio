@@ -51,7 +51,7 @@ export interface TerminalPaneProps {
    * 把命令写进指定会话的交互式 PTY（与手动输入同一通道，命令/结果出现在该会话的终端标签）。
    * 由 App 解析该会话的 chan 并 termWrite；自动建连的新标签通道注册有延迟，内部会轮询等待。
    */
-  sendToPty?: (sessionId: string, cmd: string) => Promise<boolean>
+  sendToPty?: (sessionId: string, cmd: string, cols?: number, rows?: number) => Promise<boolean>
   /**
    * Surfaces the live PTY channel id to App so it can write into the active
    * terminal (e.g. snippet/history "insert"). Called with the chanId once
@@ -286,6 +286,10 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
     setMxRunState(initial)
     if (ready.length === 0) return
 
+    // 广播来源终端的真实列宽——用它对齐各目标 PTY，保证渲染与手工执行一致。
+    const cols = termRef.current?.cols
+    const rows = termRef.current?.rows
+
     // 对每个就绪目标：先订阅 history（拿 exitCode/耗时），再把命令写进其 PTY。
     for (const { connId, sid, isSelf } of ready) {
       let resolved = false
@@ -310,7 +314,7 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
           await termWrite(sessionId, chanIdRef.current, bytesToBase64(cmd + '\r'))
           ok = true
         } else if (sendToPty) {
-          ok = await sendToPty(sid, cmd)
+          ok = await sendToPty(sid, cmd, cols, rows)
         }
       } catch {
         ok = false

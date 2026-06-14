@@ -150,12 +150,6 @@ export function BroadcastConfirmModal({ cmd, targets, sensitive, reasons, onConf
             </div>
           )}
 
-          {/* 无状态执行提示 —— 始终展示 */}
-          <span className="row gap6" style={{ fontSize: 11, color: 'var(--text-faint)', lineHeight: 1.5, alignItems: 'flex-start' }}>
-            <Icon name="info" size={12} style={{ flex: 'none', marginTop: 1 }} />
-            {t('workbench.broadcastStateless')}
-          </span>
-
           {/* 操作区 */}
           <div className="row" style={{ justifyContent: 'flex-end', gap: 8, marginTop: 2 }}>
             <Btn variant="ghost" onClick={onCancel}>{t('workbench.broadcastCancel')}</Btn>

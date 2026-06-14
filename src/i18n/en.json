@@ -232,7 +232,6 @@
     "broadcastTypeYes": "Type yes to confirm",
     "broadcastConfirmBtn": "Confirm broadcast",
     "broadcastCancel": "Cancel",
-    "broadcastStateless": "Each broadcast is an independent one-off execution and keeps no shell state (cd and similar do not carry across commands)",
     "broadcastNeedsAuth": "Needs auth",
     "broadcastConnect": "Connect",
     "broadcastFailed": "Connection failed",
