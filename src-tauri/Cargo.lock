@@ -741,6 +741,7 @@ dependencies = [
  "deadpool-postgres",
  "duckdb",
  "futures-util",
+ "ipnet",
  "mongodb",
  "mysql_async",
  "rand 0.10.1",

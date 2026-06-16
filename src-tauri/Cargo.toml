@@ -41,6 +41,7 @@ tokio-util = { version = "0.7.18", features = ["compat"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "socks"] }
 mongodb = "3.7.0"
 redis = { version = "1.2.2", features = ["tokio-comp", "tls-rustls", "tokio-rustls-comp", "cluster-async"] }
+ipnet = "2.11"
 
 [profile.release]
 panic = "abort"

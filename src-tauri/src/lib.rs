@@ -1,6 +1,7 @@
 pub mod ssh;
 pub mod db;
 pub mod mcp;
+pub mod scan;
 
 use ssh::manager::SessionManager;
 use db::manager::ConnManager;
@@ -13,6 +14,7 @@ pub fn run() {
         .manage(SessionManager::default())
         .manage(ConnManager::default())
         .manage(mcp::McpState::default())
+        .manage(scan::ScanState::default())
         .invoke_handler(tauri::generate_handler![
             ssh::conn::ssh_connect,
             ssh::conn::ssh_disconnect,
@@ -68,7 +70,10 @@ pub fn run() {
             mcp::mcp_start,
             mcp::mcp_stop,
             mcp::mcp_status,
-            mcp::mcp_sync_targets
+            mcp::mcp_sync_targets,
+            scan::commands::scan_start,
+            scan::commands::scan_cancel,
+            scan::commands::scan_read_text_file
         ])
         .setup(|app| {
             // Default the JDBC sidecar's driver-JAR directory to
