@@ -16,3 +16,6 @@ diff.png
 
 # git worktrees
 .worktrees/
+
+# superpowers brainstorm mockups
+.superpowers/
