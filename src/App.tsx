@@ -3,6 +3,7 @@ import { useState, useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { TitleBar, Sidebar, IconRail } from './components/shell/Sidebar'
 import { HomeView } from './components/views/HomeView'
+import ScanWizard from './components/scan/ScanWizard'
 import { SettingsView } from './components/views/SettingsView'
 import { WorkbenchTabs } from './components/workbench/WorkbenchTabs'
 import { TerminalPane } from './components/workbench/TerminalPane'
@@ -41,6 +42,7 @@ import { mcpSyncTargets } from './services/mcp'
 import { createVaultCredential, unlockVault, lockVault, isVaultUnlocked, recallSecret, rememberSecret } from './state/vault'
 import { appendHistory, loadHistory, clearHistory, deleteHistory, deleteHistoryForProfile } from './state/history'
 import { loadRecentSessions, recordRecentSession } from './state/recentSessions'
+import { getSessionSecret } from './state/sessionSecrets'
 import type { HistoryItem } from './services/types'
 import { loadProfiles, saveProfile, deleteProfile } from './state/connections'
 import { loadSnippets, saveSnippet, newSnippetId } from './state/snippets'
@@ -501,6 +503,14 @@ export default function App() {
       void performConnect(args, display.name, args.secret, display.profileId)
       return
     }
+    // 扫描导入的 ✓authed 主机：本次会话内存里存有命中密码，首连直连免再输。
+    if (display.profileId) {
+      const sess = getSessionSecret(display.profileId)
+      if (sess) {
+        void performConnect(args, display.name, sess, display.profileId)
+        return
+      }
+    }
     // Auth-gated cache: reuse a remembered secret (no prompt). Skipped when a jump
     // host still needs its own secret (we only cache the target secret).
     if (display.profileId && (!args.jump || args.jump.secret)) {
@@ -597,6 +607,12 @@ export default function App() {
       } else {
         const dbp = dbProfiles.find(p => p.id === conn.id)
         if (dbp) {
+          // 扫描导入的 ✓authed 库：本次会话内存里存有命中密码,首连直连免再输。
+          const sess = getSessionSecret(dbp.id)
+          if (sess) {
+            try { await connectDbProfile(dbp, sess); return }
+            catch { /* 会话密钥失效则继续走缓存/提示 */ }
+          }
           const cached = await cachedSecret(dbp.id)
           if (cached) {
             try { await connectDbProfile(dbp, cached); return }
@@ -1275,8 +1291,10 @@ export default function App() {
           <div className="card-surface grow col" style={{ overflow: 'hidden', position: 'relative' }}>
             {/* view body */}
             <div className="grow col" style={{ minHeight: 0 }}>
-              {view === 'home' && <HomeView onOpen={openConn} onNew={() => setShowNew(true)} owned={ownsVault} userName={authEnabled ? currentName : ''} authEnabled={authEnabled} conns={vaultConns}
+              {view === 'home' && <HomeView onOpen={openConn} onNew={() => setShowNew(true)} onAutoScan={() => setView('scan')} owned={ownsVault} userName={authEnabled ? currentName : ''} authEnabled={authEnabled} conns={vaultConns}
                 recent={recentSessions.map(r => { const conn = vaultConns.find(c => c.id === r.connId); return conn ? { conn, ts: r.ts } : null }).filter((x): x is { conn: Connection; ts: number } => !!x)} />}
+
+              {view === 'scan' && <ScanWizard onClose={() => setView('home')} onImported={() => { reloadProfiles() /* db 自动刷新 */ }} />}
 
               {/* tab bar — only in workbench when there are tabs */}
               {view === 'workbench' && tabs.length > 0 && (
