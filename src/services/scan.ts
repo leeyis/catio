@@ -77,6 +77,14 @@ export interface ScanProgress {
   failed: number
 }
 
+export type ScanLogLevel = 'info' | 'attempt' | 'hit' | 'miss' | 'warn'
+
+export interface ScanLog {
+  scanId: string
+  level: ScanLogLevel
+  message: string
+}
+
 // ---- 命令 ----
 
 /** 启动扫描，返回 scanId。非 Tauri 环境抛错。 */
@@ -102,4 +110,8 @@ export async function onScanFound(cb: (f: ScanFound) => void): Promise<() => voi
 
 export async function onScanDone(cb: (d: { scanId: string }) => void): Promise<() => void> {
   return tauriListen<{ scanId: string }>('scan://done', cb)
+}
+
+export async function onScanLog(cb: (l: ScanLog) => void): Promise<() => void> {
+  return tauriListen<ScanLog>('scan://log', cb)
 }

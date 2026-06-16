@@ -29,7 +29,7 @@ use crate::ssh::conn::{self, AuthMethod, ConnectArgs as SshConnectArgs};
 
 static SCAN_SEQ: AtomicU64 = AtomicU64::new(0);
 
-const DEFAULT_CONCURRENCY: u32 = 64;
+const DEFAULT_CONCURRENCY: u32 = 32;
 
 /// 单次试登录上限：防止被防火墙/tarpit 接受 TCP 却挂起 SSH/DB 握手时无限阻塞，
 /// 同时也避免本该命中的认证因长时间挂起被卡死。超时按“该次未命中”处理，继续下一条。
@@ -139,6 +139,15 @@ pub struct ScanDone {
     pub scan_id: String,
 }
 
+/// 实时扫描日志（控制台式输出）。level: info|attempt|hit|miss|warn。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanLog {
+    pub scan_id: String,
+    pub level: String,
+    pub message: String,
+}
+
 // ─── 进度计数器：跨任务共享的原子计数，按需 emit progress ──────────────────────
 
 struct Counters {
@@ -175,6 +184,17 @@ fn emit_progress(app: &AppHandle, scan_id: &str, counters: &Counters) {
 
 fn emit_found(app: &AppHandle, found: &ScanFound) {
     let _ = app.emit("scan://found", found.clone());
+}
+
+fn emit_log(app: &AppHandle, scan_id: &str, level: &str, message: String) {
+    let _ = app.emit(
+        "scan://log",
+        ScanLog {
+            scan_id: scan_id.to_string(),
+            level: level.to_string(),
+            message,
+        },
+    );
 }
 
 // ─── DatabaseType 解析：契约里 dbType 是字符串，需转回后端枚举 ──────────────────
@@ -302,6 +322,32 @@ async fn run_scan(app: AppHandle, scan_id: String, args: ScanArgs, token: Cancel
     let key_users = Arc::new(args.key_users);
     let engines = Arc::new(args.engines);
 
+    emit_log(
+        &app,
+        &scan_id,
+        "info",
+        format!(
+            "开始扫描 · {} · 目标 {} · 凭证 {} 组 · 并发 {}{}",
+            if is_db { "数据库" } else { "主机" },
+            total,
+            creds.len(),
+            concurrency,
+            if dns_failed > 0 {
+                format!(" · 域名解析失败 {dns_failed}")
+            } else {
+                String::new()
+            },
+        ),
+    );
+    if creds.is_empty() && (is_db || keys.is_empty()) {
+        emit_log(
+            &app,
+            &scan_id,
+            "warn",
+            "未提供任何凭证/私钥：主机模式将无可登录结果，数据库模式仅识别（标记需要认证）".into(),
+        );
+    }
+
     let mut handles = Vec::new();
 
     for ip in ips {
@@ -390,9 +436,24 @@ async fn scan_host_target(
     }
 
     let address = format!("{ip}:{port}");
+    emit_log(
+        app,
+        scan_id,
+        "info",
+        format!(
+            "{address} 端口开放 · {}",
+            probe.os.clone().unwrap_or_else(|| "SSH".into())
+        ),
+    );
 
     // 逐个 cred 试密码登录，命中即停。
     for cred in creds {
+        emit_log(
+            app,
+            scan_id,
+            "attempt",
+            format!("{address} 尝试 {} / {}", cred.user, cred.password),
+        );
         let args = SshConnectArgs {
             host: ip.to_string(),
             port,
@@ -406,6 +467,12 @@ async fn scan_host_target(
             Err(_) => continue, // 超时 → 视为该 cred 未命中，继续下一条。
         };
         if res.ok {
+            emit_log(
+                app,
+                scan_id,
+                "hit",
+                format!("{address} ✓ 登录成功 · {}", cred.user),
+            );
             emit_found(
                 app,
                 &ScanFound {
@@ -435,6 +502,12 @@ async fn scan_host_target(
     // 私钥试登录：keyUsers × keys 笛卡尔积，命中即停。
     for user in key_users {
         for key in keys {
+            emit_log(
+                app,
+                scan_id,
+                "attempt",
+                format!("{address} 尝试 {user} / 🔑{}", key.name),
+            );
             let args = SshConnectArgs {
                 host: ip.to_string(),
                 port,
@@ -450,6 +523,12 @@ async fn scan_host_target(
                 Err(_) => continue, // 超时 → 视为该 用户×私钥 未命中，继续下一组。
             };
             if res.ok {
+                emit_log(
+                    app,
+                    scan_id,
+                    "hit",
+                    format!("{address} ✓ 私钥登录成功 · {user} / 🔑{}", key.name),
+                );
                 emit_found(
                     app,
                     &ScanFound {
@@ -479,7 +558,12 @@ async fn scan_host_target(
 
     // 识别到 SSH 但字典/私钥均未命中：host 模式不收录（结果列表仅含可正常登录的节点）。
     // 与 db 模式不同——db 会保留“识别到但未认证”的节点供用户后续补凭证登录。
-    let _ = address;
+    emit_log(
+        app,
+        scan_id,
+        "miss",
+        format!("{address} ✗ 凭证未命中，不收录"),
+    );
 }
 
 // ─── db 目标 ──────────────────────────────────────────────────────────────────
@@ -505,9 +589,21 @@ async fn scan_db_target(
     }
 
     let address = format!("{ip}:{port}");
+    emit_log(
+        app,
+        scan_id,
+        "info",
+        format!("{address} 端口开放 · {}", engine.engine_id),
+    );
 
     // 逐个 cred 试连，命中即停（用返回的 version 回填）。
     for cred in creds {
+        emit_log(
+            app,
+            scan_id,
+            "attempt",
+            format!("{address} 尝试 {} / {}", cred.user, cred.password),
+        );
         let args = DbConnectArgs {
             db_type,
             host: ip.to_string(),
@@ -520,6 +616,12 @@ async fn scan_db_target(
         };
         let attempt = timeout(AUTH_ATTEMPT_TIMEOUT, crate::db::commands::db_test_connection(args)).await;
         if let Ok(Ok(res)) = attempt {
+            emit_log(
+                app,
+                scan_id,
+                "hit",
+                format!("{address} ✓ 连接成功 · {}", cred.user),
+            );
             let version = if res.version.is_empty() {
                 probe.version.clone()
             } else {
@@ -553,6 +655,16 @@ async fn scan_db_target(
 
     // 字典未命中：原生探针识别到该协议族 → unauthed；否则仅端口开放（含 JDBC 未确认）→ open。
     let status = if probe.matched { "unauthed" } else { "open" };
+    emit_log(
+        app,
+        scan_id,
+        "miss",
+        if probe.matched {
+            format!("{address} ⚠ 凭证未命中，入库为草稿（需要认证）")
+        } else {
+            format!("{address} 端口开放 · 未确认")
+        },
+    );
     emit_found(
         app,
         &ScanFound {

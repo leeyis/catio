@@ -6,9 +6,9 @@ import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { IconBtn } from '../atoms'
 import {
-  scanStart, scanCancel, onScanProgress, onScanFound, onScanDone,
+  scanStart, scanCancel, onScanProgress, onScanFound, onScanDone, onScanLog,
   type ScanArgs, type ScanEngineProbe, type ScanFound, type ScanProgress,
-  type ScanMode, type ScanKeySpec,
+  type ScanMode, type ScanKeySpec, type ScanLog,
 } from '../../services/scan'
 import type { DbType } from '../../services/db'
 import { exportFile } from '../../services/db'
@@ -28,7 +28,7 @@ import { StepScanning } from './StepScanning'
 import StepResults from './StepResults'
 
 const HOST_DEFAULT_PORT = 22
-const DEFAULT_CONCURRENCY = 64
+const DEFAULT_CONCURRENCY = 32
 
 // ---- 文本解析工具 ----
 // 字典解析复用 ./parseDict（按“第一个空白”切分，兼容含空格密码），与 spec/单测一致。
@@ -115,6 +115,7 @@ export function ScanWizard({ onClose, onImported, existingHostKeys, existingDbKe
 
   const [scanId, setScanId] = useState<string | null>(null)
   const [rows, setRows] = useState<ScanRow[]>([])
+  const [logs, setLogs] = useState<ScanLog[]>([])
   const [progress, setProgress] = useState<ScanProgress | null>(null)
   const [scanning, setScanning] = useState(false)
   const [done, setDone] = useState(false)
@@ -167,6 +168,11 @@ export function ScanWizard({ onClose, onImported, existingHostKeys, existingDbKe
         if (!alive) return
         const row = toRow(f, existingHosts, existingDbs)
         setRows(prev => (prev.some(r => r.rowId === row.rowId) ? prev : [...prev, row]))
+      }),
+      onScanLog(l => {
+        if (!alive) return
+        // 控制台式日志，封顶 1000 行，避免长扫描内存膨胀。
+        setLogs(prev => (prev.length >= 1000 ? [...prev.slice(prev.length - 999), l] : [...prev, l]))
       }),
       onScanDone(() => {
         if (!alive) return
@@ -285,6 +291,7 @@ export function ScanWizard({ onClose, onImported, existingHostKeys, existingDbKe
 
     // 进入步骤③并立即开始计时（即便 scanStart 在途）。
     setRows([])
+    setLogs([])
     setProgress(null)
     setDone(false)
     setScanning(true)
@@ -420,16 +427,22 @@ export function ScanWizard({ onClose, onImported, existingHostKeys, existingDbKe
   return (
     <div style={{
       position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
-      background: 'var(--bg-canvas)', color: 'var(--text-primary)', overflow: 'hidden',
+      background: 'var(--surface-card)', color: 'var(--text-primary)', overflow: 'hidden',
     }}>
       {/* 顶栏：标题 + 步骤条 + 关闭 */}
       <header style={{
-        display: 'flex', alignItems: 'center', gap: 16, padding: '14px 20px',
+        display: 'flex', alignItems: 'center', gap: 16, padding: '14px 24px',
         borderBottom: '1px solid var(--border-hairline)', flex: '0 0 auto',
+        background: 'var(--surface-subtle)',
       }}>
         <div className="row gap10" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <Icon name="radar" size={20} />
-          <h1 style={{ margin: 0, fontSize: 16, fontWeight: 700, letterSpacing: '-0.2px' }}>
+          <span className="icon-badge" style={{
+            width: 30, height: 30, borderRadius: 9,
+            color: 'var(--accent-primary)', background: 'var(--accent-soft)',
+          }}>
+            <Icon name="radar" size={17} />
+          </span>
+          <h1 style={{ margin: 0, fontSize: 15.5, fontWeight: 700, letterSpacing: '-0.2px' }}>
             {t('scan.title')}
           </h1>
         </div>
@@ -464,19 +477,9 @@ export function ScanWizard({ onClose, onImported, existingHostKeys, existingDbKe
         </div>
       </header>
 
-      {/* 风险提示条 */}
-      <div style={{
-        flex: '0 0 auto', display: 'flex', alignItems: 'center', gap: 8,
-        padding: '8px 20px', fontSize: 12,
-        color: 'var(--signal-amber)', background: 'color-mix(in srgb, var(--signal-amber) 10%, transparent)',
-        borderBottom: '1px solid var(--border-hairline)',
-      }}>
-        <Icon name="alert-triangle" size={14} />
-        <span>{t('scan.riskNotice')}</span>
-      </div>
-
-      {/* 步骤主体 */}
-      <main style={{ flex: '1 1 auto', minHeight: 0, overflow: 'auto', padding: 20 }}>
+      {/* 步骤主体（居中内容列；风险提示在步骤②内呈现，避免重复） */}
+      <main style={{ flex: '1 1 auto', minHeight: 0, overflow: 'auto', padding: '28px 24px 40px' }}>
+       <div style={{ maxWidth: 880, margin: '0 auto', width: '100%' }}>
         {step === 1 && (
           <StepMode
             mode={mode}
@@ -511,6 +514,7 @@ export function ScanWizard({ onClose, onImported, existingHostKeys, existingDbKe
           <StepScanning
             progress={progress}
             rows={rows}
+            logs={logs}
             scanning={scanning}
             done={done}
             onCancel={handleCancel}
@@ -532,6 +536,7 @@ export function ScanWizard({ onClose, onImported, existingHostKeys, existingDbKe
             onBack={() => setStep(3)}
           />
         )}
+       </div>
       </main>
     </div>
   )

@@ -1,10 +1,9 @@
+import { useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Btn, StatusDot } from '../atoms'
-import type { StatusKind } from '../atoms'
+import { Btn } from '../atoms'
 import { Icon } from '../Icon'
-import { findEngine } from '../../services/dbEngines'
+import type { ScanLogLevel } from '../../services/scan'
 import type { StepScanningProps } from './types'
-import type { ScanRow } from './types'
 
 // elapsedMs -> mm:ss
 function fmtElapsed(ms: number): string {
@@ -14,24 +13,30 @@ function fmtElapsed(ms: number): string {
   return `${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`
 }
 
-// 扫描状态 -> StatusDot 语义色：authed=绿、unauthed=琥珀、open=灰
-function statusKind(status: ScanRow['status']): StatusKind {
-  if (status === 'authed') return 'up'
-  if (status === 'unauthed') return 'idle'
-  return 'down'
+// 日志级别 → 终端配色（深色终端面板上的可读色）。
+const LOG_COLOR: Record<ScanLogLevel, string> = {
+  hit: 'var(--signal-green)',
+  warn: 'var(--signal-amber)',
+  attempt: 'var(--term-fg)',
+  info: 'var(--term-dim)',
+  miss: 'var(--text-faint)',
 }
 
-// 行右侧的副标题：db 显示引擎名，host 显示 OS
-function rowMeta(row: ScanRow): string | undefined {
-  if (row.kind === 'db') {
-    const eng = row.engineId ? findEngine(row.engineId) : undefined
-    return eng?.label ?? row.dbType ?? row.engineId
-  }
-  return row.os
+// 顶部统计小卡。
+function StatTile({ label, value, accent }: { label: string; value: string; accent?: string }) {
+  return (
+    <div className="col" style={{
+      flex: 1, minWidth: 0, gap: 2, padding: '10px 14px',
+      borderRadius: 12, border: '1px solid var(--border-hairline)', background: 'var(--surface-card)',
+    }}>
+      <span className="mono" style={{ fontSize: 18, fontWeight: 700, color: accent ?? 'var(--text-primary)', lineHeight: 1.1 }}>{value}</span>
+      <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{label}</span>
+    </div>
+  )
 }
 
-/** 步骤③ 扫描中：实时进度条 + 边扫边出的精简结果流。 */
-export function StepScanning({ progress, rows, scanning, done, onCancel, onBack, onNext, elapsedMs }: StepScanningProps) {
+/** 步骤③ 扫描中：进度 + 统计 + 控制台式实时日志（当前 IP / 用户名 / 密码试登录实时输出）。 */
+export function StepScanning({ progress, rows, logs, scanning, done, onCancel, onBack, onNext, elapsedMs }: StepScanningProps) {
   const { t } = useTranslation()
 
   const scanned = progress?.scanned ?? 0
@@ -39,93 +44,97 @@ export function StepScanning({ progress, rows, scanning, done, onCancel, onBack,
   const found = progress?.found ?? rows.length
   const failed = progress?.failed ?? 0
   const pct = total > 0 ? Math.min(100, (scanned / total) * 100) : 0
-  // done 或已扫出结果时允许查看结果
   const canViewResults = done || rows.length > 0
+
+  // 控制台自动滚动到底部（有新日志时）。
+  const consoleRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    const el = consoleRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [logs.length])
 
   return (
     <div className="col" style={{ gap: 18 }}>
-      {/* 顶部：返回 + 标题 */}
-      <div className="row gap10" style={{ justifyContent: 'space-between' }}>
+      {/* 顶部：返回 + 用时 */}
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
         <Btn variant="ghost" size="sm" icon="arrow-left" onClick={onBack}>{t('scan.back')}</Btn>
-        <div className="row gap10" style={{ color: 'var(--text-tertiary)', fontSize: 12 }}>
+        <div className="row gap8" style={{ color: 'var(--text-tertiary)', fontSize: 12, alignItems: 'center' }}>
           <Icon name="clock" size={14} />
           <span className="mono">{t('scan.scanning.elapsed')} {fmtElapsed(elapsedMs)}</span>
         </div>
       </div>
 
-      {/* 进度条 + 统计 */}
-      <div className="col" style={{ gap: 10 }}>
-        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
-          <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
-            {t('scan.scanning.progress', { scanned, total })}
-          </span>
-          <div className="row gap10" style={{ fontSize: 12 }}>
-            <span style={{ color: 'var(--signal-green)' }}>{t('scan.scanning.found', { found })}</span>
-            {failed > 0 && (
-              <span style={{ color: 'var(--text-faint)' }}>{t('scan.scanning.failed', { failed })}</span>
-            )}
-          </div>
-        </div>
-        <div style={{ height: 6, borderRadius: 999, background: 'var(--surface-sunken)', overflow: 'hidden' }}>
+      {/* 统计小卡 */}
+      <div className="row gap10">
+        <StatTile label={t('scan.scanning.scanned')} value={`${scanned} / ${total}`} />
+        <StatTile label={t('scan.scanning.foundLabel')} value={String(found)} accent="var(--signal-green)" />
+        <StatTile label={t('scan.scanning.failedLabel')} value={String(failed)} accent={failed > 0 ? 'var(--signal-amber)' : undefined} />
+      </div>
+
+      {/* 进度条 */}
+      <div className="col" style={{ gap: 6 }}>
+        <div style={{ height: 8, borderRadius: 999, background: 'var(--surface-sunken)', overflow: 'hidden' }}>
           <div style={{
-            height: '100%',
-            width: `${pct}%`,
-            borderRadius: 999,
-            background: 'var(--accent-primary)',
-            transition: 'width .3s ease',
+            height: '100%', width: `${pct}%`, borderRadius: 999,
+            background: 'var(--accent-primary)', transition: 'width .3s ease',
           }} />
         </div>
       </div>
 
-      {/* 结果流：边扫边出 */}
+      {/* 控制台式实时日志 */}
       <div className="col" style={{
-        gap: 4,
-        maxHeight: 280,
-        overflowY: 'auto',
-        border: '1px solid var(--border-hairline)',
-        borderRadius: 10,
-        background: 'var(--surface-subtle)',
-        padding: 6,
+        borderRadius: 14, overflow: 'hidden',
+        border: '1px solid var(--border-hairline)', background: 'var(--term-bg)',
+        boxShadow: 'var(--shadow-card)',
       }}>
-        {rows.length === 0 ? (
-          <div className="row gap10" style={{ justifyContent: 'center', padding: '32px 0', color: 'var(--text-faint)', fontSize: 13 }}>
-            {scanning && <Icon name="loader" size={16} style={{ animation: 'spin 1s linear infinite' }} />}
-            <span>{t('scan.scanning.waiting')}</span>
+        {/* 终端标题栏 */}
+        <div className="row" style={{
+          justifyContent: 'space-between', alignItems: 'center',
+          padding: '9px 14px', borderBottom: '1px solid rgba(255,255,255,0.06)',
+        }}>
+          <div className="row gap8" style={{ alignItems: 'center' }}>
+            <span style={{ display: 'inline-flex', gap: 5 }}>
+              <span style={{ width: 9, height: 9, borderRadius: 999, background: '#ff5f56', display: 'inline-block' }} />
+              <span style={{ width: 9, height: 9, borderRadius: 999, background: '#ffbd2e', display: 'inline-block' }} />
+              <span style={{ width: 9, height: 9, borderRadius: 999, background: '#27c93f', display: 'inline-block' }} />
+            </span>
+            <span style={{ fontSize: 11.5, color: 'var(--term-dim)', marginLeft: 4 }}>{t('scan.scanning.console')}</span>
           </div>
-        ) : (
-          rows.map(row => {
-            const meta = rowMeta(row)
-            return (
-              <div key={row.rowId} className="row gap10" style={{
-                justifyContent: 'space-between',
-                padding: '7px 10px',
-                borderRadius: 8,
-                background: 'var(--surface-card)',
-                animation: 'slideInRight .2s ease',
-              }}>
-                <div className="row gap10" style={{ minWidth: 0 }}>
-                  <StatusDot status={statusKind(row.status)} />
-                  <span className="mono" style={{ fontSize: 12.5, color: 'var(--text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    {row.address}
-                  </span>
-                </div>
-                {meta && (
-                  <span style={{ fontSize: 11.5, color: 'var(--text-tertiary)', whiteSpace: 'nowrap' }}>{meta}</span>
-                )}
+          {scanning && (
+            <span className="row gap6" style={{ alignItems: 'center', fontSize: 11, color: 'var(--term-dim)' }}>
+              <span style={{ width: 7, height: 7, borderRadius: 999, background: 'var(--signal-green)', animation: 'ping 1.8s cubic-bezier(0,0,0.2,1) infinite' }} />
+              {t('scan.scanning.live')}
+            </span>
+          )}
+        </div>
+        {/* 日志行 */}
+        <div ref={consoleRef} className="mono" style={{
+          height: 320, overflowY: 'auto', padding: '10px 14px',
+          fontSize: 12, lineHeight: 1.7, color: 'var(--term-fg)',
+        }}>
+          {logs.length === 0 ? (
+            <div className="row gap8" style={{ justifyContent: 'center', padding: '120px 0', color: 'var(--term-dim)', fontSize: 12.5 }}>
+              {scanning && <Icon name="loader" size={15} style={{ animation: 'spin 1s linear infinite' }} />}
+              <span>{t('scan.scanning.waiting')}</span>
+            </div>
+          ) : (
+            logs.map((l, i) => (
+              <div key={i} style={{ color: LOG_COLOR[l.level], whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                {l.message}
               </div>
-            )
-          })
-        )}
+            ))
+          )}
+        </div>
       </div>
 
-      {/* 底部操作：扫描中→取消；可看结果→查看结果 */}
+      {/* 底部操作 */}
       <div className="row gap10" style={{ justifyContent: 'flex-end' }}>
         {scanning && (
           <Btn variant="danger" size="md" icon="x" onClick={onCancel}>{t('scan.cancel')}</Btn>
         )}
         {canViewResults && (
           <Btn variant="primary" size="md" iconR="chevron-right" onClick={onNext}>
-            {t('scan.scanning.viewResults')}
+            {t('scan.scanning.viewResults')} ({found})
           </Btn>
         )}
       </div>

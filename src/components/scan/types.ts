@@ -1,4 +1,4 @@
-import type { ScanMode, ScanFound, ScanProgress } from '../../services/scan'
+import type { ScanMode, ScanFound, ScanProgress, ScanLog } from '../../services/scan'
 
 // rowId 唯一键 = address（db 模式追加 '#'+engineId）
 export interface ScanRow extends ScanFound {
@@ -51,6 +51,7 @@ export interface StepRangeCredsProps {
 export interface StepScanningProps {
   progress: ScanProgress | null
   rows: ScanRow[]
+  logs: ScanLog[]
   scanning: boolean
   done: boolean
   onCancel: () => void

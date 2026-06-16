@@ -692,8 +692,8 @@
     },
     "creds": {
       "label": "凭据字典",
-      "placeholder": "user:password，每行一组",
-      "hint": "每行一组 user:password，用于批量试登录。",
+      "placeholder": "root 你的密码\nubuntu 你的密码",
+      "hint": "每行一组「用户名 密码」，用空格分隔（首个空格切分，密码可含空格），用于批量试登录。",
       "upload": "导入字典文件"
     },
     "keys": {
@@ -712,7 +712,12 @@
       "elapsed": "用时",
       "failed": "失败 {{failed}}",
       "waiting": "等待扫描结果…",
-      "viewResults": "查看结果"
+      "viewResults": "查看结果",
+      "scanned": "已扫描",
+      "foundLabel": "已发现",
+      "failedLabel": "失败/跳过",
+      "console": "实时日志",
+      "live": "实时"
     },
     "results": {
       "summary": "共 {{total}} 项 · 可登录 {{authed}} · 未授权 {{unauthed}} · 已存在 {{existing}}",

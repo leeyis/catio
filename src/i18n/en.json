@@ -692,8 +692,8 @@
     },
     "creds": {
       "label": "Credential Dictionary",
-      "placeholder": "user:password, one pair per line",
-      "hint": "One user:password pair per line, used for bulk login attempts.",
+      "placeholder": "root yourpassword\nubuntu yourpassword",
+      "hint": "One \"username password\" pair per line, space-separated (split on first space; password may contain spaces).",
       "upload": "Import dictionary file"
     },
     "keys": {
@@ -712,7 +712,12 @@
       "elapsed": "Elapsed",
       "failed": "{{failed}} failed",
       "waiting": "Waiting for scan results…",
-      "viewResults": "View results"
+      "viewResults": "View results",
+      "scanned": "Scanned",
+      "foundLabel": "Found",
+      "failedLabel": "Failed/skipped",
+      "console": "Live log",
+      "live": "live"
     },
     "results": {
       "summary": "{{total}} total · {{authed}} authed · {{unauthed}} unauthorized · {{existing}} existing",
