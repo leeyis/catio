@@ -98,7 +98,7 @@ function toRow(f: ScanFound, existingHosts: Set<string>, existingDbs: Set<string
 
 // ---- 主组件 ----
 
-export function ScanWizard({ onClose, onImported }: ScanWizardProps) {
+export function ScanWizard({ onClose, onImported, existingHostKeys, existingDbKeys, onRememberSecret }: ScanWizardProps) {
   const { t } = useTranslation()
 
   const [step, setStep] = useState<1 | 2 | 3 | 4>(1)
@@ -128,19 +128,17 @@ export function ScanWizard({ onClose, onImported }: ScanWizardProps) {
   scanIdRef.current = scanId
   scanningRef.current = scanning
 
-  // 去重基线：进入向导时快照一次 vault（host + db）。
+  // 去重基线：优先用 App 传入的、与侧栏同源（按 ownsVault 作用域）的键，保证
+  // “侧栏看到什么 = 去重比对什么”；缺省时回退到全局 loadProfiles/listDbConnections。
   const existingHosts = useMemo(() => {
-    const s = new Set<string>()
-    for (const p of loadProfiles()) s.add(`${p.host}:${p.port}`)
-    return s
-  }, [])
+    const keys = existingHostKeys ?? loadProfiles().map(p => `${p.host}:${p.port}`)
+    return new Set(keys)
+  }, [existingHostKeys])
   const existingDbs = useMemo(() => {
-    const s = new Set<string>()
-    for (const p of listDbConnections()) {
-      s.add(`${p.host}:${p.port}#${p.engineId ?? p.dbType}`)
-    }
-    return s
-  }, [])
+    const keys = existingDbKeys
+      ?? listDbConnections().map(p => `${p.host}:${p.port}#${p.engineId ?? p.dbType}`)
+    return new Set(keys)
+  }, [existingDbKeys])
 
   // ---- 计算 defaultPorts ----
   const defaultPorts = useMemo<number[]>(() => {
@@ -345,9 +343,11 @@ export function ScanWizard({ onClose, onImported }: ScanWizardProps) {
         }
         try {
           saveProfile(profile)
-          // authed 且 password 命中：会话内存缓存密码，供首连免二次输入。
+          // authed 且 password 命中：缓存命中密码供首连免二次输入。
+          // 会话内存（本次会话）+ 加密 vault（启用账户验证时持久化，重启后仍免密）。
           if (r.status === 'authed' && r.hitAuthKind === 'password' && r.hitSecret) {
             setSessionSecret(id, r.hitSecret)
+            onRememberSecret?.(id, r.hitSecret)
           }
           imported++
         } catch { /* localStorage 不可用 */ }
@@ -370,7 +370,10 @@ export function ScanWizard({ onClose, onImported }: ScanWizardProps) {
         }
         try {
           saveDbConnection(profile) // 内部 notify()，db 列表自动刷新
-          if (r.status === 'authed' && r.hitSecret) setSessionSecret(id, r.hitSecret)
+          if (r.status === 'authed' && r.hitSecret) {
+            setSessionSecret(id, r.hitSecret)
+            onRememberSecret?.(id, r.hitSecret)
+          }
           imported++
         } catch { /* localStorage 不可用 */ }
       }
@@ -379,7 +382,7 @@ export function ScanWizard({ onClose, onImported }: ScanWizardProps) {
     onImported?.()
     console.info(t('scan.toast.imported', { n: imported }))
     onClose()
-  }, [rows, groupId, onImported, onClose, t])
+  }, [rows, groupId, onImported, onRememberSecret, onClose, t])
 
   // ---- 步骤④：导出 ----
   const handleExport = useCallback(async (format: 'csv' | 'json') => {

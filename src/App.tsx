@@ -1294,7 +1294,10 @@ export default function App() {
               {view === 'home' && <HomeView onOpen={openConn} onNew={() => setShowNew(true)} onAutoScan={() => setView('scan')} owned={ownsVault} userName={authEnabled ? currentName : ''} authEnabled={authEnabled} conns={vaultConns}
                 recent={recentSessions.map(r => { const conn = vaultConns.find(c => c.id === r.connId); return conn ? { conn, ts: r.ts } : null }).filter((x): x is { conn: Connection; ts: number } => !!x)} />}
 
-              {view === 'scan' && <ScanWizard onClose={() => setView('home')} onImported={() => { reloadProfiles() /* db 自动刷新 */ }} />}
+              {view === 'scan' && <ScanWizard onClose={() => setView('home')} onImported={() => { reloadProfiles() /* db 自动刷新 */ }}
+                existingHostKeys={ownsVault ? profiles.map(p => `${p.host}:${p.port}`) : []}
+                existingDbKeys={ownsVault ? dbProfiles.map(p => `${p.host}:${p.port}#${p.engineId ?? p.dbType}`) : []}
+                onRememberSecret={rememberConnSecret} />}
 
               {/* tab bar — only in workbench when there are tabs */}
               {view === 'workbench' && tabs.length > 0 && (

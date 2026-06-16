@@ -10,6 +10,14 @@ export interface ScanRow extends ScanFound {
 export interface ScanWizardProps {
   onClose: () => void
   onImported?: () => void
+  /** 去重基线：与侧栏同源（App 按 ownsVault 作用域计算）的现有 host 键 `host:port`。
+   *  缺省时回退到全局 loadProfiles()（仅用于无 App 上下文的测试场景）。 */
+  existingHostKeys?: string[]
+  /** 去重基线：现有 db 键 `host:port#engineId|dbType`，同样与侧栏同源。 */
+  existingDbKeys?: string[]
+  /** 入库 ✓已认证连接时，把命中密码持久化到加密 vault（启用账户验证且已解锁时生效），
+   *  使首连免密在重启/重新登录后依然有效。由 App 注入（rememberConnSecret）。 */
+  onRememberSecret?: (profileId: string, secret: string) => void
 }
 
 export interface StepModeProps {
