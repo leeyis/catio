@@ -39,4 +39,16 @@ describe('parseDict', () => {
       { user: 'admin', password: 'admin123' },
     ])
   })
+
+  it('兼容冒号分隔写法', () => {
+    expect(parseDict('root:123456')).toEqual([{ user: 'root', password: '123456' }])
+  })
+
+  it('空格在前时冒号视为密码的一部分', () => {
+    expect(parseDict('root my:secret')).toEqual([{ user: 'root', password: 'my:secret' }])
+  })
+
+  it('忽略 # 注释行', () => {
+    expect(parseDict('# 注释\nroot 123')).toEqual([{ user: 'root', password: '123' }])
+  })
 })
