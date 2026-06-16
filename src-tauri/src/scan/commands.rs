@@ -14,8 +14,10 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
+use std::time::Duration;
 use tokio::net::lookup_host;
 use tokio::sync::Semaphore;
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 use crate::db::driver::ConnectArgs as DbConnectArgs;
@@ -28,6 +30,10 @@ use crate::ssh::conn::{self, AuthMethod, ConnectArgs as SshConnectArgs};
 static SCAN_SEQ: AtomicU64 = AtomicU64::new(0);
 
 const DEFAULT_CONCURRENCY: u32 = 64;
+
+/// 单次试登录上限：防止被防火墙/tarpit 接受 TCP 却挂起 SSH/DB 握手时无限阻塞，
+/// 同时也避免本该命中的认证因长时间挂起被卡死。超时按“该次未命中”处理，继续下一条。
+const AUTH_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(12);
 
 // ─── 入参（serde camelCase，严格匹配前端契约）─────────────────────────────────
 
@@ -397,7 +403,10 @@ async fn scan_host_target(
             secret: Some(cred.password.clone()),
             jump: None,
         };
-        let res = conn::test_connection(args).await;
+        let res = match timeout(AUTH_ATTEMPT_TIMEOUT, conn::test_connection(args)).await {
+            Ok(r) => r,
+            Err(_) => continue, // 超时 → 视为该 cred 未命中，继续下一条。
+        };
         if res.ok {
             emit_found(
                 app,
@@ -438,7 +447,10 @@ async fn scan_host_target(
                 secret: None,
                 jump: None,
             };
-            let res = conn::test_connection(args).await;
+            let res = match timeout(AUTH_ATTEMPT_TIMEOUT, conn::test_connection(args)).await {
+                Ok(r) => r,
+                Err(_) => continue, // 超时 → 视为该 用户×私钥 未命中，继续下一组。
+            };
             if res.ok {
                 emit_found(
                     app,
@@ -528,7 +540,8 @@ async fn scan_db_target(
             options: None,
             secret: Some(cred.password.clone()),
         };
-        if let Ok(res) = crate::db::commands::db_test_connection(args).await {
+        let attempt = timeout(AUTH_ATTEMPT_TIMEOUT, crate::db::commands::db_test_connection(args)).await;
+        if let Ok(Ok(res)) = attempt {
             let version = if res.version.is_empty() {
                 probe.version.clone()
             } else {
