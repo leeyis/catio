@@ -122,6 +122,9 @@ export function ScanWizard({ onClose, onImported, existingHostKeys, existingDbKe
   const [elapsedMs, setElapsedMs] = useState(0)
   // 结果页：入库目标分组（''=未分组）。
   const [groupId, setGroupId] = useState('')
+  // 入库成功反馈（短暂浮层提示）。
+  const [toast, setToast] = useState<string | null>(null)
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // 计时器与扫描状态的最新引用（供卸载清理用，避免闭包过期）。
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -133,15 +136,25 @@ export function ScanWizard({ onClose, onImported, existingHostKeys, existingDbKe
 
   // 去重基线：优先用 App 传入的、与侧栏同源（按 ownsVault 作用域）的键，保证
   // “侧栏看到什么 = 去重比对什么”；缺省时回退到全局 loadProfiles/listDbConnections。
+  // 去重基线 = App 传入的侧栏同源键 ∪ 实际存储（loadProfiles/listDbConnections）。
+  // 兜底读实际存储，确保「IP:端口 已在库」一定判为已存在、禁止重复入库；
+  // 随 existingHostKeys 变化（每次入库 onImported→reloadProfiles 触发）重算。
   const existingHosts = useMemo(() => {
-    const keys = existingHostKeys ?? loadProfiles().map(p => `${p.host}:${p.port}`)
-    return new Set(keys)
+    const keys = new Set<string>(existingHostKeys ?? [])
+    for (const p of loadProfiles()) keys.add(`${p.host}:${p.port}`)
+    return keys
   }, [existingHostKeys])
   const existingDbs = useMemo(() => {
-    const keys = existingDbKeys
-      ?? listDbConnections().map(p => `${p.host}:${p.port}#${p.engineId ?? p.dbType}`)
-    return new Set(keys)
+    const keys = new Set<string>(existingDbKeys ?? [])
+    for (const p of listDbConnections()) keys.add(`${p.host}:${p.port}#${p.engineId ?? p.dbType}`)
+    return keys
   }, [existingDbKeys])
+  // 用 ref 让"只接线一次"的扫描监听器始终读到最新去重基线（避免闭包过期，
+  // 分批入库后再扫的主机也能正确判为已存在）。
+  const existingHostsRef = useRef(existingHosts)
+  const existingDbsRef = useRef(existingDbs)
+  existingHostsRef.current = existingHosts
+  existingDbsRef.current = existingDbs
 
   // ---- 计算 defaultPorts ----
   const defaultPorts = useMemo<number[]>(() => {
@@ -166,7 +179,7 @@ export function ScanWizard({ onClose, onImported, existingHostKeys, existingDbKe
       onScanProgress(p => { if (alive) setProgress(p) }),
       onScanFound(f => {
         if (!alive) return
-        const row = toRow(f, existingHosts, existingDbs)
+        const row = toRow(f, existingHostsRef.current, existingDbsRef.current)
         setRows(prev => (prev.some(r => r.rowId === row.rowId) ? prev : [...prev, row]))
       }),
       onScanLog(l => {
@@ -193,6 +206,7 @@ export function ScanWizard({ onClose, onImported, existingHostKeys, existingDbKe
   useEffect(() => {
     return () => {
       stopTimer()
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current)
       if (scanningRef.current && scanIdRef.current) {
         scanCancel(scanIdRef.current).catch(() => { /* 忽略取消失败 */ })
       }
@@ -202,6 +216,13 @@ export function ScanWizard({ onClose, onImported, existingHostKeys, existingDbKe
 
   function stopTimer() {
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null }
+  }
+
+  // 浮层提示：展示一条消息，2.6s 后自动消失。
+  function showToast(msg: string) {
+    setToast(msg)
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current)
+    toastTimerRef.current = setTimeout(() => setToast(null), 2600)
   }
 
   function startTimer() {
@@ -399,13 +420,18 @@ export function ScanWizard({ onClose, onImported, existingHostKeys, existingDbKe
     }
     // host saveProfile 不通知父级，需手动触发刷新。
     onImported?.()
-    console.info(t('scan.toast.imported', { n: imported }))
-    // 多批导入：移除已入库行（不关闭向导），用户可继续把其余结果导入其他分组；
-    // 也可随时点右上角关闭。全部导入后列表清空，显示空态。
-    if (importedIds.size > 0) {
-      setRows(prev => prev.filter(r => !importedIds.has(r.rowId)))
+    if (importedIds.size === 0) return
+    // 多批导入：移除已入库行。若无可继续导入的行（全部完成）→ 自动关闭向导；
+    // 否则留在结果页并弹出成功提示，用户可继续把其余结果导入其他分组。
+    const remaining = rows.filter(r => !importedIds.has(r.rowId))
+    setRows(remaining)
+    const moreToImport = remaining.some(r => !r.existing)
+    if (moreToImport) {
+      showToast(t('scan.toast.imported', { n: imported }))
+    } else {
+      onClose()
     }
-  }, [rows, groupId, onImported, onRememberSecret, t])
+  }, [rows, groupId, onImported, onRememberSecret, onClose, t])
 
   // ---- 步骤④：导出 ----
   const handleExport = useCallback(async (format: 'csv' | 'json') => {
@@ -555,6 +581,21 @@ export function ScanWizard({ onClose, onImported, existingHostKeys, existingDbKe
         )}
        </div>
       </main>
+
+      {/* 入库成功浮层提示 */}
+      {toast && (
+        <div className="fade-in" style={{
+          position: 'absolute', bottom: 76, left: '50%', transform: 'translateX(-50%)',
+          display: 'flex', alignItems: 'center', gap: 8, zIndex: 20,
+          padding: '10px 16px', borderRadius: 999,
+          background: 'var(--surface-card)', border: '1px solid var(--signal-green)',
+          color: 'var(--signal-green)', fontSize: 13, fontWeight: 600,
+          boxShadow: 'var(--shadow-dropdown)',
+        }}>
+          <Icon name="circle-check" size={16} />
+          <span>{toast}</span>
+        </div>
+      )}
     </div>
   )
 }
