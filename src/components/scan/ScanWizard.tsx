@@ -327,11 +327,12 @@ export function ScanWizard({ onClose, onImported, existingHostKeys, existingDbKe
     setRows(prev => prev.map(r => (set.has(r.rowId) && !r.existing ? { ...r, selected } : r)))
   }, [])
 
-  // ---- 步骤④：导入入库 ----
+  // ---- 步骤④：导入入库（支持多批：导入后移除已入库行，留在结果页继续导入其余到其他分组）----
   const handleImport = useCallback(() => {
     const picks = rows.filter(r => r.selected && !r.existing)
     if (picks.length === 0) return
     let imported = 0
+    const importedIds = new Set<string>()
     for (const r of picks) {
       if (r.kind === 'host') {
         const id = (typeof crypto !== 'undefined' && crypto.randomUUID)
@@ -363,6 +364,7 @@ export function ScanWizard({ onClose, onImported, existingHostKeys, existingDbKe
             // 首连直接用私钥连接、不再弹密码框。
             setSessionSecret(id, '')
           }
+          importedIds.add(r.rowId)
           imported++
         } catch { /* localStorage 不可用 */ }
       } else {
@@ -390,6 +392,7 @@ export function ScanWizard({ onClose, onImported, existingHostKeys, existingDbKe
             setSessionSecret(id, r.hitSecret)
             onRememberSecret?.(id, r.hitSecret)
           }
+          importedIds.add(r.rowId)
           imported++
         } catch { /* localStorage 不可用 */ }
       }
@@ -397,8 +400,12 @@ export function ScanWizard({ onClose, onImported, existingHostKeys, existingDbKe
     // host saveProfile 不通知父级，需手动触发刷新。
     onImported?.()
     console.info(t('scan.toast.imported', { n: imported }))
-    onClose()
-  }, [rows, groupId, onImported, onRememberSecret, onClose, t])
+    // 多批导入：移除已入库行（不关闭向导），用户可继续把其余结果导入其他分组；
+    // 也可随时点右上角关闭。全部导入后列表清空，显示空态。
+    if (importedIds.size > 0) {
+      setRows(prev => prev.filter(r => !importedIds.has(r.rowId)))
+    }
+  }, [rows, groupId, onImported, onRememberSecret, t])
 
   // ---- 步骤④：导出 ----
   const handleExport = useCallback(async (format: 'csv' | 'json') => {
