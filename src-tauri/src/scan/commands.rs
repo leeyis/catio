@@ -31,7 +31,7 @@ use crate::ssh::monitor;
 
 static SCAN_SEQ: AtomicU64 = AtomicU64::new(0);
 
-const DEFAULT_CONCURRENCY: u32 = 32;
+const DEFAULT_CONCURRENCY: u32 = 64;
 
 /// 单次试登录上限：防止被防火墙/tarpit 接受 TCP 却挂起 SSH/DB 握手时无限阻塞，
 /// 同时也避免本该命中的认证因长时间挂起被卡死。超时按“该次未命中”处理，继续下一条。

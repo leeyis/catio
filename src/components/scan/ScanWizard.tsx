@@ -28,7 +28,7 @@ import { StepScanning } from './StepScanning'
 import StepResults from './StepResults'
 
 const HOST_DEFAULT_PORT = 22
-const DEFAULT_CONCURRENCY = 32
+const DEFAULT_CONCURRENCY = 64
 
 // ---- 文本解析工具 ----
 // 字典解析复用 ./parseDict（按“第一个空白”切分，兼容含空格密码），与 spec/单测一致。
@@ -478,9 +478,18 @@ export function ScanWizard({ onClose, onImported, existingHostKeys, existingDbKe
         </div>
       </header>
 
-      {/* 步骤主体（居中内容列；风险提示在步骤②内呈现，避免重复） */}
-      <main style={{ flex: '1 1 auto', minHeight: 0, overflow: 'auto', padding: '28px 24px 40px' }}>
-       <div style={{ maxWidth: 880, margin: '0 auto', width: '100%' }}>
+      {/* 步骤主体（居中内容列；风险提示在步骤②内呈现，避免重复）。
+          步骤④：main 不滚动，由内层 flex 列把高度交给 StepResults——表格内部滚动、
+          底部操作栏始终固定可见。 */}
+      <main style={{
+        flex: '1 1 auto', minHeight: 0,
+        overflow: step === 4 ? 'hidden' : 'auto',
+        padding: step === 4 ? '20px 24px 22px' : '28px 24px 40px',
+      }}>
+       <div style={{
+         maxWidth: step === 4 ? 1120 : 880, margin: '0 auto', width: '100%',
+         ...(step === 4 ? { height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 } : {}),
+       }}>
         {step === 1 && (
           <StepMode
             mode={mode}
