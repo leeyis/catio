@@ -348,7 +348,8 @@ export function ScanWizard({ onClose, onImported, existingHostKeys, existingDbKe
           user: r.hitUser || '',
           auth,
           ...(groupId ? { group: groupId } : {}),
-          ...(r.os ? { os: r.os } : {}),
+          // 侧栏品牌 logo 需要 OS 目录 id（ubuntu/centos…），而非展示名。
+          ...(r.osId ? { os: r.osId } : {}),
         }
         try {
           saveProfile(profile)

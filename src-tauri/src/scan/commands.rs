@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use russh::client::Handle;
 use tauri::{AppHandle, Emitter};
 use std::time::Duration;
 use tokio::net::lookup_host;
@@ -26,6 +27,7 @@ use crate::scan::probe::{self, ProbeResult};
 use crate::scan::range::{self};
 use crate::scan::{ScanError, ScanState};
 use crate::ssh::conn::{self, AuthMethod, ConnectArgs as SshConnectArgs};
+use crate::ssh::monitor;
 
 static SCAN_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -34,6 +36,55 @@ const DEFAULT_CONCURRENCY: u32 = 32;
 /// 单次试登录上限：防止被防火墙/tarpit 接受 TCP 却挂起 SSH/DB 握手时无限阻塞，
 /// 同时也避免本该命中的认证因长时间挂起被卡死。超时按“该次未命中”处理，继续下一条。
 const AUTH_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(12);
+
+/// 登录成功后探测真实操作系统（读 /etc/os-release + uname）。一行 sh 输出 KV。
+const OS_DETECT_CMD: &str = "sh -c '. /etc/os-release 2>/dev/null; \
+printf \"ID=%s\\nPRETTY=%s\\nKERNEL=%s\\nUNAME=%s\\n\" \
+\"${ID:-}\" \"${PRETTY_NAME:-}\" \"$(uname -r 2>/dev/null)\" \"$(uname -s 2>/dev/null)\"'";
+
+/// OS 探测耗时上限。
+const OS_DETECT_TIMEOUT: Duration = Duration::from_secs(6);
+
+/// 解析 OS_DETECT_CMD 的输出，返回 (os_id, 系统展示名, 版本/内核)。
+/// 探测为空时回退到 SSH banner（probe.os / probe.version）。
+fn parse_os_release(out: &str, probe: &ProbeResult) -> (Option<String>, Option<String>, Option<String>) {
+    let (mut id, mut pretty, mut kernel, mut uname) = (None, None, None, None);
+    for line in out.lines() {
+        let line = line.trim();
+        if let Some(v) = line.strip_prefix("ID=") {
+            if !v.is_empty() { id = Some(v.to_ascii_lowercase()); }
+        } else if let Some(v) = line.strip_prefix("PRETTY=") {
+            if !v.is_empty() { pretty = Some(v.to_string()); }
+        } else if let Some(v) = line.strip_prefix("KERNEL=") {
+            if !v.is_empty() { kernel = Some(v.to_string()); }
+        } else if let Some(v) = line.strip_prefix("UNAME=") {
+            if !v.is_empty() { uname = Some(v.to_string()); }
+        }
+    }
+    let os_id = id.clone().or_else(|| {
+        uname.as_ref().map(|u| {
+            if u.eq_ignore_ascii_case("Darwin") { "macos".to_string() } else { "linux".to_string() }
+        })
+    });
+    let system = pretty.or_else(|| uname.clone()).or_else(|| probe.os.clone());
+    let version = kernel.or_else(|| probe.version.clone());
+    (os_id, system, version)
+}
+
+/// 在已认证的 SSH handle 上探测 OS（best-effort，带超时），随后断开连接。
+async fn detect_os_then_close(
+    handle: &Handle<conn::ClientHandler>,
+    probe: &ProbeResult,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let out = match timeout(OS_DETECT_TIMEOUT, monitor::run_cmd(handle, OS_DETECT_CMD)).await {
+        Ok(Ok(s)) => s,
+        _ => String::new(),
+    };
+    let _ = handle
+        .disconnect(russh::Disconnect::ByApplication, "", "en")
+        .await;
+    parse_os_release(&out, probe)
+}
 
 // ─── 入参（serde camelCase，严格匹配前端契约）─────────────────────────────────
 
@@ -108,6 +159,9 @@ pub struct ScanFound {
     pub driver_profile: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub os: Option<String>,
+    /// OS 目录 id（ubuntu/debian/centos…），用于侧栏品牌 logo；与展示用的 os 区分。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub os_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     pub status: String,
@@ -462,40 +516,37 @@ async fn scan_host_target(
             secret: Some(cred.password.clone()),
             jump: None,
         };
-        let res = match timeout(AUTH_ATTEMPT_TIMEOUT, conn::test_connection(args)).await {
-            Ok(r) => r,
-            Err(_) => continue, // 超时 → 视为该 cred 未命中，继续下一条。
-        };
-        if res.ok {
-            emit_log(
-                app,
-                scan_id,
-                "hit",
-                format!("{address} ✓ 登录成功 · {}", cred.user),
-            );
-            emit_found(
-                app,
-                &ScanFound {
-                    scan_id: scan_id.to_string(),
-                    ip: ip.to_string(),
-                    port,
-                    address,
-                    kind: "host".into(),
-                    engine_id: None,
-                    db_type: None,
-                    driver_profile: None,
-                    os: probe.os.clone(),
-                    version: probe.version.clone(),
-                    status: "authed".into(),
-                    hit_user: Some(cred.user.clone()),
-                    hit_secret: Some(cred.password.clone()),
-                    hit_auth_kind: Some("password".into()),
-                    hit_key_name: None,
-                    hit_key_path: None,
-                },
-            );
-            counters.found.fetch_add(1, Ordering::Relaxed);
-            return;
+        match timeout(AUTH_ATTEMPT_TIMEOUT, conn::connect_authenticated(&args)).await {
+            Ok(Ok((handle, _fp, _fwd, _jump))) => {
+                // 登录成功：探测真实 OS/内核（best-effort）后断开。
+                let (os_id, system, version) = detect_os_then_close(&handle, &probe).await;
+                emit_log(app, scan_id, "hit", format!("{address} ✓ 登录成功 · {}", cred.user));
+                emit_found(
+                    app,
+                    &ScanFound {
+                        scan_id: scan_id.to_string(),
+                        ip: ip.to_string(),
+                        port,
+                        address,
+                        kind: "host".into(),
+                        engine_id: None,
+                        db_type: None,
+                        driver_profile: None,
+                        os: system,
+                        os_id,
+                        version,
+                        status: "authed".into(),
+                        hit_user: Some(cred.user.clone()),
+                        hit_secret: Some(cred.password.clone()),
+                        hit_auth_kind: Some("password".into()),
+                        hit_key_name: None,
+                        hit_key_path: None,
+                    },
+                );
+                counters.found.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+            _ => continue, // 认证失败/超时 → 下一条凭证。
         }
     }
 
@@ -518,40 +569,41 @@ async fn scan_host_target(
                 secret: None,
                 jump: None,
             };
-            let res = match timeout(AUTH_ATTEMPT_TIMEOUT, conn::test_connection(args)).await {
-                Ok(r) => r,
-                Err(_) => continue, // 超时 → 视为该 用户×私钥 未命中，继续下一组。
-            };
-            if res.ok {
-                emit_log(
-                    app,
-                    scan_id,
-                    "hit",
-                    format!("{address} ✓ 私钥登录成功 · {user} / 🔑{}", key.name),
-                );
-                emit_found(
-                    app,
-                    &ScanFound {
-                        scan_id: scan_id.to_string(),
-                        ip: ip.to_string(),
-                        port,
-                        address,
-                        kind: "host".into(),
-                        engine_id: None,
-                        db_type: None,
-                        driver_profile: None,
-                        os: probe.os.clone(),
-                        version: probe.version.clone(),
-                        status: "authed".into(),
-                        hit_user: Some(user.clone()),
-                        hit_secret: None,
-                        hit_auth_kind: Some("key".into()),
-                        hit_key_name: Some(key.name.clone()),
-                        hit_key_path: Some(key.path.clone()),
-                    },
-                );
-                counters.found.fetch_add(1, Ordering::Relaxed);
-                return;
+            match timeout(AUTH_ATTEMPT_TIMEOUT, conn::connect_authenticated(&args)).await {
+                Ok(Ok((handle, _fp, _fwd, _jump))) => {
+                    let (os_id, system, version) = detect_os_then_close(&handle, &probe).await;
+                    emit_log(
+                        app,
+                        scan_id,
+                        "hit",
+                        format!("{address} ✓ 私钥登录成功 · {user} / 🔑{}", key.name),
+                    );
+                    emit_found(
+                        app,
+                        &ScanFound {
+                            scan_id: scan_id.to_string(),
+                            ip: ip.to_string(),
+                            port,
+                            address,
+                            kind: "host".into(),
+                            engine_id: None,
+                            db_type: None,
+                            driver_profile: None,
+                            os: system,
+                            os_id,
+                            version,
+                            status: "authed".into(),
+                            hit_user: Some(user.clone()),
+                            hit_secret: None,
+                            hit_auth_kind: Some("key".into()),
+                            hit_key_name: Some(key.name.clone()),
+                            hit_key_path: Some(key.path.clone()),
+                        },
+                    );
+                    counters.found.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+                _ => continue, // 认证失败/超时 → 下一组。
             }
         }
     }
@@ -639,6 +691,7 @@ async fn scan_db_target(
                     db_type: Some(engine.db_type.clone()),
                     driver_profile: engine.driver_profile.clone(),
                     os: None,
+                    os_id: None,
                     version,
                     status: "authed".into(),
                     hit_user: Some(cred.user.clone()),
@@ -677,6 +730,7 @@ async fn scan_db_target(
             db_type: Some(engine.db_type.clone()),
             driver_profile: engine.driver_profile.clone(),
             os: None,
+            os_id: None,
             version: probe.version.clone(),
             status: status.into(),
             hit_user: None,

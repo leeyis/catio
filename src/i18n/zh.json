@@ -720,12 +720,12 @@
       "live": "实时"
     },
     "results": {
-      "summary": "共 {{total}} 项 · 可登录 {{authed}} · 未授权 {{unauthed}} · 已存在 {{existing}}",
+      "summary": "共 {{total}} 项 · 可登录 {{authed}} · 需要认证 {{unauthed}} · 已存在 {{existing}}",
       "filterStatus": "状态筛选",
       "filterEngine": "引擎筛选",
       "statusAll": "全部状态",
       "statusAuthed": "可登录",
-      "statusUnauthed": "未授权",
+      "statusUnauthed": "需要认证",
       "statusExisting": "已存在",
       "engineAll": "全部引擎",
       "group": "导入分组",
@@ -745,7 +745,7 @@
     },
     "tag": {
       "authed": "可登录",
-      "unauthed": "未授权",
+      "unauthed": "需要认证",
       "existing": "已存在",
       "open": "端口开放",
       "unconfirmed": "端口开放 · 未确认",

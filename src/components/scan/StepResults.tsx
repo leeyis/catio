@@ -85,6 +85,13 @@ export default function StepResults({
     return { total: rows.length, authed, unauthed, existing }
   }, [rows])
 
+  // ---- 状态筛选：仅列出结果中实际出现的状态（如主机模式没有"需要认证"则不显示）----
+  const presentTags = useMemo(() => {
+    const s = new Set<string>()
+    for (const r of rows) s.add(rowTag(r))
+    return s
+  }, [rows])
+
   // ---- db 模式：引擎过滤选项（带计数）----
   const engineOptions = useMemo(() => {
     if (mode !== 'db') return []
@@ -164,24 +171,22 @@ export default function StepResults({
         : tag === 'unauthed' ? t('scan.tag.unauthed')
           : tag === 'existing' ? t('scan.tag.existing')
             : t('scan.tag.unconfirmed')
-    // 悬浮提示：明确 authed=已记忆密码免密、unauthed=首连需手输、open=未确认。
+    // 悬浮提示：可登录=已记忆密码免密、需要认证=首连需手输、未确认=仅端口开放。
     const hint =
       tag === 'authed' ? t('scan.tag.authedHint')
         : tag === 'unauthed' ? t('scan.tag.unauthedHint')
           : tag === 'open' ? t('scan.tag.openHint')
-            : undefined
+            : label
+    // 仅以图标标记状态：可登录=绿色对勾、需要认证=琥珀三角、已存在=灰双勾、未确认=灰点。
+    const icon =
+      tag === 'authed' ? 'circle-check'
+        : tag === 'unauthed' ? 'alert-triangle'
+          : tag === 'existing' ? 'check-check'
+            : 'circle-dot'
     return (
-      <span title={hint} style={{
-        display: 'inline-flex', alignItems: 'center', gap: 5,
-        height: 22, padding: '0 9px', borderRadius: 6,
-        fontSize: 11.5, fontWeight: 600,
-        color: tone.fg, background: tone.bg,
-        cursor: hint ? 'help' : 'default',
-      }}>
-        {tag === 'authed' && <Icon name="circle-check" size={12} />}
-        {tag === 'unauthed' && <Icon name="alert-triangle" size={12} />}
-        {tag === 'open' && <Icon name="circle-dot" size={12} />}
-        {label}
+      <span title={`${label} · ${hint}`} aria-label={label}
+        style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', color: tone.fg, cursor: 'help' }}>
+        <Icon name={icon} size={18} />
       </span>
     )
   }
@@ -202,9 +207,9 @@ export default function StepResults({
             <select value={statusFilter} onChange={e => setStatusFilter(e.target.value as StatusFilter)}
               aria-label={t('scan.results.filterStatus')} style={SELECT_STYLE}>
               <option value="all">{t('scan.results.statusAll')}</option>
-              <option value="authed">{t('scan.results.statusAuthed')}</option>
-              <option value="unauthed">{t('scan.results.statusUnauthed')}</option>
-              <option value="existing">{t('scan.results.statusExisting')}</option>
+              {presentTags.has('authed') && <option value="authed">{t('scan.results.statusAuthed')}</option>}
+              {presentTags.has('unauthed') && <option value="unauthed">{t('scan.results.statusUnauthed')}</option>}
+              {presentTags.has('existing') && <option value="existing">{t('scan.results.statusExisting')}</option>}
             </select>
             <Icon name="chevron-right" size={12} style={{ position: 'absolute', right: 9, top: '50%', transform: 'translateY(-50%) rotate(90deg)', color: 'var(--text-faint)', pointerEvents: 'none' }} />
           </span>

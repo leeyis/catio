@@ -59,7 +59,10 @@ export interface ScanFound {
   engineId?: string
   dbType?: string
   driverProfile?: string
+  /** 展示用系统名（如 "Ubuntu 22.04.3 LTS"）。 */
   os?: string
+  /** OS 目录 id（ubuntu/centos…），用于入库后侧栏品牌 logo。 */
+  osId?: string
   version?: string
   status: ScanStatus
   hitUser?: string

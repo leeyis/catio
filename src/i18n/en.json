@@ -720,12 +720,12 @@
       "live": "live"
     },
     "results": {
-      "summary": "{{total}} total · {{authed}} authed · {{unauthed}} unauthorized · {{existing}} existing",
+      "summary": "{{total}} total · {{authed}} loginable · {{unauthed}} needs auth · {{existing}} existing",
       "filterStatus": "Filter by status",
       "filterEngine": "Filter by engine",
       "statusAll": "All statuses",
-      "statusAuthed": "Authed",
-      "statusUnauthed": "Unauthorized",
+      "statusAuthed": "Loginable",
+      "statusUnauthed": "Needs auth",
       "statusExisting": "Existing",
       "engineAll": "All engines",
       "group": "Import group",
@@ -744,8 +744,8 @@
       "status": "Status"
     },
     "tag": {
-      "authed": "Authed",
-      "unauthed": "Unauthorized",
+      "authed": "Loginable",
+      "unauthed": "Needs auth",
       "existing": "Existing",
       "open": "Port open",
       "unconfirmed": "Port open · unconfirmed",
