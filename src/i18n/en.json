@@ -655,5 +655,96 @@
     "shellAssistant": "Terminal assistant",
     "cmdBarSqlPlaceholder": "Generate / optimize / explain SQL · {{target}}…  ⌘J",
     "cmdBarShellPlaceholder": "Generate shell command · {{target}}…  ⌘J"
+  },
+  "scan": {
+    "title": "Asset Discovery",
+    "openButton": "Scan & Discover",
+    "back": "Back",
+    "next": "Next",
+    "cancel": "Cancel Scan",
+    "start": "Start Scan",
+    "close": "Close",
+    "riskNotice": "Bulk login attempts may trigger account lockouts — use only on assets you own.",
+    "step": {
+      "mode": "Mode",
+      "range": "Range & Credentials",
+      "scanning": "Scanning",
+      "results": "Results"
+    },
+    "mode": {
+      "host": "Host Scan",
+      "hostDesc": "Scan a network range for open SSH ports and attempt login with credentials or private keys.",
+      "db": "Database Scan",
+      "dbDesc": "Scan a network range for database engine ports and confirm via test connection.",
+      "pickEngines": "Select database engines"
+    },
+    "range": {
+      "label": "Scan Range",
+      "placeholder": "192.168.1.0/24, 10.0.0.1-10.0.0.50, 172.16.0.5",
+      "hint": "Supports CIDR, IP ranges, or single IPs — separate multiple ranges with commas or newlines."
+    },
+    "ports": {
+      "label": "Ports",
+      "placeholder": "22, 2222",
+      "defaultLabel": "Default ports"
+    },
+    "creds": {
+      "label": "Credential Dictionary",
+      "placeholder": "user:password, one pair per line",
+      "hint": "One user:password pair per line, used for bulk login attempts.",
+      "upload": "Import dictionary file"
+    },
+    "keys": {
+      "label": "Private Keys",
+      "upload": "Add key file",
+      "users": "Key users",
+      "usersPlaceholder": "root, admin, ubuntu",
+      "empty": "No private keys added"
+    },
+    "concurrency": {
+      "label": "Concurrency"
+    },
+    "scanning": {
+      "progress": "Scanned {{scanned}}/{{total}}",
+      "found": "{{found}} found",
+      "elapsed": "Elapsed",
+      "failed": "{{failed}} failed",
+      "waiting": "Waiting for scan results…",
+      "viewResults": "View results"
+    },
+    "results": {
+      "summary": "{{total}} total · {{authed}} authed · {{unauthed}} unauthorized · {{existing}} existing",
+      "filterStatus": "Filter by status",
+      "filterEngine": "Filter by engine",
+      "statusAll": "All statuses",
+      "statusAuthed": "Authed",
+      "statusUnauthed": "Unauthorized",
+      "statusExisting": "Existing",
+      "engineAll": "All engines",
+      "group": "Import group",
+      "import": "Import {{n}}",
+      "export": "Export",
+      "exportCsv": "Export CSV",
+      "exportJson": "Export JSON",
+      "empty": "No matching results"
+    },
+    "col": {
+      "address": "Address",
+      "engine": "Engine",
+      "os": "OS",
+      "version": "Version",
+      "cred": "Hit Credential",
+      "status": "Status"
+    },
+    "tag": {
+      "authed": "Authed",
+      "unauthed": "Unauthorized",
+      "existing": "Existing",
+      "open": "Port open",
+      "unconfirmed": "Port open · unconfirmed"
+    },
+    "toast": {
+      "imported": "Imported {{n}}"
+    }
   }
 }

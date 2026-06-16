@@ -655,5 +655,96 @@
     "shellAssistant": "终端助手",
     "cmdBarSqlPlaceholder": "生成 / 优化 / 解释 SQL · {{target}}…  ⌘J",
     "cmdBarShellPlaceholder": "生成 shell 命令 · {{target}}…  ⌘J"
+  },
+  "scan": {
+    "title": "资产发现",
+    "openButton": "扫描发现",
+    "back": "上一步",
+    "next": "下一步",
+    "cancel": "取消扫描",
+    "start": "开始扫描",
+    "close": "关闭",
+    "riskNotice": "批量试登录可能触发账号锁定，请仅对自有资产使用。",
+    "step": {
+      "mode": "选择模式",
+      "range": "范围与凭据",
+      "scanning": "扫描中",
+      "results": "发现结果"
+    },
+    "mode": {
+      "host": "主机扫描",
+      "hostDesc": "扫描网段内开放的 SSH 端口，并尝试用凭据或私钥试登录。",
+      "db": "数据库扫描",
+      "dbDesc": "扫描网段内的数据库引擎端口，并尝试试连确认。",
+      "pickEngines": "选择数据库引擎"
+    },
+    "range": {
+      "label": "扫描范围",
+      "placeholder": "192.168.1.0/24, 10.0.0.1-10.0.0.50, 172.16.0.5",
+      "hint": "支持 CIDR、IP 区间或单个 IP，多个范围以逗号或换行分隔。"
+    },
+    "ports": {
+      "label": "端口",
+      "placeholder": "22, 2222",
+      "defaultLabel": "默认端口"
+    },
+    "creds": {
+      "label": "凭据字典",
+      "placeholder": "user:password，每行一组",
+      "hint": "每行一组 user:password，用于批量试登录。",
+      "upload": "导入字典文件"
+    },
+    "keys": {
+      "label": "私钥",
+      "upload": "添加私钥文件",
+      "users": "私钥用户",
+      "usersPlaceholder": "root, admin, ubuntu",
+      "empty": "未添加私钥"
+    },
+    "concurrency": {
+      "label": "并发数"
+    },
+    "scanning": {
+      "progress": "已扫描 {{scanned}}/{{total}}",
+      "found": "已发现 {{found}} 项",
+      "elapsed": "用时",
+      "failed": "失败 {{failed}}",
+      "waiting": "等待扫描结果…",
+      "viewResults": "查看结果"
+    },
+    "results": {
+      "summary": "共 {{total}} 项 · 可登录 {{authed}} · 未授权 {{unauthed}} · 已存在 {{existing}}",
+      "filterStatus": "状态筛选",
+      "filterEngine": "引擎筛选",
+      "statusAll": "全部状态",
+      "statusAuthed": "可登录",
+      "statusUnauthed": "未授权",
+      "statusExisting": "已存在",
+      "engineAll": "全部引擎",
+      "group": "导入分组",
+      "import": "导入 {{n}} 项",
+      "export": "导出",
+      "exportCsv": "导出 CSV",
+      "exportJson": "导出 JSON",
+      "empty": "暂无匹配结果"
+    },
+    "col": {
+      "address": "地址",
+      "engine": "引擎",
+      "os": "系统",
+      "version": "版本",
+      "cred": "命中凭据",
+      "status": "状态"
+    },
+    "tag": {
+      "authed": "可登录",
+      "unauthed": "未授权",
+      "existing": "已存在",
+      "open": "端口开放",
+      "unconfirmed": "端口开放 · 未确认"
+    },
+    "toast": {
+      "imported": "已导入 {{n}} 项"
+    }
   }
 }
