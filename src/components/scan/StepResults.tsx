@@ -164,12 +164,19 @@ export default function StepResults({
         : tag === 'unauthed' ? t('scan.tag.unauthed')
           : tag === 'existing' ? t('scan.tag.existing')
             : t('scan.tag.unconfirmed')
+    // 悬浮提示：明确 authed=已记忆密码免密、unauthed=首连需手输、open=未确认。
+    const hint =
+      tag === 'authed' ? t('scan.tag.authedHint')
+        : tag === 'unauthed' ? t('scan.tag.unauthedHint')
+          : tag === 'open' ? t('scan.tag.openHint')
+            : undefined
     return (
-      <span style={{
+      <span title={hint} style={{
         display: 'inline-flex', alignItems: 'center', gap: 5,
         height: 22, padding: '0 9px', borderRadius: 6,
         fontSize: 11.5, fontWeight: 600,
         color: tone.fg, background: tone.bg,
+        cursor: hint ? 'help' : 'default',
       }}>
         {tag === 'authed' && <Icon name="circle-check" size={12} />}
         {tag === 'unauthed' && <Icon name="alert-triangle" size={12} />}

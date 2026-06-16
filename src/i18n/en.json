@@ -741,7 +741,10 @@
       "unauthed": "Unauthorized",
       "existing": "Existing",
       "open": "Port open",
-      "unconfirmed": "Port open · unconfirmed"
+      "unconfirmed": "Port open · unconfirmed",
+      "authedHint": "Credential matched and remembered — imported nodes connect on first use without re-entering the password",
+      "unauthedHint": "Service identified but no dictionary credential matched — import as a draft; first connect will prompt for the password",
+      "openHint": "Only an open port was detected (service and credential unconfirmed) — first connect will prompt for the password"
     },
     "toast": {
       "imported": "Imported {{n}}"
