@@ -33,7 +33,7 @@ import { useData } from './state/DataContext'
 import { dbConnect, dbDisconnect, getHistory as getDbHistory, clearDbHistory, deleteDbHistory, deleteDbHistoryForProfile, dbErrMsg } from './services/db'
 import {
   useDbConnections, dbProfileToConnection, listActiveDbConnections,
-  setActiveDbConnection, removeDbConnection, removeActiveDbConnection,
+  setActiveDbConnection, removeDbConnection, removeActiveDbConnection, saveDbConnection,
   type DbProfile,
 } from './state/dbConnections'
 import { sshConnect, sshDisconnect, sshTrustHost, isTauri, onHistory, sshSysinfo, sshDetectOs, importSshConfig } from './services/ssh'
@@ -912,6 +912,8 @@ export default function App() {
     setActiveDbConnection(result, profile)
     // Auth succeeded → cache the secret (when auth + vault allow).
     rememberConnSecret(profile.id, secret)
+    // 扫描导入的「需要认证」草稿：首次成功登录后清除标记（不再显示徽标）。
+    if (profile.needsAuth) saveDbConnection({ ...profile, needsAuth: false })
     bumpDbActive()
     syncMcpTargets()
     void openConn(dbProfileToConnection(profile, true))

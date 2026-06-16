@@ -360,6 +360,7 @@ export function Sidebar({ activeId, onOpen, onDetail, collapsed, onToggleCollaps
 
 export function ConnRow({ conn, active, onOpen, onDetail, nested }: ConnRowProps) {
   const D = useData()
+  const { t } = useTranslation()
   const [hover, setHover] = useState(false)
   // DB cards open the details panel on click (no workbench, no detail icon).
   // Host/SSH cards keep the original behavior: click → workbench, hover → detail icon.
@@ -376,8 +377,14 @@ export function ConnRow({ conn, active, onOpen, onDetail, nested }: ConnRowProps
       }}>
       <ConnGlyph conn={conn} size={nested ? 26 : 30} radius={nested ? 7 : 8} />
       <div className="col grow" style={{ lineHeight: 1.25, minWidth: 0 }}>
-        <div className="row gap6" style={{ minWidth: 0 }}>
+        <div className="row gap6" style={{ minWidth: 0, alignItems: 'center' }}>
           <span className="ell" style={{ fontSize: nested ? 12.5 : 13, fontWeight: active ? 600 : 500, color: active ? 'var(--accent-primary)' : 'var(--text-primary)' }}>{conn.name}</span>
+          {conn.needsAuth && (
+            <span className="badge-accent" title={t('vault.needsAuthHint')}
+              style={{ flexShrink: 0, background: 'color-mix(in srgb, var(--signal-amber) 14%, transparent)', color: 'var(--signal-amber)' }}>
+              <Icon name="lock" size={9} /> {t('vault.needsAuth')}
+            </span>
+          )}
         </div>
         <span className="ell mono" style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{nested ? (D.engineMeta[conn.engine ?? ''] || {}).label : conn.sub}</span>
       </div>

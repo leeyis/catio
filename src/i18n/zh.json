@@ -70,7 +70,9 @@
     "filterHost": "主机",
     "filterDb": "数据库",
     "newBtn": "新建",
-    "online": "在线"
+    "online": "在线",
+    "needsAuth": "需要认证",
+    "needsAuthHint": "自动扫描识别到此连接但未验证凭证，首次连接需手动输入密码"
   },
   "dbviews": {
     "copySel": "复制",

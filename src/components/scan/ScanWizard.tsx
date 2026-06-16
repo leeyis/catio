@@ -91,10 +91,10 @@ function toRow(f: ScanFound, existingHosts: Set<string>, existingDbs: Set<string
   const existing = f.kind === 'host'
     ? existingHosts.has(hostPort)
     : existingDbs.has(`${hostPort}#${f.engineId ?? f.dbType ?? ''}`)
-  // 默认仅勾选 ✓已认证（命中凭证、首连免密可用）的行：一键入库即得到可直连节点。
-  // ⚠未授权（草稿）与 open（仅端口开放）默认不勾，避免用户误以为导入即可直连——
-  // 仍可手动勾选导入为草稿（首连补凭证）。existing 一律不勾。
-  const selected = !existing && f.status === 'authed'
+  // 默认勾选：✓已认证（命中凭证、首连免密）始终勾选；db 模式额外默认勾选 ⚠未授权
+  // （识别到的库可入库为「需要认证」草稿，首连补密码）；host 模式后端只回传可登录节点，
+  // 故 host 全是 authed。open（仅端口开放/未确认）与 existing 一律不默认勾选。
+  const selected = !existing && (f.status === 'authed' || (f.kind === 'db' && f.status === 'unauthed'))
   return { ...f, rowId: rowIdFor(f), existing, selected }
 }
 
@@ -373,6 +373,8 @@ export function ScanWizard({ onClose, onImported, existingHostKeys, existingDbKe
           port: r.port,
           user: r.hitUser || '',
           ...(groupId ? { group: groupId } : {}),
+          // 未命中凭证的库 → 草稿，标「需要认证」，首连由用户补密码。
+          ...(r.status !== 'authed' ? { needsAuth: true } : {}),
         }
         try {
           saveDbConnection(profile) // 内部 notify()，db 列表自动刷新

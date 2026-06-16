@@ -385,9 +385,7 @@ async fn scan_host_target(
         return; // 端口不开放——不算 found，也不计 failed。
     }
     if !probe.matched {
-        // 端口开放但非 SSH——按"仅端口开放"上报 open，便于人工判断。
-        emit_open(app, scan_id, ip, port, "host", &probe, None);
-        counters.found.fetch_add(1, Ordering::Relaxed);
+        // host 模式仅收录“能正常登录”的节点：端口开放但非 SSH 不上报。
         return;
     }
 
@@ -479,29 +477,9 @@ async fn scan_host_target(
         }
     }
 
-    // 识别到 SSH 但字典/私钥均未命中 → unauthed。
-    emit_found(
-        app,
-        &ScanFound {
-            scan_id: scan_id.to_string(),
-            ip: ip.to_string(),
-            port,
-            address,
-            kind: "host".into(),
-            engine_id: None,
-            db_type: None,
-            driver_profile: None,
-            os: probe.os.clone(),
-            version: probe.version.clone(),
-            status: "unauthed".into(),
-            hit_user: None,
-            hit_secret: None,
-            hit_auth_kind: None,
-            hit_key_name: None,
-            hit_key_path: None,
-        },
-    );
-    counters.found.fetch_add(1, Ordering::Relaxed);
+    // 识别到 SSH 但字典/私钥均未命中：host 模式不收录（结果列表仅含可正常登录的节点）。
+    // 与 db 模式不同——db 会保留“识别到但未认证”的节点供用户后续补凭证登录。
+    let _ = address;
 }
 
 // ─── db 目标 ──────────────────────────────────────────────────────────────────
@@ -616,34 +594,3 @@ async fn native_probe(db_type: DatabaseType, ip: IpAddr, port: u16) -> ProbeResu
     }
 }
 
-fn emit_open(
-    app: &AppHandle,
-    scan_id: &str,
-    ip: IpAddr,
-    port: u16,
-    kind: &str,
-    probe: &ProbeResult,
-    engine: Option<&ProbeEngine>,
-) {
-    emit_found(
-        app,
-        &ScanFound {
-            scan_id: scan_id.to_string(),
-            ip: ip.to_string(),
-            port,
-            address: format!("{ip}:{port}"),
-            kind: kind.to_string(),
-            engine_id: engine.map(|e| e.engine_id.clone()),
-            db_type: engine.map(|e| e.db_type.clone()),
-            driver_profile: engine.and_then(|e| e.driver_profile.clone()),
-            os: probe.os.clone(),
-            version: probe.version.clone(),
-            status: "open".into(),
-            hit_user: None,
-            hit_secret: None,
-            hit_auth_kind: None,
-            hit_key_name: None,
-            hit_key_path: None,
-        },
-    );
-}

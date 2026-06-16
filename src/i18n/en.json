@@ -70,7 +70,9 @@
     "filterHost": "Hosts",
     "filterDb": "Databases",
     "newBtn": "New",
-    "online": "Online"
+    "online": "Online",
+    "needsAuth": "Needs auth",
+    "needsAuthHint": "Auto-scan identified this connection but did not verify a credential — first connect will prompt for the password"
   },
   "dbviews": {
     "copySel": "Copy",
