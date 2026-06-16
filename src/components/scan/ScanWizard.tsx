@@ -91,8 +91,10 @@ function toRow(f: ScanFound, existingHosts: Set<string>, existingDbs: Set<string
   const existing = f.kind === 'host'
     ? existingHosts.has(hostPort)
     : existingDbs.has(`${hostPort}#${f.engineId ?? f.dbType ?? ''}`)
-  // existing 默认不勾；open（仅端口开放·未确认）默认不勾；authed/unauthed 默认勾选。
-  const selected = !existing && f.status !== 'open'
+  // 默认仅勾选 ✓已认证（命中凭证、首连免密可用）的行：一键入库即得到可直连节点。
+  // ⚠未授权（草稿）与 open（仅端口开放）默认不勾，避免用户误以为导入即可直连——
+  // 仍可手动勾选导入为草稿（首连补凭证）。existing 一律不勾。
+  const selected = !existing && f.status === 'authed'
   return { ...f, rowId: rowIdFor(f), existing, selected }
 }
 
@@ -348,6 +350,10 @@ export function ScanWizard({ onClose, onImported, existingHostKeys, existingDbKe
           if (r.status === 'authed' && r.hitAuthKind === 'password' && r.hitSecret) {
             setSessionSecret(id, r.hitSecret)
             onRememberSecret?.(id, r.hitSecret)
+          } else if (r.status === 'authed' && r.hitAuthKind === 'key') {
+            // 私钥命中：扫描已验证该私钥可【免口令】登录，存空口令标记，
+            // 首连直接用私钥连接、不再弹密码框。
+            setSessionSecret(id, '')
           }
           imported++
         } catch { /* localStorage 不可用 */ }

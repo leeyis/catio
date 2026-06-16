@@ -503,10 +503,11 @@ export default function App() {
       void performConnect(args, display.name, args.secret, display.profileId)
       return
     }
-    // 扫描导入的 ✓authed 主机：本次会话内存里存有命中密码，首连直连免再输。
+    // 扫描导入的 ✓authed 主机：本次会话内存里存有命中凭证，首连直连免再输。
+    // 注意用 !== undefined 判断：私钥命中存的是空口令标记（''），也应直连（用私钥免口令）。
     if (display.profileId) {
       const sess = getSessionSecret(display.profileId)
-      if (sess) {
+      if (sess !== undefined) {
         void performConnect(args, display.name, sess, display.profileId)
         return
       }
