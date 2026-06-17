@@ -175,8 +175,6 @@ cd src-tauri && cargo test --lib
 - 新 UI 必须支持主题切换（使用设计令牌，不要硬编码颜色）。
 - **切勿**提交真实密钥、私钥、生产连接串或下载的 JDBC 驱动 JAR。
 
-完整工作约定见 [`AGENTS.md`](AGENTS.md) 与 [`CLAUDE.md`](CLAUDE.md)。
-
 ---
 
 ## 📝 许可证

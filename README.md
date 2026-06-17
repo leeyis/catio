@@ -175,8 +175,6 @@ Contributions are welcome! A few conventions that keep the codebase healthy:
 - New UI must support theme switching (use design tokens, no hard‑coded colors).
 - **Never** commit real secrets, private keys, production connection strings, or downloaded JDBC driver JARs.
 
-See [`AGENTS.md`](AGENTS.md) and [`CLAUDE.md`](CLAUDE.md) for the full working agreement.
-
 ---
 
 ## 📝 License

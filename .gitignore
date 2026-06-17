@@ -6,8 +6,8 @@ src-tauri/jdbc-plugin/target/
 # local JDBC driver JARs used for integration testing (downloaded, not redistributed)
 .test-drivers/
 .DS_Store
-# decoded reference scratch (regenerable from ref-ui HTML)
-ref-ui/_extract/
+# reference UI assets (design scratch, not part of the shipped product)
+ref-ui/
 # pixel-diff artifacts
 diff.png
 *-actual.png
@@ -19,3 +19,17 @@ diff.png
 
 # superpowers brainstorm mockups
 .superpowers/
+
+# build / tooling logs (test & compile output, regenerable)
+*.log
+
+# internal design specs & agent instructions (not for the public repo)
+docs/superpowers/
+AGENTS.md
+CLAUDE.md
+
+# local integration-test scaffolding (docker compose / env notes)
+deploy/
+
+# misc local tooling state
+.nezha/
