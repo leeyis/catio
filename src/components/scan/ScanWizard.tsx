@@ -29,6 +29,9 @@ import StepResults from './StepResults'
 
 const HOST_DEFAULT_PORT = 22
 const DEFAULT_CONCURRENCY = 64
+// 实时日志保留行数上限（仅防内存膨胀）。一个 /24 全失败时约 254×(端口开放+N凭证)
+// 行，取 20000 足以容纳常见网段 × 多组凭证的逐次尝试不被截断。
+const LOG_CAP = 20000
 
 // ---- 文本解析工具 ----
 // 字典解析复用 ./parseDict（按“第一个空白”切分，兼容含空格密码），与 spec/单测一致。
@@ -184,8 +187,9 @@ export function ScanWizard({ onClose, onImported, existingHostKeys, existingDbKe
       }),
       onScanLog(l => {
         if (!alive) return
-        // 控制台式日志，封顶 1000 行，避免长扫描内存膨胀。
-        setLogs(prev => (prev.length >= 1000 ? [...prev.slice(prev.length - 999), l] : [...prev, l]))
+        // 控制台式日志，封顶 LOG_CAP 行后丢弃最旧行（仅防内存膨胀）。
+        // 取较大上限，保证一个 C 类网段（254 主机 × 多组凭证）的逐次尝试不会被截断。
+        setLogs(prev => (prev.length >= LOG_CAP ? [...prev.slice(prev.length - (LOG_CAP - 1)), l] : [...prev, l]))
       }),
       onScanDone(() => {
         if (!alive) return
