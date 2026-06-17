@@ -44,6 +44,8 @@ export interface StepRangeCredsProps {
   concurrency: number
   onConcurrencyChange: (n: number) => void
   defaultPorts: number[]
+  /** 必填项是否齐备（扫描范围 + 至少一组凭证或密钥）；否则禁用「开始扫描」。 */
+  canStart: boolean
   onBack: () => void
   onStart: () => void
 }

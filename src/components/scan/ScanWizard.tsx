@@ -271,9 +271,16 @@ export function ScanWizard({ onClose, onImported, existingHostKeys, existingDbKe
   // （StepRangeCredsProps 仅暴露 onDictTextChange，未提供文件上传回调）。
   // 本项目未集成 @tauri-apps/plugin-fs 的 JS 绑定，故不在此读取字典文件文本。
 
+  // ---- 必填项校验：扫描范围 + 至少一组凭证或密钥（host 模式密钥可替代凭证）----
+  const canStart = useMemo(() => {
+    const hasRange = parseRanges(ranges).length > 0
+    const hasCred = parseDict(dictText).length > 0 || (mode === 'host' && keyFiles.length > 0)
+    return hasRange && hasCred
+  }, [ranges, dictText, mode, keyFiles])
+
   // ---- 步骤②→③：开始扫描 ----
   const handleStart = useCallback(async () => {
-    if (!mode) return
+    if (!mode || !canStart) return
     const creds = parseDict(dictText)
     const rangeList = parseRanges(ranges)
 
@@ -328,7 +335,7 @@ export function ScanWizard({ onClose, onImported, existingHostKeys, existingDbKe
       stopTimer()
       console.error('scanStart 失败', e)
     }
-  }, [mode, dictText, ranges, concurrency, defaultPorts, keyFiles, keyUsersRaw, customPorts, selectedEngineIds])
+  }, [mode, canStart, dictText, ranges, concurrency, defaultPorts, keyFiles, keyUsersRaw, customPorts, selectedEngineIds])
 
   // ---- 步骤③：取消 ----
   const handleCancel = useCallback(() => {
@@ -549,6 +556,7 @@ export function ScanWizard({ onClose, onImported, existingHostKeys, existingDbKe
             concurrency={concurrency}
             onConcurrencyChange={setConcurrency}
             defaultPorts={defaultPorts}
+            canStart={canStart}
             onBack={() => setStep(1)}
             onStart={handleStart}
           />
@@ -582,10 +590,10 @@ export function ScanWizard({ onClose, onImported, existingHostKeys, existingDbKe
        </div>
       </main>
 
-      {/* 入库成功浮层提示 */}
+      {/* 入库成功浮层提示（从顶部出现，更醒目） */}
       {toast && (
         <div className="fade-in" style={{
-          position: 'absolute', bottom: 76, left: '50%', transform: 'translateX(-50%)',
+          position: 'absolute', top: 72, left: '50%', transform: 'translateX(-50%)',
           display: 'flex', alignItems: 'center', gap: 8, zIndex: 20,
           padding: '10px 16px', borderRadius: 999,
           background: 'var(--surface-card)', border: '1px solid var(--signal-green)',

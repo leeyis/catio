@@ -39,6 +39,10 @@ export interface SidebarProps {
   filter?: string
   onFilterChange?: (filter: string) => void
   onEnableAuth?: () => void
+  /** 批量维护：把选中的连接移动到目标分组（groupId='' 表示移出到未分组）。 */
+  onBatchMove?: (conns: Connection[], groupId: string) => void
+  /** 批量维护：删除选中的连接（由 App 弹确认框后执行）。 */
+  onBatchDelete?: (conns: Connection[]) => void
 }
 
 export interface ConnRowProps {
@@ -47,6 +51,10 @@ export interface ConnRowProps {
   onOpen: (conn: Connection) => void
   onDetail?: (conn: Connection) => void
   nested?: boolean
+  /** 批量维护模式：显示勾选框，行点击切换选中而非打开详情。 */
+  selectable?: boolean
+  selected?: boolean
+  onSelectToggle?: (conn: Connection) => void
 }
 
 export interface IconRailProps {
@@ -150,13 +158,43 @@ export function TitleBar({ theme, onToggleTheme, onOpenSettings, settingsActive 
 
 // ---- Sidebar ----
 
-export function Sidebar({ activeId, onOpen, onDetail, collapsed, onToggleCollapse, conns: vaultConns, currentUser, authEnabled, onLock, onEnableAuth, filter: filterProp, onFilterChange }: SidebarProps) {
+export function Sidebar({ activeId, onOpen, onDetail, collapsed, onToggleCollapse, conns: vaultConns, currentUser, authEnabled, onLock, onEnableAuth, filter: filterProp, onFilterChange, onBatchMove, onBatchDelete }: SidebarProps) {
   const { t } = useTranslation()
   const D = useData()
   const groups = useGroups()
   const allConns = vaultConns || D.connections
   const [query, setQuery] = useState('')
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({})
+
+  // ---- 批量维护 ----
+  const [batchMode, setBatchMode] = useState(false)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [moveTarget, setMoveTarget] = useState('') // 目标分组 id（''=未分组）
+  const exitBatch = () => { setBatchMode(false); setSelectedIds(new Set()); setMoveTarget('') }
+  const toggleSelect = (conn: Connection) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      if (next.has(conn.id)) next.delete(conn.id); else next.add(conn.id)
+      return next
+    })
+  }
+  // 选中的连接（从当前列表过滤，自动剔除已删除的陈旧 id）。
+  const selectedConns = allConns.filter(c => selectedIds.has(c.id))
+  // 统一注入到每个 ConnRow 的公共 props（含批量勾选）。
+  const rowProps = (conn: Connection) => ({
+    conn,
+    active: activeId === conn.id,
+    onOpen, onDetail,
+    selectable: batchMode,
+    selected: selectedIds.has(conn.id),
+    onSelectToggle: toggleSelect,
+  })
+  const handleBatchMove = () => {
+    if (!selectedConns.length) return
+    onBatchMove?.(selectedConns, moveTarget)
+    setSelectedIds(new Set())
+    setMoveTarget('')
+  }
   // Inline "new group" composer — toggled by the header folder-plus button.
   const [addingGroup, setAddingGroup] = useState(false)
   const [newGroupName, setNewGroupName] = useState('')
@@ -205,6 +243,8 @@ export function Sidebar({ activeId, onOpen, onDetail, collapsed, onToggleCollaps
             <span className="badge-accent">{allConns.length}</span>
           </div>
           <div className="row gap4">
+            <IconBtn name="check-check" size={15} variant="bare" title={t('shell.batchMode')} active={batchMode}
+              onClick={() => (batchMode ? exitBatch() : setBatchMode(true))} />
             <IconBtn name="folder-plus" size={15} variant="bare" title={t('shell.newGroup')} onClick={() => { setAddingGroup(true); setNewGroupName('') }} />
             <IconBtn name="panel-left" size={15} variant="bare" title={t('shell.collapseSidebar')} onClick={onToggleCollapse} />
           </div>
@@ -259,18 +299,18 @@ export function Sidebar({ activeId, onOpen, onDetail, collapsed, onToggleCollaps
                   {buildSidebarTree(ungrouped, filter).map(node => (
                     node.nested ? (
                       <div key={node.host.id} className="col" style={{ gap: 1 }}>
-                        <ConnRow conn={node.host} active={activeId === node.host.id} onOpen={onOpen} onDetail={onDetail} />
+                        <ConnRow {...rowProps(node.host)} />
                         <div className="col" style={{ gap: 1, marginLeft: 19, paddingLeft: 11, borderLeft: '1.5px solid var(--border-hairline)' }}>
                           {node.dbs.map((c) => (
                             <div key={c.id} style={{ position: 'relative' }}>
                               <span style={{ position: 'absolute', left: -11, top: 18, width: 8, height: 1.5, background: 'var(--border-hairline)' }} />
-                              <ConnRow conn={c} active={activeId === c.id} onOpen={onOpen} onDetail={onDetail} nested />
+                              <ConnRow {...rowProps(c)} nested />
                             </div>
                           ))}
                         </div>
                       </div>
                     ) : (
-                      <ConnRow key={node.conn.id} conn={node.conn} active={activeId === node.conn.id} onOpen={onOpen} onDetail={onDetail} />
+                      <ConnRow key={node.conn.id} {...rowProps(node.conn)} />
                     )
                   ))}
                 </div>
@@ -300,18 +340,18 @@ export function Sidebar({ activeId, onOpen, onDetail, collapsed, onToggleCollaps
                   {buildSidebarTree(items, filter).map(node => (
                     node.nested ? (
                       <div key={node.host.id} className="col" style={{ gap: 1 }}>
-                        <ConnRow conn={node.host} active={activeId === node.host.id} onOpen={onOpen} onDetail={onDetail} />
+                        <ConnRow {...rowProps(node.host)} />
                         <div className="col" style={{ gap: 1, marginLeft: 19, paddingLeft: 11, borderLeft: '1.5px solid var(--border-hairline)' }}>
                           {node.dbs.map((c) => (
                             <div key={c.id} style={{ position: 'relative' }}>
                               <span style={{ position: 'absolute', left: -11, top: 18, width: 8, height: 1.5, background: 'var(--border-hairline)' }} />
-                              <ConnRow conn={c} active={activeId === c.id} onOpen={onOpen} onDetail={onDetail} nested />
+                              <ConnRow {...rowProps(c)} nested />
                             </div>
                           ))}
                         </div>
                       </div>
                     ) : (
-                      <ConnRow key={node.conn.id} conn={node.conn} active={activeId === node.conn.id} onOpen={onOpen} onDetail={onDetail} />
+                      <ConnRow key={node.conn.id} {...rowProps(node.conn)} />
                     )
                   ))}
                 </div>
@@ -329,6 +369,36 @@ export function Sidebar({ activeId, onOpen, onDetail, collapsed, onToggleCollaps
           </div>
         )}
       </div>
+
+      {/* 批量维护操作栏：选中计数 + 移动到分组 + 删除 + 退出 */}
+      {batchMode && (
+        <div className="col" style={{ gap: 8, padding: '10px 12px', borderTop: '1px solid var(--border-hairline)', background: 'var(--surface-sunken)' }}>
+          <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>
+              {t('shell.batchSelected', { n: selectedConns.length })}
+            </span>
+            <button className="icon-btn bare" title={t('shell.batchExit')} onClick={exitBatch} style={{ width: 22, height: 22 }}>
+              <Icon name="x" size={14} />
+            </button>
+          </div>
+          <div className="row gap6" style={{ alignItems: 'center' }}>
+            <select value={moveTarget} onChange={e => setMoveTarget(e.target.value)}
+              style={{ flex: 1, minWidth: 0, height: 30, padding: '0 8px', borderRadius: 8, border: '1px solid var(--border-hairline)', background: 'var(--surface-card)', fontSize: 12.5, color: 'var(--text-primary)', outline: 'none' }}>
+              <option value="">{t('shell.ungrouped')}</option>
+              {groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+            </select>
+            <button className="btn btn-secondary sm" disabled={!selectedConns.length} onClick={handleBatchMove}
+              style={{ flexShrink: 0, ...(selectedConns.length ? {} : { opacity: 0.5, cursor: 'not-allowed' }) }}>
+              <Icon name="folder" size={14} /> {t('shell.batchMove')}
+            </button>
+          </div>
+          <button className="btn btn-danger sm" disabled={!selectedConns.length}
+            onClick={() => { if (selectedConns.length) onBatchDelete?.(selectedConns) }}
+            style={{ width: '100%', ...(selectedConns.length ? {} : { opacity: 0.5, cursor: 'not-allowed' }) }}>
+            <Icon name="trash-2" size={14} /> {t('shell.batchDelete')}
+          </button>
+        </div>
+      )}
 
       {/* footer status */}
       <div className="row" style={{ padding: '10px 12px', borderTop: '1px solid var(--border-hairline)', gap: 8 }}>
@@ -358,23 +428,34 @@ export function Sidebar({ activeId, onOpen, onDetail, collapsed, onToggleCollaps
 
 // ---- ConnRow ----
 
-export function ConnRow({ conn, active, onOpen, onDetail, nested }: ConnRowProps) {
+export function ConnRow({ conn, active, onOpen, onDetail, nested, selectable, selected, onSelectToggle }: ConnRowProps) {
   const D = useData()
   const { t } = useTranslation()
   const [hover, setHover] = useState(false)
   // DB cards open the details panel on click (no workbench, no detail icon).
   // Host/SSH cards keep the original behavior: click → workbench, hover → detail icon.
   // (onOpen is wired by the parent; Connect moves to the DetailsPanel's Connect button.)
+  // 批量维护模式下，行点击改为切换选中（不打开详情/工作台）。
   const isDb = conn.kind === 'db'
-  const handlePrimary = () => (isDb ? onDetail?.(conn) : onOpen(conn))
+  const handlePrimary = () => (selectable ? onSelectToggle?.(conn) : (isDb ? onDetail?.(conn) : onOpen(conn)))
   return (
     <div onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
       onClick={handlePrimary} onDoubleClick={handlePrimary}
       style={{
         display: 'flex', alignItems: 'center', gap: 9, padding: nested ? '6px 9px' : '7px 9px', borderRadius: 10, cursor: 'pointer',
-        background: active ? 'var(--accent-soft)' : hover ? 'var(--surface-sunken)' : 'transparent',
+        background: active || (selectable && selected) ? 'var(--accent-soft)' : hover ? 'var(--surface-sunken)' : 'transparent',
         transition: 'background .12s',
       }}>
+      {selectable && (
+        <span style={{
+          flexShrink: 0, width: 16, height: 16, borderRadius: 5, display: 'grid', placeItems: 'center',
+          border: `1.5px solid ${selected ? 'var(--accent-primary)' : 'var(--border-hairline-alt)'}`,
+          background: selected ? 'var(--accent-primary)' : 'transparent',
+          color: 'var(--on-accent)',
+        }}>
+          {selected && <Icon name="check" size={11} />}
+        </span>
+      )}
       <ConnGlyph conn={conn} size={nested ? 26 : 30} radius={nested ? 7 : 8} />
       <div className="col grow" style={{ lineHeight: 1.25, minWidth: 0 }}>
         <div className="row gap6" style={{ minWidth: 0, alignItems: 'center' }}>

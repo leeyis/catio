@@ -22,7 +22,7 @@ export function StepRangeCreds(props: StepRangeCredsProps) {
     mode, ranges, onRangesChange, customPorts, onCustomPortsChange,
     dictText, onDictTextChange, keyFiles, onAddKeyFiles, onRemoveKeyFile,
     keyUsersRaw, onKeyUsersChange, concurrency, onConcurrencyChange,
-    defaultPorts, onBack, onStart,
+    defaultPorts, canStart, onBack, onStart,
   } = props
   const { t } = useTranslation()
 
@@ -98,8 +98,9 @@ export function StepRangeCreds(props: StepRangeCredsProps) {
         />
       </label>
 
-      {/* 凭证字典 */}
-      <label className="col" style={{ gap: 5 }}>
+      {/* 凭证字典 —— 用 <div> 而非 <label> 包裹：label 会把空白处的点击转发给其内第一个
+          可关联控件（此处是「上传」按钮），导致点击空白也触发上传。改用 div 后仅按钮可上传。 */}
+      <div className="col" style={{ gap: 5 }}>
         <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
           <span style={labelStyle}>{t('scan.creds.label')}</span>
           <Btn size="sm" variant="ghost" icon="upload" onClick={handleDictUpload}>
@@ -115,7 +116,7 @@ export function StepRangeCreds(props: StepRangeCredsProps) {
           style={fieldStyle}
         />
         <span style={hintStyle}>{t('scan.creds.hint')}</span>
-      </label>
+      </div>
 
       {/* 密钥区：仅 host 模式 */}
       {mode === 'host' && (
@@ -180,10 +181,23 @@ export function StepRangeCreds(props: StepRangeCredsProps) {
         />
       </label>
 
-      {/* 底部操作 */}
-      <div className="row" style={{ justifyContent: 'space-between', marginTop: 4 }}>
+      {/* 底部操作 —— 必填项未齐备时禁用「开始扫描」并给出提示 */}
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginTop: 4 }}>
         <Btn variant="ghost" icon="chevron-left" onClick={onBack}>{t('scan.back')}</Btn>
-        <Btn variant="primary" icon="radar" onClick={onStart}>{t('scan.start')}</Btn>
+        <div className="row gap10" style={{ alignItems: 'center' }}>
+          {!canStart && (
+            <span style={{ ...hintStyle, color: 'var(--text-tertiary)' }}>{t('scan.startDisabledHint')}</span>
+          )}
+          <Btn
+            variant="primary"
+            icon="radar"
+            onClick={onStart}
+            disabled={!canStart}
+            style={canStart ? undefined : { opacity: 0.5, cursor: 'not-allowed' }}
+          >
+            {t('scan.start')}
+          </Btn>
+        </div>
       </div>
     </div>
   )

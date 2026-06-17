@@ -103,6 +103,8 @@ export default function App() {
   const [editing, setEditing] = useState<ConnectionProfile | null>(null)
   // Pending delete confirmation (styled ConfirmModal).
   const [pendingDelete, setPendingDelete] = useState<Connection | null>(null)
+  // Pending BATCH delete confirmation (侧栏批量维护)。
+  const [pendingBatchDelete, setPendingBatchDelete] = useState<Connection[] | null>(null)
   const [aiAttachment, setAiAttachment] = useState<Attachment | null>(null)
   const [snippets, setSnippets] = useState<Snippet[]>(() => loadSnippets())
 
@@ -1060,6 +1062,38 @@ export default function App() {
     reloadProfiles()
     if (detailConn?.id === conn.id) { setDetailConn(null); setPanelOpen(false) }
   }
+
+  // 批量维护：把选中连接移动到目标分组（''=未分组）。host/db 分别写回各自存储。
+  function batchMoveToGroup(conns: Connection[], groupId: string) {
+    for (const c of conns) {
+      if (c.kind === 'host') {
+        const p = profiles.find(x => x.id === c.id)
+        if (p) { try { saveProfile({ ...p, group: groupId || undefined }) } catch { /* localStorage 不可用 */ } }
+      } else {
+        const p = dbProfiles.find(x => x.id === c.id)
+        if (p) saveDbConnection({ ...p, group: groupId || undefined }) // 内部 notify()
+      }
+    }
+    reloadProfiles()
+  }
+
+  // 批量维护：删除选中连接（host 走 deleteProfile + 拆会话 + 删历史；db 复用 deleteDbProfile）。
+  function batchDelete(conns: Connection[]) {
+    for (const c of conns) {
+      if (c.kind === 'host') {
+        if (sessionMap[c.id]) teardownSession(c.id)
+        try { deleteProfile(c.id) } catch { /* localStorage 不可用 */ }
+        deleteHistoryForProfile(c.id)
+      } else {
+        const p = dbProfiles.find(x => x.id === c.id)
+        if (p) deleteDbProfile(p)
+      }
+    }
+    setHistory(loadHistory())
+    reloadProfiles()
+    if (detailConn && conns.some(c => c.id === detailConn.id)) { setDetailConn(null); setPanelOpen(false) }
+  }
+
   function selectPanel(id: string) {
     if (activePanel === id && panelOpen) { setPanelOpen(false) }
     else { setActivePanel(id); setPanelOpen(true) }
@@ -1288,7 +1322,8 @@ export default function App() {
           <Sidebar activeId={detailConn ? detailConn.id : (cur ? cur.connId : undefined)} onOpen={openDetail} onDetail={openDetail}
             collapsed={sidebarCollapsed} onToggleCollapse={() => setSidebarCollapsed(c => !c)}
             conns={vaultConns} currentUser={currentName} authEnabled={authEnabled} onLock={lockApp} onEnableAuth={() => goSettings('security')}
-            filter={sidebarFilter} onFilterChange={setSidebarFilter} />
+            filter={sidebarFilter} onFilterChange={setSidebarFilter}
+            onBatchMove={batchMoveToGroup} onBatchDelete={conns => setPendingBatchDelete(conns)} />
 
           {/* main */}
           <div className="card-surface grow col" style={{ overflow: 'hidden', position: 'relative' }}>
@@ -1450,6 +1485,17 @@ export default function App() {
           danger
           onConfirm={() => { const c = pendingDelete; setPendingDelete(null); confirmDelete(c) }}
           onCancel={() => setPendingDelete(null)}
+        />
+      )}
+
+      {pendingBatchDelete && (
+        <ConfirmModal
+          title={t('modals.deleteConfirmTitle')}
+          message={t('modals.batchDeleteConfirmMsg', { n: pendingBatchDelete.length })}
+          confirmLabel={t('modals.confirmDelete')}
+          danger
+          onConfirm={() => { const list = pendingBatchDelete; setPendingBatchDelete(null); batchDelete(list) }}
+          onCancel={() => setPendingBatchDelete(null)}
         />
       )}
 
