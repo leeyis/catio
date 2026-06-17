@@ -17,7 +17,7 @@ A fast, native, cross‑platform desktop client that unifies **SSH / SFTP / term
 ![Platforms](https://img.shields.io/badge/Windows_·_macOS_·_Linux-cross--platform-4c8bf5)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
-**English** · [简体中文](#-中文简介)
+**English** · [简体中文](README.zh-CN.md)
 
 </div>
 
@@ -193,20 +193,5 @@ Catio is released under the **MIT License**.
 - [xterm.js](https://xtermjs.org) · [CodeMirror](https://codemirror.net) — the terminal and editor that power the workbench.
 
 ---
-
-## 🇨🇳 中文简介
-
-**Catio** 是一款基于 **Rust + Tauri 2** 的跨平台桌面客户端，把运维日常需要的工具集中到一个精致的窗口里：
-
-- **SSH / SFTP / 终端**：基于 `russh`，支持密码与密钥登录、ProxyJump 跳板、GPU 加速终端、单连接多标签、**多主机命令广播**、Shell 历史补全。
-- **多引擎数据库工作台**：内置 **25+ 引擎**，原生驱动 + 协议兼容 + 内置 JDBC sidecar；CodeMirror SQL 控制台（高亮/补全）、结构浏览、查询历史与片段；对 **openGauss、Kingbase、GaussDB、TiDB、OceanBase、GBase、Doris、StarRocks、GoldenDB** 等**国产/信创数据库**一等支持。
-- **无 Agent 监控**：通过 SSH 实时采集 CPU/内存/网络/磁盘/GPU，远端无需安装任何程序。
-- **隧道与端口转发** + **SOCKS 代理**。
-- **AI 助手** + **MCP** 集成。
-- **自动扫描资产发现**：对 CIDR/网段/主机名扫描，识别服务与版本，按字典/密钥尝试登录，实时输出日志，结果一键入库到**加密保险库**、按分组**批量维护**、或导出 CSV/JSON。
-- **安全优先**：凭据**绝不明文落盘**（PBKDF2 + AES‑GCM 加密保险库），首次连接免重复输入密码。
-- 全界面支持 **中文 / English** 与多套主题。
-
-快速开始：`npm ci` → `npm run tauri dev`（开发） / `npm run tauri build`（打包）。
 
 <div align="center"><sub>Built with ❤️ for people who live in the terminal — and the query console.</sub></div>
