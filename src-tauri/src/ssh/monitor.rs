@@ -5,7 +5,7 @@
 //! russh 0.61.2（ring 后端）已确认的 exec channel 流程：
 //!   `let mut ch = handle.channel_open_session().await?; ch.exec(true, cmd).await?;`
 //!   随后循环 `ch.wait()` 收集 `ChannelMsg::Data { data: Bytes }`，直到
-//!   `ChannelMsg::Eof | Close | ExitStatus`。
+//!   `ChannelMsg::Eof | Close`（`ExitStatus` 可能早于末批 stdout 到达，不作结束信号）。
 
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
@@ -57,7 +57,7 @@ pub struct Monitor {
 // ────────────────────────────────────────────────
 
 /// 打开一个会话 channel，`exec(true, cmd)`，收集所有 stdout `Data` 字节为
-/// String（lossy utf8），在 Eof/Close/ExitStatus 时返回。
+/// String（lossy utf8），在 Eof/Close 时返回（ExitStatus 不终止收集）。
 ///
 /// 契约（exit-code 处理）：**不**因非零退出码而报错。仅收集 stdout 并原样返回
 /// `Ok(stdout)`。这对监控很关键——`nvidia-smi` 在无 GPU 机器上会以非零码退出
@@ -80,9 +80,12 @@ pub async fn run_cmd(handle: &Handle<ClientHandler>, cmd: &str) -> Result<String
             ChannelMsg::Data { ref data } => {
                 out.extend_from_slice(&data[..]);
             }
-            // 退出码不影响返回值——仅收集 stdout。非零退出（如无 GPU 的
-            // nvidia-smi）一样返回已收集的 stdout（通常为空）。
-            ChannelMsg::ExitStatus { .. } | ChannelMsg::Eof | ChannelMsg::Close => {
+            // 关键：**不**在 ExitStatus 处 break。多数 SSH 服务器会在最后一批 stdout
+            // `Data`（乃至 `Eof`）之前就发来 `ExitStatus`，若在此结束循环会截断仍在途的
+            // stdout——这正是 OS 探测偶发拿到空输出、回退到 SSH banner 的根因。
+            // 退出码不影响返回值，仅记录后继续收集；真正的结束以 `Eof`/`Close` 为准
+            // （通道流结束时 `wait()` 返回 None 也会自然退出循环）。
+            ChannelMsg::Eof | ChannelMsg::Close => {
                 break;
             }
             _ => {}

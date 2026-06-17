@@ -590,18 +590,24 @@ export function ScanWizard({ onClose, onImported, existingHostKeys, existingDbKe
        </div>
       </main>
 
-      {/* 入库成功浮层提示（从顶部出现，更醒目） */}
+      {/* 入库成功浮层提示（从顶部出现，更醒目）。
+          用全宽 flex 容器居中，浮层本身才挂 .fade-in——避免 fade-in 动画的 transform
+          覆盖 translateX(-50%) 居中，导致先偏一侧再跳到中间。 */}
       {toast && (
-        <div className="fade-in" style={{
-          position: 'absolute', top: 72, left: '50%', transform: 'translateX(-50%)',
-          display: 'flex', alignItems: 'center', gap: 8, zIndex: 20,
-          padding: '10px 16px', borderRadius: 999,
-          background: 'var(--surface-card)', border: '1px solid var(--signal-green)',
-          color: 'var(--signal-green)', fontSize: 13, fontWeight: 600,
-          boxShadow: 'var(--shadow-dropdown)',
+        <div style={{
+          position: 'absolute', top: 72, left: 0, right: 0, zIndex: 20,
+          display: 'flex', justifyContent: 'center', pointerEvents: 'none',
         }}>
-          <Icon name="circle-check" size={16} />
-          <span>{toast}</span>
+          <div className="fade-in" style={{
+            display: 'flex', alignItems: 'center', gap: 8,
+            padding: '10px 16px', borderRadius: 999,
+            background: 'var(--surface-card)', border: '1px solid var(--signal-green)',
+            color: 'var(--signal-green)', fontSize: 13, fontWeight: 600,
+            boxShadow: 'var(--shadow-dropdown)',
+          }}>
+            <Icon name="circle-check" size={16} />
+            <span>{toast}</span>
+          </div>
         </div>
       )}
     </div>
