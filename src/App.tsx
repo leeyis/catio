@@ -3,6 +3,7 @@ import { useState, useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { TitleBar, Sidebar, IconRail } from './components/shell/Sidebar'
 import { HomeView } from './components/views/HomeView'
+import ScanWizard from './components/scan/ScanWizard'
 import { SettingsView } from './components/views/SettingsView'
 import { WorkbenchTabs } from './components/workbench/WorkbenchTabs'
 import { TerminalPane } from './components/workbench/TerminalPane'
@@ -32,7 +33,7 @@ import { useData } from './state/DataContext'
 import { dbConnect, dbDisconnect, getHistory as getDbHistory, clearDbHistory, deleteDbHistory, deleteDbHistoryForProfile, dbErrMsg } from './services/db'
 import {
   useDbConnections, dbProfileToConnection, listActiveDbConnections,
-  setActiveDbConnection, removeDbConnection, removeActiveDbConnection,
+  setActiveDbConnection, removeDbConnection, removeActiveDbConnection, saveDbConnection,
   type DbProfile,
 } from './state/dbConnections'
 import { sshConnect, sshDisconnect, sshTrustHost, isTauri, onHistory, sshSysinfo, sshDetectOs, importSshConfig } from './services/ssh'
@@ -41,6 +42,7 @@ import { mcpSyncTargets } from './services/mcp'
 import { createVaultCredential, unlockVault, lockVault, isVaultUnlocked, recallSecret, rememberSecret } from './state/vault'
 import { appendHistory, loadHistory, clearHistory, deleteHistory, deleteHistoryForProfile } from './state/history'
 import { loadRecentSessions, recordRecentSession } from './state/recentSessions'
+import { getSessionSecret } from './state/sessionSecrets'
 import type { HistoryItem } from './services/types'
 import { loadProfiles, saveProfile, deleteProfile } from './state/connections'
 import { loadSnippets, saveSnippet, newSnippetId } from './state/snippets'
@@ -101,6 +103,8 @@ export default function App() {
   const [editing, setEditing] = useState<ConnectionProfile | null>(null)
   // Pending delete confirmation (styled ConfirmModal).
   const [pendingDelete, setPendingDelete] = useState<Connection | null>(null)
+  // Pending BATCH delete confirmation (侧栏批量维护)。
+  const [pendingBatchDelete, setPendingBatchDelete] = useState<Connection[] | null>(null)
   const [aiAttachment, setAiAttachment] = useState<Attachment | null>(null)
   const [snippets, setSnippets] = useState<Snippet[]>(() => loadSnippets())
 
@@ -501,6 +505,15 @@ export default function App() {
       void performConnect(args, display.name, args.secret, display.profileId)
       return
     }
+    // 扫描导入的 ✓authed 主机：本次会话内存里存有命中凭证，首连直连免再输。
+    // 注意用 !== undefined 判断：私钥命中存的是空口令标记（''），也应直连（用私钥免口令）。
+    if (display.profileId) {
+      const sess = getSessionSecret(display.profileId)
+      if (sess !== undefined) {
+        void performConnect(args, display.name, sess, display.profileId)
+        return
+      }
+    }
     // Auth-gated cache: reuse a remembered secret (no prompt). Skipped when a jump
     // host still needs its own secret (we only cache the target secret).
     if (display.profileId && (!args.jump || args.jump.secret)) {
@@ -597,6 +610,12 @@ export default function App() {
       } else {
         const dbp = dbProfiles.find(p => p.id === conn.id)
         if (dbp) {
+          // 扫描导入的 ✓authed 库：本次会话内存里存有命中密码,首连直连免再输。
+          const sess = getSessionSecret(dbp.id)
+          if (sess) {
+            try { await connectDbProfile(dbp, sess); return }
+            catch { /* 会话密钥失效则继续走缓存/提示 */ }
+          }
           const cached = await cachedSecret(dbp.id)
           if (cached) {
             try { await connectDbProfile(dbp, cached); return }
@@ -895,6 +914,8 @@ export default function App() {
     setActiveDbConnection(result, profile)
     // Auth succeeded → cache the secret (when auth + vault allow).
     rememberConnSecret(profile.id, secret)
+    // 扫描导入的「需要认证」草稿：首次成功登录后清除标记（不再显示徽标）。
+    if (profile.needsAuth) saveDbConnection({ ...profile, needsAuth: false })
     bumpDbActive()
     syncMcpTargets()
     void openConn(dbProfileToConnection(profile, true))
@@ -1041,6 +1062,38 @@ export default function App() {
     reloadProfiles()
     if (detailConn?.id === conn.id) { setDetailConn(null); setPanelOpen(false) }
   }
+
+  // 批量维护：把选中连接移动到目标分组（''=未分组）。host/db 分别写回各自存储。
+  function batchMoveToGroup(conns: Connection[], groupId: string) {
+    for (const c of conns) {
+      if (c.kind === 'host') {
+        const p = profiles.find(x => x.id === c.id)
+        if (p) { try { saveProfile({ ...p, group: groupId || undefined }) } catch { /* localStorage 不可用 */ } }
+      } else {
+        const p = dbProfiles.find(x => x.id === c.id)
+        if (p) saveDbConnection({ ...p, group: groupId || undefined }) // 内部 notify()
+      }
+    }
+    reloadProfiles()
+  }
+
+  // 批量维护：删除选中连接（host 走 deleteProfile + 拆会话 + 删历史；db 复用 deleteDbProfile）。
+  function batchDelete(conns: Connection[]) {
+    for (const c of conns) {
+      if (c.kind === 'host') {
+        if (sessionMap[c.id]) teardownSession(c.id)
+        try { deleteProfile(c.id) } catch { /* localStorage 不可用 */ }
+        deleteHistoryForProfile(c.id)
+      } else {
+        const p = dbProfiles.find(x => x.id === c.id)
+        if (p) deleteDbProfile(p)
+      }
+    }
+    setHistory(loadHistory())
+    reloadProfiles()
+    if (detailConn && conns.some(c => c.id === detailConn.id)) { setDetailConn(null); setPanelOpen(false) }
+  }
+
   function selectPanel(id: string) {
     if (activePanel === id && panelOpen) { setPanelOpen(false) }
     else { setActivePanel(id); setPanelOpen(true) }
@@ -1269,14 +1322,20 @@ export default function App() {
           <Sidebar activeId={detailConn ? detailConn.id : (cur ? cur.connId : undefined)} onOpen={openDetail} onDetail={openDetail}
             collapsed={sidebarCollapsed} onToggleCollapse={() => setSidebarCollapsed(c => !c)}
             conns={vaultConns} currentUser={currentName} authEnabled={authEnabled} onLock={lockApp} onEnableAuth={() => goSettings('security')}
-            filter={sidebarFilter} onFilterChange={setSidebarFilter} />
+            filter={sidebarFilter} onFilterChange={setSidebarFilter}
+            onBatchMove={batchMoveToGroup} onBatchDelete={conns => setPendingBatchDelete(conns)} />
 
           {/* main */}
           <div className="card-surface grow col" style={{ overflow: 'hidden', position: 'relative' }}>
             {/* view body */}
             <div className="grow col" style={{ minHeight: 0 }}>
-              {view === 'home' && <HomeView onOpen={openConn} onNew={() => setShowNew(true)} owned={ownsVault} userName={authEnabled ? currentName : ''} authEnabled={authEnabled} conns={vaultConns}
+              {view === 'home' && <HomeView onOpen={openConn} onNew={() => setShowNew(true)} onAutoScan={() => setView('scan')} owned={ownsVault} userName={authEnabled ? currentName : ''} authEnabled={authEnabled} conns={vaultConns}
                 recent={recentSessions.map(r => { const conn = vaultConns.find(c => c.id === r.connId); return conn ? { conn, ts: r.ts } : null }).filter((x): x is { conn: Connection; ts: number } => !!x)} />}
+
+              {view === 'scan' && <ScanWizard onClose={() => setView('home')} onImported={() => { reloadProfiles() /* db 自动刷新 */ }}
+                existingHostKeys={ownsVault ? profiles.map(p => `${p.host}:${p.port}`) : []}
+                existingDbKeys={ownsVault ? dbProfiles.map(p => `${p.host}:${p.port}#${p.engineId ?? p.dbType}`) : []}
+                onRememberSecret={rememberConnSecret} />}
 
               {/* tab bar — only in workbench when there are tabs */}
               {view === 'workbench' && tabs.length > 0 && (
@@ -1426,6 +1485,17 @@ export default function App() {
           danger
           onConfirm={() => { const c = pendingDelete; setPendingDelete(null); confirmDelete(c) }}
           onCancel={() => setPendingDelete(null)}
+        />
+      )}
+
+      {pendingBatchDelete && (
+        <ConfirmModal
+          title={t('modals.deleteConfirmTitle')}
+          message={t('modals.batchDeleteConfirmMsg', { n: pendingBatchDelete.length })}
+          confirmLabel={t('modals.confirmDelete')}
+          danger
+          onConfirm={() => { const list = pendingBatchDelete; setPendingBatchDelete(null); batchDelete(list) }}
+          onCancel={() => setPendingBatchDelete(null)}
         />
       )}
 

@@ -23,6 +23,12 @@
     "newGroup": "New group",
     "newGroupPlaceholder": "Group name…",
     "deleteGroup": "Delete group",
+    "batchMode": "Batch",
+    "batchSelected": "{{n}} selected",
+    "batchMoveTo": "Move to group…",
+    "batchMove": "Move",
+    "batchDelete": "Delete",
+    "batchExit": "Exit",
     "noMatchingConns": "No matching connections",
     "vaultEmptyTitle": "No connections yet",
     "vaultEmptyHint": "Add a host or database from the center — it'll show up here.",
@@ -70,7 +76,9 @@
     "filterHost": "Hosts",
     "filterDb": "Databases",
     "newBtn": "New",
-    "online": "Online"
+    "online": "Online",
+    "needsAuth": "Needs auth",
+    "needsAuthHint": "Auto-scan identified this connection but did not verify a credential — first connect will prompt for the password"
   },
   "dbviews": {
     "copySel": "Copy",
@@ -497,6 +505,7 @@
     "save": "Save",
     "deleteConfirmTitle": "Delete connection",
     "deleteConfirmMsg": "Are you sure you want to delete connection \"{{name}}\"? This action cannot be undone.",
+    "batchDeleteConfirmMsg": "Delete the {{n}} selected connections? This action cannot be undone.",
     "confirmDelete": "Delete",
     "authMethod": "Auth method",
     "authPassword": "Password",
@@ -655,5 +664,105 @@
     "shellAssistant": "Terminal assistant",
     "cmdBarSqlPlaceholder": "Generate / optimize / explain SQL · {{target}}…  ⌘J",
     "cmdBarShellPlaceholder": "Generate shell command · {{target}}…  ⌘J"
+  },
+  "scan": {
+    "title": "Asset Discovery",
+    "openButton": "Scan & Discover",
+    "back": "Back",
+    "next": "Next",
+    "cancel": "Cancel Scan",
+    "start": "Start Scan",
+    "startDisabledHint": "Enter a scan range and at least one credential or key first",
+    "close": "Close",
+    "riskNotice": "Bulk login attempts may trigger account lockouts — use only on assets you own.",
+    "step": {
+      "mode": "Mode",
+      "range": "Range & Credentials",
+      "scanning": "Scanning",
+      "results": "Results"
+    },
+    "mode": {
+      "host": "Host Scan",
+      "hostDesc": "Scan a network range for open SSH ports and attempt login with credentials or private keys.",
+      "db": "Database Scan",
+      "dbDesc": "Scan a network range for database engine ports and confirm via test connection.",
+      "pickEngines": "Select database engines"
+    },
+    "range": {
+      "label": "Scan Range",
+      "placeholder": "192.168.1.0/24, 10.0.0.1-10.0.0.50, 172.16.0.5",
+      "hint": "Supports CIDR, IP ranges, or single IPs — separate multiple ranges with commas or newlines."
+    },
+    "ports": {
+      "label": "Ports",
+      "placeholder": "22, 2222",
+      "defaultLabel": "Default ports"
+    },
+    "creds": {
+      "label": "Credential Dictionary",
+      "placeholder": "root yourpassword\nubuntu yourpassword",
+      "hint": "One \"username password\" pair per line, space-separated (split on first space; password may contain spaces).",
+      "upload": "Import dictionary file"
+    },
+    "keys": {
+      "label": "Private Keys",
+      "upload": "Add key file",
+      "users": "Key users",
+      "usersPlaceholder": "root, admin, ubuntu",
+      "empty": "No private keys added"
+    },
+    "concurrency": {
+      "label": "Concurrency"
+    },
+    "scanning": {
+      "progress": "Scanned {{scanned}}/{{total}}",
+      "found": "{{found}} found",
+      "elapsed": "Elapsed",
+      "failed": "{{failed}} failed",
+      "waiting": "Waiting for scan results…",
+      "viewResults": "View results",
+      "scanned": "Scanned",
+      "foundLabel": "Found",
+      "failedLabel": "Failed/skipped",
+      "console": "Live log",
+      "live": "live"
+    },
+    "results": {
+      "summary": "{{total}} total · {{authed}} loginable · {{unauthed}} needs auth · {{existing}} existing",
+      "filterStatus": "Filter by status",
+      "filterEngine": "Filter by engine",
+      "statusAll": "All statuses",
+      "statusAuthed": "Loginable",
+      "statusUnauthed": "Needs auth",
+      "statusExisting": "Existing",
+      "engineAll": "All engines",
+      "group": "Import group",
+      "import": "Import {{n}}",
+      "export": "Export",
+      "exportCsv": "Export CSV",
+      "exportJson": "Export JSON",
+      "empty": "No matching results"
+    },
+    "col": {
+      "address": "Address",
+      "engine": "Engine",
+      "os": "OS",
+      "version": "Version",
+      "cred": "Hit Credential",
+      "status": "Status"
+    },
+    "tag": {
+      "authed": "Loginable",
+      "unauthed": "Needs auth",
+      "existing": "Existing",
+      "open": "Port open",
+      "unconfirmed": "Port open · unconfirmed",
+      "authedHint": "Credential matched and remembered — imported nodes connect on first use without re-entering the password",
+      "unauthedHint": "Service identified but no dictionary credential matched — import as a draft; first connect will prompt for the password",
+      "openHint": "Only an open port was detected (service and credential unconfirmed) — first connect will prompt for the password"
+    },
+    "toast": {
+      "imported": "Imported {{n}}"
+    }
   }
 }

@@ -38,6 +38,8 @@ export interface Connection {
   engineId?: string
   tunnel?: string
   stats?: ConnStats
+  /** 自动扫描导入的草稿连接（识别到但未验证凭证）——侧栏标「需要认证」。 */
+  needsAuth?: boolean
 }
 
 // ---- Engine / OS metadata ----

@@ -31,6 +31,9 @@ export type DbProfile = Omit<DbConnectArgs, 'secret'> & {
    *  resolve to the right brand. Falls back to `dbType` when absent (legacy
    *  profiles saved before the multi-engine catalog). */
   engineId?: string
+  /** 自动扫描导入的「草稿」连接：识别到该库但凭证字典未命中，未验证可登录。
+   *  侧栏标「需要认证」，首连需手动补密码；成功连接后清除。 */
+  needsAuth?: boolean
 }
 
 export function listDbConnections(): DbProfile[] {
@@ -103,6 +106,7 @@ export function dbProfileToConnection(p: DbProfile, active = false): Connection 
     // brand logo (CockroachDB, MariaDB, …) without affecting dialect.
     engineId: p.engineId,
     status: active ? 'up' : 'idle',
+    ...(p.needsAuth ? { needsAuth: true } : {}),
   }
 }
 

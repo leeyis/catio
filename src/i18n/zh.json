@@ -23,6 +23,12 @@
     "newGroup": "新建分组",
     "newGroupPlaceholder": "分组名称…",
     "deleteGroup": "删除分组",
+    "batchMode": "批量维护",
+    "batchSelected": "已选 {{n}} 项",
+    "batchMoveTo": "移动到分组…",
+    "batchMove": "移动",
+    "batchDelete": "删除",
+    "batchExit": "退出",
     "noMatchingConns": "无匹配连接",
     "vaultEmptyTitle": "还没有连接",
     "vaultEmptyHint": "在中间页面新建主机或数据库，连接会显示在这里。",
@@ -70,7 +76,9 @@
     "filterHost": "主机",
     "filterDb": "数据库",
     "newBtn": "新建",
-    "online": "在线"
+    "online": "在线",
+    "needsAuth": "需要认证",
+    "needsAuthHint": "自动扫描识别到此连接但未验证凭证，首次连接需手动输入密码"
   },
   "dbviews": {
     "copySel": "复制",
@@ -497,6 +505,7 @@
     "save": "保存",
     "deleteConfirmTitle": "删除连接",
     "deleteConfirmMsg": "确定要删除连接 \"{{name}}\" 吗？此操作不可撤销。",
+    "batchDeleteConfirmMsg": "确定要删除选中的 {{n}} 个连接吗？此操作不可撤销。",
     "confirmDelete": "删除",
     "authMethod": "认证方式",
     "authPassword": "密码",
@@ -655,5 +664,105 @@
     "shellAssistant": "终端助手",
     "cmdBarSqlPlaceholder": "生成 / 优化 / 解释 SQL · {{target}}…  ⌘J",
     "cmdBarShellPlaceholder": "生成 shell 命令 · {{target}}…  ⌘J"
+  },
+  "scan": {
+    "title": "资产发现",
+    "openButton": "扫描发现",
+    "back": "上一步",
+    "next": "下一步",
+    "cancel": "取消扫描",
+    "start": "开始扫描",
+    "startDisabledHint": "请先填写扫描范围，并至少提供一组凭证或密钥",
+    "close": "关闭",
+    "riskNotice": "批量试登录可能触发账号锁定，请仅对自有资产使用。",
+    "step": {
+      "mode": "选择模式",
+      "range": "范围与凭据",
+      "scanning": "扫描中",
+      "results": "发现结果"
+    },
+    "mode": {
+      "host": "主机扫描",
+      "hostDesc": "扫描网段内开放的 SSH 端口，并尝试用凭据或私钥试登录。",
+      "db": "数据库扫描",
+      "dbDesc": "扫描网段内的数据库引擎端口，并尝试试连确认。",
+      "pickEngines": "选择数据库引擎"
+    },
+    "range": {
+      "label": "扫描范围",
+      "placeholder": "192.168.1.0/24, 10.0.0.1-10.0.0.50, 172.16.0.5",
+      "hint": "支持 CIDR、IP 区间或单个 IP，多个范围以逗号或换行分隔。"
+    },
+    "ports": {
+      "label": "端口",
+      "placeholder": "22, 2222",
+      "defaultLabel": "默认端口"
+    },
+    "creds": {
+      "label": "凭据字典",
+      "placeholder": "root 你的密码\nubuntu 你的密码",
+      "hint": "每行一组「用户名 密码」，用空格分隔（首个空格切分，密码可含空格），用于批量试登录。",
+      "upload": "导入字典文件"
+    },
+    "keys": {
+      "label": "私钥",
+      "upload": "添加私钥文件",
+      "users": "私钥用户",
+      "usersPlaceholder": "root, admin, ubuntu",
+      "empty": "未添加私钥"
+    },
+    "concurrency": {
+      "label": "并发数"
+    },
+    "scanning": {
+      "progress": "已扫描 {{scanned}}/{{total}}",
+      "found": "已发现 {{found}} 项",
+      "elapsed": "用时",
+      "failed": "失败 {{failed}}",
+      "waiting": "等待扫描结果…",
+      "viewResults": "查看结果",
+      "scanned": "已扫描",
+      "foundLabel": "已发现",
+      "failedLabel": "失败/跳过",
+      "console": "实时日志",
+      "live": "实时"
+    },
+    "results": {
+      "summary": "共 {{total}} 项 · 可登录 {{authed}} · 需要认证 {{unauthed}} · 已存在 {{existing}}",
+      "filterStatus": "状态筛选",
+      "filterEngine": "引擎筛选",
+      "statusAll": "全部状态",
+      "statusAuthed": "可登录",
+      "statusUnauthed": "需要认证",
+      "statusExisting": "已存在",
+      "engineAll": "全部引擎",
+      "group": "导入分组",
+      "import": "导入 {{n}} 项",
+      "export": "导出",
+      "exportCsv": "导出 CSV",
+      "exportJson": "导出 JSON",
+      "empty": "暂无匹配结果"
+    },
+    "col": {
+      "address": "地址",
+      "engine": "引擎",
+      "os": "系统",
+      "version": "版本",
+      "cred": "命中凭据",
+      "status": "状态"
+    },
+    "tag": {
+      "authed": "可登录",
+      "unauthed": "需要认证",
+      "existing": "已存在",
+      "open": "端口开放",
+      "unconfirmed": "端口开放 · 未确认",
+      "authedHint": "已命中凭证，密码已记忆，导入后首次连接直接登录，无需再次输入",
+      "unauthedHint": "已识别到服务但字典未命中凭证，可导入为草稿，首次连接时需手动输入密码",
+      "openHint": "仅检测到端口开放、未确认服务与凭证，导入后首次连接需手动输入密码"
+    },
+    "toast": {
+      "imported": "已导入 {{n}} 项"
+    }
   }
 }
