@@ -181,7 +181,7 @@ cd src-tauri && cargo test --lib
 
 ## 📝 许可证
 
-Catio 以 **MIT License** 开源发布。
+Catio 以 [**MIT License**](LICENSE) 开源发布。
 
 ---
 

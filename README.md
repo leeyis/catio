@@ -181,7 +181,7 @@ See [`AGENTS.md`](AGENTS.md) and [`CLAUDE.md`](CLAUDE.md) for the full working a
 
 ## 📝 License
 
-Catio is released under the **MIT License**.
+Catio is released under the [**MIT License**](LICENSE).
 
 ---
 
