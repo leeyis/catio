@@ -54,6 +54,10 @@ interface HoverState {
   y: number
 }
 
+// Compact size for the hover/select row actions. The default .icon-btn is 30px —
+// taller than a list row — so revealing it on hover used to grow the row height.
+const ACTION_BTN = { width: 18, height: 18 }
+
 export interface SftpPanelProps {
   onClose: () => void
   conn?: Connection
@@ -379,16 +383,21 @@ export function SftpPanel({ onClose, conn, sessionId }: SftpPanelProps) {
                     <Icon name={it.type === 'dir' ? 'folder' : it.type === 'link' ? 'file-code' : 'file'}
                       size={15} style={{ color: it.type === 'dir' ? 'var(--signal-amber)' : 'var(--text-tertiary)', flex: 'none' }} />
                     <span className="ell mono" style={{ fontSize: 12.5, color: 'var(--text-secondary)', flex: 1 }}>{it.name}</span>
-                    {/* row actions — visible on hover/select so they are discoverable (no right-click needed) */}
-                    {(hover?.item.path === it.path || selected === it.path) && (
-                      <div className="row gap4" style={{ flex: 'none' }} onMouseDown={e => e.stopPropagation()}>
-                        {it.type === 'file' && (
-                          <IconBtn name="download" size={13} variant="bare" title={t('panels.sftpDownload')} onClick={e => { e.stopPropagation(); downloadItem(it) }} />
-                        )}
-                        <IconBtn name="pencil" size={13} variant="bare" title={t('panels.sftpRename')} onClick={e => { e.stopPropagation(); startRename(it) }} />
-                        <IconBtn name="trash-2" size={13} variant="bare" title={t('panels.sftpDelete')} onClick={e => { e.stopPropagation(); setHover(null); setDeleteConfirm(it) }} />
-                      </div>
-                    )}
+                    {/* row actions — discoverable on hover/select. Always mounted and
+                        toggled via opacity (not conditional render) so revealing them
+                        never changes the row height. */}
+                    <div className="row gap4" onMouseDown={e => e.stopPropagation()}
+                      style={{
+                        flex: 'none', transition: 'opacity .12s',
+                        opacity: hover?.item.path === it.path || selected === it.path ? 1 : 0,
+                        pointerEvents: hover?.item.path === it.path || selected === it.path ? 'auto' : 'none',
+                      }}>
+                      {it.type === 'file' && (
+                        <IconBtn name="download" size={13} variant="bare" style={ACTION_BTN} title={t('panels.sftpDownload')} onClick={e => { e.stopPropagation(); downloadItem(it) }} />
+                      )}
+                      <IconBtn name="pencil" size={13} variant="bare" style={ACTION_BTN} title={t('panels.sftpRename')} onClick={e => { e.stopPropagation(); startRename(it) }} />
+                      <IconBtn name="trash-2" size={13} variant="bare" style={ACTION_BTN} title={t('panels.sftpDelete')} onClick={e => { e.stopPropagation(); setHover(null); setDeleteConfirm(it) }} />
+                    </div>
                   </div>
                 )
               ))
