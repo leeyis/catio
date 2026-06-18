@@ -119,6 +119,8 @@ pub async fn term_open(
         // we collapse identical consecutive commands within a short window. A human
         // cannot retype the exact same command within 800ms, so this is safe.
         let mut last_emit: Option<(String, std::time::Instant)> = None;
+        // 定时器解除 mute 后补发回车,其回显的前导换行需在首批输出里剥掉(见 emit_scanned)。
+        let mut strip_lead_nl = false;
         let started = std::time::Instant::now();
         // mute 兜底定时器。此前解除 mute 的 fallback 判定只在「收到数据」时(emit_scanned
         // 内)进行;不带 shell-integration 的 shell(如 ESXi 的 ash 永不发 OSC marker)发完
@@ -136,7 +138,9 @@ pub async fn term_open(
                     fallback_fired = true;
                     if muted {
                         muted = false;
-                        // 非集成 shell:补发回车,让其显示一个干净提示符。
+                        // 非集成 shell:补发回车,让其显示一个干净提示符;并标记下一批输出
+                        // 剥掉该回车回显出来的前导换行,避免提示符前多一个空行。
+                        strip_lead_nl = true;
                         let _ = channel.data(&b"\r"[..]).await;
                     }
                 }
@@ -145,14 +149,14 @@ pub async fn term_open(
                         emit_scanned(
                             &app, &evt, &history_evt, &host, &mut scanner, data,
                             &mut cur_cmd, &mut cur_cwd, &mut cur_start,
-                            &mut muted, &started, &mut last_emit,
+                            &mut muted, &started, &mut last_emit, &mut strip_lead_nl,
                         );
                     }
                     Some(ChannelMsg::ExtendedData { ref data, .. }) => {
                         emit_scanned(
                             &app, &evt, &history_evt, &host, &mut scanner, data,
                             &mut cur_cmd, &mut cur_cwd, &mut cur_start,
-                            &mut muted, &started, &mut last_emit,
+                            &mut muted, &started, &mut last_emit, &mut strip_lead_nl,
                         );
                     }
                     Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
@@ -191,8 +195,9 @@ fn emit_scanned(
     muted: &mut bool,
     started: &std::time::Instant,
     last_emit: &mut Option<(String, std::time::Instant)>,
+    strip_lead_nl: &mut bool,
 ) {
-    let (visible, events) = scanner.feed(data);
+    let (mut visible, events) = scanner.feed(data);
     // Decide whether to show this batch's visible bytes.
     if *muted {
         // The first OSC marker means shell integration is live (first prompt
@@ -209,6 +214,20 @@ fn emit_scanned(
     // prompt bytes BEFORE capturing the input-start cursor position.
     let has_input_start = events.iter().any(|e| matches!(e, osc::OscEvent::InputStart));
     let mut input_start_emitted = false;
+    // 剥掉「定时器解除 mute 时补发的回车」回显出来的前导换行(ash 对空回车回 `\r\n`+提示符),
+    // 否则提示符前会多出一个空行。仅在补回车后的首批可见输出生效,见到真实内容即停止。
+    if *strip_lead_nl && !visible.is_empty() {
+        let skip = visible
+            .iter()
+            .take_while(|&&b| b == b'\r' || b == b'\n')
+            .count();
+        if skip > 0 {
+            visible.drain(..skip);
+        }
+        if !visible.is_empty() {
+            *strip_lead_nl = false;
+        }
+    }
     if !*muted && !visible.is_empty() {
         let mut frame = serde_json::json!({ "bytesBase64": B64.encode(&visible) });
         if has_input_start {
