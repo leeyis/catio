@@ -10,10 +10,11 @@
 //     the client's request future resolves successfully.
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use russh::server::{Auth, Config, Handler, Msg, Server, Session};
-use russh::{Channel, ChannelId, Pty};
+use russh::{Channel, ChannelId, MethodKind, MethodSet, Pty};
 use russh::keys::{Algorithm, PrivateKey};
 use russh::keys::ssh_key::PublicKey;
 
@@ -76,9 +77,12 @@ pub struct TestServer {
     /// rely on this). `true` → FORWARD: dial the requested host:port over real
     /// TCP and pipe bytes bidirectionally (ProxyJump bastion behavior).
     forward_direct_tcpip: bool,
-    /// `true` → 模拟 ESXi(dropbear)：拒绝 `password` 方法，仅接受
-    /// `keyboard-interactive`。用于验证密码认证的 keyboard-interactive 回退。
+    /// `true` → 模拟 ESXi(dropbear)：只广播并接受 `keyboard-interactive`、拒绝
+    /// `password`。用于验证密码认证的 keyboard-interactive 回退与 none 探测优化。
     keyboard_interactive_only: bool,
+    /// 被设为 true 当且仅当服务端收到过一次 `password` 认证尝试。测试据此断言 none
+    /// 探测在"仅 keyboard-interactive"服务端上**跳过**了 password(不再触发失败延迟)。
+    password_attempted: Arc<AtomicBool>,
 }
 
 pub struct TestHandler {
@@ -92,6 +96,8 @@ pub struct TestHandler {
     forward_direct_tcpip: bool,
     /// See [`TestServer::keyboard_interactive_only`].
     keyboard_interactive_only: bool,
+    /// See [`TestServer::password_attempted`].
+    password_attempted: Arc<AtomicBool>,
 }
 
 impl Server for TestServer {
@@ -104,6 +110,7 @@ impl Server for TestServer {
             sftp_root: self.sftp_root.clone(),
             forward_direct_tcpip: self.forward_direct_tcpip,
             keyboard_interactive_only: self.keyboard_interactive_only,
+            password_attempted: self.password_attempted.clone(),
         }
     }
 }
@@ -112,6 +119,8 @@ impl Handler for TestHandler {
     type Error = russh::Error;
 
     async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
+        // 记录 password 方法被尝试过——none 探测优化应使 ESXi 类服务端永不走到这里。
+        self.password_attempted.store(true, Ordering::SeqCst);
         // 模拟 ESXi(dropbear)：拒绝 `password` 方法，逼客户端回退 keyboard-interactive。
         if self.keyboard_interactive_only {
             return Ok(Auth::reject());
@@ -388,14 +397,22 @@ impl Handler for TestHandler {
 /// unused ones are (benignly) flagged as dead in the others.
 #[allow(dead_code)]
 pub async fn start() -> std::net::SocketAddr {
-    start_inner(None, false, false).await
+    start_inner(None, false, false).await.0
 }
 
-/// Start a test server that rejects the `password` auth method and only accepts
-/// `keyboard-interactive` — mimics ESXi's dropbear. Use to verify the client's
+/// Start a test server that only advertises/accepts `keyboard-interactive` and
+/// rejects `password` — mimics ESXi's dropbear. Use to verify the client's
 /// password→keyboard-interactive fallback.
 #[allow(dead_code)]
 pub async fn start_keyboard_interactive() -> std::net::SocketAddr {
+    start_inner(None, false, true).await.0
+}
+
+/// Like [`start_keyboard_interactive`], but also returns a flag set to true iff
+/// the server ever received a `password` auth attempt. Lets a test assert the
+/// none-probe optimization SKIPS password on ESXi-like servers.
+#[allow(dead_code)]
+pub async fn start_keyboard_interactive_observed() -> (std::net::SocketAddr, Arc<AtomicBool>) {
     start_inner(None, false, true).await
 }
 
@@ -403,7 +420,7 @@ pub async fn start_keyboard_interactive() -> std::net::SocketAddr {
 /// The caller pre-populates `root`; the list test passes that path to `read_dir`.
 #[allow(dead_code)]
 pub async fn start_with_root(root: PathBuf) -> std::net::SocketAddr {
-    start_inner(Some(root), false, false).await
+    start_inner(Some(root), false, false).await.0
 }
 
 /// Start a test server that acts as a ProxyJump bastion: its `direct-tcpip`
@@ -412,31 +429,44 @@ pub async fn start_with_root(root: PathBuf) -> std::net::SocketAddr {
 /// with a normal [`start`] server as the final target.
 #[allow(dead_code)]
 pub async fn start_forwarding() -> std::net::SocketAddr {
-    start_inner(None, true, false).await
+    start_inner(None, true, false).await.0
 }
 
 async fn start_inner(
     sftp_root: Option<PathBuf>,
     forward_direct_tcpip: bool,
     keyboard_interactive_only: bool,
-) -> std::net::SocketAddr {
+) -> (std::net::SocketAddr, Arc<AtomicBool>) {
     let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)
         .expect("generate ed25519 host key");
+    // 仅 keyboard-interactive 模式只向客户端广播该方法(复现 ESXi);否则广播全部。
+    let methods = if keyboard_interactive_only {
+        MethodSet::from(&[MethodKind::KeyboardInteractive][..])
+    } else {
+        MethodSet::all()
+    };
     let config = Arc::new(Config {
         keys: vec![key],
+        methods,
+        // 测试夹具:认证拒绝零延迟,避免 none 探测/失败路径拖慢测试(非安全场景)。
+        auth_rejection_time: std::time::Duration::from_millis(0),
+        auth_rejection_time_initial: Some(std::time::Duration::from_millis(0)),
         ..Default::default()
     });
+    let password_attempted = Arc::new(AtomicBool::new(false));
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
         .expect("bind 127.0.0.1:0");
     let addr = listener.local_addr().expect("local_addr");
 
+    let flag_ret = password_attempted.clone();
     tokio::spawn(async move {
         let mut server = TestServer {
             sftp_root,
             forward_direct_tcpip,
             keyboard_interactive_only,
+            password_attempted,
         };
         loop {
             let (socket, peer) = match listener.accept().await {
@@ -456,7 +486,7 @@ async fn start_inner(
         }
     });
 
-    addr
+    (addr, flag_ret)
 }
 
 // ─── 最小 SFTP 服务端后端（仅支持列目录所需的方法）────────────────────────────

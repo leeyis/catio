@@ -169,6 +169,28 @@ async fn keyboard_interactive_rejects_wrong_password() {
     assert!(!res.ok, "错误密码不应通过 keyboard-interactive");
 }
 
+// 性能根因回归：服务器只广播 keyboard-interactive(复现 ESXi)时，客户端应靠 none
+// 探测直接走 keyboard-interactive、**绝不尝试 password**——盲试 password 会触发服务端
+// 的失败惩罚延迟(实测十余秒)，正是它把连接/测试连接拖慢的。
+#[tokio::test]
+async fn keyboard_interactive_skips_password_probe() {
+    let (addr, password_attempted) = test_server::start_keyboard_interactive_observed().await;
+    let args = ConnectArgs {
+        host: addr.ip().to_string(),
+        port: addr.port(),
+        user: test_server::TEST_USER.into(),
+        auth: AuthMethod::Password,
+        secret: Some(test_server::TEST_PW.into()),
+        jump: None,
+    };
+    let res = test_connection(args).await;
+    assert!(res.ok, "应经 keyboard-interactive 连接成功: {:?}", res.error);
+    assert!(
+        !password_attempted.load(std::sync::atomic::Ordering::SeqCst),
+        "none 探测应跳过 password，但服务端收到了 password 尝试（会触发失败延迟）"
+    );
+}
+
 #[tokio::test]
 async fn connects_with_key_file() {
     let addr = test_server::start().await;

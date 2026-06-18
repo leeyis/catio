@@ -26,6 +26,33 @@ use crate::ssh::SshError;
 
 static SESS_IDS: IdGen = IdGen::new("sess");
 
+/// 客户端 KEX 算法偏好顺序。相对 russh 默认(`SAFE_KEX_ORDER`)做两处优化:
+///   1. **补上 `ecdh-sha2-nistp*`**——russh 虽编译了该实现却未在默认列表提供;
+///   2. 把**固定小群 DH**(`group14`=2048bit 最快、`group16`=4096bit)排到
+///      `group-exchange` 与大群(`group15/17/18`,最大 8192bit)**之前**。
+/// 根因:部分安全加固/FIPS 的服务端(如 ESXi 的 OpenSSH)禁用 curve25519,按 russh
+/// 默认顺序协商会落到 group-exchange / 8192bit 大群,而 russh 纯 Rust 模幂极慢(实测
+/// 单次 KEX 达 13s)。补 ecdh + 优先小群,可让这类服务端走快速路径,且不影响现代服务端
+/// (仍优先 mlkem/curve25519)。扩展项(EXT-INFO / strict-kex)与默认保持一致。
+const KEX_ORDER: &[russh::kex::Name] = &[
+    russh::kex::MLKEM768X25519_SHA256,
+    russh::kex::CURVE25519,
+    russh::kex::CURVE25519_PRE_RFC_8731,
+    russh::kex::ECDH_SHA2_NISTP256,
+    russh::kex::ECDH_SHA2_NISTP384,
+    russh::kex::ECDH_SHA2_NISTP521,
+    russh::kex::DH_G14_SHA256,
+    russh::kex::DH_G16_SHA512,
+    russh::kex::DH_GEX_SHA256,
+    russh::kex::DH_G15_SHA512,
+    russh::kex::DH_G17_SHA512,
+    russh::kex::DH_G18_SHA512,
+    russh::kex::EXTENSION_SUPPORT_AS_CLIENT,
+    russh::kex::EXTENSION_SUPPORT_AS_SERVER,
+    russh::kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT,
+    russh::kex::EXTENSION_OPENSSH_STRICT_KEX_AS_SERVER,
+];
+
 /// 认证方式。serde 判别联合：{ "method": "password" } / { "method": "keyFile", "path": "..." }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "method", rename_all = "camelCase")]
@@ -192,6 +219,47 @@ async fn authenticate_keyboard_interactive(
     Ok(false)
 }
 
+/// 密码认证:先用 `none` 方法探测服务端**声明接受**的认证方法,再只尝试其中可用于
+/// 密码登录的方法。这正是 OpenSSH 的做法,目的有二:
+///   1. 避免对不接受 `password` 的服务端(典型如 ESXi 的 dropbear)做无谓的 `password`
+///      失败尝试——后者会触发服务端的失败惩罚延迟(实测十余秒),拖慢连接与测试连接;
+///   2. 仍能覆盖"仅 `keyboard-interactive`"的服务端(ESXi)。
+/// 顺序上优先 `password`(与历史行为一致、不改变常规 Linux 的认证路径),其未被声明或
+/// 失败时回退 `keyboard-interactive`。
+async fn authenticate_with_password(
+    handle: &mut Handle<ClientHandler>,
+    user: &str,
+    password: &str,
+) -> Result<bool, SshError> {
+    // none 探测:服务端无需认证则直接成功;否则拿到它建议的后续方法集。
+    let methods = match handle
+        .authenticate_none(user.to_string())
+        .await
+        .map_err(|e| SshError::Io(e.to_string()))?
+    {
+        client::AuthResult::Success => return Ok(true),
+        client::AuthResult::Failure { remaining_methods, .. } => remaining_methods,
+    };
+    // MethodSet derefs 到 &[MethodKind]。空集(个别实现不返回列表)时两种都按序尝试,
+    // 保证兼容性。
+    let unknown = methods.is_empty();
+    if (unknown || methods.contains(&russh::MethodKind::Password))
+        && handle
+            .authenticate_password(user, password)
+            .await
+            .map_err(|e| SshError::Io(e.to_string()))?
+            .success()
+    {
+        return Ok(true);
+    }
+    if (unknown || methods.contains(&russh::MethodKind::KeyboardInteractive))
+        && authenticate_keyboard_interactive(handle, user, password).await?
+    {
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 /// 对一个已建立的 handle 执行认证（密码或私钥），返回是否成功（`.success()`）。
 /// 跳板与目标共用此逻辑，避免重复。`secret` 仅传入、不记录。
 async fn authenticate(
@@ -203,20 +271,7 @@ async fn authenticate(
     let ok = match auth {
         AuthMethod::Password => {
             let pw = secret.unwrap_or("");
-            // 先走标准 `password` 方法(CentOS/Ubuntu 等绝大多数服务端接受)。
-            let ok = handle
-                .authenticate_password(user, pw)
-                .await
-                .map_err(|e| SshError::Io(e.to_string()))?
-                .success();
-            // `password` 被拒时回退到 `keyboard-interactive`:部分服务端(典型如
-            // ESXi 的 dropbear)只接受后者、不接受 `password` 方法。这与 OpenSSH
-            // 命令行的默认回退行为一致。
-            if ok {
-                true
-            } else {
-                authenticate_keyboard_interactive(handle, user, pw).await?
-            }
+            authenticate_with_password(handle, user, pw).await?
         }
         AuthMethod::KeyFile { path } => {
             let key = russh::keys::load_secret_key(Path::new(path), secret)
@@ -257,6 +312,12 @@ async fn connect_core(
     // TMOUT(那是终端输入空闲计时,需服务端配置)。
     let mut config = client::Config::default();
     config.keepalive_interval = Some(std::time::Duration::from_secs(30));
+    // 见 KEX_ORDER 说明:优化密钥交换算法偏好,修复禁用 curve25519 的服务端(如 ESXi)
+    // 落到慢速大群 DH 导致的十余秒 KEX 卡顿。直连与 jump 路径共用此 config。
+    config.preferred = russh::Preferred {
+        kex: std::borrow::Cow::Borrowed(KEX_ORDER),
+        ..Default::default()
+    };
     let config = Arc::new(config);
 
     match &args.jump {
@@ -542,4 +603,33 @@ pub async fn ssh_trust_host(
     std::fs::write(&path, crate::ssh::knownhosts::serialize(&map))
         .map_err(|e| SshError::Io(e.to_string()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::KEX_ORDER;
+
+    fn pos(name: russh::kex::Name) -> usize {
+        KEX_ORDER
+            .iter()
+            .position(|k| *k == name)
+            .unwrap_or_else(|| panic!("KEX_ORDER 缺少算法 {name:?}"))
+    }
+
+    // 性能根因回归:快速算法必须排在慢速大群 DH 之前,且 ecdh 必须在场。
+    // 否则禁用 curve25519 的服务端(如 ESXi 的 OpenSSH)会落到慢速 KEX、连接卡十余秒。
+    #[test]
+    fn fast_kex_precede_slow_dh() {
+        // ecdh-nistp256 必须存在——这是修复 ESXi 等禁用 curve25519 服务端的关键。
+        let ecdh = pos(russh::kex::ECDH_SHA2_NISTP256);
+        // 现代服务端的快速路径仍在。
+        let _ = pos(russh::kex::CURVE25519);
+        // 快速 EC 必须排在 group-exchange 与最大群(8192bit)之前。
+        assert!(ecdh < pos(russh::kex::DH_GEX_SHA256), "ecdh 应先于 DH_GEX");
+        assert!(ecdh < pos(russh::kex::DH_G18_SHA512), "ecdh 应先于 group18");
+        // 最快的固定群 group14(2048bit)必须排在 group-exchange 与大群之前。
+        let g14 = pos(russh::kex::DH_G14_SHA256);
+        assert!(g14 < pos(russh::kex::DH_GEX_SHA256), "group14 应先于 DH_GEX");
+        assert!(g14 < pos(russh::kex::DH_G18_SHA512), "group14 应先于 group18");
+    }
 }
