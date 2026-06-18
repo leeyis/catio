@@ -1,11 +1,11 @@
 //! SFTP 子系统分段并行传输引擎。
 //!
 //! 已实现：分段规划纯函数 `plan_segments`、SFTP 子系统会话建立 `open_sftp`、
-//! 单流顺序上传/下载 `upload_sftp` / `download_sftp`（N=1 路径）。后续 slice 接入
-//! 分段并行。详见
+//! 单流顺序上传/下载 `upload_sftp` / `download_sftp`（N=1 路径）、分段并行下载
+//! `download_sftp_segmented`（§5.2）。后续 slice 接入分段并行上传与命令层分发。详见
 //! `docs/superpowers/specs/2026-06-19-sftp-multithread-transfer-design.md` §5。
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use russh_sftp::client::SftpSession;
@@ -214,6 +214,180 @@ where
         .map_err(|e| SshError::Io(e.to_string()))?;
     on_progress(total);
     Ok(false)
+}
+
+// ─── 分段并行下载（设计文档 §5.2）──────────────────────────────────────────
+
+/// 分段并行下载：`plan_segments(total)` 切段，每段一个 `tokio` task 各持独立远端/本地
+/// `File` 句柄，`seek` 到本段偏移后循环按 `CHUNK` 远端读 / 本地写。所有远端句柄共享同一
+/// `SftpSession`（请求自动 pipelining）。
+///
+/// 流程：
+/// 1. 本地 `File::create` 后 `set_len(total)` 预占位，使各段可写到对应偏移；
+/// 2. 共享 `Arc<AtomicU64> done` 聚合进度，跨 `PROGRESS_STEP` 回调一次；
+/// 3. 共享 `cancel` 各段每 CHUNK 检查；任一段出错 → 置 `cancel` 并记录首个 error；
+/// 4. `join` 全部 task：取消或失败 → 删除本地半成品并按情况返回 `Ok(true)` / `Err`；
+///    全部成功 → 末尾回调终值，返回 `Ok(false)`。
+pub async fn download_sftp_segmented<F>(
+    sftp: Arc<SftpSession>,
+    remote_path: &str,
+    local_path: &str,
+    total: u64,
+    cancel: Arc<AtomicBool>,
+    on_progress: F,
+) -> Result<bool, SshError>
+where
+    F: Fn(u64) + Send + Sync + 'static,
+{
+    on_progress(0);
+
+    // 预分配本地文件：set_len(total) 稀疏占位，各段写到对应偏移。
+    {
+        let f = tokio::fs::File::create(local_path)
+            .await
+            .map_err(|e| SshError::Io(e.to_string()))?;
+        f.set_len(total)
+            .await
+            .map_err(|e| SshError::Io(e.to_string()))?;
+    }
+
+    let segments = plan_segments(total);
+    let done = Arc::new(AtomicU64::new(0));
+    let on_progress = Arc::new(on_progress);
+
+    let mut tasks = Vec::with_capacity(segments.len());
+    for (offset, len) in segments {
+        let sftp = sftp.clone();
+        let cancel = cancel.clone();
+        let done = done.clone();
+        let on_progress = on_progress.clone();
+        let remote_path = remote_path.to_string();
+        let local_path = local_path.to_string();
+        tasks.push(tokio::spawn(async move {
+            download_one_segment(
+                &sftp,
+                &remote_path,
+                &local_path,
+                offset,
+                len,
+                &cancel,
+                &done,
+                on_progress.as_ref(),
+            )
+            .await
+        }));
+    }
+
+    // join 全部 task：记录首个 error。
+    let mut first_err: Option<SshError> = None;
+    for t in tasks {
+        match t.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                cancel.store(true, Ordering::Relaxed);
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+            Err(join_err) => {
+                cancel.store(true, Ordering::Relaxed);
+                if first_err.is_none() {
+                    first_err = Some(SshError::Sftp(join_err.to_string()));
+                }
+            }
+        }
+    }
+
+    if let Some(e) = first_err {
+        // 失败：删除本地半成品后向上报错。
+        let _ = tokio::fs::remove_file(local_path).await;
+        return Err(e);
+    }
+    if cancel.load(Ordering::Relaxed) {
+        // 取消：删除本地半成品。
+        let _ = tokio::fs::remove_file(local_path).await;
+        return Ok(true);
+    }
+
+    on_progress(total);
+    Ok(false)
+}
+
+/// 单段下载循环：远端 `File` seek 到 `offset` 读、本地 `File` seek 到 `offset` 写，
+/// 共读写 `len` 字节。每 CHUNK 检查 `cancel`、累加共享 `done` 并按节流回调进度。
+async fn download_one_segment(
+    sftp: &SftpSession,
+    remote_path: &str,
+    local_path: &str,
+    offset: u64,
+    len: u64,
+    cancel: &Arc<AtomicBool>,
+    done: &Arc<AtomicU64>,
+    on_progress: &(dyn Fn(u64) + Send + Sync),
+) -> Result<(), SshError> {
+    use std::io::SeekFrom;
+    use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+
+    if len == 0 {
+        return Ok(());
+    }
+
+    let mut remote = sftp
+        .open_with_flags(remote_path, OpenFlags::READ)
+        .await
+        .map_err(|e| SshError::Sftp(e.to_string()))?;
+    remote
+        .seek(SeekFrom::Start(offset))
+        .await
+        .map_err(|e| SshError::Sftp(e.to_string()))?;
+
+    let mut local = tokio::fs::OpenOptions::new()
+        .write(true)
+        .open(local_path)
+        .await
+        .map_err(|e| SshError::Io(e.to_string()))?;
+    local
+        .seek(SeekFrom::Start(offset))
+        .await
+        .map_err(|e| SshError::Io(e.to_string()))?;
+
+    let mut buf = vec![0u8; CHUNK];
+    let mut remaining = len;
+    while remaining > 0 {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let want = remaining.min(CHUNK as u64) as usize;
+        let n = remote
+            .read(&mut buf[..want])
+            .await
+            .map_err(|e| SshError::Sftp(e.to_string()))?;
+        if n == 0 {
+            // 远端提前 EOF：段未读满，视为协议/数据错误。
+            return Err(SshError::Sftp(format!(
+                "段 [{offset}, {}) 远端提前 EOF（剩余 {remaining}）",
+                offset + len
+            )));
+        }
+        local
+            .write_all(&buf[..n])
+            .await
+            .map_err(|e| SshError::Io(e.to_string()))?;
+        remaining -= n as u64;
+
+        // 聚合进度：跨 PROGRESS_STEP 边界时回调一次（轻微竞态可接受，进度为 cosmetic）。
+        let prev = done.fetch_add(n as u64, Ordering::Relaxed);
+        let now = prev + n as u64;
+        if now / PROGRESS_STEP != prev / PROGRESS_STEP {
+            on_progress(now);
+        }
+    }
+
+    local
+        .flush()
+        .await
+        .map_err(|e| SshError::Io(e.to_string()))?;
+    Ok(())
 }
 
 #[cfg(test)]
