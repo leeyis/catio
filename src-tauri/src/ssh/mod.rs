@@ -9,6 +9,7 @@ pub mod multiexec;
 pub mod osc;
 pub mod parse;
 pub mod sftp;
+pub mod sftp_transfer;
 pub mod shell_integration;
 pub mod term;
 pub mod tunnel;
