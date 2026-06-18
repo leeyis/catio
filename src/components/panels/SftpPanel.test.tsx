@@ -41,6 +41,7 @@ vi.mock('@tauri-apps/api/webview', () => ({
 }))
 
 import { SftpPanel } from './SftpPanel'
+import { clearSftpNav } from '../../state/sftpNav'
 
 const mk = (o: Partial<SftpItem> & { name: string; path: string; type: SftpItem['type'] }): SftpItem => ({
   size: 0, modified: 1717801234, permissions: '-rw-r--r--', owner: 'root', group: 'root', ...o,
@@ -79,6 +80,7 @@ describe('SftpPanel (SFTP wiring)', () => {
 
   afterEach(() => {
     delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+    clearSftpNav()
     vi.clearAllMocks()
   })
 
@@ -107,6 +109,24 @@ describe('SftpPanel (SFTP wiring)', () => {
     fireEvent.doubleClick(screen.getByText('logs'))
     await waitFor(() => expect(h.sftpList).toHaveBeenCalledWith('sess-1', '/srv/logs'))
     await waitFor(() => expect(screen.getByText('app.log')).toBeTruthy())
+  })
+
+  it('restores the last browsed directory after the panel is reopened', async () => {
+    const { unmount } = wrap(<SftpPanel onClose={() => {}} sessionId="sess-1" />)
+    await waitFor(() => expect(screen.getByText('logs')).toBeTruthy())
+    fireEvent.doubleClick(screen.getByText('logs'))
+    await waitFor(() => expect(screen.getByText('app.log')).toBeTruthy())
+
+    // simulate switching to another panel/page and back
+    unmount()
+    h.sftpRealpath.mockClear()
+    h.sftpList.mockClear()
+    wrap(<SftpPanel onClose={() => {}} sessionId="sess-1" />)
+
+    // restored to /srv/logs from the cache — no home re-resolution, no reload
+    await waitFor(() => expect(screen.getByText('app.log')).toBeTruthy())
+    expect(h.sftpRealpath).not.toHaveBeenCalled()
+    expect(h.sftpList).not.toHaveBeenCalled()
   })
 
   it('renders an editable address bar with the current path', async () => {

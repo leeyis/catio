@@ -7,6 +7,7 @@ import { PanelShell } from './PanelShell'
 import { PanelEmpty } from './PanelEmpty'
 import { sftpList, sftpRealpath, sftpMkdir, sftpTouch, sftpRename, sftpDelete } from '../../services/ssh'
 import { useTransfers, startUpload, startDownload, cancelTransfer, onTransferDone } from '../../state/transfers'
+import { getSftpNav, setSftpNav } from '../../state/sftpNav'
 
 function isTauriEnv(): boolean {
   return (
@@ -67,9 +68,11 @@ export interface SftpPanelProps {
 export function SftpPanel({ onClose, conn, sessionId }: SftpPanelProps) {
   const { t } = useTranslation()
 
-  const [items, setItems] = useState<SftpItem[]>([])
-  const [path, setPath] = useState<string>('')
-  const [pathInput, setPathInput] = useState<string>('')
+  // Seed from the per-session cache so reopening the panel restores the directory
+  // the user was browsing (and its listing) instead of flashing back to home.
+  const [items, setItems] = useState<SftpItem[]>(() => (sessionId ? getSftpNav(sessionId)?.items ?? [] : []))
+  const [path, setPath] = useState<string>(() => (sessionId ? getSftpNav(sessionId)?.path ?? '' : ''))
+  const [pathInput, setPathInput] = useState<string>(() => (sessionId ? getSftpNav(sessionId)?.path ?? '' : ''))
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [selected, setSelected] = useState<string | null>(null)
@@ -86,7 +89,7 @@ export function SftpPanel({ onClose, conn, sessionId }: SftpPanelProps) {
   // refs so the once-mounted drag-drop listener always sees the latest values.
   const sessionRef = useRef(sessionId)
   sessionRef.current = sessionId
-  const pathRef = useRef('')
+  const pathRef = useRef(sessionId ? getSftpNav(sessionId)?.path ?? '' : '')
 
   const load = useCallback((p: string) => {
     const sid = sessionRef.current
@@ -100,6 +103,7 @@ export function SftpPanel({ onClose, conn, sessionId }: SftpPanelProps) {
         pathRef.current = p
         setPathInput(p)
         setSelected(null)
+        setSftpNav(sid, { path: p, items: list })
       })
       .catch(e => setError(String(e)))
       .finally(() => setLoading(false))
@@ -112,6 +116,16 @@ export function SftpPanel({ onClose, conn, sessionId }: SftpPanelProps) {
       setPath('')
       pathRef.current = ''
       setPathInput('')
+      return
+    }
+    // Already browsed this session? Restore where we were (covers switching the
+    // active session while the panel stays mounted) instead of resetting to home.
+    const cached = getSftpNav(sessionId)
+    if (cached) {
+      setItems(cached.items)
+      setPath(cached.path)
+      pathRef.current = cached.path
+      setPathInput(cached.path)
       return
     }
     sftpRealpath(sessionId, '.')
