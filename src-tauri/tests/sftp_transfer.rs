@@ -21,6 +21,7 @@ use catio_lib::ssh::conn::{connect_authenticated, AuthMethod, ConnectArgs};
 use catio_lib::ssh::manager::{Session, SessionManager};
 use catio_lib::ssh::sftp_transfer::{
     download_sftp, download_sftp_segmented, open_sftp, plan_segments, upload_sftp,
+    upload_sftp_segmented,
 };
 
 /// 连接测试服并把会话以 "sess-1" 插入一个新建的 `SessionManager`，返回 manager。
@@ -223,6 +224,113 @@ async fn segmented_download_respects_cancel_flag() {
     .expect("segmented download returns ok(true) on cancel");
     assert!(cancelled, "预置取消标志应使分段下载返回 Ok(true)");
     assert!(!dst.exists(), "取消后本地半成品文件应被清理");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ─── slice 5（slice5-segmented-upload）集成测试 ──────────────────────────────
+//
+// 验证 `upload_sftp_segmented`（设计文档 §5.3）：先 CREATE|TRUNCATE|WRITE 建/清空远端
+// 并立即关闭，再 plan_segments 分多段、各段独立本地/远端 File 句柄并行 seek 到 offset、
+// 循环本地读/远端写；共享 done 聚合进度、共享 cancel 处置；取消/失败删除远端半成品。
+
+/// 多 MB 文件（> MIN_SEG_SIZE，触发多段）分段上传：经测试服落盘校验字节一致、大小一致、
+/// 进度终值正确；再用 download_sftp_segmented 取回二次校验 round-trip。
+#[tokio::test]
+async fn segmented_upload_multi_mb_round_trip() {
+    let root = std::env::temp_dir().join(format!("catio-seg-ul-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let addr = test_server::start_with_root(root.clone()).await;
+    let mgr = manager_with_session(addr).await;
+
+    // 本地准备 3 MiB + 1234 字节文件：plan_segments 应给出多段。
+    let total_usize = 3 * 1024 * 1024 + 1234;
+    let payload: Vec<u8> = (0..total_usize).map(|i| (i % 251) as u8).collect();
+    let src = root.join("seg-src.bin");
+    std::fs::write(&src, &payload).unwrap();
+    let total = payload.len() as u64;
+
+    // 前置：确认该大小确实被分成多段（否则测的不是分段路径）。
+    assert!(plan_segments(total).len() >= 2, "测试负载应触发多段");
+
+    let sftp = open_sftp(&mgr, "sess-1").await.expect("open sftp for upload");
+    let remote = "seg-remote.bin";
+    let cancel = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicU64::new(0));
+    let done_cb = done.clone();
+    let cancelled = upload_sftp_segmented(
+        Arc::new(sftp),
+        src.to_str().unwrap(),
+        remote,
+        total,
+        cancel,
+        move |d| {
+            done_cb.store(d, Ordering::Relaxed);
+        },
+    )
+    .await
+    .expect("segmented upload ok");
+    assert!(!cancelled, "未取消应正常完成");
+    assert_eq!(done.load(Ordering::Relaxed), total, "上传进度终值应为总字节数");
+
+    // 经测试服文件系统直接校验远端落盘内容。
+    let landed = std::fs::read(root.join(remote)).unwrap();
+    assert_eq!(landed.len() as u64, total, "远端文件大小应与源一致");
+    assert_eq!(landed, payload, "分段上传落盘内容应与源逐字节一致");
+
+    // 再 round-trip 下载二次校验。
+    let sftp2 = open_sftp(&mgr, "sess-1").await.expect("open sftp for download");
+    let dst = root.join("seg-dst.bin");
+    let cancel2 = Arc::new(AtomicBool::new(false));
+    let cancelled = download_sftp_segmented(
+        Arc::new(sftp2),
+        remote,
+        dst.to_str().unwrap(),
+        total,
+        cancel2,
+        |_d| {},
+    )
+    .await
+    .expect("download back ok");
+    assert!(!cancelled);
+    let got = std::fs::read(&dst).unwrap();
+    assert_eq!(got, payload, "上传后下载取回应与源逐字节一致");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 预置取消标志 → 分段上传返回 Ok(true) 且清理远端半成品文件。
+#[tokio::test]
+async fn segmented_upload_respects_cancel_flag() {
+    let root = std::env::temp_dir().join(format!("catio-seg-ul-cancel-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let addr = test_server::start_with_root(root.clone()).await;
+    let mgr = manager_with_session(addr).await;
+
+    let total_usize = 3 * 1024 * 1024;
+    let payload: Vec<u8> = vec![0x7Eu8; total_usize];
+    let src = root.join("seg-cancel-src.bin");
+    std::fs::write(&src, &payload).unwrap();
+    let total = payload.len() as u64;
+
+    let sftp = open_sftp(&mgr, "sess-1").await.expect("open sftp");
+    let remote = "seg-cancel-remote.bin";
+    let cancel = Arc::new(AtomicBool::new(true)); // 预先置位
+    let cancelled = upload_sftp_segmented(
+        Arc::new(sftp),
+        src.to_str().unwrap(),
+        remote,
+        total,
+        cancel,
+        |_d| {},
+    )
+    .await
+    .expect("segmented upload returns ok(true) on cancel");
+    assert!(cancelled, "预置取消标志应使分段上传返回 Ok(true)");
+    assert!(
+        !root.join(remote).exists(),
+        "取消后远端半成品文件应被清理"
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }
