@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use catio_lib::ssh::conn::{connect_authenticated, AuthMethod, ConnectArgs};
 use catio_lib::ssh::manager::{Session, SessionManager};
+use catio_lib::ssh::sftp::{download_stream, upload_stream};
 use catio_lib::ssh::sftp_transfer::{
     download_dispatch, download_sftp, download_sftp_segmented, open_sftp, plan_segments,
     upload_dispatch, upload_sftp, upload_sftp_segmented, SEGMENT_THRESHOLD,
@@ -687,5 +688,103 @@ async fn open_sftp_errors_when_subsystem_rejected() {
         "服务端拒绝 sftp 子系统时 open_sftp 应返回 Err（触发命令层回退）"
     );
 
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ─── exec + base64 回退**端到端**集成测试 ────────────────────────────────────
+//
+// 上一个用例只验证「触发回退的信号」（open_sftp 返 Err）。这里端到端跑通回退分支本身：
+// 在 no_sftp 服务端（拒绝 sftp 子系统、但真实执行 base64 命令）上，开 exec channel 跑
+// `base64 -d > 'path'`（上传）/ `base64 'path'`（下载），直接驱动命令层回退所调用的
+// `upload_stream` / `download_stream`，断言 base64 流式传输 round-trip 字节一致。
+// 覆盖 sftp.rs 回退分支里 upload_stream/download_stream 的真实读写、进度回调、wait_exit。
+
+/// 在 no_sftp 服务端上开一条 exec channel 并下发命令（复刻 sftp.rs 的 open_exec_channel）。
+async fn open_exec(
+    handle: &russh::client::Handle<catio_lib::ssh::conn::ClientHandler>,
+    cmd: &str,
+) -> russh::Channel<russh::client::Msg> {
+    let channel = handle.channel_open_session().await.expect("open channel");
+    channel.exec(true, cmd.to_string()).await.expect("exec");
+    channel
+}
+
+/// exec + base64 回退端到端：先 `open_sftp` 确认 Err（触发回退），再经 exec 通道用
+/// `upload_stream` 上传、`download_stream` 下载，断言 round-trip 字节一致、进度终值正确。
+#[tokio::test]
+async fn exec_base64_fallback_round_trip_end_to_end() {
+    let root =
+        std::env::temp_dir().join(format!("catio-fallback-e2e-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let addr = test_server::start_no_sftp(root.clone()).await;
+    let mgr = manager_with_session(addr).await;
+
+    // 触发回退的前提：sftp 子系统不可用。
+    assert!(
+        open_sftp(&mgr, "sess-1").await.is_err(),
+        "no_sftp 服务端 open_sftp 应失败，命令层据此走 exec + base64 回退"
+    );
+
+    // 单独连一条会话拿 russh handle 开 exec channel（mgr 内 handle 在锁后）。
+    let args = ConnectArgs {
+        host: addr.ip().to_string(),
+        port: addr.port(),
+        user: test_server::TEST_USER.into(),
+        auth: AuthMethod::Password,
+        secret: Some(test_server::TEST_PW.into()),
+        jump: None,
+    };
+    let (handle, _fp, _fwd, _jmp) = connect_authenticated(&args).await.expect("connect");
+
+    // 跨多个 48KiB CHUNK 的负载，含非整块尾巴，考验 base64 分块编码/解码与进度节流。
+    let payload: Vec<u8> = (0..130 * 1024).map(|i| (i % 251) as u8).collect();
+    let src = root.join("fb-src.bin");
+    std::fs::write(&src, &payload).unwrap();
+    let total = payload.len() as u64;
+
+    // ── 上传回退：base64 -d > 'remote' ──
+    let remote = "fb-remote.bin";
+    let up_ch = open_exec(&handle, &format!("base64 -d > '{remote}'")).await;
+    let up_done = Arc::new(AtomicU64::new(0));
+    let up_cb = up_done.clone();
+    let cancelled = upload_stream(
+        up_ch,
+        src.to_str().unwrap(),
+        total,
+        Arc::new(AtomicBool::new(false)),
+        move |d| up_cb.store(d, Ordering::Relaxed),
+    )
+    .await
+    .expect("fallback upload_stream ok");
+    assert!(!cancelled, "未取消应正常完成");
+    assert_eq!(up_done.load(Ordering::Relaxed), total, "上传进度终值应为总字节数");
+
+    // 经测试服文件系统直接校验远端落盘内容。
+    let landed = std::fs::read(root.join(remote)).expect("远端落盘文件应存在");
+    assert_eq!(landed, payload, "exec + base64 上传落盘应与源逐字节一致");
+
+    // ── 下载回退：base64 'remote' ──
+    let dn_ch = open_exec(&handle, &format!("base64 '{remote}'")).await;
+    let dst = root.join("fb-dst.bin");
+    let dn_done = Arc::new(AtomicU64::new(0));
+    let dn_cb = dn_done.clone();
+    let cancelled = download_stream(
+        dn_ch,
+        dst.to_str().unwrap(),
+        Arc::new(AtomicBool::new(false)),
+        move |d| dn_cb.store(d, Ordering::Relaxed),
+    )
+    .await
+    .expect("fallback download_stream ok");
+    assert!(!cancelled, "未取消应正常完成");
+    assert_eq!(dn_done.load(Ordering::Relaxed), total, "下载进度终值应为总字节数");
+
+    let got = std::fs::read(&dst).unwrap();
+    assert_eq!(got, payload, "exec + base64 下载取回应与源逐字节一致");
+
+    handle
+        .disconnect(russh::Disconnect::ByApplication, "", "en")
+        .await
+        .ok();
     let _ = std::fs::remove_dir_all(&root);
 }

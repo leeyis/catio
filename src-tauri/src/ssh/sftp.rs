@@ -235,20 +235,24 @@ async fn open_exec_channel(
 
 // ─── 流式传输 ────────────────────────────────────────────────────────────────
 
-/// 上传：本地文件 → 远端 `base64 -d > path`，48KiB 原始块流式 base64。
+/// 上传（exec + base64 回退流）：本地文件 → 远端 `base64 -d > path`，48KiB 原始块流式 base64。
 /// 返回 `Ok(true)` 表示被取消，`Ok(false)` 表示正常完成。
-async fn upload_stream(
+///
+/// `on_progress(done)` 在起始（0）、每跨 `PROGRESS_STEP` 字节、末尾（total）各回调一次，
+/// 与 SFTP 引擎的回调约定一致；调用方负责把字节进度转成事件（见 `progress_emitter`）。
+pub async fn upload_stream<F>(
     mut channel: Channel<Msg>,
     local_path: &str,
     total_bytes: u64,
-    filename: &str,
-    transfer_id: &str,
-    app: &tauri::AppHandle,
     cancel: Arc<AtomicBool>,
-) -> Result<bool, SshError> {
+    mut on_progress: F,
+) -> Result<bool, SshError>
+where
+    F: FnMut(u64),
+{
     use tokio::io::AsyncReadExt;
 
-    emit_progress(app, transfer_id, filename, 0, total_bytes);
+    on_progress(0);
 
     let mut file = tokio::fs::File::open(local_path)
         .await
@@ -286,7 +290,7 @@ async fn upload_stream(
         sent += filled as u64;
         if sent - last_emit >= PROGRESS_STEP || filled < CHUNK {
             last_emit = sent;
-            emit_progress(app, transfer_id, filename, sent, total_bytes);
+            on_progress(sent);
         }
         if filled < CHUNK {
             break;
@@ -298,24 +302,27 @@ async fn upload_stream(
         .await
         .map_err(|e| SshError::Sftp(e.to_string()))?;
     wait_exit(&mut channel).await?;
-    emit_progress(app, transfer_id, filename, total_bytes, total_bytes);
+    on_progress(total_bytes);
     Ok(false)
 }
 
-/// 下载：远端 `base64 path` → 本地文件，按完整 base64 行解码写入。
+/// 下载（exec + base64 回退流）：远端 `base64 path` → 本地文件，按完整 base64 行解码写入。
 /// 返回 `Ok(true)` 表示被取消，`Ok(false)` 表示正常完成。
-async fn download_stream(
+///
+/// `on_progress(done)` 约定同 [`upload_stream`]：起始 0、每跨 `PROGRESS_STEP`、末尾各回调一次。
+/// 下载侧总字节数由远端流自然界定（读到 EOF 即止），无需传入 `total`。
+pub async fn download_stream<F>(
     mut channel: Channel<Msg>,
     local_path: &str,
-    total_bytes: u64,
-    filename: &str,
-    transfer_id: &str,
-    app: &tauri::AppHandle,
     cancel: Arc<AtomicBool>,
-) -> Result<bool, SshError> {
+    mut on_progress: F,
+) -> Result<bool, SshError>
+where
+    F: FnMut(u64),
+{
     use tokio::io::AsyncWriteExt;
 
-    emit_progress(app, transfer_id, filename, 0, total_bytes);
+    on_progress(0);
 
     let mut file = tokio::fs::File::create(local_path)
         .await
@@ -358,7 +365,7 @@ async fn download_stream(
                 }
                 if written - last_emit >= PROGRESS_STEP {
                     last_emit = written;
-                    emit_progress(app, transfer_id, filename, written, total_bytes);
+                    on_progress(written);
                 }
             }
             Some(ChannelMsg::ExtendedData { ref data, .. }) => {
@@ -396,7 +403,7 @@ async fn download_stream(
         written += decoded.len() as u64;
     }
     file.flush().await.map_err(|e| SshError::Io(e.to_string()))?;
-    emit_progress(app, transfer_id, filename, written, total_bytes);
+    on_progress(written);
     Ok(false)
 }
 
@@ -435,7 +442,8 @@ async fn upload_dispatch_or_fallback(
         Err(_) => {
             let cmd = format!("base64 -d > {}", shell_escape(remote_path));
             let channel = open_exec_channel(mgr, session_id, &cmd).await?;
-            upload_stream(channel, local_path, total_bytes, filename, transfer_id, app, cancel).await
+            let on_progress = progress_emitter(app, transfer_id, filename, total_bytes);
+            upload_stream(channel, local_path, total_bytes, cancel, on_progress).await
         }
     }
 }
@@ -470,7 +478,8 @@ async fn download_dispatch_or_fallback(
         Err(_) => {
             let cmd = format!("base64 {}", shell_escape(remote_path));
             let channel = open_exec_channel(mgr, session_id, &cmd).await?;
-            download_stream(channel, local_path, total_bytes, filename, transfer_id, app, cancel).await
+            let on_progress = progress_emitter(app, transfer_id, filename, total_bytes);
+            download_stream(channel, local_path, cancel, on_progress).await
         }
     }
 }

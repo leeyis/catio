@@ -109,6 +109,10 @@ pub struct TestHandler {
     no_sftp: bool,
     /// See [`TestServer::stat_omit_size`].
     stat_omit_size: bool,
+    /// exec channel → base64 上传落盘目标：(真实路径, 已累积的 base64 字节)。仅 `no_sftp`
+    /// 模式下，`base64 -d > 'path'` 命令注册一个 sink；客户端流过来的 base64 数据在
+    /// `data` 累积、`channel_eof` 时解码写文件，使 exec + base64 上传回退可被端到端验证。
+    b64_sinks: HashMap<ChannelId, (PathBuf, Vec<u8>)>,
 }
 
 impl Server for TestServer {
@@ -124,7 +128,28 @@ impl Server for TestServer {
             password_attempted: self.password_attempted.clone(),
             no_sftp: self.no_sftp,
             stat_omit_size: self.stat_omit_size,
+            b64_sinks: HashMap::new(),
         }
+    }
+}
+
+/// 解析 `sftp::shell_escape` 形式的单引号路径（测试只用无特殊字符的裸路径，故只需
+/// 去掉首尾单引号即可）。返回去引号后的字符串。
+fn unquote(s: &str) -> String {
+    let t = s.trim();
+    t.strip_prefix('\'')
+        .and_then(|x| x.strip_suffix('\''))
+        .unwrap_or(t)
+        .to_string()
+}
+
+/// 把 base64 上传/下载命令里的路径解析为真实文件系统路径（相对路径 join 到 root）。
+fn resolve_under(root: &std::path::Path, path: &str) -> PathBuf {
+    let p = PathBuf::from(path);
+    if p.is_absolute() {
+        p
+    } else {
+        root.join(p)
     }
 }
 
@@ -278,6 +303,43 @@ impl Handler for TestHandler {
             return Ok(());
         }
 
+        // ── exec + base64 传输回退（仅 no_sftp 模式真正执行 base64）──────────────
+        // 客户端在 open_sftp 失败后走 `base64 -d > 'path'`（上传）/ `base64 'path'`（下载）。
+        // 默认服务器只回显命令，无法端到端验证回退；这里实现真实 base64，使回退路径可测。
+        if self.no_sftp {
+            let root = self.sftp_root.clone().unwrap_or_else(std::env::temp_dir);
+            // 下载：base64 'path' → 读文件、整体 base64 编码作为一行输出，再 exit/close。
+            if let Some(rest) = cmd.strip_prefix("base64 ") {
+                if !rest.starts_with("-d") {
+                    let path = resolve_under(&root, &unquote(rest));
+                    match std::fs::read(&path) {
+                        Ok(bytes) => {
+                            use base64::Engine;
+                            let mut b64 =
+                                base64::engine::general_purpose::STANDARD.encode(&bytes);
+                            b64.push('\n');
+                            session.data(channel, b64.into_bytes())?;
+                            session.exit_status_request(channel, 0)?;
+                            session.close(channel)?;
+                        }
+                        Err(e) => {
+                            session.extended_data(channel, 1, e.to_string().into_bytes())?;
+                            session.exit_status_request(channel, 1)?;
+                            session.close(channel)?;
+                        }
+                    }
+                    return Ok(());
+                }
+                // 上传：base64 -d > 'path' → 注册 sink，等客户端把 base64 数据流过来。
+                // rest 形如 "-d > 'path'"；取最后一个单引号片段作为目标路径。
+                let after = rest.trim_start_matches("-d").trim();
+                let after = after.strip_prefix('>').unwrap_or(after).trim();
+                let path = resolve_under(&root, &unquote(after));
+                self.b64_sinks.insert(channel, (path, Vec::new()));
+                return Ok(());
+            }
+        }
+
         // ── Default: echo the command back to stdout, then exit 0 and close. ──
         // NOTE: a trailing "\n" is appended (not byte-exact to the input) — exec-based
         // tests (A7/D3) that assert on output must account for it.
@@ -295,9 +357,43 @@ impl Handler for TestHandler {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        // base64 上传 sink：累积客户端流过来的 base64 字节，eof 时统一解码落盘。
+        if let Some((_, buf)) = self.b64_sinks.get_mut(&channel) {
+            buf.extend_from_slice(data);
+            return Ok(());
+        }
         if self.shell_on.contains(&channel) {
             // Echo input bytes back to the client.
             session.data(channel, data.to_vec())?;
+        }
+        Ok(())
+    }
+
+    /// 客户端 EOF：若是 base64 上传 sink，解码累积的 base64（滤掉空白）写入目标文件，
+    /// 再 exit 0 / close，使 `upload_stream` 的 `wait_exit` 正常完成。
+    async fn channel_eof(
+        &mut self,
+        channel: ChannelId,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        if let Some((path, buf)) = self.b64_sinks.remove(&channel) {
+            use base64::Engine;
+            let cleaned: Vec<u8> = buf
+                .into_iter()
+                .filter(|b| !b.is_ascii_whitespace())
+                .collect();
+            match base64::engine::general_purpose::STANDARD.decode(&cleaned) {
+                Ok(decoded) => {
+                    let _ = std::fs::write(&path, &decoded);
+                    session.exit_status_request(channel, 0)?;
+                }
+                Err(e) => {
+                    session.extended_data(channel, 1, e.to_string().into_bytes())?;
+                    session.exit_status_request(channel, 1)?;
+                }
+            }
+            session.eof(channel)?;
+            session.close(channel)?;
         }
         Ok(())
     }
