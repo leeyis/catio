@@ -76,6 +76,9 @@ pub struct TestServer {
     /// rely on this). `true` → FORWARD: dial the requested host:port over real
     /// TCP and pipe bytes bidirectionally (ProxyJump bastion behavior).
     forward_direct_tcpip: bool,
+    /// `true` → 模拟 ESXi(dropbear)：拒绝 `password` 方法，仅接受
+    /// `keyboard-interactive`。用于验证密码认证的 keyboard-interactive 回退。
+    keyboard_interactive_only: bool,
 }
 
 pub struct TestHandler {
@@ -87,6 +90,8 @@ pub struct TestHandler {
     sftp_root: Option<PathBuf>,
     /// See [`TestServer::forward_direct_tcpip`].
     forward_direct_tcpip: bool,
+    /// See [`TestServer::keyboard_interactive_only`].
+    keyboard_interactive_only: bool,
 }
 
 impl Server for TestServer {
@@ -98,6 +103,7 @@ impl Server for TestServer {
             pending: HashMap::new(),
             sftp_root: self.sftp_root.clone(),
             forward_direct_tcpip: self.forward_direct_tcpip,
+            keyboard_interactive_only: self.keyboard_interactive_only,
         }
     }
 }
@@ -106,10 +112,44 @@ impl Handler for TestHandler {
     type Error = russh::Error;
 
     async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
+        // 模拟 ESXi(dropbear)：拒绝 `password` 方法，逼客户端回退 keyboard-interactive。
+        if self.keyboard_interactive_only {
+            return Ok(Auth::reject());
+        }
         if user == TEST_USER && password == TEST_PW {
             Ok(Auth::Accept)
         } else {
             Ok(Auth::reject())
+        }
+    }
+
+    /// keyboard-interactive 认证。首次调用(`response == None`)下发一个 "Password:"
+    /// prompt；客户端作答后(`response == Some`)校验密码。仅在
+    /// `keyboard_interactive_only` 模式下接受，模拟 ESXi 的认证行为。
+    async fn auth_keyboard_interactive<'a>(
+        &'a mut self,
+        user: &str,
+        _submethods: &str,
+        response: Option<russh::server::Response<'a>>,
+    ) -> Result<Auth, Self::Error> {
+        if !self.keyboard_interactive_only || user != TEST_USER {
+            return Ok(Auth::reject());
+        }
+        match response {
+            // 首次：发一个不回显的 "Password:" prompt。
+            None => Ok(Auth::Partial {
+                name: std::borrow::Cow::Borrowed(""),
+                instructions: std::borrow::Cow::Borrowed(""),
+                prompts: std::borrow::Cow::Owned(vec![(
+                    std::borrow::Cow::Borrowed("Password: "),
+                    false,
+                )]),
+            }),
+            // 客户端作答：取第一个回答与正确密码比对。
+            Some(mut resp) => match resp.next() {
+                Some(answer) if answer.as_ref() == TEST_PW.as_bytes() => Ok(Auth::Accept),
+                _ => Ok(Auth::reject()),
+            },
         }
     }
 
@@ -348,14 +388,22 @@ impl Handler for TestHandler {
 /// unused ones are (benignly) flagged as dead in the others.
 #[allow(dead_code)]
 pub async fn start() -> std::net::SocketAddr {
-    start_inner(None, false).await
+    start_inner(None, false, false).await
+}
+
+/// Start a test server that rejects the `password` auth method and only accepts
+/// `keyboard-interactive` — mimics ESXi's dropbear. Use to verify the client's
+/// password→keyboard-interactive fallback.
+#[allow(dead_code)]
+pub async fn start_keyboard_interactive() -> std::net::SocketAddr {
+    start_inner(None, false, true).await
 }
 
 /// Like [`start`], but the sftp subsystem serves the given `root` directory.
 /// The caller pre-populates `root`; the list test passes that path to `read_dir`.
 #[allow(dead_code)]
 pub async fn start_with_root(root: PathBuf) -> std::net::SocketAddr {
-    start_inner(Some(root), false).await
+    start_inner(Some(root), false, false).await
 }
 
 /// Start a test server that acts as a ProxyJump bastion: its `direct-tcpip`
@@ -364,10 +412,14 @@ pub async fn start_with_root(root: PathBuf) -> std::net::SocketAddr {
 /// with a normal [`start`] server as the final target.
 #[allow(dead_code)]
 pub async fn start_forwarding() -> std::net::SocketAddr {
-    start_inner(None, true).await
+    start_inner(None, true, false).await
 }
 
-async fn start_inner(sftp_root: Option<PathBuf>, forward_direct_tcpip: bool) -> std::net::SocketAddr {
+async fn start_inner(
+    sftp_root: Option<PathBuf>,
+    forward_direct_tcpip: bool,
+    keyboard_interactive_only: bool,
+) -> std::net::SocketAddr {
     let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)
         .expect("generate ed25519 host key");
     let config = Arc::new(Config {
@@ -384,6 +436,7 @@ async fn start_inner(sftp_root: Option<PathBuf>, forward_direct_tcpip: bool) -> 
         let mut server = TestServer {
             sftp_root,
             forward_direct_tcpip,
+            keyboard_interactive_only,
         };
         loop {
             let (socket, peer) = match listener.accept().await {

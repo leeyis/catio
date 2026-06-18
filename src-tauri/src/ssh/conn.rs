@@ -159,6 +159,39 @@ impl client::Handler for ClientHandler {
 
 // ─── 私有共享核心：只做 TCP 握手 + 认证 ─────────────────────────────────────
 
+/// 用 `keyboard-interactive` 方法做密码认证：对服务端下发的每个 prompt 都以
+/// 同一密码作答。部分 SSH 服务端(典型如 ESXi 的 dropbear)仅接受
+/// keyboard-interactive 的密码认证、拒绝 `password` 方法；OpenSSH 命令行也是据此
+/// 自动回退的，这里复刻同样行为。返回是否认证成功。
+async fn authenticate_keyboard_interactive(
+    handle: &mut Handle<ClientHandler>,
+    user: &str,
+    password: &str,
+) -> Result<bool, SshError> {
+    use russh::client::KeyboardInteractiveAuthResponse;
+    let mut res = handle
+        .authenticate_keyboard_interactive_start(user.to_string(), None)
+        .await
+        .map_err(|e| SshError::Io(e.to_string()))?;
+    // 上限防御:正常流程仅 1 轮(单个 "Password:" prompt)。服务端若异常地反复
+    // 下发 InfoRequest,靠此上限兜底(超限即判失败),杜绝理论上的死循环。
+    for _ in 0..16 {
+        match res {
+            KeyboardInteractiveAuthResponse::Success => return Ok(true),
+            KeyboardInteractiveAuthResponse::Failure { .. } => return Ok(false),
+            KeyboardInteractiveAuthResponse::InfoRequest { prompts, .. } => {
+                // 每个 prompt 都用同一密码作答；无 prompt(仅 banner)则回空 vec。
+                let responses = prompts.iter().map(|_| password.to_string()).collect();
+                res = handle
+                    .authenticate_keyboard_interactive_respond(responses)
+                    .await
+                    .map_err(|e| SshError::Io(e.to_string()))?;
+            }
+        }
+    }
+    Ok(false)
+}
+
 /// 对一个已建立的 handle 执行认证（密码或私钥），返回是否成功（`.success()`）。
 /// 跳板与目标共用此逻辑，避免重复。`secret` 仅传入、不记录。
 async fn authenticate(
@@ -170,11 +203,20 @@ async fn authenticate(
     let ok = match auth {
         AuthMethod::Password => {
             let pw = secret.unwrap_or("");
-            handle
+            // 先走标准 `password` 方法(CentOS/Ubuntu 等绝大多数服务端接受)。
+            let ok = handle
                 .authenticate_password(user, pw)
                 .await
                 .map_err(|e| SshError::Io(e.to_string()))?
-                .success()
+                .success();
+            // `password` 被拒时回退到 `keyboard-interactive`:部分服务端(典型如
+            // ESXi 的 dropbear)只接受后者、不接受 `password` 方法。这与 OpenSSH
+            // 命令行的默认回退行为一致。
+            if ok {
+                true
+            } else {
+                authenticate_keyboard_interactive(handle, user, pw).await?
+            }
         }
         AuthMethod::KeyFile { path } => {
             let key = russh::keys::load_secret_key(Path::new(path), secret)

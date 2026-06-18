@@ -136,6 +136,39 @@ async fn test_connection_fails_with_wrong_password() {
     assert!(res.error.is_some(), "error should be set on failure");
 }
 
+// ESXi(dropbear) 只接受 keyboard-interactive、拒绝 password。客户端必须像
+// OpenSSH 一样从 password 回退到 keyboard-interactive，才能用密码连上。
+#[tokio::test]
+async fn password_auth_falls_back_to_keyboard_interactive() {
+    let addr = test_server::start_keyboard_interactive().await;
+    let args = ConnectArgs {
+        host: addr.ip().to_string(),
+        port: addr.port(),
+        user: test_server::TEST_USER.into(),
+        auth: AuthMethod::Password,
+        secret: Some(test_server::TEST_PW.into()),
+        jump: None,
+    };
+    let res = test_connection(args).await;
+    assert!(res.ok, "应回退到 keyboard-interactive 并成功: {:?}", res.error);
+}
+
+// keyboard-interactive 回退在密码错误时仍应判定为认证失败(不误判为成功)。
+#[tokio::test]
+async fn keyboard_interactive_rejects_wrong_password() {
+    let addr = test_server::start_keyboard_interactive().await;
+    let args = ConnectArgs {
+        host: addr.ip().to_string(),
+        port: addr.port(),
+        user: test_server::TEST_USER.into(),
+        auth: AuthMethod::Password,
+        secret: Some("wrong".into()),
+        jump: None,
+    };
+    let res = test_connection(args).await;
+    assert!(!res.ok, "错误密码不应通过 keyboard-interactive");
+}
+
 #[tokio::test]
 async fn connects_with_key_file() {
     let addr = test_server::start().await;
