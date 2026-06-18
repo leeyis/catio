@@ -358,16 +358,23 @@ where
     // 防截断校验：各段只读 `total` 字节、never 触发 EOF；若远端真实大小 > total
     // （stat 给小了 / 文件在 stat 与传输间被改写变大），本地 set_len(total) 会比远端短、
     // 内容被静默截断却报成功。完成后探测一次远端真实大小，不等于 total 即报错并清理。
+    //
+    // 注意：SFTP 协议中 ATTRS 的 size 为可选字段，部分服务端（或某些 stat 实现）不返回
+    // size。此时 `FileAttributes::size` 为 `None`（`len()` 会折叠成 0）。绝不能把缺失的
+    // size 当作 0 去比对——否则会把一次正确完成的下载误判为截断并删除正确文件。故仅在
+    // 服务端**确实**返回了 size 时才执行该校验；缺 size 时跳过（cosmetic 防护 < 数据安全）。
     let remote_size = sftp
         .metadata(remote_path)
         .await
         .map_err(|e| SshError::Sftp(e.to_string()))?
-        .len();
-    if remote_size != total {
-        let _ = tokio::fs::remove_file(local_path).await;
-        return Err(SshError::Sftp(format!(
-            "远端文件大小 {remote_size} 与预期 {total} 不一致，疑似 stat 失真或传输中被改写，已中止以避免静默截断"
-        )));
+        .size;
+    if let Some(remote_size) = remote_size {
+        if remote_size != total {
+            let _ = tokio::fs::remove_file(local_path).await;
+            return Err(SshError::Sftp(format!(
+                "远端文件大小 {remote_size} 与预期 {total} 不一致，疑似 stat 失真或传输中被改写，已中止以避免静默截断"
+            )));
+        }
     }
 
     on_progress(total);

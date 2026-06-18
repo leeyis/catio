@@ -419,6 +419,47 @@ async fn segmented_upload_errors_when_local_larger_than_total() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// 服务端 stat 省略可选 size 属性（合规行为）→ 远端内容已完整正确下载，分段下载的
+/// 防截断校验**不得**因 `metadata().len()` 把 size-less ATTRS 当作 0 而误删正确文件。
+/// 复现高优 bug：size-less 服务端上正常下载会被误判失败并删档。
+#[tokio::test]
+async fn segmented_download_succeeds_when_server_omits_stat_size() {
+    let root =
+        std::env::temp_dir().join(format!("catio-seg-dl-nosize-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let addr = test_server::start_with_root_stat_omit_size(root.clone()).await;
+    let mgr = manager_with_session(addr).await;
+
+    // 远端 3 MiB + 1234 字节，触发多段；server stat 不返回 size。
+    let total_usize = 3 * 1024 * 1024 + 1234;
+    let payload: Vec<u8> = (0..total_usize).map(|i| (i % 251) as u8).collect();
+    let remote = "nosize.bin";
+    std::fs::write(root.join(remote), &payload).unwrap();
+    let total = payload.len() as u64;
+    assert!(plan_segments(total).len() >= 2, "应触发多段");
+
+    let sftp = open_sftp(&mgr, "sess-1").await.expect("open sftp");
+    let dst = root.join("nosize-dst.bin");
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancelled = download_sftp_segmented(
+        Arc::new(sftp),
+        remote,
+        dst.to_str().unwrap(),
+        total,
+        cancel,
+        |_d| {},
+    )
+    .await
+    .expect("size-less 服务端上正常下载不应被误判为失败");
+    assert!(!cancelled, "未取消应正常完成");
+
+    // 文件必须存在且逐字节一致，不能被防截断校验误删。
+    let got = std::fs::read(&dst).expect("下载文件应存在，未被误删");
+    assert_eq!(got, payload, "size-less 服务端上下载内容仍应逐字节一致");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 // ─── slice 6（slice6-wire-commands-fallback）集成测试 ────────────────────────
 //
 // 验证命令层分发核心 `upload_dispatch` / `download_dispatch`：按文件大小在「分段并行」

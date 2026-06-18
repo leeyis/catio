@@ -86,6 +86,10 @@ pub struct TestServer {
     /// `true` → 拒绝 `sftp` 子系统请求(模拟 ESXi ash 等无 sftp 子系统的环境)，
     /// 使客户端 `open_sftp` 失败、回退到 exec + base64。
     no_sftp: bool,
+    /// `true` → sftp 后端 `stat`/`fstat` 响应**省略 size 属性**(SFTP 协议中 ATTRS 的
+    /// size 为可选字段，部分服务端/某些 stat 实现不返回)。用于复现 `metadata().len()`
+    /// 在 size-less 服务端上返回 0 的高优正确性 bug：下载本已正确完成，防截断校验却误删。
+    stat_omit_size: bool,
 }
 
 pub struct TestHandler {
@@ -103,6 +107,8 @@ pub struct TestHandler {
     password_attempted: Arc<AtomicBool>,
     /// See [`TestServer::no_sftp`].
     no_sftp: bool,
+    /// See [`TestServer::stat_omit_size`].
+    stat_omit_size: bool,
 }
 
 impl Server for TestServer {
@@ -117,6 +123,7 @@ impl Server for TestServer {
             keyboard_interactive_only: self.keyboard_interactive_only,
             password_attempted: self.password_attempted.clone(),
             no_sftp: self.no_sftp,
+            stat_omit_size: self.stat_omit_size,
         }
     }
 }
@@ -207,7 +214,7 @@ impl Handler for TestHandler {
                 .sftp_root
                 .clone()
                 .unwrap_or_else(std::env::temp_dir);
-            let backend = SftpBackend::new(root);
+            let backend = SftpBackend::new(root, self.stat_omit_size);
             tokio::spawn(async move {
                 russh_sftp::server::run(channel.into_stream(), backend).await;
             });
@@ -403,7 +410,7 @@ impl Handler for TestHandler {
 /// unused ones are (benignly) flagged as dead in the others.
 #[allow(dead_code)]
 pub async fn start() -> std::net::SocketAddr {
-    start_inner(None, false, false, false).await.0
+    start_inner(None, false, false, false, false).await.0
 }
 
 /// Like [`start_with_root`], but REJECTS the `sftp` subsystem request — mimics
@@ -413,7 +420,18 @@ pub async fn start() -> std::net::SocketAddr {
 /// assertions a test wants to make.
 #[allow(dead_code)]
 pub async fn start_no_sftp(root: PathBuf) -> std::net::SocketAddr {
-    start_inner(Some(root), false, false, true).await.0
+    start_inner(Some(root), false, false, true, false).await.0
+}
+
+/// Like [`start_with_root`], but the sftp backend's `stat`/`fstat` responses OMIT
+/// the optional `size` attribute — mimics SFTP servers that legally return ATTRS
+/// without a size. The bytes are still served correctly; only the post-transfer
+/// size probe sees a size-less ATTRS. Use to verify the segmented-download
+/// anti-truncation check does NOT delete a correctly-downloaded file when the
+/// server omits size (`FileAttributes::len()` would collapse `None` → 0).
+#[allow(dead_code)]
+pub async fn start_with_root_stat_omit_size(root: PathBuf) -> std::net::SocketAddr {
+    start_inner(Some(root), false, false, false, true).await.0
 }
 
 /// Start a test server that only advertises/accepts `keyboard-interactive` and
@@ -421,7 +439,7 @@ pub async fn start_no_sftp(root: PathBuf) -> std::net::SocketAddr {
 /// password→keyboard-interactive fallback.
 #[allow(dead_code)]
 pub async fn start_keyboard_interactive() -> std::net::SocketAddr {
-    start_inner(None, false, true, false).await.0
+    start_inner(None, false, true, false, false).await.0
 }
 
 /// Like [`start_keyboard_interactive`], but also returns a flag set to true iff
@@ -429,14 +447,14 @@ pub async fn start_keyboard_interactive() -> std::net::SocketAddr {
 /// none-probe optimization SKIPS password on ESXi-like servers.
 #[allow(dead_code)]
 pub async fn start_keyboard_interactive_observed() -> (std::net::SocketAddr, Arc<AtomicBool>) {
-    start_inner(None, false, true, false).await
+    start_inner(None, false, true, false, false).await
 }
 
 /// Like [`start`], but the sftp subsystem serves the given `root` directory.
 /// The caller pre-populates `root`; the list test passes that path to `read_dir`.
 #[allow(dead_code)]
 pub async fn start_with_root(root: PathBuf) -> std::net::SocketAddr {
-    start_inner(Some(root), false, false, false).await.0
+    start_inner(Some(root), false, false, false, false).await.0
 }
 
 /// Start a test server that acts as a ProxyJump bastion: its `direct-tcpip`
@@ -445,7 +463,7 @@ pub async fn start_with_root(root: PathBuf) -> std::net::SocketAddr {
 /// with a normal [`start`] server as the final target.
 #[allow(dead_code)]
 pub async fn start_forwarding() -> std::net::SocketAddr {
-    start_inner(None, true, false, false).await.0
+    start_inner(None, true, false, false, false).await.0
 }
 
 async fn start_inner(
@@ -453,6 +471,7 @@ async fn start_inner(
     forward_direct_tcpip: bool,
     keyboard_interactive_only: bool,
     no_sftp: bool,
+    stat_omit_size: bool,
 ) -> (std::net::SocketAddr, Arc<AtomicBool>) {
     let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)
         .expect("generate ed25519 host key");
@@ -485,6 +504,7 @@ async fn start_inner(
             keyboard_interactive_only,
             password_attempted,
             no_sftp,
+            stat_omit_size,
         };
         loop {
             let (socket, peer) = match listener.accept().await {
@@ -530,16 +550,29 @@ struct SftpBackend {
     files: HashMap<String, (PathBuf, std::fs::File)>,
     /// 文件句柄自增计数。
     next_file: u64,
+    /// `true` → `stat`/`fstat` 返回的 ATTRS 省略 size 字段（见 [`TestServer::stat_omit_size`]）。
+    stat_omit_size: bool,
 }
 
 impl SftpBackend {
-    fn new(root: PathBuf) -> Self {
+    fn new(root: PathBuf, stat_omit_size: bool) -> Self {
         Self {
             root,
             read_done: HashSet::new(),
             files: HashMap::new(),
             next_file: 0,
+            stat_omit_size,
         }
+    }
+
+    /// 由真实 metadata 构造 ATTRS；若配置了 `stat_omit_size`，把 size 抹成 `None`
+    /// （复现 SFTP 协议 size 可选、部分服务端 stat 不返回 size 的合规行为）。
+    fn attrs_for(&self, m: &std::fs::Metadata) -> SftpAttrs {
+        let mut attrs = SftpAttrs::from(m);
+        if self.stat_omit_size {
+            attrs.size = None;
+        }
+        attrs
     }
 
     /// 把客户端给的路径解析为真实文件系统路径。"." / "/" / "" → root；
@@ -626,7 +659,7 @@ impl russh_sftp::server::Handler for SftpBackend {
         let m = std::fs::metadata(&resolved).map_err(|_| StatusCode::NoSuchFile)?;
         Ok(SftpStatAttrs {
             id,
-            attrs: SftpAttrs::from(&m),
+            attrs: self.attrs_for(&m),
         })
     }
 
@@ -710,7 +743,7 @@ impl russh_sftp::server::Handler for SftpBackend {
         let m = std::fs::metadata(path).map_err(|_| StatusCode::NoSuchFile)?;
         Ok(SftpStatAttrs {
             id,
-            attrs: SftpAttrs::from(&m),
+            attrs: self.attrs_for(&m),
         })
     }
 
