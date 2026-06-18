@@ -20,8 +20,8 @@ use std::sync::Arc;
 use catio_lib::ssh::conn::{connect_authenticated, AuthMethod, ConnectArgs};
 use catio_lib::ssh::manager::{Session, SessionManager};
 use catio_lib::ssh::sftp_transfer::{
-    download_sftp, download_sftp_segmented, open_sftp, plan_segments, upload_sftp,
-    upload_sftp_segmented,
+    download_dispatch, download_sftp, download_sftp_segmented, open_sftp, plan_segments,
+    upload_dispatch, upload_sftp, upload_sftp_segmented, SEGMENT_THRESHOLD,
 };
 
 /// 连接测试服并把会话以 "sess-1" 插入一个新建的 `SessionManager`，返回 manager。
@@ -330,6 +330,148 @@ async fn segmented_upload_respects_cancel_flag() {
     assert!(
         !root.join(remote).exists(),
         "取消后远端半成品文件应被清理"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ─── slice 6（slice6-wire-commands-fallback）集成测试 ────────────────────────
+//
+// 验证命令层分发核心 `upload_dispatch` / `download_dispatch`：按文件大小在「分段并行」
+// 与「单流顺序」SFTP 路径间分发（≥ SEGMENT_THRESHOLD 走分段，< 阈值走单流）；
+// 以及回退信号 `open_sftp` 在服务端拒绝 sftp 子系统时返回 Err（命令层据此回退 exec）。
+
+/// 大文件（≥ SEGMENT_THRESHOLD）经 `upload_dispatch` → `download_dispatch` round-trip：
+/// 走分段路径，字节一致、大小一致、进度终值正确。
+#[tokio::test]
+async fn dispatch_large_file_round_trip() {
+    let root = std::env::temp_dir().join(format!("catio-disp-lg-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let addr = test_server::start_with_root(root.clone()).await;
+    let mgr = manager_with_session(addr).await;
+
+    // 8 MiB + 4096：≥ 阈值，dispatch 应走分段（plan_segments 给出多段）。
+    let total_usize = SEGMENT_THRESHOLD as usize + 4096;
+    let payload: Vec<u8> = (0..total_usize).map(|i| (i % 251) as u8).collect();
+    let src = root.join("disp-lg-src.bin");
+    std::fs::write(&src, &payload).unwrap();
+    let total = payload.len() as u64;
+    assert!(total >= SEGMENT_THRESHOLD, "应触发分段路径");
+    assert!(plan_segments(total).len() >= 2, "大文件应分多段");
+
+    // 上传 via dispatch。
+    let sftp = open_sftp(&mgr, "sess-1").await.expect("open sftp for upload");
+    let remote = "disp-lg-remote.bin";
+    let cancel = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicU64::new(0));
+    let done_cb = done.clone();
+    let cancelled = upload_dispatch(
+        Arc::new(sftp),
+        src.to_str().unwrap(),
+        remote,
+        total,
+        cancel,
+        move |d| done_cb.store(d, Ordering::Relaxed),
+    )
+    .await
+    .expect("dispatch upload ok");
+    assert!(!cancelled);
+    assert_eq!(done.load(Ordering::Relaxed), total, "上传进度终值应为总字节数");
+
+    let landed = std::fs::read(root.join(remote)).unwrap();
+    assert_eq!(landed, payload, "dispatch 上传落盘应与源逐字节一致");
+
+    // 下载 via dispatch。
+    let sftp2 = open_sftp(&mgr, "sess-1").await.expect("open sftp for download");
+    let dst = root.join("disp-lg-dst.bin");
+    let cancel2 = Arc::new(AtomicBool::new(false));
+    let done2 = Arc::new(AtomicU64::new(0));
+    let done2_cb = done2.clone();
+    let cancelled = download_dispatch(
+        Arc::new(sftp2),
+        remote,
+        dst.to_str().unwrap(),
+        total,
+        cancel2,
+        move |d| done2_cb.store(d, Ordering::Relaxed),
+    )
+    .await
+    .expect("dispatch download ok");
+    assert!(!cancelled);
+    assert_eq!(done2.load(Ordering::Relaxed), total, "下载进度终值应为总字节数");
+    let got = std::fs::read(&dst).unwrap();
+    assert_eq!(got, payload, "dispatch 下载取回应与源逐字节一致");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 小文件（< SEGMENT_THRESHOLD）经 `upload_dispatch` → `download_dispatch` round-trip：
+/// 走单流路径，字节一致、大小一致。
+#[tokio::test]
+async fn dispatch_small_file_round_trip() {
+    let root = std::env::temp_dir().join(format!("catio-disp-sm-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let addr = test_server::start_with_root(root.clone()).await;
+    let mgr = manager_with_session(addr).await;
+
+    // 64 KiB：< 阈值，dispatch 应走单流。
+    let payload: Vec<u8> = (0..64 * 1024).map(|i| (i % 251) as u8).collect();
+    let src = root.join("disp-sm-src.bin");
+    std::fs::write(&src, &payload).unwrap();
+    let total = payload.len() as u64;
+    assert!(total < SEGMENT_THRESHOLD, "应触发单流路径");
+
+    let sftp = open_sftp(&mgr, "sess-1").await.expect("open sftp for upload");
+    let remote = "disp-sm-remote.bin";
+    let cancel = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicU64::new(0));
+    let done_cb = done.clone();
+    let cancelled = upload_dispatch(
+        Arc::new(sftp),
+        src.to_str().unwrap(),
+        remote,
+        total,
+        cancel,
+        move |d| done_cb.store(d, Ordering::Relaxed),
+    )
+    .await
+    .expect("dispatch upload ok");
+    assert!(!cancelled);
+    assert_eq!(done.load(Ordering::Relaxed), total);
+
+    let sftp2 = open_sftp(&mgr, "sess-1").await.expect("open sftp for download");
+    let dst = root.join("disp-sm-dst.bin");
+    let cancel2 = Arc::new(AtomicBool::new(false));
+    let cancelled = download_dispatch(
+        Arc::new(sftp2),
+        remote,
+        dst.to_str().unwrap(),
+        total,
+        cancel2,
+        |_d| {},
+    )
+    .await
+    .expect("dispatch download ok");
+    assert!(!cancelled);
+    let got = std::fs::read(&dst).unwrap();
+    assert_eq!(got, payload, "小文件 dispatch round-trip 应逐字节一致");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 服务端拒绝 sftp 子系统（模拟 ESXi ash）→ `open_sftp` 返回 Err。命令层据此回退
+/// 到 exec + base64（回退分支由命令层覆盖；此处验证触发回退的信号）。
+#[tokio::test]
+async fn open_sftp_errors_when_subsystem_rejected() {
+    let root = std::env::temp_dir().join(format!("catio-nosftp-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let addr = test_server::start_no_sftp(root.clone()).await;
+    let mgr = manager_with_session(addr).await;
+
+    let res = open_sftp(&mgr, "sess-1").await;
+    assert!(
+        res.is_err(),
+        "服务端拒绝 sftp 子系统时 open_sftp 应返回 Err（触发命令层回退）"
     );
 
     let _ = std::fs::remove_dir_all(&root);

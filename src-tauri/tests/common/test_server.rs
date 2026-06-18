@@ -83,6 +83,9 @@ pub struct TestServer {
     /// 被设为 true 当且仅当服务端收到过一次 `password` 认证尝试。测试据此断言 none
     /// 探测在"仅 keyboard-interactive"服务端上**跳过**了 password(不再触发失败延迟)。
     password_attempted: Arc<AtomicBool>,
+    /// `true` → 拒绝 `sftp` 子系统请求(模拟 ESXi ash 等无 sftp 子系统的环境)，
+    /// 使客户端 `open_sftp` 失败、回退到 exec + base64。
+    no_sftp: bool,
 }
 
 pub struct TestHandler {
@@ -98,6 +101,8 @@ pub struct TestHandler {
     keyboard_interactive_only: bool,
     /// See [`TestServer::password_attempted`].
     password_attempted: Arc<AtomicBool>,
+    /// See [`TestServer::no_sftp`].
+    no_sftp: bool,
 }
 
 impl Server for TestServer {
@@ -111,6 +116,7 @@ impl Server for TestServer {
             forward_direct_tcpip: self.forward_direct_tcpip,
             keyboard_interactive_only: self.keyboard_interactive_only,
             password_attempted: self.password_attempted.clone(),
+            no_sftp: self.no_sftp,
         }
     }
 }
@@ -187,7 +193,7 @@ impl Handler for TestHandler {
         name: &str,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        if name == "sftp" {
+        if name == "sftp" && !self.no_sftp {
             let channel = match self.pending.remove(&channel_id) {
                 Some(c) => c,
                 None => {
@@ -397,7 +403,17 @@ impl Handler for TestHandler {
 /// unused ones are (benignly) flagged as dead in the others.
 #[allow(dead_code)]
 pub async fn start() -> std::net::SocketAddr {
-    start_inner(None, false, false).await.0
+    start_inner(None, false, false, false).await.0
+}
+
+/// Like [`start_with_root`], but REJECTS the `sftp` subsystem request — mimics
+/// ESXi ash and other minimal servers with no sftp subsystem. The exec path
+/// still works (echo), so client code that tries sftp first must fall back to
+/// exec + base64. The `root` is still served for any direct filesystem
+/// assertions a test wants to make.
+#[allow(dead_code)]
+pub async fn start_no_sftp(root: PathBuf) -> std::net::SocketAddr {
+    start_inner(Some(root), false, false, true).await.0
 }
 
 /// Start a test server that only advertises/accepts `keyboard-interactive` and
@@ -405,7 +421,7 @@ pub async fn start() -> std::net::SocketAddr {
 /// password→keyboard-interactive fallback.
 #[allow(dead_code)]
 pub async fn start_keyboard_interactive() -> std::net::SocketAddr {
-    start_inner(None, false, true).await.0
+    start_inner(None, false, true, false).await.0
 }
 
 /// Like [`start_keyboard_interactive`], but also returns a flag set to true iff
@@ -413,14 +429,14 @@ pub async fn start_keyboard_interactive() -> std::net::SocketAddr {
 /// none-probe optimization SKIPS password on ESXi-like servers.
 #[allow(dead_code)]
 pub async fn start_keyboard_interactive_observed() -> (std::net::SocketAddr, Arc<AtomicBool>) {
-    start_inner(None, false, true).await
+    start_inner(None, false, true, false).await
 }
 
 /// Like [`start`], but the sftp subsystem serves the given `root` directory.
 /// The caller pre-populates `root`; the list test passes that path to `read_dir`.
 #[allow(dead_code)]
 pub async fn start_with_root(root: PathBuf) -> std::net::SocketAddr {
-    start_inner(Some(root), false, false).await.0
+    start_inner(Some(root), false, false, false).await.0
 }
 
 /// Start a test server that acts as a ProxyJump bastion: its `direct-tcpip`
@@ -429,13 +445,14 @@ pub async fn start_with_root(root: PathBuf) -> std::net::SocketAddr {
 /// with a normal [`start`] server as the final target.
 #[allow(dead_code)]
 pub async fn start_forwarding() -> std::net::SocketAddr {
-    start_inner(None, true, false).await.0
+    start_inner(None, true, false, false).await.0
 }
 
 async fn start_inner(
     sftp_root: Option<PathBuf>,
     forward_direct_tcpip: bool,
     keyboard_interactive_only: bool,
+    no_sftp: bool,
 ) -> (std::net::SocketAddr, Arc<AtomicBool>) {
     let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)
         .expect("generate ed25519 host key");
@@ -467,6 +484,7 @@ async fn start_inner(
             forward_direct_tcpip,
             keyboard_interactive_only,
             password_attempted,
+            no_sftp,
         };
         loop {
             let (socket, peer) = match listener.accept().await {
