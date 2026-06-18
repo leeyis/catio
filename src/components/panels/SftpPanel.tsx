@@ -2,10 +2,11 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { IconBtn } from '../atoms'
-import type { Connection, SftpItem, TransferProgress } from '../../services/types'
+import type { Connection, SftpItem } from '../../services/types'
 import { PanelShell } from './PanelShell'
 import { PanelEmpty } from './PanelEmpty'
-import { sftpList, sftpRealpath, sftpUpload, sftpDownload, sftpMkdir, sftpTouch, sftpRename, sftpDelete, sftpTransferCancel, listen } from '../../services/ssh'
+import { sftpList, sftpRealpath, sftpMkdir, sftpTouch, sftpRename, sftpDelete } from '../../services/ssh'
+import { useTransfers, startUpload, startDownload, cancelTransfer, onTransferDone } from '../../state/transfers'
 
 function isTauriEnv(): boolean {
   return (
@@ -47,16 +48,6 @@ function fmtSpeed(bytesPerSec: number): string {
   return `${fmtSize(bytesPerSec)}/s`
 }
 
-interface ActiveTransfer {
-  id: string
-  filename: string
-  percent: number
-  /** Instantaneous transfer rate in bytes/sec (derived from progress deltas). */
-  speed: number
-  status: 'active' | 'error'
-  kind: 'up' | 'down'
-}
-
 interface HoverState {
   item: SftpItem
   x: number
@@ -78,7 +69,7 @@ export function SftpPanel({ onClose, conn, sessionId }: SftpPanelProps) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [selected, setSelected] = useState<string | null>(null)
-  const [transfers, setTransfers] = useState<ActiveTransfer[]>([])
+  const transfers = useTransfers()
   const [dragging, setDragging] = useState(false)
   const [hover, setHover] = useState<HoverState | null>(null)
   // file operations (create / rename / delete / context menu)
@@ -92,10 +83,6 @@ export function SftpPanel({ onClose, conn, sessionId }: SftpPanelProps) {
   const sessionRef = useRef(sessionId)
   sessionRef.current = sessionId
   const pathRef = useRef('')
-  // last progress sample per transfer, for computing speed.
-  const sampleRef = useRef<Record<string, { bytes: number; time: number }>>({})
-  // per-transfer listener cleanup, so cancel can stop listening immediately.
-  const transferCleanup = useRef<Record<string, () => void>>({})
 
   const load = useCallback((p: string) => {
     const sid = sessionRef.current
@@ -129,66 +116,25 @@ export function SftpPanel({ onClose, conn, sessionId }: SftpPanelProps) {
   }, [sessionId, load])
 
   // ---- transfers ----
-  const trackTransfer = useCallback(async (id: string, filename: string, kind: 'up' | 'down') => {
-    setTransfers(prev => [...prev, { id, filename, percent: 0, speed: 0, status: 'active', kind }])
-    const offs: Array<() => void> = []
-    const cleanup = () => { offs.forEach(f => f()); delete sampleRef.current[id]; delete transferCleanup.current[id] }
-    transferCleanup.current[id] = cleanup
-    offs.push(await listen<TransferProgress>(`transfer-progress-${id}`, p => {
-      const now = Date.now()
-      const prev = sampleRef.current[id]
-      // Refresh the displayed speed at most once per second (otherwise it flickers
-      // on every 256KiB progress event). The bar/percent still update every event.
-      let nextSpeed: number | undefined
-      if (!prev) {
-        sampleRef.current[id] = { bytes: p.bytesTransferred, time: now }
-      } else if (now - prev.time >= 1000) {
-        nextSpeed = (p.bytesTransferred - prev.bytes) / ((now - prev.time) / 1000)
-        sampleRef.current[id] = { bytes: p.bytesTransferred, time: now }
-      }
-      setTransfers(prevT => prevT.map(x => (x.id === id
-        ? { ...x, percent: p.percent, speed: nextSpeed !== undefined ? nextSpeed : x.speed }
-        : x)))
-    }))
-    offs.push(await listen(`transfer-complete-${id}`, () => {
-      cleanup()
-      setTransfers(prev => prev.filter(x => x.id !== id))
-      load(pathRef.current)
-    }))
-    offs.push(await listen(`transfer-cancelled-${id}`, () => {
-      cleanup()
-      setTransfers(prev => prev.filter(x => x.id !== id))
-      load(pathRef.current)
-    }))
-    offs.push(await listen<string>(`transfer-error-${id}`, msg => {
-      cleanup()
-      setTransfers(prev => prev.map(x => (x.id === id ? { ...x, status: 'error' } : x)))
-      setError(typeof msg === 'string' ? msg : 'transfer failed')
-      // drop the errored row after a short delay
-      setTimeout(() => setTransfers(prev => prev.filter(x => x.id !== id)), 4000)
-    }))
-  }, [load])
-
-  // Cancel an in-flight transfer: tell the backend to stop, stop listening, and
-  // drop the row immediately (the backend's cancelled event is then ignored).
-  const cancelTransfer = useCallback((id: string) => {
-    sftpTransferCancel(id).catch(() => { /* best-effort */ })
-    transferCleanup.current[id]?.()
-    setTransfers(prev => prev.filter(x => x.id !== id))
-    load(pathRef.current)
-  }, [load])
+  // Transfer state + the Tauri progress/complete/cancel/error listeners live in the
+  // global store (src/state/transfers.ts), NOT here — so an in-flight upload/download
+  // survives this panel unmounting when the user switches tabs/panels. Here we only
+  // reload the listing once a transfer that landed in the directory we're viewing finishes.
+  useEffect(() => onTransferDone(dir => {
+    if (dir === pathRef.current) load(pathRef.current)
+  }), [load])
 
   const uploadLocal = useCallback(async (localPath: string) => {
     const sid = sessionRef.current
     if (!sid) return
-    const remote = joinPath(pathRef.current, baseName(localPath))
+    const dir = pathRef.current
+    const name = baseName(localPath)
     try {
-      const id = await sftpUpload(sid, localPath, remote)
-      await trackTransfer(id, baseName(localPath), 'up')
+      await startUpload(sid, localPath, joinPath(dir, name), dir, name)
     } catch (e) {
       setError(String(e))
     }
-  }, [trackTransfer])
+  }, [])
 
   const handleDrop = useCallback(async (paths: string[]) => {
     if (!sessionRef.current || paths.length === 0) return
@@ -237,7 +183,7 @@ export function SftpPanel({ onClose, conn, sessionId }: SftpPanelProps) {
     import('@tauri-apps/plugin-dialog').then(({ save }) => {
       save({ defaultPath: it.name }).then(dest => {
         if (!dest) return
-        sftpDownload(sessionId, it.path, dest).then(id => trackTransfer(id, it.name, 'down')).catch(e => setError(String(e)))
+        startDownload(sessionId, it.path, dest, pathRef.current, it.name).catch(e => setError(String(e)))
       })
     })
   }
@@ -349,7 +295,7 @@ export function SftpPanel({ onClose, conn, sessionId }: SftpPanelProps) {
                     )}
                     <span className="mono">{tr.status === 'error' ? '!' : `${Math.round(tr.percent)}%`}</span>
                     {tr.status === 'active' && (
-                      <IconBtn name="x" size={12} variant="bare" title={t('panels.sftpCancelTransfer')} onClick={() => cancelTransfer(tr.id)} />
+                      <IconBtn name="x" size={12} variant="bare" title={t('panels.sftpCancelTransfer')} onClick={() => { cancelTransfer(tr.id); load(pathRef.current) }} />
                     )}
                   </div>
                   <div style={{ height: 4, borderRadius: 4, background: 'var(--surface-sunken)', overflow: 'hidden' }}>
