@@ -1,14 +1,15 @@
-//! 远端文件浏览与传输 —— 基于 SSH **exec**（照搬 Reach 的实现，MIT）。
+//! 远端文件浏览与传输 —— 元数据操作基于 SSH **exec**（照搬 Reach 的实现，MIT），
+//! 上传/下载优先走 **SFTP 子系统**（分段并行），失败回退 exec + base64。
 //!
-//! 不走 SFTP 子系统，而是通过普通 exec 命令完成：
 //!   * 列目录：`ls -lA --time-style=+%s`，解析输出拿到 名称/类型/大小/属主/属组/
 //!     权限/修改时间（[`parse_ls_output`] 为纯函数，单测覆盖）。
-//!   * 上传 / 下载：单条 channel 上 `base64 -d > file` / `base64 file` 流式传输，
-//!     无逐块 SSH 往返；进度按字节节流后经 `transfer-progress-{id}` 事件发出。
-//!   * mkdir / rm / mv / touch / realpath：对应 shell 命令。
-//!
-//! 选择 exec 而非 SFTP 子系统，与 Reach 一致：吞吐更高、`ls -lA` 直接给到
-//! tooltip 所需的属主/属组/权限/时间，且无需为每次操作另开子系统。
+//!     仍走 exec：`ls -lA` 直接给到 tooltip 所需的属主/属组名称，SFTP `read_dir`
+//!     只给数字 uid/gid，切换会造成回归。
+//!   * 上传 / 下载：先试 `open_sftp`，成功则按大小走分段并行 / 单流 SFTP
+//!     （[`crate::ssh::sftp_transfer`]）；`open_sftp` 失败（子系统不支持，如 ESXi ash）
+//!     → 回退到现有 exec + base64 单流（[`upload_stream`] / [`download_stream`]）。
+//!     进度按字节节流后经 `transfer-progress-{id}` 事件发出。
+//!   * mkdir / rm / mv / touch / realpath：对应 shell 命令（仍走 exec）。
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -399,6 +400,95 @@ async fn download_stream(
     Ok(false)
 }
 
+// ─── 命令层分发：先试 SFTP 子系统，失败回退 exec + base64 ───────────────────
+
+/// 上传分发：先 `open_sftp`，成功则按大小走分段/单流 SFTP（`upload_dispatch`），
+/// 进度经 `transfer-progress-{id}` 发出；`open_sftp` 失败（子系统不支持，如 ESXi ash）
+/// → 回退到现有 exec + base64 单流（`upload_stream`）。语义保持一致：
+/// `Ok(false)` 完成、`Ok(true)` 取消、`Err` 出错。
+#[allow(clippy::too_many_arguments)]
+async fn upload_dispatch_or_fallback(
+    mgr: &SessionManager,
+    app: &tauri::AppHandle,
+    session_id: &str,
+    local_path: &str,
+    remote_path: &str,
+    total_bytes: u64,
+    filename: &str,
+    transfer_id: &str,
+    cancel: Arc<AtomicBool>,
+) -> Result<bool, SshError> {
+    match crate::ssh::sftp_transfer::open_sftp(mgr, session_id).await {
+        Ok(sftp) => {
+            let on_progress = progress_emitter(app, transfer_id, filename, total_bytes);
+            crate::ssh::sftp_transfer::upload_dispatch(
+                Arc::new(sftp),
+                local_path,
+                remote_path,
+                total_bytes,
+                cancel,
+                on_progress,
+            )
+            .await
+        }
+        // 子系统不可用：回退到 exec + base64。
+        Err(_) => {
+            let cmd = format!("base64 -d > {}", shell_escape(remote_path));
+            let channel = open_exec_channel(mgr, session_id, &cmd).await?;
+            upload_stream(channel, local_path, total_bytes, filename, transfer_id, app, cancel).await
+        }
+    }
+}
+
+/// 下载分发：对称于 [`upload_dispatch_or_fallback`]。先 `open_sftp`，成功走
+/// `download_dispatch`，失败回退 exec + base64（`download_stream`）。
+#[allow(clippy::too_many_arguments)]
+async fn download_dispatch_or_fallback(
+    mgr: &SessionManager,
+    app: &tauri::AppHandle,
+    session_id: &str,
+    remote_path: &str,
+    local_path: &str,
+    total_bytes: u64,
+    filename: &str,
+    transfer_id: &str,
+    cancel: Arc<AtomicBool>,
+) -> Result<bool, SshError> {
+    match crate::ssh::sftp_transfer::open_sftp(mgr, session_id).await {
+        Ok(sftp) => {
+            let on_progress = progress_emitter(app, transfer_id, filename, total_bytes);
+            crate::ssh::sftp_transfer::download_dispatch(
+                Arc::new(sftp),
+                remote_path,
+                local_path,
+                total_bytes,
+                cancel,
+                on_progress,
+            )
+            .await
+        }
+        Err(_) => {
+            let cmd = format!("base64 {}", shell_escape(remote_path));
+            let channel = open_exec_channel(mgr, session_id, &cmd).await?;
+            download_stream(channel, local_path, total_bytes, filename, transfer_id, app, cancel).await
+        }
+    }
+}
+
+/// 构造一个把 SFTP 引擎的字节进度回调转成 `transfer-progress-{id}` 事件的闭包。
+/// 满足 `upload_dispatch`/`download_dispatch` 要求的 `Fn(u64) + Send + Sync + 'static`。
+fn progress_emitter(
+    app: &tauri::AppHandle,
+    transfer_id: &str,
+    filename: &str,
+    total: u64,
+) -> impl Fn(u64) + Send + Sync + 'static {
+    let app = app.clone();
+    let transfer_id = transfer_id.to_string();
+    let filename = filename.to_string();
+    move |done| emit_progress(&app, &transfer_id, &filename, done, total)
+}
+
 // ─── 阻塞式传输（供 MCP 等非 UI 调用方：等待完成、不发进度事件）─────────────
 
 /// 上传本地文件到远端，等待完成后返回字节数。复用流式上传核心。
@@ -418,11 +508,20 @@ pub async fn upload_blocking(
         exec(mgr, session_id, &cmd).await?;
         return Ok(0);
     }
-    let cmd = format!("base64 -d > {}", shell_escape(remote_path));
-    let channel = open_exec_channel(mgr, session_id, &cmd).await?;
     let filename = basename(local_path);
     let cancel = Arc::new(AtomicBool::new(false));
-    let cancelled = upload_stream(channel, local_path, total_bytes, &filename, "mcp", app, cancel).await?;
+    let cancelled = upload_dispatch_or_fallback(
+        mgr,
+        app,
+        session_id,
+        local_path,
+        remote_path,
+        total_bytes,
+        &filename,
+        "mcp",
+        cancel,
+    )
+    .await?;
     if cancelled {
         return Err(SshError::Sftp("cancelled".into()));
     }
@@ -449,11 +548,20 @@ pub async fn download_blocking(
             .map_err(|e| SshError::Io(e.to_string()))?;
         return Ok(0);
     }
-    let cmd = format!("base64 {}", shell_escape(remote_path));
-    let channel = open_exec_channel(mgr, session_id, &cmd).await?;
     let filename = basename(remote_path);
     let cancel = Arc::new(AtomicBool::new(false));
-    let cancelled = download_stream(channel, local_path, total_bytes, &filename, "mcp", app, cancel).await?;
+    let cancelled = download_dispatch_or_fallback(
+        mgr,
+        app,
+        session_id,
+        remote_path,
+        local_path,
+        total_bytes,
+        &filename,
+        "mcp",
+        cancel,
+    )
+    .await?;
     if cancelled {
         return Err(SshError::Sftp("cancelled".into()));
     }
@@ -573,16 +681,25 @@ pub async fn sftp_upload(
         return Ok(id);
     }
 
-    let cmd = format!("base64 -d > {}", shell_escape(&remote_path));
-    let channel = open_exec_channel(&mgr, &session_id, &cmd).await?;
-
     let cancel = Arc::new(AtomicBool::new(false));
     mgr.register_transfer(id.clone(), cancel.clone()).await;
 
     let tid = id.clone();
     tauri::async_runtime::spawn(async move {
-        let result = upload_stream(channel, &local_path, total_bytes, &filename, &tid, &app, cancel).await;
-        app.state::<SessionManager>().unregister_transfer(&tid).await;
+        let mgr = app.state::<SessionManager>();
+        let result = upload_dispatch_or_fallback(
+            &mgr,
+            &app,
+            &session_id,
+            &local_path,
+            &remote_path,
+            total_bytes,
+            &filename,
+            &tid,
+            cancel,
+        )
+        .await;
+        mgr.unregister_transfer(&tid).await;
         dispatch_outcome(&app, &tid, result);
     });
     Ok(id)
@@ -618,16 +735,25 @@ pub async fn sftp_download(
         return Ok(id);
     }
 
-    let cmd = format!("base64 {}", shell_escape(&remote_path));
-    let channel = open_exec_channel(&mgr, &session_id, &cmd).await?;
-
     let cancel = Arc::new(AtomicBool::new(false));
     mgr.register_transfer(id.clone(), cancel.clone()).await;
 
     let tid = id.clone();
     tauri::async_runtime::spawn(async move {
-        let result = download_stream(channel, &local_path, total_bytes, &filename, &tid, &app, cancel).await;
-        app.state::<SessionManager>().unregister_transfer(&tid).await;
+        let mgr = app.state::<SessionManager>();
+        let result = download_dispatch_or_fallback(
+            &mgr,
+            &app,
+            &session_id,
+            &remote_path,
+            &local_path,
+            total_bytes,
+            &filename,
+            &tid,
+            cancel,
+        )
+        .await;
+        mgr.unregister_transfer(&tid).await;
         dispatch_outcome(&app, &tid, result);
     });
     Ok(id)
