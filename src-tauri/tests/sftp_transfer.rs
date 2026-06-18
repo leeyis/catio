@@ -19,7 +19,9 @@ use std::sync::Arc;
 
 use catio_lib::ssh::conn::{connect_authenticated, AuthMethod, ConnectArgs};
 use catio_lib::ssh::manager::{Session, SessionManager};
-use catio_lib::ssh::sftp_transfer::{download_sftp, open_sftp, upload_sftp};
+use catio_lib::ssh::sftp_transfer::{
+    download_sftp, download_sftp_segmented, open_sftp, plan_segments, upload_sftp,
+};
 
 /// 连接测试服并把会话以 "sess-1" 插入一个新建的 `SessionManager`，返回 manager。
 async fn manager_with_session(addr: std::net::SocketAddr) -> SessionManager {
@@ -137,6 +139,90 @@ async fn download_respects_cancel_flag() {
     .expect("download returns ok(true) on cancel");
     assert!(cancelled, "预置取消标志应使下载返回 Ok(true)");
     assert!(!dst.exists(), "取消后半成品本地文件应被清理");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ─── slice 4（slice4-segmented-download）集成测试 ────────────────────────────
+//
+// 验证 `download_sftp_segmented`：用 plan_segments 分多段、各段独立 File 句柄并行
+// seek/读写、本地 set_len 预占位、共享 done 聚合进度、共享 cancel 处置。
+
+/// 多 MB 文件（> MIN_SEG_SIZE，触发多段）分段下载：字节一致、大小一致、进度终值正确。
+#[tokio::test]
+async fn segmented_download_multi_mb_round_trip() {
+    let root = std::env::temp_dir().join(format!("catio-seg-dl-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let addr = test_server::start_with_root(root.clone()).await;
+    let mgr = manager_with_session(addr).await;
+
+    // 远端准备 3 MiB + 1234 字节文件：plan_segments 应给出多段（ceil(3MiB/1MiB)=4，取 4 段）。
+    let total_usize = 3 * 1024 * 1024 + 1234;
+    let payload: Vec<u8> = (0..total_usize).map(|i| (i % 251) as u8).collect();
+    let remote = "big.bin";
+    std::fs::write(root.join(remote), &payload).unwrap();
+    let total = payload.len() as u64;
+
+    // 前置：确认该大小确实被分成多段（否则测的不是分段路径）。
+    assert!(plan_segments(total).len() >= 2, "测试负载应触发多段");
+
+    let sftp = open_sftp(&mgr, "sess-1").await.expect("open sftp");
+    let dst = root.join("big-dst.bin");
+    let cancel = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicU64::new(0));
+    let done_cb = done.clone();
+    let cancelled = download_sftp_segmented(
+        Arc::new(sftp),
+        remote,
+        dst.to_str().unwrap(),
+        total,
+        cancel,
+        move |d| {
+            // 进度单调不减、不超过 total。
+            done_cb.store(d, Ordering::Relaxed);
+        },
+    )
+    .await
+    .expect("segmented download ok");
+    assert!(!cancelled, "未取消应正常完成");
+    assert_eq!(done.load(Ordering::Relaxed), total, "进度终值应为总字节数");
+
+    let got = std::fs::read(&dst).unwrap();
+    assert_eq!(got.len() as u64, total, "下载文件大小应与源一致");
+    assert_eq!(got, payload, "分段下载内容应与源逐字节一致");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 预置取消标志 → 分段下载返回 Ok(true) 且清理本地半成品文件。
+#[tokio::test]
+async fn segmented_download_respects_cancel_flag() {
+    let root = std::env::temp_dir().join(format!("catio-seg-dl-cancel-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let addr = test_server::start_with_root(root.clone()).await;
+    let mgr = manager_with_session(addr).await;
+
+    let total_usize = 3 * 1024 * 1024;
+    let payload: Vec<u8> = vec![0x33u8; total_usize];
+    let remote = "big-cancel.bin";
+    std::fs::write(root.join(remote), &payload).unwrap();
+    let total = payload.len() as u64;
+
+    let sftp = open_sftp(&mgr, "sess-1").await.expect("open sftp");
+    let dst = root.join("big-cancel-dst.bin");
+    let cancel = Arc::new(AtomicBool::new(true)); // 预先置位
+    let cancelled = download_sftp_segmented(
+        Arc::new(sftp),
+        remote,
+        dst.to_str().unwrap(),
+        total,
+        cancel,
+        |_d| {},
+    )
+    .await
+    .expect("segmented download returns ok(true) on cancel");
+    assert!(cancelled, "预置取消标志应使分段下载返回 Ok(true)");
+    assert!(!dst.exists(), "取消后本地半成品文件应被清理");
 
     let _ = std::fs::remove_dir_all(&root);
 }
