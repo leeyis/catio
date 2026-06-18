@@ -335,6 +335,94 @@ async fn segmented_upload_respects_cancel_flag() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+// ─── 传输中（进行中）取消 → 终态 cancelled 集成测试 ──────────────────────────
+//
+// 上面两个 *_respects_cancel_flag 用例在传输**前**预置 cancel，仅覆盖立即返回。
+// 这里覆盖「传输进行中」翻转 cancel 的时序：在首个进度回调（跨 PROGRESS_STEP 256 KiB）
+// 里置位 cancel，使各段在后续 CHUNK 检查时停下；join 后无 first_err、cancel 为真 →
+// 返回 Ok(true)（= 命令层 dispatch_outcome 的 cancelled 终态），并清理半成品。
+
+/// 传输进行中翻转 cancel → 分段下载返回 Ok(true) 且清理本地半成品（终态 cancelled）。
+#[tokio::test]
+async fn segmented_download_cancel_in_flight_returns_cancelled() {
+    let root =
+        std::env::temp_dir().join(format!("catio-seg-dl-inflight-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let addr = test_server::start_with_root(root.clone()).await;
+    let mgr = manager_with_session(addr).await;
+
+    // 足够大（远超 PROGRESS_STEP）以保证在完成前必有进度回调可翻转 cancel。
+    let total_usize = 4 * 1024 * 1024;
+    let payload: Vec<u8> = vec![0x41u8; total_usize];
+    let remote = "inflight.bin";
+    std::fs::write(root.join(remote), &payload).unwrap();
+    let total = payload.len() as u64;
+    assert!(plan_segments(total).len() >= 2, "应触发多段");
+
+    let sftp = open_sftp(&mgr, "sess-1").await.expect("open sftp");
+    let dst = root.join("inflight-dst.bin");
+    let cancel = Arc::new(AtomicBool::new(false)); // 传输前未取消
+    let cancel_cb = cancel.clone();
+    let cancelled = download_sftp_segmented(
+        Arc::new(sftp),
+        remote,
+        dst.to_str().unwrap(),
+        total,
+        cancel,
+        move |_d| {
+            // 进度推进到任一 PROGRESS_STEP 边界时翻转 cancel：模拟传输中用户点取消。
+            cancel_cb.store(true, Ordering::Relaxed);
+        },
+    )
+    .await
+    .expect("in-flight cancel 应返回 Ok(true) 而非 Err");
+    assert!(cancelled, "传输中翻转 cancel 应使分段下载返回 Ok(true)（cancelled）");
+    assert!(!dst.exists(), "in-flight 取消后本地半成品应被清理");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 传输进行中翻转 cancel → 分段上传返回 Ok(true) 且清理远端半成品（终态 cancelled）。
+#[tokio::test]
+async fn segmented_upload_cancel_in_flight_returns_cancelled() {
+    let root =
+        std::env::temp_dir().join(format!("catio-seg-ul-inflight-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let addr = test_server::start_with_root(root.clone()).await;
+    let mgr = manager_with_session(addr).await;
+
+    let total_usize = 4 * 1024 * 1024;
+    let payload: Vec<u8> = vec![0x42u8; total_usize];
+    let src = root.join("inflight-src.bin");
+    std::fs::write(&src, &payload).unwrap();
+    let total = payload.len() as u64;
+    assert!(plan_segments(total).len() >= 2, "应触发多段");
+
+    let sftp = open_sftp(&mgr, "sess-1").await.expect("open sftp");
+    let remote = "inflight-remote.bin";
+    let cancel = Arc::new(AtomicBool::new(false)); // 传输前未取消
+    let cancel_cb = cancel.clone();
+    let cancelled = upload_sftp_segmented(
+        Arc::new(sftp),
+        src.to_str().unwrap(),
+        remote,
+        total,
+        cancel,
+        move |_d| {
+            cancel_cb.store(true, Ordering::Relaxed);
+        },
+    )
+    .await
+    .expect("in-flight cancel 应返回 Ok(true) 而非 Err");
+    assert!(cancelled, "传输中翻转 cancel 应使分段上传返回 Ok(true)（cancelled）");
+    assert!(
+        !root.join(remote).exists(),
+        "in-flight 取消后远端半成品应被清理"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 // ─── size-mismatch 防截断（高优正确性修复）集成测试 ───────────────────────────
 //
 // 分段路径按 caller 传入的 `total` 切段，各段只读 len 字节。若真实远端/本地文件大于
