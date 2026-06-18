@@ -355,6 +355,21 @@ where
         return Ok(true);
     }
 
+    // 防截断校验：各段只读 `total` 字节、never 触发 EOF；若远端真实大小 > total
+    // （stat 给小了 / 文件在 stat 与传输间被改写变大），本地 set_len(total) 会比远端短、
+    // 内容被静默截断却报成功。完成后探测一次远端真实大小，不等于 total 即报错并清理。
+    let remote_size = sftp
+        .metadata(remote_path)
+        .await
+        .map_err(|e| SshError::Sftp(e.to_string()))?
+        .len();
+    if remote_size != total {
+        let _ = tokio::fs::remove_file(local_path).await;
+        return Err(SshError::Sftp(format!(
+            "远端文件大小 {remote_size} 与预期 {total} 不一致，疑似 stat 失真或传输中被改写，已中止以避免静默截断"
+        )));
+    }
+
     on_progress(total);
     Ok(false)
 }
@@ -536,6 +551,19 @@ where
         // 取消：删除远端半成品。
         let _ = sftp.remove_file(remote_path).await;
         return Ok(true);
+    }
+
+    // 防截断校验：各段只读本地 `total` 字节；若本地真实大小 > total（传输中被写大等），
+    // 超出部分不会上传却报成功。完成后探测一次本地真实大小，不等于 total 即报错并清理远端。
+    let local_size = tokio::fs::metadata(local_path)
+        .await
+        .map_err(|e| SshError::Io(e.to_string()))?
+        .len();
+    if local_size != total {
+        let _ = sftp.remove_file(remote_path).await;
+        return Err(SshError::Io(format!(
+            "本地文件大小 {local_size} 与预期 {total} 不一致，疑似传输中被改写，已中止以避免远端静默截断"
+        )));
     }
 
     on_progress(total);
