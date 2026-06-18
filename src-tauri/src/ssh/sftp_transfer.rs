@@ -84,6 +84,51 @@ pub async fn open_sftp(mgr: &SessionManager, session_id: &str) -> Result<SftpSes
         .map_err(|e| SshError::Sftp(e.to_string()))
 }
 
+// ─── 按大小分发（命令层入口）────────────────────────────────────────────────
+
+/// 上传分发：文件 `total ≥ SEGMENT_THRESHOLD` 走分段并行 `upload_sftp_segmented`，
+/// 否则走单流 `upload_sftp`（避免小文件的分段开销）。语义与底层一致：
+/// 取消 → `Ok(true)`，完成 → `Ok(false)`，失败 → `Err`。
+///
+/// 由命令层在 `open_sftp` 成功后调用；`open_sftp` 失败则命令层回退 exec + base64。
+pub async fn upload_dispatch<F>(
+    sftp: Arc<SftpSession>,
+    local_path: &str,
+    remote_path: &str,
+    total: u64,
+    cancel: Arc<AtomicBool>,
+    on_progress: F,
+) -> Result<bool, SshError>
+where
+    F: Fn(u64) + Send + Sync + 'static,
+{
+    if total >= SEGMENT_THRESHOLD {
+        upload_sftp_segmented(sftp, local_path, remote_path, total, cancel, on_progress).await
+    } else {
+        upload_sftp(&sftp, local_path, remote_path, total, cancel, on_progress).await
+    }
+}
+
+/// 下载分发：远端 `total ≥ SEGMENT_THRESHOLD` 走分段并行 `download_sftp_segmented`，
+/// 否则走单流 `download_sftp`。语义同 [`upload_dispatch`]。
+pub async fn download_dispatch<F>(
+    sftp: Arc<SftpSession>,
+    remote_path: &str,
+    local_path: &str,
+    total: u64,
+    cancel: Arc<AtomicBool>,
+    on_progress: F,
+) -> Result<bool, SshError>
+where
+    F: Fn(u64) + Send + Sync + 'static,
+{
+    if total >= SEGMENT_THRESHOLD {
+        download_sftp_segmented(sftp, remote_path, local_path, total, cancel, on_progress).await
+    } else {
+        download_sftp(&sftp, remote_path, local_path, total, cancel, on_progress).await
+    }
+}
+
 // ─── 单流顺序传输（N=1 路径）────────────────────────────────────────────────
 
 /// 单流顺序上传：本地文件 → 远端单 `File` 句柄，按 `CHUNK` 顺序读写。
