@@ -22,9 +22,22 @@ pub const CHUNK: usize = 32 * 1024;
 ///
 /// 保证：各段长度之和等于 `total`，相邻段首尾相接（无重叠、无空洞），段数 ≤ `SEGMENTS`。
 pub fn plan_segments(total: u64) -> Vec<(u64, u64)> {
-    // 待实现：真实分段逻辑见后续 feat 提交。
-    let _ = total;
-    Vec::new()
+    if total == 0 {
+        return vec![(0, 0)];
+    }
+    // ceil(total / MIN_SEG_SIZE)
+    let by_min = total.div_ceil(MIN_SEG_SIZE);
+    let n = SEGMENTS.min(by_min).max(1);
+    let seg = total / n;
+    let mut out = Vec::with_capacity(n as usize);
+    let mut offset = 0u64;
+    for i in 0..n {
+        // 最后一段吃掉余数。
+        let len = if i == n - 1 { total - offset } else { seg };
+        out.push((offset, len));
+        offset += len;
+    }
+    out
 }
 
 #[cfg(test)]
