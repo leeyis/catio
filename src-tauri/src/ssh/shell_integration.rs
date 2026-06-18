@@ -33,40 +33,99 @@ elif [ -n "${BASH_VERSION:-}" ]; then
   case "$PS1" in *'633;B'*) ;; *) PS1="$PS1"$'\[\e]633;B\a\]';; esac
 fi"#;
 
-/// Returns ONE line to write to the PTY that installs the shell-integration
+/// 块大小：每条赋值行携带的 base64 字节数。配合固定前缀后整行远低于 POSIX
+/// `MAX_CANON`（规范模式单行上限，最小可低至 255 字节），确保任何 PTY 都不会截断。
+const CHUNK: usize = 120;
+
+/// Returns the bytes to write to the PTY that install the shell-integration
 /// hooks for the given `nonce`. The integration body is base64-encoded and
 /// decoded remotely (covering both GNU `base64 -d` and BSD `base64 --decode`).
 ///
-/// The leading space, combined with `HISTCONTROL=ignorespace`, keeps the
-/// bootstrap out of the remote shell's history.
+/// 关键：**绝不**一次写一条超长单行。部分 SSH 服务端（典型如 ESXi 的 dropbear）
+/// PTY 规范模式的单行长度上限很小，超长行会被截断；截断点一旦落在 base64 的单引号
+/// 字符串中间，引号便不闭合，远端 shell 随即卡在 PS2 续行（`> `）——之后每条命令都
+/// 被当作续行，永不执行、永无输出。因此把 base64 切成小块，用多条各自引号闭合的短
+/// 赋值命令拼到 `__c`，最后统一解码 `eval`。每行前导空格配合 `HISTCONTROL=ignorespace`
+/// 使这些引导命令不进入 bash 历史。对无 `base64` 的极简 shell（如 ESXi 的 ash），
+/// `eval` 得到空串、纯无害（shell-integration 本就只对 bash/zsh 生效），交互不再被卡死。
+///
+/// 返回值含多个换行：调用方一次写入 PTY，远端按行逐条执行（每行均短于截断上限）。
 pub fn bootstrap_line(nonce: &str) -> String {
     let body = INTEGRATION_TEMPLATE.replace("__CATIO_NONCE__", nonce);
     let b64 = B64.encode(body.as_bytes());
-    format!(
-        " export HISTCONTROL=ignorespace; eval \"$(printf %s '{b64}' | base64 -d 2>/dev/null || printf %s '{b64}' | base64 --decode)\"\n"
-    )
+    let mut s = String::new();
+    s.push_str(" export HISTCONTROL=ignorespace\n");
+    s.push_str(" __c=''\n");
+    // b64 仅含 [A-Za-z0-9+/=]，是纯 ASCII，故按字节切片安全；单引号内这些字符绝对安全。
+    let mut i = 0;
+    while i < b64.len() {
+        let end = (i + CHUNK).min(b64.len());
+        s.push_str(" __c=\"$__c\"'");
+        s.push_str(&b64[i..end]);
+        s.push_str("'\n");
+        i = end;
+    }
+    s.push_str(" eval \"$(printf %s \"$__c\" | base64 -d 2>/dev/null || printf %s \"$__c\" | base64 --decode 2>/dev/null)\"\n");
+    s.push_str(" unset __c\n");
+    s
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // 从分块注入中还原出完整 base64：拼接每条 ` __c="$__c"'<chunk>'` 行的片段。
+    fn reassemble_b64(script: &str) -> String {
+        script
+            .lines()
+            .filter_map(|l| {
+                let l = l.trim_start();
+                let rest = l.strip_prefix("__c=\"$__c\"'")?;
+                rest.strip_suffix('\'')
+            })
+            .collect()
+    }
+
     #[test]
     fn bootstrap_line_shape() {
-        let line = bootstrap_line("ABC");
-        // Leading space keeps it out of history with HISTCONTROL=ignorespace.
-        assert!(line.starts_with(' '), "must start with a space: {line:?}");
+        let script = bootstrap_line("ABC");
+        // Leading space keeps each command out of history with HISTCONTROL=ignorespace.
+        assert!(script.starts_with(' '), "must start with a space: {script:?}");
         // Covers GNU base64 decode.
-        assert!(line.contains("base64 -d"), "missing `base64 -d`: {line:?}");
+        assert!(script.contains("base64 -d"), "missing `base64 -d`: {script:?}");
         // Covers BSD base64 decode fallback.
-        assert!(line.contains("base64 --decode"), "missing `base64 --decode`: {line:?}");
-        // A non-empty base64 blob must be present (the encoded integration body).
-        let b64 = B64.encode(INTEGRATION_TEMPLATE.replace("__CATIO_NONCE__", "ABC").as_bytes());
-        assert!(!b64.is_empty());
-        assert!(line.contains(&b64), "base64 blob not embedded");
-        // The nonce must round-trip into the encoded body.
+        assert!(script.contains("base64 --decode"), "missing `base64 --decode`: {script:?}");
+        // 把分块片段还原出 base64，解码后必须是带 nonce 的 integration 脚本。
+        let b64 = reassemble_b64(&script);
+        assert!(!b64.is_empty(), "no base64 chunks embedded: {script:?}");
         let decoded = String::from_utf8(B64.decode(b64.as_bytes()).unwrap()).unwrap();
         assert!(decoded.contains("ABC"), "nonce not embedded in body");
+        assert!(
+            decoded.contains("ZSH_VERSION") && decoded.contains("BASH_VERSION"),
+            "decoded body is not the integration template: {decoded}"
+        );
+        // 还原结果必须与直接编码完整脚本逐字节一致（分块/拼接无损）。
+        let expected = B64.encode(INTEGRATION_TEMPLATE.replace("__CATIO_NONCE__", "ABC").as_bytes());
+        assert_eq!(b64, expected, "reassembled base64 differs from source");
+    }
+
+    #[test]
+    fn no_line_exceeds_canonical_pty_limit() {
+        // 根因回归：任何一行都必须远低于 POSIX MAX_CANON(255)，否则 ESXi 等 PTY 会
+        // 截断该行、引号断裂，使远端 shell 卡死在 PS2 续行。用长 nonce 取更长的脚本。
+        let script = bootstrap_line("deadbeefdeadbeefdeadbeefdeadbeef");
+        for l in script.lines() {
+            assert!(
+                l.len() < 200,
+                "injected line too long ({} bytes), risks PTY truncation: {l:?}",
+                l.len()
+            );
+        }
+        // 必须确实是多行注入（不是退回单行）。
+        assert!(
+            script.lines().count() > 5,
+            "bootstrap must be split into many short lines"
+        );
     }
 
     #[test]
