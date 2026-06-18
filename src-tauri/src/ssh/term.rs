@@ -120,8 +120,26 @@ pub async fn term_open(
         // cannot retype the exact same command within 800ms, so this is safe.
         let mut last_emit: Option<(String, std::time::Instant)> = None;
         let started = std::time::Instant::now();
+        // mute 兜底定时器。此前解除 mute 的 fallback 判定只在「收到数据」时(emit_scanned
+        // 内)进行;不带 shell-integration 的 shell(如 ESXi 的 ash 永不发 OSC marker)发完
+        // 初始提示符+引导回显便沉默,没有新数据触发判定 → mute 永不解除、终端一直空白,
+        // 用户在空白里打的字还会进远端缓冲(mute 只挡显示不挡发送),造成命令拼接错乱。
+        // 改用独立定时器:到点必解除;且这类 shell 不会自行重绘被丢弃的初始提示符,故解除
+        // 时补发一个回车,促其打印一个干净的新提示符。bash 等会更早因 OSC marker 解除
+        // (muted 已为 false),到点时不补回车,行为不变。
+        let mute_fallback = tokio::time::sleep(std::time::Duration::from_millis(MUTE_FALLBACK_MS));
+        tokio::pin!(mute_fallback);
+        let mut fallback_fired = false;
         loop {
             tokio::select! {
+                _ = &mut mute_fallback, if !fallback_fired => {
+                    fallback_fired = true;
+                    if muted {
+                        muted = false;
+                        // 非集成 shell:补发回车,让其显示一个干净提示符。
+                        let _ = channel.data(&b"\r"[..]).await;
+                    }
+                }
                 msg = channel.wait() => match msg {
                     Some(ChannelMsg::Data { ref data }) => {
                         emit_scanned(
