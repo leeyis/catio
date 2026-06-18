@@ -335,6 +335,90 @@ async fn segmented_upload_respects_cancel_flag() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+// ─── size-mismatch 防截断（高优正确性修复）集成测试 ───────────────────────────
+//
+// 分段路径按 caller 传入的 `total` 切段，各段只读 len 字节。若真实远端/本地文件大于
+// `total`（stat 输出异常、文件在 stat 与传输间被改写变大等），各段读满 len 即停、
+// never 触发 EOF，最终 set_len(total) 的本地文件/落盘远端文件比真实源短、内容被静默
+// 截断却返回 Ok(false)（成功）。修复后：分段完成应校验真实源大小 == total，不等则报错。
+
+/// 远端真实文件大于声明 `total` → 分段下载应报错（防止本地被静默截断为 total）。
+#[tokio::test]
+async fn segmented_download_errors_when_remote_larger_than_total() {
+    let root = std::env::temp_dir().join(format!("catio-seg-dl-trunc-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let addr = test_server::start_with_root(root.clone()).await;
+    let mgr = manager_with_session(addr).await;
+
+    // 真实远端文件 3 MiB + 4096，但 caller 只声明 3 MiB（少 4096，模拟 stat 给小了）。
+    let real_usize = 3 * 1024 * 1024 + 4096;
+    let payload: Vec<u8> = (0..real_usize).map(|i| (i % 251) as u8).collect();
+    let remote = "trunc.bin";
+    std::fs::write(root.join(remote), &payload).unwrap();
+    let declared_total = (3 * 1024 * 1024) as u64;
+    assert!(plan_segments(declared_total).len() >= 2, "应触发多段");
+
+    let sftp = open_sftp(&mgr, "sess-1").await.expect("open sftp");
+    let dst = root.join("trunc-dst.bin");
+    let cancel = Arc::new(AtomicBool::new(false));
+    let res = download_sftp_segmented(
+        Arc::new(sftp),
+        remote,
+        dst.to_str().unwrap(),
+        declared_total,
+        cancel,
+        |_d| {},
+    )
+    .await;
+    assert!(
+        res.is_err(),
+        "真实远端大于声明 total 时分段下载应报错，而非静默截断报成功"
+    );
+    assert!(!dst.exists(), "报错后本地半成品应被清理");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 本地真实文件大于声明 `total` → 分段上传应报错（防止远端被静默截断为 total）。
+#[tokio::test]
+async fn segmented_upload_errors_when_local_larger_than_total() {
+    let root = std::env::temp_dir().join(format!("catio-seg-ul-trunc-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let addr = test_server::start_with_root(root.clone()).await;
+    let mgr = manager_with_session(addr).await;
+
+    // 真实本地文件 3 MiB + 4096，但 caller 只声明 3 MiB。
+    let real_usize = 3 * 1024 * 1024 + 4096;
+    let payload: Vec<u8> = (0..real_usize).map(|i| (i % 251) as u8).collect();
+    let src = root.join("trunc-src.bin");
+    std::fs::write(&src, &payload).unwrap();
+    let declared_total = (3 * 1024 * 1024) as u64;
+    assert!(plan_segments(declared_total).len() >= 2, "应触发多段");
+
+    let sftp = open_sftp(&mgr, "sess-1").await.expect("open sftp");
+    let remote = "trunc-remote.bin";
+    let cancel = Arc::new(AtomicBool::new(false));
+    let res = upload_sftp_segmented(
+        Arc::new(sftp),
+        src.to_str().unwrap(),
+        remote,
+        declared_total,
+        cancel,
+        |_d| {},
+    )
+    .await;
+    assert!(
+        res.is_err(),
+        "真实本地大于声明 total 时分段上传应报错，而非静默截断报成功"
+    );
+    assert!(
+        !root.join(remote).exists(),
+        "报错后远端半成品应被清理"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 // ─── slice 6（slice6-wire-commands-fallback）集成测试 ────────────────────────
 //
 // 验证命令层分发核心 `upload_dispatch` / `download_dispatch`：按文件大小在「分段并行」
