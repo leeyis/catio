@@ -65,8 +65,14 @@ pub fn bootstrap_line(nonce: &str) -> String {
         s.push_str("'\n");
         i = end;
     }
-    s.push_str(" eval \"$(printf %s \"$__c\" | base64 -d 2>/dev/null || printf %s \"$__c\" | base64 --decode 2>/dev/null)\"\n");
-    s.push_str(" unset __c\n");
+    // 关键：把 `unset __c` 放进 eval 字符串的**最前面**(而非作为独立的最后一行)。
+    // 独立的 ` unset __c` 行会在 integration 安装、第一个 prompt(OSC marker)解除
+    // mute 之后才回显，于是被显示到终端(用户报告的 `unset __c` 噪声)。放进 eval 串内：
+    //   * $() 在求值时先解码(此时 __c 仍在),
+    //   * eval 执行 "unset __c; <body>"——unset 在 hook 安装前跑、无独立回显、不触发审计;
+    //   * 这成为注入的最后一行,其后第一个 prompt 才解除 mute,终端从干净的 prompt 起显。
+    // 对无 base64 的极简 shell(ESXi),$() 为空,eval 仅执行 `unset __c`,同样清理且无害。
+    s.push_str(" eval \"unset __c; $(printf %s \"$__c\" | base64 -d 2>/dev/null || printf %s \"$__c\" | base64 --decode 2>/dev/null)\"\n");
     s
 }
 
