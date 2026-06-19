@@ -39,9 +39,13 @@ export interface SchemaBrowserProps {
   refreshing?: boolean
   /** True while the INITIAL introspection is in flight — shows a skeleton instead of a blank tree. */
   loading?: boolean
+  /** 整栏收起态:由父级 DbWorkbench 持有(含最大化联动)。收起后只剩一条窄边 + 展开按钮。 */
+  collapsed?: boolean
+  /** 切换收起/展开(收起按钮与窄边展开按钮都调用它)。 */
+  onToggleCollapse?: () => void
 }
 
-export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, schemas, conn, live, refreshing, loading }: SchemaBrowserProps) {
+export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, schemas, conn, live, refreshing, loading, collapsed, onToggleCollapse }: SchemaBrowserProps) {
   const { t } = useTranslation()
   const D = useData()
   // Live path: render every supplied namespace; mock path: the single seeded schema (pixel-identical).
@@ -53,6 +57,18 @@ export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpen
   const headerName = conn?.name ?? 'prod-orders'
   const headerEngine = conn ? (conn.engine ?? conn.sub) : 'PostgreSQL 16.2'
   const headerGlyph = conn ?? D.byId['d-orders']
+
+  // 收起态:窄边 + 居中"展开"按钮,隐藏 header 文字/搜索/树/footer。
+  if (collapsed) {
+    return (
+      <div className="col" style={{ width: 36, flex: 'none', alignItems: 'center', paddingTop: 10, borderRight: '1px solid var(--border-hairline)', background: 'var(--surface-card)' }}>
+        <button className="icon-btn bare" data-testid="wb-expand-sidebar" style={{ width: 26, height: 26 }}
+          title={t('workbench.expandSidebar')} aria-label={t('workbench.expandSidebar')} onClick={onToggleCollapse}>
+          <Icon name="panel-left" size={15} style={{ color: 'var(--text-tertiary)' }} />
+        </button>
+      </div>
+    )
+  }
 
   return (
     <div className="col" style={{ width: 248, flex: 'none', borderRight: '1px solid var(--border-hairline)', background: 'var(--surface-card)' }}>
@@ -67,6 +83,12 @@ export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpen
           <button className="icon-btn bare" data-testid="wb-refresh" style={{ width: 26, height: 26 }} title={t('workbench.refresh')} onClick={onRefresh} disabled={refreshing}>
             <Icon name="refresh-cw" size={13} style={refreshing ? { animation: 'spin 1s linear infinite' } : undefined} />
           </button>
+          {onToggleCollapse && (
+            <button className="icon-btn bare" data-testid="wb-collapse-sidebar" style={{ width: 26, height: 26 }}
+              title={t('workbench.collapseSidebar')} aria-label={t('workbench.collapseSidebar')} onClick={onToggleCollapse}>
+              <Icon name="chevron-left" size={15} style={{ color: 'var(--text-tertiary)' }} />
+            </button>
+          )}
         </div>
       </div>
       {/* search */}
@@ -78,7 +100,7 @@ export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpen
       {/* tree — one collapsible top-level DB node per schema namespace.
           Live connection: skeleton while introspecting, empty-state when it returns
           nothing, otherwise the real tree. Mock path always has namespaces. */}
-      <div className="grow" style={{ overflowY: 'auto', padding: '0 6px 10px' }}>
+      <div className="grow scrollon" style={{ overflowY: 'auto', padding: '0 6px 10px' }}>
         {loading && namespaces.length === 0 ? (
           <div className="col" style={{ gap: 9, padding: '8px 6px' }} aria-busy="true" data-testid="schema-skeleton">
             {[0, 1, 2, 3, 4, 5, 6].map(i => (

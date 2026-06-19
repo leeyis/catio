@@ -81,6 +81,20 @@
     "needsAuthHint": "自动扫描识别到此连接但未验证凭证，首次连接需手动输入密码"
   },
   "dbviews": {
+    "maximizeEditor": "最大化编辑区",
+    "maximizeResults": "最大化结果区",
+    "restorePane": "恢复大小",
+    "copyCell": "复制单元格",
+    "cellCopied": "已复制",
+    "resizeColumnHint": "拖动调整列宽",
+    "viewRowDetail": "查看明细",
+    "rowDetail": "明细数据",
+    "prevRow": "上一条",
+    "nextRow": "下一条",
+    "pageSize": "每页行数",
+    "statNew": "{{count}} 新增",
+    "statEdited": "{{count}} 修改",
+    "statDeleted": "{{count}} 删除",
     "copySel": "复制",
     "askAI": "问 AI",
     "viaTunnel": "经 db-bastion 隧道",
@@ -174,6 +188,8 @@
     "esPlaceholder": "GET /index/_search\n{ \"query\": { \"match_all\": {} } }  —  也支持 SELECT * FROM index"
   },
   "workbench": {
+    "collapseSidebar": "收起侧栏",
+    "expandSidebar": "展开侧栏",
     "newTab": "新建标签",
     "closeCurrent": "关闭当前",
     "closeOthers": "关闭其他",

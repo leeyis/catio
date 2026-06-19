@@ -362,3 +362,29 @@ describe('DbWorkbench unified tabs', () => {
     expect(screen.getByText(/没有打开的标签|No open tabs/)).toBeInTheDocument()
   })
 })
+
+describe('DbWorkbench 侧栏整栏收起 (功能#2)', () => {
+  beforeEach(() => {
+    h.list.mockReset(); h.tablePreview.mockReset(); h.getSchema.mockReset(); h.runQuery.mockReset(); h.objectSource.mockReset()
+    h.list.mockReturnValue([])
+    h.tablePreview.mockResolvedValue({ columns: [], rows: [] })
+    h.getSchema.mockResolvedValue(LIVE_SCHEMA)
+    h.runQuery.mockResolvedValue({ columns: [], rows: [] })
+    h.objectSource.mockResolvedValue('')
+  })
+
+  it('点击收起按钮进入收起态(出现展开按钮、隐藏搜索框),再点展开恢复', () => {
+    wrap(<DbWorkbench conn={CONN} />)
+    // 展开态:搜索框可见、收起按钮存在
+    expect(screen.getByPlaceholderText(/搜索表|Search/)).toBeInTheDocument()
+    const collapseBtn = screen.getByTestId('wb-collapse-sidebar')
+    // 收起 → 搜索框消失,展开按钮出现
+    fireEvent.click(collapseBtn)
+    expect(screen.queryByPlaceholderText(/搜索表|Search/)).not.toBeInTheDocument()
+    const expandBtn = screen.getByTestId('wb-expand-sidebar')
+    expect(expandBtn).toBeInTheDocument()
+    // 展开 → 搜索框恢复
+    fireEvent.click(expandBtn)
+    expect(screen.getByPlaceholderText(/搜索表|Search/)).toBeInTheDocument()
+  })
+})

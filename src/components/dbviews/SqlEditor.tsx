@@ -91,7 +91,22 @@ const catioTheme = EditorView.theme(
       fontFamily: "'Geist Mono', monospace",
       lineHeight: '1.6',
       overflow: 'auto',
+      // 内容溢出时显示可见、可拖动的滚动条(覆盖全局 scrollbar 隐藏);
+      // thumb 复用 tokens.css 中基于 --text-faint 的样式,自动适配主题。
+      scrollbarWidth: 'thin',
     },
+    '.cm-scroller::-webkit-scrollbar': { width: '10px', height: '10px' },
+    '.cm-scroller::-webkit-scrollbar-thumb': {
+      background: 'color-mix(in srgb, var(--text-faint) 40%, transparent)',
+      borderRadius: '999px',
+      border: '3px solid transparent',
+      backgroundClip: 'padding-box',
+    },
+    '.cm-scroller::-webkit-scrollbar-thumb:hover': {
+      background: 'color-mix(in srgb, var(--text-faint) 65%, transparent)',
+      backgroundClip: 'padding-box',
+    },
+    '.cm-scroller::-webkit-scrollbar-corner': { background: 'transparent' },
     '.cm-content': {
       padding: '12px 14px',
       caretColor: 'var(--accent-primary)',

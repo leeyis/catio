@@ -658,6 +658,22 @@ input, textarea { font-family: inherit; }
 *::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--text-faint) 65%, transparent); background-clip: padding-box; }
 *::-webkit-scrollbar-corner { background: transparent; }
 
+/* opt-in 可见滚动条：仅供数据区(库结构树/结果网格/SQL 编辑器)主动挂载，覆盖上面的全局隐藏 */
+.scrollon { scrollbar-width: thin; }
+.scrollon::-webkit-scrollbar { width: 10px; height: 10px; }
+.scrollon::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--text-faint) 40%, transparent);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+.scrollon::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--text-faint) 65%, transparent); background-clip: padding-box; }
+.scrollon::-webkit-scrollbar-corner { background: transparent; }
+
+/* 结果网格行号上的"查看明细"按钮：默认隐藏，悬浮该行时浮出 */
+.row-detail-btn { opacity: 0; transition: opacity .12s; }
+.gridrow:hover .row-detail-btn { opacity: 1; }
+
 /* ============================================================
    Desktop stage — letterbox the fixed-size window
    ============================================================ */
