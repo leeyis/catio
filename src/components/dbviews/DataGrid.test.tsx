@@ -121,6 +121,44 @@ describe('DataGrid generic rows', () => {
     expect(screen.queryByTitle(/Save edits/i)).not.toBeInTheDocument()
   })
 
+  it('copies the selected cell full text on Ctrl+C', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+    const columns: ResultColumn[] = [
+      { name: 'id', type: 'int', pk: true },
+      { name: 'name', type: 'text' },
+    ]
+    const rows: unknown[][] = [[1, 'alice'], [2, 'bob']]
+    wrap(<DataGrid columns={columns} rows={rows} statusTones={{}} density="comfortable" />)
+
+    // Select the "alice" cell, then dispatch Ctrl+C on the focusable grid container.
+    fireEvent.click(screen.getByText('alice'))
+    const grid = document.querySelector('.scrollon') as HTMLElement
+    expect(grid).toBeTruthy()
+    fireEvent.keyDown(grid, { key: 'c', ctrlKey: true })
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('alice'))
+  })
+
+  it('drag-resizing a column header updates the grid template width', () => {
+    const columns: ResultColumn[] = [
+      { name: 'id', type: 'int', pk: true },
+      { name: 'name', type: 'text' },
+    ]
+    const rows: unknown[][] = [[1, 'alice'], [2, 'bob']]
+    wrap(<DataGrid columns={columns} rows={rows} statusTones={{}} density="comfortable" />)
+
+    const handle = screen.getAllByTitle(/resize/i)[0] // 'id' 列的拖动手柄
+    const header = document.querySelector('[data-grid-header]') as HTMLElement
+    const before = header.style.gridTemplateColumns
+    fireEvent.mouseDown(handle, { clientX: 200 })
+    fireEvent.mouseMove(document, { clientX: 260 })
+    fireEvent.mouseUp(document)
+    const after = header.style.gridTemplateColumns
+    expect(after).not.toBe(before)
+    // 'id' default width is 160 → +60px drag = 220px.
+    expect(after).toContain('220px')
+  })
+
   it('reuses the default namespace for raw-query pagination', async () => {
     queryPage.mockResolvedValue({ columns: [{ name: 'id', type: 'int' }], rows: [[101]], truncated: false })
     const columns: ResultColumn[] = [{ name: 'id', type: 'int' }]
@@ -143,5 +181,27 @@ describe('DataGrid generic rows', () => {
       100,
       'dwd',
     ))
+  })
+
+  it('row detail: opens a vertical detail modal, renders URL values as links, and prev/next navigate within the page', () => {
+    const columns: ResultColumn[] = [
+      { name: 'id', type: 'int', pk: true },
+      { name: 'site', type: 'text' },
+    ]
+    const rows: unknown[][] = [[1, 'https://example.com'], [2, 'plain value']]
+    wrap(<DataGrid columns={columns} rows={rows} statusTones={{}} density="comfortable" />)
+    // 每行行号处都有一个"查看明细"按钮
+    const detailBtns = screen.getAllByTitle('View detail')
+    expect(detailBtns.length).toBe(2)
+    fireEvent.click(detailBtns[0])
+    // 弹窗标题携带行号；URL 值渲染为可点击链接
+    expect(screen.getByText('Row detail[1]')).toBeInTheDocument()
+    const link = screen.getByRole('link', { name: 'https://example.com' })
+    expect(link).toHaveAttribute('href', 'https://example.com')
+    // 下一条 → 第 2 行，标题变为 [2]，纯文本不是链接
+    fireEvent.click(screen.getByTitle('Next'))
+    expect(screen.getByText('Row detail[2]')).toBeInTheDocument()
+    // 第 2 行没有 URL，明细里不应再出现可点击链接（网格单元格本身不会渲染成链接）
+    expect(screen.queryByRole('link')).toBeNull()
   })
 })

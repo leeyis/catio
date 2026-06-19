@@ -36,9 +36,14 @@ export interface SqlConsoleProps {
   connName?: string
   /** 保存档 profile id — 随历史记录持久化,使历史可按连接删除/友好显示。 */
   profileId?: string
+  /**
+   * 上报"是否处于最大化"(paneMode !== 'split')给父级 DbWorkbench,
+   * 用于最大化时联动收起左侧侧栏(功能#6)。仅当前活动 tab 的态影响侧栏。
+   */
+  onFullscreenChange?: (fullscreen: boolean) => void
 }
 
-export function SqlConsole({ density, fresh, writable = true, connId, initialCode, initialDefaultSchema, active, engine, connName, profileId }: SqlConsoleProps) {
+export function SqlConsole({ density, fresh, writable = true, connId, initialCode, initialDefaultSchema, active, engine, connName, profileId, onFullscreenChange }: SqlConsoleProps) {
   const { t } = useTranslation()
   // mongodb/elasticsearch 用各自语法(mongo shell / REST+SQL),编辑器走 plain 模式:
   // 不挂 SQL 补全、显示语法占位提示、结果网格只读(mongo 的 _id 带 pk 标记,
@@ -73,6 +78,41 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
   const [liveColumns, setLiveColumns] = useState<Record<string, Record<string, string[]>>>({})
   // Imperative handle to the CodeMirror editor for cursor-aware insertion.
   const editorRef = useRef<SqlEditorHandle>(null)
+  // 编辑区/结果区上下分隔(功能#5):编辑区占比,仅会话内存。
+  const [splitRatio, setSplitRatio] = useState(0.5)
+  // 一键最大化(功能#6):'split' 上下分屏 / 'maxEditor' 编辑区占满 / 'maxResults' 结果区占满。
+  const [paneMode, setPaneMode] = useState<'split' | 'maxEditor' | 'maxResults'>('split')
+  // 外层容器引用 — 拖动分隔条时按容器高度把位移换算成比例增量。
+  const splitContainerRef = useRef<HTMLDivElement>(null)
+  // 分隔条 hover/拖动高亮(不依赖外部 CSS 文件,内联实现,保证主题切换正常)。
+  const [splitHot, setSplitHot] = useState(false)
+
+  // 上报最大化态给父级(功能#6 父子契约):非 split 即视为占满,父级据此联动收起侧栏。
+  useEffect(() => { onFullscreenChange?.(paneMode !== 'split') }, [paneMode, onFullscreenChange])
+
+  // 分隔条拖动:在 document 上挂 mousemove/mouseup,按容器高度换算比例,clamp 到 [0.15,0.85]。
+  function onSplitDragStart(e: React.MouseEvent) {
+    e.preventDefault()
+    const container = splitContainerRef.current
+    if (!container) return
+    const total = container.getBoundingClientRect().height
+    if (total <= 0) return
+    const startY = e.clientY
+    const startRatio = splitRatio
+    const onMove = (ev: MouseEvent) => {
+      const delta = (ev.clientY - startY) / total
+      const next = Math.min(0.85, Math.max(0.15, startRatio + delta))
+      setSplitRatio(next)
+    }
+    const onUp = () => {
+      setSplitHot(false)
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+    }
+    setSplitHot(true)
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+  }
   // Live collection names for the plain-mode mongo completion source. Held in a
   // ref so the (stable-identity) completion source reads the latest list without
   // rebuilding the editor extension on every schema change.
@@ -295,7 +335,7 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
   }, [active])
 
   return (
-    <div className="col" style={{ height: '100%', width: '100%', minHeight: 0, minWidth: 0 }}>
+    <div ref={splitContainerRef} className="col" style={{ height: '100%', width: '100%', minHeight: 0, minWidth: 0 }}>
       {/* console toolbar — the query name lives in the tab strip above, so it's not
           repeated here; just the editor actions, right-aligned. */}
       <div className="row" style={{ justifyContent: 'space-between', gap: 10, padding: '7px 12px', borderBottom: '1px solid var(--border-hairline)', flex: 'none' }}>
@@ -329,18 +369,53 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
               </select>
             </label>
           )}
+          {/* 功能#6:编辑区最大化/恢复。仅在有结果区(phase!=='idle')时显示——idle 时编辑区本就占满。 */}
+          {phase !== 'idle' && (
+            paneMode === 'maxEditor'
+              ? <button className="icon-btn bare" title={t('dbviews.restorePane')} onClick={() => setPaneMode('split')}><Icon name="minimize-2" size={15} /></button>
+              : <button className="icon-btn bare" title={t('dbviews.maximizeEditor')} onClick={() => setPaneMode('maxEditor')}><Icon name="maximize-2" size={15} /></button>
+          )}
         </div>
       </div>
       {/* editor — always grows to fill the available area (full width + height).
           When there are no results yet it fills the whole console; once a run
-          starts it shares the space with the results region below (a split). */}
-      <div style={{ flex: 1, minHeight: 140, width: '100%', borderBottom: phase === 'idle' ? 'none' : '1px solid var(--border-hairline)' }}>
-        <SqlEditor ref={editorRef} code={code} onChange={setCode} schema={editorSchema} onRun={run} onRunSelection={connId ? (sql => run(sql)) : undefined} placeholder={editorPlaceholder} plain={plain} completion={completion} />
-      </div>
+          starts it shares the space with the results region below (a split).
+          功能#5/#6:split 态按 splitRatio 分配高度;maxEditor 占满;maxResults 时隐藏。 */}
+      {paneMode !== 'maxResults' && (
+        <div style={{
+          flexGrow: phase === 'idle' || paneMode === 'maxEditor' ? 1 : splitRatio,
+          flexBasis: 0,
+          minHeight: 140,
+          width: '100%',
+          borderBottom: phase === 'idle' ? 'none' : '1px solid var(--border-hairline)',
+        }}>
+          <SqlEditor ref={editorRef} code={code} onChange={setCode} schema={editorSchema} onRun={run} onRunSelection={connId ? (sql => run(sql)) : undefined} placeholder={editorPlaceholder} plain={plain} completion={completion} />
+        </div>
+      )}
+      {/* 功能#5:编辑区与结果区之间的水平拖动分隔条。仅在 split 态且有结果区时显示。 */}
+      {phase !== 'idle' && paneMode === 'split' && (
+        <div
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label={t('dbviews.resizeColumnHint')}
+          onMouseDown={onSplitDragStart}
+          onMouseEnter={() => setSplitHot(true)}
+          onMouseLeave={() => setSplitHot(false)}
+          style={{ flex: 'none', height: 6, width: '100%', cursor: 'row-resize', background: splitHot ? 'var(--accent-primary)' : 'var(--border-hairline)', transition: 'background .12s' }}
+        />
+      )}
       {/* results — only rendered once a run has started (running/done). While
-          idle (fresh query) the editor above fills everything. */}
-      {phase !== 'idle' && (
-        <div style={{ flex: 1, minHeight: 0, width: '100%' }}>
+          idle (fresh query) the editor above fills everything.
+          功能#6:maxEditor 时隐藏;maxResults 占满;split 按 1-ratio 分配。 */}
+      {phase !== 'idle' && paneMode !== 'maxEditor' && (
+        <div className="col" style={{ flexGrow: paneMode === 'maxResults' ? 1 : 1 - splitRatio, flexBasis: 0, minHeight: 0, width: '100%' }}>
+          {/* 功能#6:结果区极简工具条,仅放最大化/恢复入口(控制 maxResults<->split)。视觉克制,右对齐。 */}
+          <div className="row" style={{ justifyContent: 'flex-end', flex: 'none', padding: '3px 8px', borderBottom: '1px solid var(--border-hairline)' }}>
+            {paneMode === 'maxResults'
+              ? <button className="icon-btn bare" title={t('dbviews.restorePane')} onClick={() => setPaneMode('split')}><Icon name="minimize-2" size={15} /></button>
+              : <button className="icon-btn bare" title={t('dbviews.maximizeResults')} onClick={() => setPaneMode('maxResults')}><Icon name="maximize-2" size={15} /></button>}
+          </div>
+          <div style={{ flex: 1, minHeight: 0, width: '100%' }}>
           {phase === 'running'
             ? <div className="col" style={{ alignItems: 'center', justifyContent: 'center', height: '100%', gap: 10, color: 'var(--text-tertiary)' }}>
                 <Icon name="loader" size={26} style={{ animation: 'spin 1s linear infinite' }} />
@@ -362,6 +437,7 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
                     columns={D.ordersColumns.map(c => ({ name: c.name, type: c.type, pk: c.pk, fk: c.fk, icon: c.icon }))}
                     rows={D.ordersRows.map(r => D.ordersColumns.map(c => (r as unknown as Record<string, unknown>)[c.name]))}
                     statusTones={D.statusTones} density={density} />)}
+          </div>
         </div>
       )}
     </div>

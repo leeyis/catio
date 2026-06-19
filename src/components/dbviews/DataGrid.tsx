@@ -2,7 +2,7 @@
 import { useState, useMemo, useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
-import { Btn, IconBtn, Segmented } from '../atoms'
+import { Btn, IconBtn } from '../atoms'
 import { previewDml, applyEdits, queryPage, tablePreview, exportFile, dbErrMsg, type EditRequest } from '../../services/db'
 import type { ResultColumn } from '../../services/types'
 
@@ -87,6 +87,11 @@ function clip(s: string, n: number): string {
   return s.length > n ? s.slice(0, n) + '…' : s
 }
 
+/** 文本整体是否为一个可点击的 http(s) URL（行明细里把它渲染成链接）。 */
+function isUrl(s: string): boolean {
+  return /^https?:\/\/\S+$/i.test(s.trim())
+}
+
 /** Derive a column icon from its type/pk/fk flags (mirrors the mock ordersColumns icons). */
 function colIcon(col: ResultColumn): string {
   if (col.pk) return 'hash'
@@ -136,8 +141,33 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   const [applyErr, setApplyErr] = useState<string | null>(null)
   // Full-content viewer for a long/nested cell value (opened from the status bar).
   const [cellViewer, setCellViewer] = useState<{ label: string; text: string } | null>(null)
+  // 列宽（列名→像素宽，仅会话内存）；首屏由启发式宽度填充，用户拖动后覆盖。
+  const [colWidths, setColWidths] = useState<Record<string, number>>({})
+  // 单元格复制成功后的短暂提示（约 1.5s 后清除）。
+  const [copied, setCopied] = useState(false)
+  // 行明细查看：当前展开行在 pageRows 中的显示下标（null=未打开）；支持当前页内上/下条切换。
+  const [detailIdx, setDetailIdx] = useState<number | null>(null)
   const rowH = density === 'compact' ? 30 : 36
   const PAGE = pageSize
+
+  // 单列的启发式初始宽度（沿用原 gridTemplate 的写死宽度）。
+  function heuristicWidth(name: string): number {
+    if (name === 'channel' || name === 'currency') return 92
+    if (name === 'created_at' || name === 'updated_at' || name === 'customer_id') return 150
+    return 160
+  }
+
+  // 列变化时补齐缺失列的初始宽度，不覆盖用户已拖动的列。
+  useEffect(() => {
+    setColWidths(prev => {
+      let changed = false
+      const next = { ...prev }
+      for (const c of columns) {
+        if (next[c.name] === undefined) { next[c.name] = heuristicWidth(c.name); changed = true }
+      }
+      return changed ? next : prev
+    })
+  }, [columns])
 
   // The pk column(s) of the result — needed to safely key UPDATEs. Empty → not editable per-row.
   const pkCols = useMemo(() => columns.filter(c => c.pk).map(c => c.name), [columns])
@@ -188,6 +218,24 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   const pages = serverRows ? page + (serverTruncated ? 1 : 0) : Math.max(1, Math.ceil(filtered.length / PAGE))
   const showTruncated = serverRows ? serverTruncated : !!truncated
 
+  // ---- 行明细查看 ----
+  // 当前展开行的数据(按 pageRows 显示下标取)与显示行号；上一条/下一条仅在当前页内移动。
+  const detailEntry = detailIdx != null ? pageRows[detailIdx] : null
+  const detailNumber = detailIdx != null ? (page - 1) * PAGE + detailIdx + 1 : 0
+  function detailPrev() { setDetailIdx(i => (i != null && i > 0 ? i - 1 : i)) }
+  function detailNext() { setDetailIdx(i => (i != null && i < pageRows.length - 1 ? i + 1 : i)) }
+  // 明细弹窗打开时支持键盘：Esc 关闭、↑ 上一条、↓ 下一条。
+  useEffect(() => {
+    if (detailIdx == null) return
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') setDetailIdx(null)
+      else if (e.key === 'ArrowUp') { e.preventDefault(); setDetailIdx(i => (i != null && i > 0 ? i - 1 : i)) }
+      else if (e.key === 'ArrowDown') { e.preventDefault(); setDetailIdx(i => (i != null && i < pageRows.length - 1 ? i + 1 : i)) }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [detailIdx, pageRows.length])
+
   // Fetch one server page. Prefer the dialect-correct tablePreview (schema/table)
   // when the parent opts in via `livePreview`; else fall back to the raw-SQL queryPage.
   const fetchPage = useMemo(() => {
@@ -220,6 +268,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
 
   async function gotoPage(next: number) {
     if (next < 1) return
+    setDetailIdx(null) // 翻页关闭行明细（其上一条/下一条按当前页定义）
     if (fetchPage) {
       const res = await fetchPage(PAGE, (next - 1) * PAGE)
       applyServerPage(res)
@@ -231,6 +280,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
 
   function changePageSize(v: string) {
     const n = Number(v)
+    setDetailIdx(null)
     setPageSize(n)
     setPage(1)
     if (fetchPage) {
@@ -578,7 +628,38 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   // Fixed per-column widths so the row is exactly as wide as the sum of its
   // columns and the grid scrolls horizontally — no flex/1fr stretch that would
   // blow up a couple of columns to fill the viewport and hide the rest.
-  const gridTemplate = '46px ' + columns.map(c => c.name === 'channel' || c.name === 'currency' ? '92px' : c.name === 'created_at' || c.name === 'updated_at' ? '150px' : c.name === 'customer_id' ? '150px' : '160px').join(' ') + (showActionCol ? ' 44px' : '')
+  const gridTemplate = '46px ' + columns.map(c => (colWidths[c.name] ?? heuristicWidth(c.name)) + 'px').join(' ') + (showActionCol ? ' 44px' : '')
+
+  // 列宽拖动：在 document 上挂 mousemove/mouseup，避免鼠标移出表头丢事件；
+  // 拖动期间根据 clientX 位移动态更新该列宽度，最小 60px。
+  function startResize(e: React.MouseEvent, name: string) {
+    e.stopPropagation() // 避免触发该列的排序 toggleSort
+    e.preventDefault()
+    const startX = e.clientX
+    const startW = colWidths[name] ?? heuristicWidth(name)
+    function onMove(ev: MouseEvent) {
+      const w = Math.max(60, startW + (ev.clientX - startX))
+      setColWidths(prev => ({ ...prev, [name]: w }))
+    }
+    function onUp() {
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+    }
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+  }
+
+  // 单元格 Ctrl+C 复制：编辑态（input 聚焦）不拦截，走浏览器默认。
+  function onGridKeyDown(e: React.KeyboardEvent) {
+    if ((e.target as HTMLElement).tagName === 'INPUT') return
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C') && selCell) {
+      e.preventDefault()
+      navigator.clipboard?.writeText(selCell.full).then(() => {
+        setCopied(true)
+        setTimeout(() => setCopied(false), 1500)
+      }).catch(() => {})
+    }
+  }
 
   // The currently-selected cell's value (for the status-bar preview + viewer).
   const selCell = (() => {
@@ -679,17 +760,20 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
       )}
 
       {/* grid */}
-      <div className="grow mono" style={{ overflow: 'auto', fontSize: 12.5 }}>
+      <div className="grow mono scrollon" tabIndex={0} onKeyDown={onGridKeyDown} style={{ overflow: 'auto', fontSize: 12.5, outline: 'none' }}>
         <div style={{ minWidth: 'max-content' }}>
           {/* header */}
-          <div style={{ display: 'grid', gridTemplateColumns: gridTemplate, position: 'sticky', top: 0, zIndex: 2, background: 'var(--surface-subtle)', borderBottom: '1px solid var(--border-hairline-alt)' }}>
+          <div data-grid-header style={{ display: 'grid', gridTemplateColumns: gridTemplate, position: 'sticky', top: 0, zIndex: 2, background: 'var(--surface-subtle)', borderBottom: '1px solid var(--border-hairline-alt)' }}>
             <div style={{ ...thStyle, justifyContent: 'center', color: 'var(--text-faint)', position: 'sticky', left: 0, zIndex: 3, background: 'var(--surface-subtle)' }}>#</div>
             {columns.map((col) => (
-              <div key={col.name} style={thStyle} onClick={() => toggleSort(col.name)} className="gridhead">
+              <div key={col.name} style={{ ...thStyle, position: 'relative' }} onClick={() => toggleSort(col.name)} className="gridhead">
                 <Icon name={col.icon ?? colIcon(col)} size={12} style={{ color: col.pk ? 'var(--signal-amber)' : col.fk ? 'var(--signal-blue)' : 'var(--text-faint)' }} />
                 <span className="ell" style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>{col.name}</span>
                 {col.pk && <span style={{ fontSize: 9, color: 'var(--signal-amber)', fontWeight: 700 }}>PK</span>}
                 {sortCol === col.name && <Icon name={sortDir === 'asc' ? 'chevron-up' : 'chevron-down'} size={12} style={{ color: 'var(--accent-primary)', marginLeft: 'auto' }} />}
+                {/* 列宽拖动手柄：列右缘，stopPropagation 避免触发排序 */}
+                <span title={t('dbviews.resizeColumnHint')} onMouseDown={e => startResize(e, col.name)} onClick={e => e.stopPropagation()}
+                  style={{ position: 'absolute', top: 0, right: 0, width: 5, height: '100%', cursor: 'col-resize', zIndex: 1 }} />
               </div>
             ))}
             {showActionCol && <div style={{ ...thStyle, justifyContent: 'center', borderRight: 'none' }} />}
@@ -701,7 +785,15 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
             return (
               <div key={origIdx} style={{ display: 'grid', gridTemplateColumns: gridTemplate, height: rowH, background: isDel ? 'color-mix(in srgb, var(--danger-fg) 12%, transparent)' : ri % 2 ? 'var(--surface-subtle)' : 'transparent', opacity: isDel ? 0.6 : 1, textDecoration: isDel ? 'line-through' : 'none' }}
                 className="gridrow">
-                <div style={{ ...tdStyle, justifyContent: 'center', color: 'var(--text-faint)', fontSize: 11, background: 'var(--surface-sunken)', borderRight: '1px solid var(--border-hairline)', position: 'sticky', left: 0, zIndex: 1 }}>{globalIdx + 1}</div>
+                <div style={{ ...tdStyle, justifyContent: 'center', color: 'var(--text-faint)', fontSize: 11, background: 'var(--surface-sunken)', borderRight: '1px solid var(--border-hairline)', position: 'sticky', left: 0, zIndex: 1 }}>
+                  {globalIdx + 1}
+                  {/* 悬浮行时浮出"查看明细"按钮，覆盖行号；点击打开该行的纵向明细弹窗 */}
+                  <button className="icon-btn bare row-detail-btn" title={t('dbviews.viewRowDetail')}
+                    onClick={e => { e.stopPropagation(); setDetailIdx(ri) }}
+                    style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', background: 'var(--surface-sunken)' }}>
+                    <Icon name="maximize-2" size={13} style={{ color: 'var(--accent-primary)' }} />
+                  </button>
+                </div>
                 {columns.map((col, ci) => {
                   const k = cellKey(origIdx, col.name)
                   const isEdited = edits[k] !== undefined
@@ -807,16 +899,24 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
           </span>
           {showTruncated && <span className="chip" style={{ background: 'color-mix(in srgb, var(--signal-amber) 14%, transparent)', color: 'var(--signal-amber)', fontWeight: 600 }}>{t('dbviews.truncated')}</span>}
           {applyMsg && <span style={{ color: 'var(--signal-green)' }}>{applyMsg}</span>}
+          {copied && <span style={{ color: 'var(--signal-green)' }}>{t('dbviews.cellCopied')}</span>}
           {loadError && <span className="row gap6" style={{ color: 'var(--danger-fg)' }}><Icon name="alert-triangle" size={12} /> {t('dbviews.loadError', { message: loadError })}</span>}
           {exportErr && <span className="row gap6" style={{ color: 'var(--danger-fg)' }}><Icon name="alert-triangle" size={12} /> {exportErr}</span>}
         </div>
         <div className="row gap8">
-          <span className="mono" style={{ color: 'var(--signal-green)' }}>● {newCount} new</span>
-          <span className="mono" style={{ color: 'var(--signal-amber)' }}>● {editedCount} edited</span>
-          <span className="mono" style={{ color: 'var(--danger-fg)' }}>● {deletedCount} deleted</span>
+          {/* 变更计数：默认只显示彩色圆点，具体数量以 hover tooltip 展示 */}
+          <span className="row" style={{ gap: 6 }}>
+            <span title={t('dbviews.statNew', { count: newCount })} style={{ color: 'var(--signal-green)', cursor: 'default', fontSize: 12 }}>●</span>
+            <span title={t('dbviews.statEdited', { count: editedCount })} style={{ color: 'var(--signal-amber)', cursor: 'default', fontSize: 12 }}>●</span>
+            <span title={t('dbviews.statDeleted', { count: deletedCount })} style={{ color: 'var(--danger-fg)', cursor: 'default', fontSize: 12 }}>●</span>
+          </span>
           <div style={{ width: 1, height: 14, background: 'var(--border-hairline)' }} />
-          <Segmented size="sm" value={String(pageSize)} onChange={changePageSize}
-            options={[{ value: '50', label: '50' }, { value: '100', label: '100' }, { value: '500', label: '500' }]} />
+          {/* 每页行数：下拉框 */}
+          <select value={String(pageSize)} onChange={e => changePageSize(e.target.value)}
+            title={t('dbviews.pageSize')} aria-label={t('dbviews.pageSize')}
+            style={{ height: 24, border: '1px solid var(--border-hairline)', borderRadius: 7, background: 'var(--surface-sunken)', color: 'var(--text-secondary)', fontSize: 11.5, padding: '0 4px', outline: 'none', fontFamily: 'inherit', cursor: 'pointer' }}>
+            {[50, 100, 500].map(n => <option key={n} value={n}>{n}</option>)}
+          </select>
           <button className="icon-btn bare" style={{ width: 22, height: 22 }} onClick={() => gotoPage(page - 1)}><Icon name="chevron-left" size={14} /></button>
           <span className="mono">{page} / {pages}</span>
           <button className="icon-btn bare" style={{ width: 22, height: 22 }} onClick={() => gotoPage(page + 1)}><Icon name="chevron-right" size={14} /></button>
@@ -870,6 +970,43 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
               </div>
             </div>
             <pre className="mono" style={{ margin: 0, padding: '14px 18px', color: 'var(--text-primary)', fontSize: 12.5, lineHeight: 1.6, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{cellViewer.text}</pre>
+          </div>
+        </div>
+      )}
+
+      {/* 行明细 — 纵向表单展示该行全部字段；URL 文本渲染为可点击链接；支持当前页内上一条/下一条切换 */}
+      {detailEntry && (
+        <div onClick={() => setDetailIdx(null)}
+          style={{ position: 'absolute', inset: 0, zIndex: 70, background: 'color-mix(in srgb, var(--cta-bg) 42%, transparent)', backdropFilter: 'blur(3px)', display: 'grid', placeItems: 'center' }}>
+          <div onClick={e => e.stopPropagation()} className="pop-in"
+            style={{ width: 640, maxWidth: '92%', maxHeight: '84%', background: 'var(--surface-card)', borderRadius: 18, border: '1px solid var(--border-hairline)', boxShadow: 'var(--shadow-window)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+            <div className="row" style={{ justifyContent: 'space-between', padding: '16px 20px 12px', borderBottom: '1px solid var(--border-hairline)' }}>
+              <span style={{ fontSize: 15, fontWeight: 700, letterSpacing: '-0.2px' }}>{t('dbviews.rowDetail')}[{detailNumber}]</span>
+              <div className="row gap6">
+                <button className="icon-btn bare" title={t('dbviews.prevRow')} disabled={detailIdx === 0} onClick={detailPrev}><Icon name="chevron-up" size={16} /></button>
+                <button className="icon-btn bare" title={t('dbviews.nextRow')} disabled={detailIdx != null && detailIdx >= pageRows.length - 1} onClick={detailNext}><Icon name="chevron-down" size={16} /></button>
+                <IconBtn name="x" size={16} variant="bare" onClick={() => setDetailIdx(null)} />
+              </div>
+            </div>
+            <div className="col scrollon" style={{ overflow: 'auto', padding: '4px 0 8px' }}>
+              {columns.map((col, ci) => {
+                const k = cellKey(detailEntry.origIdx, col.name)
+                const raw = edits[k] !== undefined ? edits[k] : detailEntry.row[ci]
+                const text = cellText(raw)
+                return (
+                  <div key={col.name} className="row" style={{ alignItems: 'flex-start', gap: 16, padding: '9px 22px', borderBottom: '1px solid var(--border-hairline)' }}>
+                    <span className="mono" style={{ flex: 'none', width: 168, textAlign: 'right', color: 'var(--text-tertiary)', fontSize: 12, paddingTop: 1, wordBreak: 'break-word' }}>{col.name}</span>
+                    <span style={{ flex: 1, minWidth: 0, color: 'var(--text-primary)', fontSize: 12.5, lineHeight: 1.6, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                      {text === ''
+                        ? <span style={{ color: 'var(--text-faint)' }}>—</span>
+                        : isUrl(text)
+                          ? <a href={text} target="_blank" rel="noreferrer" style={{ color: 'var(--accent-primary)', textDecoration: 'underline', wordBreak: 'break-all' }}>{text}</a>
+                          : text}
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
           </div>
         </div>
       )}

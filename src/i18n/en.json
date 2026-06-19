@@ -81,6 +81,20 @@
     "needsAuthHint": "Auto-scan identified this connection but did not verify a credential — first connect will prompt for the password"
   },
   "dbviews": {
+    "maximizeEditor": "Maximize editor",
+    "maximizeResults": "Maximize results",
+    "restorePane": "Restore size",
+    "copyCell": "Copy cell",
+    "cellCopied": "Copied",
+    "resizeColumnHint": "Drag to resize column",
+    "viewRowDetail": "View detail",
+    "rowDetail": "Row detail",
+    "prevRow": "Previous",
+    "nextRow": "Next",
+    "pageSize": "Rows per page",
+    "statNew": "{{count}} new",
+    "statEdited": "{{count}} edited",
+    "statDeleted": "{{count}} deleted",
     "copySel": "Copy",
     "askAI": "Ask AI",
     "viaTunnel": "via db-bastion tunnel",
@@ -174,6 +188,8 @@
     "esPlaceholder": "GET /index/_search\n{ \"query\": { \"match_all\": {} } }  —  SELECT * FROM index also works"
   },
   "workbench": {
+    "collapseSidebar": "Collapse sidebar",
+    "expandSidebar": "Expand sidebar",
     "newTab": "New tab",
     "closeCurrent": "Close current",
     "closeOthers": "Close others",

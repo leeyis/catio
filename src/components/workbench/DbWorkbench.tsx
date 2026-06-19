@@ -78,6 +78,13 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
   const [queryInitialCode, setQueryInitialCode] = useState<Record<number, string>>({})
   const activeTab = tabs.find(tb => tb.id === activeId) ?? null
 
+  // ---- 侧栏整栏收起 (功能#2) — 仅本次会话内存 ----
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  // 每个 SQL 控制台上报的"是否最大化"(功能#6 父侧联动);活动 tab 最大化时联动收起侧栏。
+  const [fsByTab, setFsByTab] = useState<Record<string, boolean>>({})
+  // 有效收起 = 手动收起 || 当前活动 SQL 控制台处于最大化(activeId 可能为 null,安全取值)。
+  const effectiveCollapsed = sidebarCollapsed || (activeId != null && !!fsByTab[activeId])
+
   // Open CREATE TABLE/VIEW form modal (null → closed). Carries the target schema + kind.
   const [createObj, setCreateObj] = useState<{ schema: string; kind: 'table' | 'view' } | null>(null)
   // Error surfaced when a CREATE statement fails to run.
@@ -223,6 +230,7 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
         refreshing={refreshing}
         erActive={activeTab?.kind === 'er'} sqlActive={activeTab?.kind === 'sql'}
         disabledSql={!caps.sqlConsole} disabledEr={!caps.er}
+        collapsed={effectiveCollapsed} onToggleCollapse={() => setSidebarCollapsed(c => !c)}
         schemas={connId ? namespaces : undefined} conn={connId ? conn : undefined} live={!!connId} loading={schemaLoading} />
       <div className="col grow" style={{ minWidth: 0, minHeight: 0, overflow: 'hidden', position: 'relative' }}>
         {/* 统一 tab strip:表 / 对象 / 查询 / ER 平级,身份复用,全部保持 mounted。 */}
@@ -266,6 +274,7 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
               {tb.kind === 'sql' && (
                 <SqlConsole density={density} fresh queryN={tb.qid} writable={caps.writable} connId={connId ?? undefined}
                   initialCode={queryInitialCode[tb.qid]} initialDefaultSchema={tb.defaultSchema}
+                  onFullscreenChange={(fs) => setFsByTab(m => ({ ...m, [tb.id]: fs }))}
                   active={shown && tb.id === activeId} engine={conn.engine} connName={conn.name} profileId={conn.id} />
               )}
               {tb.kind === 'er' && (
