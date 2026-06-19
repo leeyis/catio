@@ -787,10 +787,11 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
                 className="gridrow">
                 <div style={{ ...tdStyle, justifyContent: 'center', color: 'var(--text-faint)', fontSize: 11, background: 'var(--surface-sunken)', borderRight: '1px solid var(--border-hairline)', position: 'sticky', left: 0, zIndex: 1 }}>
                   {globalIdx + 1}
-                  {/* 悬浮行时浮出"查看明细"按钮，覆盖行号；点击打开该行的纵向明细弹窗 */}
-                  <button className="icon-btn bare row-detail-btn" title={t('dbviews.viewRowDetail')}
+                  {/* 悬浮行时浮出"查看明细"按钮，覆盖行号并上下左右居中；点击打开该行的纵向明细弹窗。
+                      不用 .icon-btn（其固定 30px 宽会与 inset:0 冲突，使图标偏左），改为显式撑满单元格 + flex 居中。 */}
+                  <button className="row-detail-btn" title={t('dbviews.viewRowDetail')}
                     onClick={e => { e.stopPropagation(); setDetailIdx(ri) }}
-                    style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', background: 'var(--surface-sunken)' }}>
+                    style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', border: 'none', padding: 0, background: 'var(--surface-sunken)', cursor: 'pointer' }}>
                     <Icon name="maximize-2" size={13} style={{ color: 'var(--accent-primary)' }} />
                   </button>
                 </div>
@@ -974,10 +975,11 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
         </div>
       )}
 
-      {/* 行明细 — 纵向表单展示该行全部字段；URL 文本渲染为可点击链接；支持当前页内上一条/下一条切换 */}
+      {/* 行明细 — 纵向表单展示该行全部字段；URL 文本渲染为可点击链接；支持当前页内上一条/下一条切换。
+          遮罩用 position:fixed 覆盖整个控制台(含上方 SQL 编辑区)，而非仅遮住 DataGrid 所在的结果区。 */}
       {detailEntry && (
         <div onClick={() => setDetailIdx(null)}
-          style={{ position: 'absolute', inset: 0, zIndex: 70, background: 'color-mix(in srgb, var(--cta-bg) 42%, transparent)', backdropFilter: 'blur(3px)', display: 'grid', placeItems: 'center' }}>
+          style={{ position: 'fixed', inset: 0, zIndex: 70, background: 'color-mix(in srgb, var(--cta-bg) 42%, transparent)', backdropFilter: 'blur(3px)', display: 'grid', placeItems: 'center' }}>
           <div onClick={e => e.stopPropagation()} className="pop-in"
             style={{ width: 640, maxWidth: '92%', maxHeight: '84%', background: 'var(--surface-card)', borderRadius: 18, border: '1px solid var(--border-hairline)', boxShadow: 'var(--shadow-window)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
             <div className="row" style={{ justifyContent: 'space-between', padding: '16px 20px 12px', borderBottom: '1px solid var(--border-hairline)' }}>
