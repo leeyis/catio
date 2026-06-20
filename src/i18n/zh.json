@@ -126,6 +126,8 @@
     "colDefault": "默认值",
     "colKey": "键",
     "colComment": "备注",
+    "showComments": "显示列注释",
+    "showColumnNames": "显示列名",
     "idxName": "索引名",
     "idxCols": "列",
     "idxUnique": "唯一",

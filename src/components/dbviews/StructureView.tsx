@@ -143,7 +143,7 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
           { value: 'ddl', label: 'DDL' },
         ]} />
         <div className="grow" />
-        <span style={{ fontSize: 11.5, color: 'var(--text-faint)' }}>{st.comment}</span>
+        <span style={{ fontSize: 11.5, color: 'var(--text-faint)', maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={st.comment || undefined}>{st.comment}</span>
         <Btn size="sm" variant="secondary" icon="plus" onClick={editable ? openAdd : undefined} disabled={!editable}>{t('dbviews.addColumn')}</Btn>
       </div>
       <div className="grow" style={{ overflow: 'auto' }}>
@@ -165,7 +165,7 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
                   <td style={{ ...tdCell, textAlign: 'center' }}>{c.nullable ? <span style={{ color: 'var(--text-faint)' }}>NULL</span> : <Icon name="check" size={13} style={{ color: 'var(--signal-green)' }} />}</td>
                   <td style={tdCell}><span className="mono" style={{ color: 'var(--text-tertiary)', fontSize: 11.5 }}>{c.default || '—'}</span></td>
                   <td style={tdCell}>{c.key ? <span className="badge-accent" style={{ background: `color-mix(in srgb, ${keyTone[c.key]} 16%, transparent)`, color: keyTone[c.key] }}>{c.key}</span> : ''}</td>
-                  <td style={{ ...tdCell, color: 'var(--text-faint)', fontSize: 11.5 }}>{c.extra}</td>
+                  <td style={{ ...tdCell, color: 'var(--text-faint)', fontSize: 11.5, maxWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={c.comment || undefined}>{c.comment}</td>
                   {editable && (
                     <td style={{ ...tdCell, textAlign: 'right', whiteSpace: 'nowrap' }}>
                       <span className="structrow-actions row gap6" style={{ justifyContent: 'flex-end' }}>

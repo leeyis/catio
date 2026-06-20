@@ -388,3 +388,83 @@ describe('DbWorkbench 侧栏整栏收起 (功能#2)', () => {
     expect(screen.getByPlaceholderText(/搜索表|Search/)).toBeInTheDocument()
   })
 })
+
+describe('DbWorkbench 历史记录无窗口执行 (功能#3)', () => {
+  const LIVE_CONN = {
+    connId: 'conn-live', profileId: 'd-orders', dbType: 'postgres' as const, name: 'prod-orders',
+    capabilities: {
+      writable: true, transactions: true, schemas: true,
+      sqlConsole: true, er: true, structureEdit: true,
+    },
+  }
+  // 只含一张表的库 → 自动打开 public.orders 表预览 tab(激活态非 SQL 控制台)。
+  const SCHEMA = {
+    db: 'conn',
+    schemas: [{
+      name: 'public', open: false,
+      tables: [{ name: 'orders', rows: '', cols: 0 }],
+      views: [], functions: [],
+    }],
+  }
+
+  beforeEach(() => {
+    h.list.mockReset(); h.tablePreview.mockReset(); h.getSchema.mockReset(); h.runQuery.mockReset(); h.objectSource.mockReset()
+    h.list.mockReturnValue([LIVE_CONN])
+    h.getSchema.mockResolvedValue(SCHEMA)
+    h.tablePreview.mockResolvedValue({ columns: [{ name: 'id', type: 'int', pk: true }], rows: [[101]] })
+    h.runQuery.mockResolvedValue({ columns: [], rows: [] })
+    h.objectSource.mockResolvedValue('')
+  })
+
+  const fireRun = (text: string) =>
+    window.dispatchEvent(new CustomEvent('catio-run', { detail: { kind: 'sql', text } }))
+
+  it('(a) 完全没有 SQL tab:派发 catio-run 后新建 SQL tab 并执行', async () => {
+    wrap(<DbWorkbench conn={CONN} />)
+    // 自动打开表预览 tab(激活,非 SQL);此时没有任何 SQL 控制台。
+    await screen.findByTestId('wbtab-table:public.orders')
+    expect(screen.queryByTestId('wbtab-sql:1')).not.toBeInTheDocument()
+
+    fireRun('select 1')
+
+    // DbWorkbench 兜底:新建 SQL tab 并 seed + 自动执行。
+    expect(await screen.findByTestId('wbtab-sql:1')).toBeInTheDocument()
+    await waitFor(() => expect(h.runQuery).toHaveBeenCalledTimes(1))
+    expect(h.runQuery).toHaveBeenCalledWith(
+      'conn-live', 'select 1', 'public', expect.objectContaining({ profileId: 'd-orders' }),
+    )
+  })
+
+  it('(b) 有 SQL tab 但非激活:切到该 tab 并执行,不新建', async () => {
+    wrap(<DbWorkbench conn={CONN} />)
+    const tableChip = await screen.findByTestId('wbtab-table:public.orders')
+    // 先新建一个 SQL tab(sql:1,激活),再切回表预览 → SQL tab 存在但非激活。
+    fireEvent.click(screen.getByTestId('wb-new-query'))
+    await screen.findByTestId('wbtab-sql:1')
+    fireEvent.click(tableChip)
+
+    fireRun('select 2')
+
+    // 不新建第二个 SQL tab;复用 sql:1 并执行。
+    await waitFor(() => expect(h.runQuery).toHaveBeenCalledTimes(1))
+    expect(screen.queryByTestId('wbtab-sql:2')).not.toBeInTheDocument()
+    expect(screen.getByTestId('wbtab-sql:1')).toBeInTheDocument()
+    expect(h.runQuery).toHaveBeenCalledWith(
+      'conn-live', 'select 2', 'public', expect.objectContaining({ profileId: 'd-orders' }),
+    )
+  })
+
+  it('(c) 激活 tab 是 SQL:由 SqlConsole 处理,DbWorkbench 不重复执行', async () => {
+    wrap(<DbWorkbench conn={CONN} />)
+    await screen.findByTestId('wbtab-table:public.orders')
+    // 新建 SQL tab 并保持激活。
+    fireEvent.click(screen.getByTestId('wb-new-query'))
+    await screen.findByTestId('wbtab-sql:1')
+
+    fireRun('select 3')
+
+    // 仅 SqlConsole 执行一次,DbWorkbench 不介入(不重复执行、不新建 tab)。
+    await waitFor(() => expect(h.runQuery).toHaveBeenCalledTimes(1))
+    expect(screen.queryByTestId('wbtab-sql:2')).not.toBeInTheDocument()
+  })
+})

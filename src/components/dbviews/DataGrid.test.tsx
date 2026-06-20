@@ -183,6 +183,57 @@ describe('DataGrid generic rows', () => {
     ))
   })
 
+  it('comment toggle: hidden when no column has a comment (e.g. ad-hoc SQL results)', () => {
+    const columns: ResultColumn[] = [
+      { name: 'id', type: 'int', pk: true },
+      { name: 'name', type: 'text' },
+    ]
+    const rows: unknown[][] = [[1, 'alice']]
+    wrap(<DataGrid columns={columns} rows={rows} statusTones={{}} density="comfortable" />)
+    expect(screen.queryByTitle(/Show comments/i)).toBeNull()
+    expect(screen.queryByTitle(/Show column names/i)).toBeNull()
+  })
+
+  it('comment toggle: shown when any column has a comment, and flips header text to comments and back', () => {
+    const columns: ResultColumn[] = [
+      { name: 'id', type: 'int', pk: true, comment: '主键' },
+      { name: 'status', type: 'text' }, // no comment → falls back to name in comment mode
+    ]
+    const rows: unknown[][] = [[1, 'open']]
+    wrap(<DataGrid columns={columns} rows={rows} statusTones={{}} density="comfortable" />)
+
+    // default: english names visible, comment not shown as a header
+    const header = document.querySelector('[data-grid-header]') as HTMLElement
+    expect(header.textContent).toContain('id')
+    expect(header.textContent).not.toContain('主键')
+
+    // toggle on → comment mode: 'id' header shows its comment; 'status' (no comment) falls back to name
+    fireEvent.click(screen.getByTitle(/Show comments/i))
+    const headerOn = document.querySelector('[data-grid-header]') as HTMLElement
+    expect(headerOn.textContent).toContain('主键')
+    expect(headerOn.textContent).toContain('status')
+
+    // toggle back → english names again
+    fireEvent.click(screen.getByTitle(/Show column names/i))
+    const headerOff = document.querySelector('[data-grid-header]') as HTMLElement
+    expect(headerOff.textContent).toContain('id')
+    expect(headerOff.textContent).not.toContain('主键')
+  })
+
+  it('comment toggle: long comment is truncated with a title carrying the full text', () => {
+    const longComment = '这是一个非常非常非常长的列注释用于验证省略号截断与 title 悬浮显示全文的行为'
+    const columns: ResultColumn[] = [
+      { name: 'id', type: 'int', pk: true, comment: longComment },
+    ]
+    const rows: unknown[][] = [[1]]
+    wrap(<DataGrid columns={columns} rows={rows} statusTones={{}} density="comfortable" />)
+    fireEvent.click(screen.getByTitle(/Show comments/i))
+    // the comment-mode header label carries the full comment as a title for hover
+    const labelled = screen.getByTitle(longComment)
+    expect(labelled).toBeInTheDocument()
+    expect(labelled.className).toContain('ell')
+  })
+
   it('row detail: opens a vertical detail modal, renders URL values as links, and prev/next navigate within the page', () => {
     const columns: ResultColumn[] = [
       { name: 'id', type: 'int', pk: true },

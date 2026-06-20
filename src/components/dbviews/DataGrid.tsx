@@ -143,6 +143,9 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   const [cellViewer, setCellViewer] = useState<{ label: string; text: string } | null>(null)
   // 列宽（列名→像素宽，仅会话内存）；首屏由启发式宽度填充，用户拖动后覆盖。
   const [colWidths, setColWidths] = useState<Record<string, number>>({})
+  // 表头显示模式:false=英文列名(默认),true=列注释。本地状态;DataGrid 带 key={schema.table}
+  // → 切表/关 tab 重新挂载即重置,满足「每个表 tab 独立、不记忆」。
+  const [commentMode, setCommentMode] = useState(false)
   // 单元格复制成功后的短暂提示（约 1.5s 后清除）。
   const [copied, setCopied] = useState(false)
   // 行明细查看：当前展开行在 pageRows 中的显示下标（null=未打开）；支持当前页内上/下条切换。
@@ -171,6 +174,10 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
 
   // The pk column(s) of the result — needed to safely key UPDATEs. Empty → not editable per-row.
   const pkCols = useMemo(() => columns.filter(c => c.pk).map(c => c.name), [columns])
+  // 是否存在任一非空注释 → 决定切换按钮显隐。仅表预览会填 comment,故 SQL 查询结果无此按钮。
+  const hasComments = useMemo(() => columns.some(c => !!c.comment), [columns])
+  // 表头展示文案:注释模式优先显示该列注释,无注释的列回退到英文名;否则始终英文名。
+  function headLabel(col: ResultColumn): string { return commentMode && col.comment ? col.comment : col.name }
   // Active per-row keys for the no-PK (ctid) path: server page keys take precedence
   // over the parent-provided first-page keys, mirroring serverRows ?? rows.
   const activeRowKeys = serverRowKeys ?? rowKeys ?? null
@@ -697,6 +704,12 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
               <div style={{ width: 1, height: 18, background: 'var(--border-hairline)' }} />
             </>
           )}
+          {/* 列名/注释切换:仅当存在任一非空注释时出现(天然限定在表预览) */}
+          {hasComments && (
+            <button className="icon-btn bare" data-active={commentMode ? '1' : undefined}
+              title={commentMode ? t('dbviews.showColumnNames') : t('dbviews.showComments')}
+              onClick={() => setCommentMode(m => !m)}><Icon name="message-square" size={15} /></button>
+          )}
           <button className="icon-btn bare" title={t('dbviews.filter')} data-active={filterOpen ? '1' : undefined}
             onClick={() => setFilterOpen(o => !o)}><Icon name="filter" size={15} /></button>
           <div ref={sortMenuRef} style={{ position: 'relative' }}>
@@ -768,7 +781,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
             {columns.map((col) => (
               <div key={col.name} style={{ ...thStyle, position: 'relative' }} onClick={() => toggleSort(col.name)} className="gridhead">
                 <Icon name={col.icon ?? colIcon(col)} size={12} style={{ color: col.pk ? 'var(--signal-amber)' : col.fk ? 'var(--signal-blue)' : 'var(--text-faint)' }} />
-                <span className="ell" style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>{col.name}</span>
+                <span className="ell" style={{ color: 'var(--text-secondary)', fontWeight: 600 }} title={commentMode && col.comment ? col.comment : undefined}>{headLabel(col)}</span>
                 {col.pk && <span style={{ fontSize: 9, color: 'var(--signal-amber)', fontWeight: 700 }}>PK</span>}
                 {sortCol === col.name && <Icon name={sortDir === 'asc' ? 'chevron-up' : 'chevron-down'} size={12} style={{ color: 'var(--accent-primary)', marginLeft: 'auto' }} />}
                 {/* 列宽拖动手柄：列右缘，stopPropagation 避免触发排序 */}

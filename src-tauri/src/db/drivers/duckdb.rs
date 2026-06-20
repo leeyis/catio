@@ -313,6 +313,15 @@ impl Driver for DuckDbDriver {
         // DuckDB has limited index introspection; use duckdb_indexes() if available, else empty.
         let indexes = query_indexes(&conn, schema_name, table).unwrap_or_else(|_| vec![]);
 
+        // ---- Per-column comments via duckdb_columns() (DuckDB-specific view) ----
+        // Best-effort: empty map if the view/column is unavailable.
+        let column_comments = query_column_comments(&conn, &catalog, schema_name, table)
+            .unwrap_or_default();
+
+        // ---- Table comment via duckdb_tables() (DuckDB-specific view) ----
+        let table_comment = query_table_comment(&conn, &catalog, schema_name, table)
+            .unwrap_or_default();
+
         // Build uni_cols from indexes for "UNI" annotation
         let uni_cols: std::collections::HashSet<String> = indexes.iter()
             .filter(|idx| idx.unique && !idx.columns.contains(','))
@@ -353,17 +362,19 @@ impl Driver for DuckDbDriver {
                 } else {
                     ""
                 };
+                let comment = column_comments.get(&name).cloned().unwrap_or_default();
                 ColumnDef {
                     name,
                     type_name,
                     nullable,
                     default,
                     key: key.into(),
+                    comment,
                 }
             })
             .collect();
 
-        Ok(TableStructure { columns, indexes, fks })
+        Ok(TableStructure { comment: table_comment, columns, indexes, fks })
     }
 
     async fn er_relations(&self, schema: &str) -> Result<Vec<ErRelation>, DbError> {
@@ -519,6 +530,57 @@ fn query_indexes(
     Ok(indexes)
 }
 
+/// Query per-column comments from the DuckDB-specific `duckdb_columns()` view.
+/// Returns a map of column_name → comment (only non-empty comments are kept).
+/// Best-effort: returns empty map on any error (older DuckDB without the comment column).
+fn query_column_comments(
+    conn: &Connection,
+    catalog: &str,
+    schema: &str,
+    table: &str,
+) -> Result<std::collections::HashMap<String, String>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT column_name, comment \
+         FROM duckdb_columns() \
+         WHERE database_name = ? AND schema_name = ? AND table_name = ?",
+    ).map_err(|e| DbError::QueryFailed(e.to_string()))?;
+
+    let rows = stmt.query_map(
+        [catalog, schema, table],
+        |row| {
+            let name: String = row.get(0)?;
+            let comment: Option<String> = row.get(1)?;
+            Ok((name, comment))
+        },
+    ).map_err(|e| DbError::QueryFailed(e.to_string()))?;
+
+    let mut map = std::collections::HashMap::new();
+    for item in rows {
+        let (name, comment) = item.map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        if let Some(c) = comment.filter(|s| !s.is_empty()) {
+            map.insert(name, c);
+        }
+    }
+    Ok(map)
+}
+
+/// Query the table-level comment from the DuckDB-specific `duckdb_tables()` view.
+/// Best-effort: returns empty string on any error (older DuckDB without the comment column).
+fn query_table_comment(
+    conn: &Connection,
+    catalog: &str,
+    schema: &str,
+    table: &str,
+) -> Result<String, DbError> {
+    let comment: Option<String> = conn.query_row(
+        "SELECT comment FROM duckdb_tables() \
+         WHERE database_name = ? AND schema_name = ? AND table_name = ?",
+        [catalog, schema, table],
+        |row| row.get::<_, Option<String>>(0),
+    ).map_err(|e| DbError::QueryFailed(e.to_string()))?;
+    Ok(comment.unwrap_or_default())
+}
+
 /// Extract column names from a DuckDB CREATE INDEX SQL string.
 /// E.g.: "CREATE INDEX idx ON t(col1, col2)" → "col1, col2"
 /// Returns None if the SQL is malformed or not parseable.
@@ -530,4 +592,30 @@ fn extract_index_columns(sql: Option<&str>) -> Option<String> {
         return None;
     }
     Some(sql[open + 1..close].trim().to_string())
+}
+
+#[cfg(test)]
+mod comment_tests {
+    use super::*;
+
+    /// 端到端：建表 + COMMENT ON，验证列注释与表注释被读出并填入结构。
+    #[tokio::test]
+    async fn structure_populates_column_and_table_comments() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, name VARCHAR); \
+             COMMENT ON TABLE t IS 'people table'; \
+             COMMENT ON COLUMN t.name IS 'full name';",
+        ).unwrap();
+        let driver = DuckDbDriver { conn: Arc::new(Mutex::new(conn)) };
+
+        let st = driver.table_structure("main", "t").await.unwrap();
+        assert_eq!(st.comment, "people table", "表注释应来自 duckdb_tables().comment");
+
+        let name_col = st.columns.iter().find(|c| c.name == "name").unwrap();
+        assert_eq!(name_col.comment, "full name", "列注释应来自 duckdb_columns().comment");
+
+        let id_col = st.columns.iter().find(|c| c.name == "id").unwrap();
+        assert_eq!(id_col.comment, "", "无注释的列保持空字符串");
+    }
 }

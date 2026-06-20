@@ -277,7 +277,7 @@ export async function tableStructure(connId: string, schema: string, table: stri
     comment: '',
     columns: (raw.columns ?? []).map(c => ({
       name: c.name, type: c.typeName, nullable: c.nullable, default: c.default ?? null,
-      key: (c.key === 'PK' || c.key === 'FK' || c.key === 'UNI' ? c.key : ''), extra: '',
+      key: (c.key === 'PK' || c.key === 'FK' || c.key === 'UNI' ? c.key : ''), extra: '', comment: '',
     })),
     indexes: (raw.indexes ?? []).map(i => ({ name: i.name, cols: i.columns, unique: i.unique, method: i.method })),
     fks: (raw.fks ?? []).map(f => ({ col: f.column, ref: f.references, onDelete: f.onDelete, onUpdate: f.onUpdate })),

@@ -65,6 +65,28 @@ fn is_nullable(type_name: &str) -> bool {
     type_name.starts_with("Nullable(")
 }
 
+/// Column introspection SQL. Selects `comment` (6th column) so the「备注」
+/// column can be populated from `system.columns.comment`.
+fn clickhouse_columns_sql(schema: &str, table: &str) -> String {
+    format!(
+        "SELECT name, type, default_kind, default_expression, is_in_primary_key, comment \
+         FROM system.columns \
+         WHERE database = '{}' AND table = '{}' \
+         ORDER BY position",
+        schema.replace('\'', "\\'"),
+        table.replace('\'', "\\'")
+    )
+}
+
+/// Table-level comment SQL (`system.tables.comment`).
+fn clickhouse_table_comment_sql(schema: &str, table: &str) -> String {
+    format!(
+        "SELECT comment FROM system.tables WHERE database = '{}' AND name = '{}'",
+        schema.replace('\'', "\\'"),
+        table.replace('\'', "\\'")
+    )
+}
+
 #[async_trait]
 impl Driver for ClickhouseDriver {
     fn db_type(&self) -> DatabaseType { DatabaseType::Clickhouse }
@@ -160,15 +182,7 @@ impl Driver for ClickhouseDriver {
     }
 
     async fn table_structure(&self, schema: &str, table: &str) -> Result<TableStructure, DbError> {
-        let sql = format!(
-            "SELECT name, type, default_kind, default_expression, is_in_primary_key \
-             FROM system.columns \
-             WHERE database = '{}' AND table = '{}' \
-             ORDER BY position",
-            schema.replace('\'', "\\'"),
-            table.replace('\'', "\\'")
-        );
-        let result = ch_query(&self.http, &sql).await?;
+        let result = ch_query(&self.http, &clickhouse_columns_sql(schema, table)).await?;
 
         let columns: Vec<ColumnDef> = result.data.iter().map(|row| {
             let name = row.first().and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -186,11 +200,22 @@ impl Driver for ClickhouseDriver {
                 })
                 .unwrap_or(false);
             let key = if is_pk { "PK" } else { "" };
-            ColumnDef { name, type_name, nullable, default, key: key.into() }
+            // system.columns.comment is the 6th selected column.
+            let comment = row.get(5).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            ColumnDef { name, type_name, nullable, default, key: key.into(), comment }
         }).collect();
+
+        // ---- table comment (system.tables.comment) ----
+        let comment = ch_query(&self.http, &clickhouse_table_comment_sql(schema, table)).await
+            .ok()
+            .and_then(|r| r.data.into_iter().next())
+            .and_then(|row| row.into_iter().next())
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
 
         // ClickHouse has no foreign keys
         Ok(TableStructure {
+            comment,
             columns,
             indexes: Vec::<IndexDef>::new(),
             fks: Vec::<ForeignKeyDef>::new(),
@@ -200,5 +225,24 @@ impl Driver for ClickhouseDriver {
     async fn er_relations(&self, _schema: &str) -> Result<Vec<ErRelation>, DbError> {
         // ClickHouse has no FK concept; er=false per capabilities
         Ok(vec![])
+    }
+}
+
+#[cfg(test)]
+mod comment_sql_tests {
+    use super::{clickhouse_columns_sql, clickhouse_table_comment_sql};
+
+    #[test]
+    fn columns_sql_selects_comment_from_system_columns() {
+        let sql = clickhouse_columns_sql("mydb", "users");
+        assert!(sql.contains("system.columns"), "列 SQL 必须查 system.columns");
+        assert!(sql.contains("comment"), "列 SQL 必须 SELECT comment 以填备注");
+    }
+
+    #[test]
+    fn table_comment_sql_selects_comment_from_system_tables() {
+        let sql = clickhouse_table_comment_sql("mydb", "users");
+        assert!(sql.contains("system.tables"), "表注释 SQL 必须查 system.tables");
+        assert!(sql.contains("comment"), "表注释 SQL 必须 SELECT comment");
     }
 }

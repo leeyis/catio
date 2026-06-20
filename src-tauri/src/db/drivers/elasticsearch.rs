@@ -244,6 +244,7 @@ impl Driver for ElasticsearchDriver {
                 nullable: false,
                 default: None,
                 key: "PK".into(),
+                comment: String::new(),
             }
         ];
 
@@ -260,11 +261,13 @@ impl Driver for ElasticsearchDriver {
                     nullable: true,
                     default: None,
                     key: String::new(),
+                    comment: String::new(),
                 });
             }
         }
 
         Ok(TableStructure {
+            comment: String::new(),
             columns,
             indexes: Vec::<IndexDef>::new(),
             fks: Vec::<ForeignKeyDef>::new(),

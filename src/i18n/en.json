@@ -126,6 +126,8 @@
     "colDefault": "Default",
     "colKey": "Key",
     "colComment": "Comment",
+    "showComments": "Show comments",
+    "showColumnNames": "Show column names",
     "idxName": "Index name",
     "idxCols": "Columns",
     "idxUnique": "Unique",

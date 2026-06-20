@@ -24,7 +24,7 @@ vi.mock('../../services/db', () => ({
   })),
   tableStructure: vi.fn(async () => ({
     comment: '',
-    columns: [{ name: 'id', type: 'bigint', nullable: false, default: null, key: 'PK', extra: '' }],
+    columns: [{ name: 'id', type: 'bigint', nullable: false, default: null, key: 'PK', extra: '', comment: '' }],
     indexes: [],
     fks: [],
   })),

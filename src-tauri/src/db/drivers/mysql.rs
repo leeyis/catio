@@ -516,6 +516,42 @@ impl Driver for MySqlDriver {
 
 // ── Standard MySQL introspection helpers ────────────────────────────────────
 
+/// Build the column introspection SQL for standard MySQL.
+/// Includes c.COLUMN_COMMENT so the「备注」column can be populated.
+fn mysql_columns_sql(schema: &str, table: &str) -> String {
+    format!(
+        "SELECT c.COLUMN_NAME, c.COLUMN_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, c.EXTRA, \
+         c.COLUMN_KEY, c.COLUMN_COMMENT, \
+         CASE WHEN pk.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS is_pk, \
+         CASE WHEN fk.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS is_fk \
+         FROM information_schema.COLUMNS c \
+         LEFT JOIN information_schema.KEY_COLUMN_USAGE pk \
+           ON pk.TABLE_SCHEMA = c.TABLE_SCHEMA \
+           AND pk.TABLE_NAME = c.TABLE_NAME \
+           AND pk.COLUMN_NAME = c.COLUMN_NAME \
+           AND pk.CONSTRAINT_NAME = 'PRIMARY' \
+         LEFT JOIN information_schema.KEY_COLUMN_USAGE fk \
+           ON fk.TABLE_SCHEMA = c.TABLE_SCHEMA \
+           AND fk.TABLE_NAME = c.TABLE_NAME \
+           AND fk.COLUMN_NAME = c.COLUMN_NAME \
+           AND fk.REFERENCED_TABLE_NAME IS NOT NULL \
+         WHERE c.TABLE_SCHEMA = {s} AND c.TABLE_NAME = {t} \
+         ORDER BY c.ORDINAL_POSITION",
+        s = quote_value(schema),
+        t = quote_value(table),
+    )
+}
+
+/// Build the table-comment SQL for standard MySQL (information_schema.TABLES.TABLE_COMMENT).
+fn mysql_table_comment_sql(schema: &str, table: &str) -> String {
+    format!(
+        "SELECT TABLE_COMMENT FROM information_schema.TABLES \
+         WHERE TABLE_SCHEMA = {s} AND TABLE_NAME = {t}",
+        s = quote_value(schema),
+        t = quote_value(table),
+    )
+}
+
 impl MySqlDriver {
     /// table_structure for standard MySQL.
     /// Adapted from dbx list_columns/list_indexes/list_foreign_keys, Apache-2.0.
@@ -531,27 +567,7 @@ impl MySqlDriver {
 
         // ---- columns ----
         // adapted from dbx columns_sql (information_schema.COLUMNS + KEY_COLUMN_USAGE for PK)
-        let col_sql = format!(
-            "SELECT c.COLUMN_NAME, c.COLUMN_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, c.EXTRA, \
-             c.COLUMN_KEY, \
-             CASE WHEN pk.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS is_pk, \
-             CASE WHEN fk.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS is_fk \
-             FROM information_schema.COLUMNS c \
-             LEFT JOIN information_schema.KEY_COLUMN_USAGE pk \
-               ON pk.TABLE_SCHEMA = c.TABLE_SCHEMA \
-               AND pk.TABLE_NAME = c.TABLE_NAME \
-               AND pk.COLUMN_NAME = c.COLUMN_NAME \
-               AND pk.CONSTRAINT_NAME = 'PRIMARY' \
-             LEFT JOIN information_schema.KEY_COLUMN_USAGE fk \
-               ON fk.TABLE_SCHEMA = c.TABLE_SCHEMA \
-               AND fk.TABLE_NAME = c.TABLE_NAME \
-               AND fk.COLUMN_NAME = c.COLUMN_NAME \
-               AND fk.REFERENCED_TABLE_NAME IS NOT NULL \
-             WHERE c.TABLE_SCHEMA = {s} AND c.TABLE_NAME = {t} \
-             ORDER BY c.ORDINAL_POSITION",
-            s = quote_value(schema),
-            t = quote_value(table),
-        );
+        let col_sql = mysql_columns_sql(schema, table);
         let result = conn.query_iter(&col_sql).await
             .map_err(|e| DbError::QueryFailed(e.to_string()))?;
         let col_rows: Vec<mysql_async::Row> = result
@@ -573,6 +589,7 @@ impl MySqlDriver {
                 nullable,
                 default: get_opt_str_by_name(r, "COLUMN_DEFAULT"),
                 key: key.into(),
+                comment: get_str_by_name(r, "COLUMN_COMMENT"),
             }
         }).collect();
 
@@ -645,7 +662,15 @@ impl MySqlDriver {
             }
         }).collect();
 
-        Ok(TableStructure { columns, indexes, fks })
+        // ---- table comment ----
+        let comment_sql = mysql_table_comment_sql(schema, table);
+        let comment = conn.query_first::<mysql_async::Row, _>(&comment_sql).await
+            .ok()
+            .flatten()
+            .map(|r| get_str(&r, 0))
+            .unwrap_or_default();
+
+        Ok(TableStructure { comment, columns, indexes, fks })
     }
 
     /// er_relations for standard MySQL.
@@ -675,6 +700,41 @@ impl MySqlDriver {
             to_col: get_str(r, 3),
         }).collect())
     }
+}
+
+/// Build the column introspection SQL for the OceanBase-Oracle path.
+/// Joins ALL_COL_COMMENTS so column comments populate the「备注」column.
+fn ob_columns_sql(schema: &str, table: &str) -> String {
+    format!(
+        "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.NULLABLE, c.DATA_DEFAULT, \
+         c.DATA_LENGTH, c.DATA_PRECISION, c.DATA_SCALE, c.COLUMN_ID, \
+         CASE WHEN cc.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS IS_PK, \
+         cm.COMMENTS AS COL_COMMENT \
+         FROM ALL_TAB_COLUMNS c \
+         LEFT JOIN ( \
+           SELECT cols.OWNER, cols.TABLE_NAME, cols.COLUMN_NAME \
+           FROM ALL_CONS_COLUMNS cols \
+           JOIN ALL_CONSTRAINTS con \
+             ON con.CONSTRAINT_NAME = cols.CONSTRAINT_NAME AND con.OWNER = cols.OWNER \
+           WHERE con.CONSTRAINT_TYPE = 'P' \
+         ) cc ON cc.OWNER = c.OWNER AND cc.TABLE_NAME = c.TABLE_NAME AND cc.COLUMN_NAME = c.COLUMN_NAME \
+         LEFT JOIN ALL_COL_COMMENTS cm \
+           ON cm.OWNER = c.OWNER AND cm.TABLE_NAME = c.TABLE_NAME AND cm.COLUMN_NAME = c.COLUMN_NAME \
+         WHERE c.OWNER = {s} AND c.TABLE_NAME = {t} \
+         ORDER BY c.COLUMN_ID",
+        s = quote_value(schema),
+        t = quote_value(table),
+    )
+}
+
+/// Build the table-comment SQL for the OceanBase-Oracle path (ALL_TAB_COMMENTS).
+fn ob_table_comment_sql(schema: &str, table: &str) -> String {
+    format!(
+        "SELECT COMMENTS FROM ALL_TAB_COMMENTS \
+         WHERE OWNER = {s} AND TABLE_NAME = {t}",
+        s = quote_value(schema),
+        t = quote_value(table),
+    )
 }
 
 // ── OceanBase-Oracle introspection helpers ───────────────────────────────────
@@ -722,23 +782,7 @@ impl MySqlDriver {
             .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
 
         // ---- columns (ALL_TAB_COLUMNS + PK join) ----
-        let col_sql = format!(
-            "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.NULLABLE, c.DATA_DEFAULT, \
-             c.DATA_LENGTH, c.DATA_PRECISION, c.DATA_SCALE, c.COLUMN_ID, \
-             CASE WHEN cc.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS IS_PK \
-             FROM ALL_TAB_COLUMNS c \
-             LEFT JOIN ( \
-               SELECT cols.OWNER, cols.TABLE_NAME, cols.COLUMN_NAME \
-               FROM ALL_CONS_COLUMNS cols \
-               JOIN ALL_CONSTRAINTS con \
-                 ON con.CONSTRAINT_NAME = cols.CONSTRAINT_NAME AND con.OWNER = cols.OWNER \
-               WHERE con.CONSTRAINT_TYPE = 'P' \
-             ) cc ON cc.OWNER = c.OWNER AND cc.TABLE_NAME = c.TABLE_NAME AND cc.COLUMN_NAME = c.COLUMN_NAME \
-             WHERE c.OWNER = {s} AND c.TABLE_NAME = {t} \
-             ORDER BY c.COLUMN_ID",
-            s = quote_value(schema),
-            t = quote_value(table),
-        );
+        let col_sql = ob_columns_sql(schema, table);
         let result = conn.query_iter(&col_sql).await
             .map_err(|e| DbError::QueryFailed(e.to_string()))?;
         let col_rows: Vec<mysql_async::Row> = result
@@ -758,6 +802,7 @@ impl MySqlDriver {
                     if d.is_empty() { None } else { Some(d) }
                 },
                 key: if is_pk { "PK" } else { "" }.into(),
+                comment: get_str(r, 9),
             }
         }).collect();
 
@@ -827,7 +872,15 @@ impl MySqlDriver {
             }
         }).collect();
 
-        Ok(TableStructure { columns, indexes, fks })
+        // ---- table comment ----
+        let comment_sql = ob_table_comment_sql(schema, table);
+        let comment = conn.query_first::<mysql_async::Row, _>(&comment_sql).await
+            .ok()
+            .flatten()
+            .map(|r| get_str(&r, 0))
+            .unwrap_or_default();
+
+        Ok(TableStructure { comment, columns, indexes, fks })
     }
 
     async fn ob_er_relations(&self, schema: &str) -> Result<Vec<ErRelation>, DbError> {
@@ -860,5 +913,37 @@ impl MySqlDriver {
             to: get_str(r, 2),
             to_col: get_str(r, 3),
         }).collect())
+    }
+}
+
+#[cfg(test)]
+mod comment_sql_tests {
+    use super::{mysql_columns_sql, mysql_table_comment_sql, ob_columns_sql, ob_table_comment_sql};
+
+    #[test]
+    fn standard_columns_sql_selects_column_comment() {
+        let sql = mysql_columns_sql("mydb", "users");
+        assert!(sql.contains("COLUMN_COMMENT"), "标准列 SQL 必须 SELECT COLUMN_COMMENT");
+        assert!(sql.contains("'mydb'") && sql.contains("'users'"));
+    }
+
+    #[test]
+    fn standard_table_comment_sql_selects_table_comment() {
+        let sql = mysql_table_comment_sql("mydb", "users");
+        assert!(sql.contains("TABLE_COMMENT"), "表注释 SQL 必须 SELECT TABLE_COMMENT");
+        assert!(sql.contains("information_schema.TABLES"));
+    }
+
+    #[test]
+    fn ob_columns_sql_selects_col_comments() {
+        let sql = ob_columns_sql("SCOTT", "EMP");
+        assert!(sql.contains("ALL_COL_COMMENTS"), "OB-Oracle 列 SQL 必须 JOIN ALL_COL_COMMENTS");
+        assert!(sql.contains("COL_COMMENT"));
+    }
+
+    #[test]
+    fn ob_table_comment_sql_selects_tab_comments() {
+        let sql = ob_table_comment_sql("SCOTT", "EMP");
+        assert!(sql.contains("ALL_TAB_COMMENTS"), "OB-Oracle 表注释 SQL 必须查 ALL_TAB_COMMENTS");
     }
 }

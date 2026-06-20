@@ -443,6 +443,7 @@ impl Driver for MongoDriver {
                 nullable: name != "_id",
                 default: None,
                 key: key.into(),
+                comment: String::new(),
             }
         }).collect();
 
@@ -478,6 +479,7 @@ impl Driver for MongoDriver {
         }
 
         Ok(TableStructure {
+            comment: String::new(),
             columns,
             indexes,
             fks: vec![],

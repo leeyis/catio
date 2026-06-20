@@ -76,6 +76,10 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
   const [activeId, setActiveId] = useState<string | null>(connId ? null : tabIdOf.table('public', 'orders'))
   const [queryN, setQueryN] = useState(0)
   const [queryInitialCode, setQueryInitialCode] = useState<Record<number, string>>({})
+  // 功能#3:每个 SQL tab 的一次性"seed + 自动执行"信号(历史「执行」兜底)。
+  // seq 单调递增,SqlConsole 据此去重,避免重渲染重复执行。
+  const [autoRunByTab, setAutoRunByTab] = useState<Record<string, { text: string; seq: number }>>({})
+  const autoRunSeq = useRef(0)
   const activeTab = tabs.find(tb => tb.id === activeId) ?? null
 
   // ---- 侧栏整栏收起 (功能#2) — 仅本次会话内存 ----
@@ -152,11 +156,13 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
   function pickObject(schema: string, name: string, kind: 'view' | 'function' | 'procedure') {
     openTab({ id: tabIdOf.object(kind, schema, name), kind: 'object', schema, name, objKind: kind })
   }
-  function newQuery(seed?: string, defaultSchema?: string) {
+  /** autoRun=true → 新控制台 seed 入 SQL 并在挂载后自动执行一次(历史「执行」无窗口兜底,功能#3)。 */
+  function newQuery(seed?: string, defaultSchema?: string, autoRun = false) {
     if (!caps.sqlConsole) return
     const id = queryN + 1
     setQueryN(id)
     if (seed != null) setQueryInitialCode(m => ({ ...m, [id]: seed }))
+    if (autoRun && seed != null) setAutoRunByTab(m => ({ ...m, [tabIdOf.sql(id)]: { text: seed, seq: ++autoRunSeq.current } }))
     openTab({ id: tabIdOf.sql(id), kind: 'sql', qid: id, defaultSchema })
   }
   /** Open the CREATE TABLE/VIEW form modal for `schema`. No-op without a live connection. */
@@ -222,6 +228,37 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
       ?? namespaces[0]
   }, [namespaces, activeTab])
 
+  // ---- 功能#3:历史「执行」无窗口兜底 ----
+  // catio-run 全局派发。激活 tab 为 SQL 控制台时由 SqlConsole 自行处理(行为不变);
+  // 当激活 tab 不是 SQL 控制台时,DbWorkbench 介入:有已开 SQL tab → 切到最近的那个并执行,
+  // 否则新建一个并 seed + 自动执行。仅可见 workbench(shown)响应。
+  // 处理逻辑放进每渲染更新的 ref,监听只按 [shown] 订阅一次,避免每次状态变化重订阅。
+  const runFallbackRef = useRef<(text: string) => void>(() => {})
+  runFallbackRef.current = (text: string) => {
+    if (!caps.sqlConsole) return
+    // 激活 tab 即 SQL 控制台 → 不介入(SqlConsole 现有逻辑会处理)。
+    if (activeTab?.kind === 'sql') return
+    // 有已开 SQL tab(非激活)→ 切到最近打开的那个,再 seed + 执行。
+    const lastSql = [...tabs].reverse().find(tb => tb.kind === 'sql')
+    if (lastSql) {
+      setActiveId(lastSql.id)
+      setAutoRunByTab(m => ({ ...m, [lastSql.id]: { text, seq: ++autoRunSeq.current } }))
+      return
+    }
+    // 完全没有 SQL tab → 新建并 seed + 自动执行。
+    newQuery(text, namespace?.name, true)
+  }
+  useEffect(() => {
+    if (!shown) return
+    const onRun = (e: Event) => {
+      const ce = e as CustomEvent<{ kind?: string; text?: string }>
+      if (!ce.detail || ce.detail.kind !== 'sql' || typeof ce.detail.text !== 'string') return
+      runFallbackRef.current(ce.detail.text)
+    }
+    window.addEventListener('catio-run', onRun)
+    return () => window.removeEventListener('catio-run', onRun)
+  }, [shown])
+
   return (
     <div style={{ display: 'flex', alignItems: 'stretch', height: '100%', width: '100%', flex: 1, minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
       <SchemaBrowser onPick={pickTable} onPickObject={pickObject}
@@ -273,8 +310,8 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
               )}
               {tb.kind === 'sql' && (
                 <SqlConsole density={density} fresh queryN={tb.qid} writable={caps.writable} connId={connId ?? undefined}
-                  initialCode={queryInitialCode[tb.qid]} initialDefaultSchema={tb.defaultSchema}
-                  onFullscreenChange={(fs) => setFsByTab(m => ({ ...m, [tb.id]: fs }))}
+                  initialCode={queryInitialCode[tb.qid]} initialDefaultSchema={tb.defaultSchema} autoRun={autoRunByTab[tb.id]}
+                  onFullscreenChange={(fs) => setFsByTab(m => (m[tb.id] === fs ? m : { ...m, [tb.id]: fs }))}
                   active={shown && tb.id === activeId} engine={conn.engine} connName={conn.name} profileId={conn.id} />
               )}
               {tb.kind === 'er' && (

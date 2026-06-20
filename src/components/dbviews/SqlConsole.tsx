@@ -24,6 +24,13 @@ export interface SqlConsoleProps {
   /** Namespace selected when this query tab is opened from a scoped action. */
   initialDefaultSchema?: string
   /**
+   * One-shot "seed-and-run" signal from the parent (history "执行" with no active
+   * SQL console, 功能#3). When `seq` changes (per dispatch) AND this console is the
+   * active one, the text is inserted and run once. Identity-stable seqs are not
+   * re-run, so a re-render won't trigger a duplicate execution.
+   */
+  autoRun?: { text: string; seq: number }
+  /**
    * True when this console is the currently-shown query tab. Consoles stay
    * MOUNTED while hidden, so only the active one may consume the global
    * `catio-insert` / `catio-run` (sql) window events — otherwise every open
@@ -43,7 +50,7 @@ export interface SqlConsoleProps {
   onFullscreenChange?: (fullscreen: boolean) => void
 }
 
-export function SqlConsole({ density, fresh, writable = true, connId, initialCode, initialDefaultSchema, active, engine, connName, profileId, onFullscreenChange }: SqlConsoleProps) {
+export function SqlConsole({ density, fresh, writable = true, connId, initialCode, initialDefaultSchema, autoRun, active, engine, connName, profileId, onFullscreenChange }: SqlConsoleProps) {
   const { t } = useTranslation()
   // mongodb/elasticsearch 用各自语法(mongo shell / REST+SQL),编辑器走 plain 模式:
   // 不挂 SQL 补全、显示语法占位提示、结果网格只读(mongo 的 _id 带 pk 标记,
@@ -299,6 +306,21 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
   // calls the current closure without re-subscribing on every keystroke.
   const runRef = useRef(run)
   runRef.current = run
+
+  // 功能#3:父级派发的一次性"seed + run"(历史「执行」无激活 SQL 控制台时,
+  // 由 DbWorkbench 新建/切换到本控制台并下发)。仅当本控制台为激活态、且 seq 未消费过
+  // 才执行一次:插入文本到编辑器(jsdom 下编辑器未挂载则降级 setCode),再运行该语句。
+  // 初值 -1(无效 seq):autoRun 仅在父级有意下发时才传入,故首个非空 autoRun 必然触发
+  // (新建控制台挂载即带 autoRun 的分支也需要在挂载后运行)。
+  const autoRunSeqRef = useRef(-1)
+  useEffect(() => {
+    if (active === false) return
+    if (!autoRun || autoRun.seq === autoRunSeqRef.current) return
+    autoRunSeqRef.current = autoRun.seq
+    if (editorRef.current) editorRef.current.insertAtCursor(autoRun.text, true)
+    else setCode(prev => (prev.trim() ? prev.replace(/\s*$/, '') + '\n\n' : '') + autoRun.text)
+    runRef.current(autoRun.text)
+  }, [autoRun, active])
 
   // Snippet / history / AI "insert" + "run" into the SQL editor.
   // GATING: only the ACTIVE query console consumes these global events, so N

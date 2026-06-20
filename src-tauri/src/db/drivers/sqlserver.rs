@@ -14,6 +14,45 @@ use crate::db::driver::{
 };
 use crate::db::result::{binary_to_json, safe_i64_to_json, ColumnInfo, QueryResult};
 
+/// Column introspection SQL for SQL Server. `s`/`t` are already single-quote-escaped.
+/// Column 5 (0-based) is the column comment from sys.extended_properties (MS_Description, class=1).
+fn sqlserver_columns_sql(s: &str, t: &str) -> String {
+    format!(
+        "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, \
+         CASE WHEN kcu.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS IS_PK, \
+         CAST(( \
+           SELECT ep.value FROM sys.extended_properties ep \
+           WHERE ep.class = 1 \
+             AND ep.major_id = OBJECT_ID('{s}.{t}') \
+             AND ep.minor_id = COLUMNPROPERTY(OBJECT_ID('{s}.{t}'), c.COLUMN_NAME, 'ColumnId') \
+             AND ep.name = 'MS_Description' \
+         ) AS NVARCHAR(MAX)) AS COL_COMMENT \
+         FROM INFORMATION_SCHEMA.COLUMNS c \
+         LEFT JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu \
+           ON c.TABLE_SCHEMA = kcu.TABLE_SCHEMA \
+           AND c.TABLE_NAME = kcu.TABLE_NAME \
+           AND c.COLUMN_NAME = kcu.COLUMN_NAME \
+           AND kcu.CONSTRAINT_NAME IN ( \
+             SELECT CONSTRAINT_NAME FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS \
+             WHERE CONSTRAINT_TYPE = 'PRIMARY KEY' \
+               AND TABLE_SCHEMA = '{s}' AND TABLE_NAME = '{t}' \
+           ) \
+         WHERE c.TABLE_SCHEMA = '{s}' AND c.TABLE_NAME = '{t}' \
+         ORDER BY c.ORDINAL_POSITION"
+    )
+}
+
+/// Table-comment SQL for SQL Server (sys.extended_properties, class=1, minor_id=0, MS_Description).
+fn sqlserver_table_comment_sql(s: &str, t: &str) -> String {
+    format!(
+        "SELECT CAST(ep.value AS NVARCHAR(MAX)) AS TBL_COMMENT \
+         FROM sys.extended_properties ep \
+         WHERE ep.class = 1 AND ep.minor_id = 0 \
+           AND ep.major_id = OBJECT_ID('{s}.{t}') \
+           AND ep.name = 'MS_Description'"
+    )
+}
+
 /// Tiberius client wrapped in a mutex because `Client` needs `&mut self` for queries.
 pub struct SqlServerDriver {
     client: Arc<Mutex<Client<Compat<TcpStream>>>>,
@@ -283,22 +322,7 @@ impl Driver for SqlServerDriver {
 
         // ---- columns with PK detection via INFORMATION_SCHEMA constraints ----
         // Adapted from dbx sqlserver.rs sqlserver_columns_sql.
-        let col_sql = format!(
-            "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, \
-             CASE WHEN kcu.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS IS_PK \
-             FROM INFORMATION_SCHEMA.COLUMNS c \
-             LEFT JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu \
-               ON c.TABLE_SCHEMA = kcu.TABLE_SCHEMA \
-               AND c.TABLE_NAME = kcu.TABLE_NAME \
-               AND c.COLUMN_NAME = kcu.COLUMN_NAME \
-               AND kcu.CONSTRAINT_NAME IN ( \
-                 SELECT CONSTRAINT_NAME FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS \
-                 WHERE CONSTRAINT_TYPE = 'PRIMARY KEY' \
-                   AND TABLE_SCHEMA = '{s}' AND TABLE_NAME = '{t}' \
-               ) \
-             WHERE c.TABLE_SCHEMA = '{s}' AND c.TABLE_NAME = '{t}' \
-             ORDER BY c.ORDINAL_POSITION"
-        );
+        let col_sql = sqlserver_columns_sql(&s, &t);
 
         // Also query FK columns to mark them
         let fk_col_sql = format!(
@@ -377,12 +401,14 @@ impl Driver for SqlServerDriver {
                 } else {
                     ""
                 };
+                let comment = r.try_get::<&str, _>(5).ok().flatten().unwrap_or("").to_string();
                 ColumnDef {
                     name,
                     type_name,
                     nullable: is_nullable,
                     default,
                     key: key.into(),
+                    comment,
                 }
             })
             .collect();
@@ -471,7 +497,24 @@ impl Driver for SqlServerDriver {
             })
             .collect();
 
+        // ---- table comment (sys.extended_properties, minor_id = 0) ----
+        let comment_sql = sqlserver_table_comment_sql(&s, &t);
+        let comment = match client.query(&*comment_sql, &[]).await {
+            Ok(stream) => stream
+                .into_first_result()
+                .await
+                .ok()
+                .and_then(|rows| {
+                    rows.first()
+                        .and_then(|r| r.try_get::<&str, _>(0).ok().flatten())
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_default(),
+            Err(_) => String::new(),
+        };
+
         Ok(TableStructure {
+            comment,
             columns,
             indexes,
             fks,
@@ -515,5 +558,26 @@ impl Driver for SqlServerDriver {
                 to_col: r.try_get::<&str, _>(4).ok().flatten().unwrap_or("").to_string(),
             })
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod comment_sql_tests {
+    use super::{sqlserver_columns_sql, sqlserver_table_comment_sql};
+
+    #[test]
+    fn columns_sql_selects_ms_description() {
+        let sql = sqlserver_columns_sql("dbo", "Users");
+        assert!(sql.contains("MS_Description"), "列 SQL 必须取 MS_Description 扩展属性");
+        assert!(sql.contains("sys.extended_properties"));
+        assert!(sql.contains("ep.class = 1"));
+        assert!(sql.contains("COLUMNPROPERTY"));
+    }
+
+    #[test]
+    fn table_comment_sql_uses_minor_id_zero() {
+        let sql = sqlserver_table_comment_sql("dbo", "Users");
+        assert!(sql.contains("MS_Description"), "表注释 SQL 必须取 MS_Description");
+        assert!(sql.contains("ep.minor_id = 0"), "表注释用 minor_id = 0");
     }
 }
