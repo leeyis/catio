@@ -22,9 +22,10 @@ describe('buildTableContext — relational', () => {
     expect(out).toContain('PRIMARY KEY ("id")')
   })
 
-  it('uses MySQL backtick quoting for mysql engine', () => {
+  it('uses MySQL backtick quoting and database-qualifies the table for mysql engine', () => {
     const out = buildTableContext('mysql', 'shop', 'orders', relStruct)
-    expect(out).toContain('CREATE TABLE `orders`')
+    // MySQL "schema" is the database; qualify so cross-database references resolve.
+    expect(out).toContain('CREATE TABLE `shop`.`orders`')
     expect(out).toContain('`id` bigint NOT NULL')
   })
 

@@ -24,9 +24,15 @@ export function quoteIdent(dialect: StructDialect, name: string): string {
   return '"' + name.replace(/"/g, '""') + '"'
 }
 
-/** Schema-qualify + quote a table. Postgres qualifies with the schema; MySQL uses the table alone. */
+/**
+ * Schema-qualify + quote a table. When a schema is given, qualify with it for BOTH
+ * dialects — for MySQL the "schema" is the database, and the workbench browses
+ * across databases, so an unqualified ALTER would resolve against the connection's
+ * current database (e.g. `esales`) instead of the table's own (`eastmoney`) and
+ * fail with "table doesn't exist". Falls back to the bare table when no schema.
+ */
 export function qualifiedTable(dialect: StructDialect, schema: string | undefined, table: string): string {
-  if (dialect === 'postgres' && schema && schema.trim()) {
+  if (schema && schema.trim()) {
     return `${quoteIdent(dialect, schema)}.${quoteIdent(dialect, table)}`
   }
   return quoteIdent(dialect, table)

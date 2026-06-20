@@ -12,7 +12,7 @@ describe('structureDdl — ADD COLUMN with comment', () => {
   it('MySQL carries the comment inline in the column definition', () => {
     const q = qualifiedTable('mysql', 'eastmoney', 'orders')
     const stmts = buildAddColumn('mysql', q, draft({ name: 'remark', type: 'varchar(50)', comment: '备注' }))
-    expect(stmts).toEqual(["ALTER TABLE `orders` ADD COLUMN `remark` varchar(50) COMMENT '备注';"])
+    expect(stmts).toEqual(["ALTER TABLE `eastmoney`.`orders` ADD COLUMN `remark` varchar(50) COMMENT '备注';"])
   })
 
   it("MySQL escapes single quotes in the comment", () => {
@@ -116,5 +116,20 @@ describe('structureDdl — dialectFor sanity', () => {
     expect(dialectFor('mariadb')).toBe('mysql')
     expect(dialectFor('postgres')).toBe('postgres')
     expect(dialectFor(undefined)).toBe('postgres')
+  })
+})
+
+describe('structureDdl — qualifiedTable qualifies with schema for BOTH dialects', () => {
+  it('MySQL qualifies with the database so cross-database ALTERs resolve correctly', () => {
+    // Regression: an unqualified `ods_org_issueinfo` resolved against the connection's
+    // current db (esales) instead of eastmoney → "table doesn't exist".
+    expect(qualifiedTable('mysql', 'eastmoney', 'ods_org_issueinfo')).toBe('`eastmoney`.`ods_org_issueinfo`')
+  })
+  it('Postgres qualifies with the schema', () => {
+    expect(qualifiedTable('postgres', 'public', 'orders')).toBe('"public"."orders"')
+  })
+  it('falls back to the bare table when no schema is given', () => {
+    expect(qualifiedTable('mysql', undefined, 't')).toBe('`t`')
+    expect(qualifiedTable('postgres', '', 't')).toBe('"t"')
   })
 })
