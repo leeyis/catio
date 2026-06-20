@@ -126,6 +126,7 @@
     "colDefault": "默认值",
     "colKey": "键",
     "colComment": "备注",
+    "colCommentPlaceholder": "例如:机构发行信息",
     "showComments": "显示列注释",
     "showColumnNames": "显示列名",
     "idxName": "索引名",

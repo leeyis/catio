@@ -126,6 +126,7 @@
     "colDefault": "Default",
     "colKey": "Key",
     "colComment": "Comment",
+    "colCommentPlaceholder": "e.g. issuing institution info",
     "showComments": "Show comments",
     "showColumnNames": "Show column names",
     "idxName": "Index name",

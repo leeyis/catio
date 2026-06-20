@@ -7,7 +7,7 @@ import { useData } from '../../state/DataContext'
 import { tableStructure, runQuery, dbErrMsg } from '../../services/db'
 import type { StructColumn, TableStructure } from '../../services/types'
 import { highlightSQL } from './highlightSQL'
-import { dialectFor, qualifiedTable, buildAddColumn, buildModifyColumn, buildDropColumn, type ColumnDraft } from './structureDdl'
+import { dialectFor, qualifiedTable, buildAddColumn, buildModifyColumn, buildDropColumn, buildCreateTableDDL, type ColumnDraft } from './structureDdl'
 
 export interface StructureViewProps {
   table: string
@@ -30,12 +30,6 @@ const thCell: React.CSSProperties = { textAlign: 'left', padding: '9px 12px', fo
 const tdCell: React.CSSProperties = { padding: '8px 12px', borderBottom: '1px solid var(--border-hairline)', color: 'var(--text-secondary)', verticalAlign: 'middle' }
 const inputStyle: React.CSSProperties = { border: '1px solid var(--border-hairline)', borderRadius: 7, padding: '6px 9px', background: 'var(--surface-card)', color: 'var(--text-primary)', font: 'inherit', fontSize: 12.5, outline: 'none', width: '100%' }
 
-function buildDDL(qualified: string, st: TableStructure) {
-  const cols = st.columns.map(c => `  ${c.name.padEnd(16)} ${c.type}${c.nullable ? '' : ' not null'}${c.default ? ' default ' + c.default : ''}${c.key === 'PK' ? ' primary key' : ''}`).join(',\n')
-  const fks = st.fks.map(fk => `  foreign key (${fk.col}) references ${fk.ref} on delete ${fk.onDelete}`).join(',\n')
-  return `create table ${qualified} (\n${cols}${fks ? ',\n' + fks : ''}\n);\n\n${st.indexes.filter(i => !i.name.endsWith('pkey')).map(i => `create ${i.unique ? 'unique ' : ''}index ${i.name} on ${qualified} using ${i.method} (${i.cols});`).join('\n')}`
-}
-
 function Empty({ icon, text }: { icon: string; text: string }) {
   return <div className="col" style={{ alignItems: 'center', justifyContent: 'center', height: '100%', gap: 8, color: 'var(--text-faint)' }}><Icon name={icon} size={26} /><span style={{ fontSize: 13 }}>{text}</span></div>
 }
@@ -48,6 +42,7 @@ interface ColForm {
   type: string
   nullable: boolean
   default: string
+  comment: string
 }
 
 export function StructureView({ table, connId, schema, engine, canEdit = true }: StructureViewProps) {
@@ -88,18 +83,18 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
 
   function openAdd() {
     setApplyErr(null)
-    setForm({ mode: 'add', name: '', type: '', nullable: true, default: '' })
+    setForm({ mode: 'add', name: '', type: '', nullable: true, default: '', comment: '' })
   }
   function openEdit(c: StructColumn) {
     setApplyErr(null)
-    const original: ColumnDraft = { name: c.name, type: c.type, nullable: c.nullable, default: c.default ?? '' }
-    setForm({ mode: { editing: c.name, original }, name: c.name, type: c.type, nullable: c.nullable, default: c.default ?? '' })
+    const original: ColumnDraft = { name: c.name, type: c.type, nullable: c.nullable, default: c.default ?? '', comment: c.comment ?? '' }
+    setForm({ mode: { editing: c.name, original }, name: c.name, type: c.type, nullable: c.nullable, default: c.default ?? '', comment: c.comment ?? '' })
   }
 
   // Build the statements for the open form and hand them to the preview gate.
   function submitForm() {
     if (!form) return
-    const draft: ColumnDraft = { name: form.name, type: form.type, nullable: form.nullable, default: form.default }
+    const draft: ColumnDraft = { name: form.name, type: form.type, nullable: form.nullable, default: form.default, comment: form.comment }
     const stmts = form.mode === 'add'
       ? buildAddColumn(dialect, sqlQualified, draft)
       : buildModifyColumn(dialect, sqlQualified, form.mode.original, draft)
@@ -215,7 +210,7 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
         )}
         {!structErr && tab === 'ddl' && (
           <pre className="mono" style={{ margin: 0, padding: 16, fontSize: 12.5, lineHeight: 1.7, color: 'var(--text-secondary)', whiteSpace: 'pre-wrap' }}
-            dangerouslySetInnerHTML={{ __html: highlightSQL(buildDDL(ddlQualified, st)) }} />
+            dangerouslySetInnerHTML={{ __html: highlightSQL(buildCreateTableDDL(dialect, ddlQualified, st)) }} />
         )}
       </div>
 
@@ -252,6 +247,12 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
                 <input value={form.default} onChange={e => setForm(f => f && { ...f, default: e.target.value })}
                   placeholder="0, 'pending', now()…"
                   onKeyDown={e => { if (e.key === 'Enter') submitForm() }} style={{ ...inputStyle, fontFamily: 'var(--font-mono, monospace)' }} />
+              </label>
+              <label className="col" style={{ gap: 5 }}>
+                <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('dbviews.colComment')} <span style={{ color: 'var(--text-faint)', fontWeight: 400 }}>({t('dbviews.optional')})</span></span>
+                <input value={form.comment} onChange={e => setForm(f => f && { ...f, comment: e.target.value })}
+                  placeholder={t('dbviews.colCommentPlaceholder')}
+                  onKeyDown={e => { if (e.key === 'Enter') submitForm() }} style={inputStyle} />
               </label>
               <div className="row gap8" style={{ justifyContent: 'flex-end', marginTop: 2 }}>
                 <Btn variant="ghost" onClick={() => setForm(null)}>{t('dbviews.cancel')}</Btn>
