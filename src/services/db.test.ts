@@ -130,6 +130,40 @@ describe('services/db', () => {
     delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
   })
 
+  it('tableStructure threads column- and table-level comments from the backend', async () => {
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+    invokeMock.mockResolvedValue({
+      comment: '机构发行信息表',
+      columns: [
+        { name: 'id', typeName: 'int', nullable: false, default: null, key: 'PK', comment: '主键' },
+        { name: 'secucode', typeName: 'varchar(20)', nullable: true, default: null, key: '', comment: '证券代码' },
+      ],
+      indexes: [],
+      fks: [],
+    })
+    const { tableStructure } = await import('./db')
+    const st = await tableStructure('conn-1', 'eastmoney', 'ods_org_issueinfo')
+    expect(invokeMock).toHaveBeenCalledWith('db_table_structure', { connId: 'conn-1', schema: 'eastmoney', table: 'ods_org_issueinfo' })
+    expect(st.comment).toBe('机构发行信息表')
+    expect(st.columns[0].comment).toBe('主键')
+    expect(st.columns[1].comment).toBe('证券代码')
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
+
+  it('tableStructure defaults missing comments to empty strings (engines without native comments)', async () => {
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+    invokeMock.mockResolvedValue({
+      columns: [{ name: 'id', typeName: 'int', nullable: false, default: null, key: 'PK' }],
+      indexes: [],
+      fks: [],
+    })
+    const { tableStructure } = await import('./db')
+    const st = await tableStructure('conn-1', 'main', 't')
+    expect(st.comment).toBe('')
+    expect(st.columns[0].comment).toBe('')
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
+
   it('getHistory forwards to db_history under Tauri', async () => {
     ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
     invokeMock.mockResolvedValue([{ id: 'hist-1', kind: 'sql', target: 'conn-1', text: 'SELECT 1', when: '0', dur: '1ms' }])
