@@ -237,6 +237,16 @@ function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery,
   const [hover, setHover] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
+  // 复制节点名后的短暂反馈:被复制的节点名,~1.2s 后清空(图标 copy→check)。
+  const [copiedName, setCopiedName] = useState<string | null>(null)
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => { if (copyTimer.current) clearTimeout(copyTimer.current) }, [])
+  function copyName(name: string) {
+    navigator.clipboard?.writeText(name)
+    setCopiedName(name)
+    if (copyTimer.current) clearTimeout(copyTimer.current)
+    copyTimer.current = setTimeout(() => setCopiedName(null), 1200)
+  }
   const tables: SchemaTable[] = ns.tables.filter(tbl => tbl.name.toLowerCase().includes(query))
   const keyTone: Record<string, string> = { PK: 'var(--signal-amber)', FK: 'var(--signal-blue)', UNI: 'var(--signal-violet)' }
 
@@ -263,22 +273,26 @@ function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery,
 
   // Hover-revealed copy/insert actions for a leaf node (table/view/function).
   // Insert is only offered when the active tab is a SQL console (catio-insert is a no-op otherwise).
-  const leafActions = (name: string) => (
-    <span className="treerow-actions row" style={{ flex: 'none', gap: 2, alignItems: 'center' }}>
-      <button className="icon-btn bare" title={t('workbench.copyName')} aria-label={t('workbench.copyName')}
-        onClick={e => { e.stopPropagation(); navigator.clipboard?.writeText(name) }}
-        style={{ width: 20, height: 20 }}>
-        <Icon name="copy" size={12} style={{ color: 'var(--text-tertiary)' }} />
-      </button>
-      {sqlActive && (
-        <button className="icon-btn bare" title={t('workbench.insertName')} aria-label={t('workbench.insertName')}
-          onClick={e => { e.stopPropagation(); window.dispatchEvent(new CustomEvent('catio-insert', { detail: { kind: 'sql', text: name } })) }}
+  const leafActions = (name: string) => {
+    const copied = copiedName === name
+    return (
+      // 行内布局(非绝对定位):hover 时出现并挤压名字使其省略号截断,避免遮挡表名。
+      <span className="treerow-actions" style={{ gap: 2, alignItems: 'center', marginLeft: 'auto' }}>
+        <button className="icon-btn bare" title={copied ? t('dbviews.copied') : t('workbench.copyName')} aria-label={t('workbench.copyName')}
+          onClick={e => { e.stopPropagation(); copyName(name) }}
           style={{ width: 20, height: 20 }}>
-          <Icon name="plus" size={12} style={{ color: 'var(--accent-primary)' }} />
+          <Icon name={copied ? 'check' : 'copy'} size={12} style={{ color: copied ? 'var(--signal-green)' : 'var(--text-tertiary)' }} />
         </button>
-      )}
-    </span>
-  )
+        {sqlActive && (
+          <button className="icon-btn bare" title={t('workbench.insertName')} aria-label={t('workbench.insertName')}
+            onClick={e => { e.stopPropagation(); window.dispatchEvent(new CustomEvent('catio-insert', { detail: { kind: 'sql', text: name } })) }}
+            style={{ width: 20, height: 20 }}>
+            <Icon name="arrow-right-to-line" size={12} style={{ color: 'var(--accent-primary)' }} />
+          </button>
+        )}
+      </span>
+    )
+  }
 
   return (
     <>

@@ -827,14 +827,16 @@ select option { background: var(--surface-elevated); color: var(--text-primary);
 .structrow:hover .structrow-actions,
 .structrow:focus-within .structrow-actions { opacity: 1; }
 
-/* Schema tree leaf rows: copy / insert actions reveal on row hover */
-.treerow-actions { opacity: 0; transition: opacity .12s; }
+/* Schema tree leaf rows: copy / insert actions reveal on row hover.
+   In-flow (not absolute) so they take their own slot and the name shrinks +
+   ellipsis-truncates instead of being overlapped. Hidden = display:none so no
+   space is reserved in the resting state (name keeps full width). */
+.treerow-actions { display: none; flex: none; }
 .treerow:hover .treerow-actions,
-.treerow:focus-within .treerow-actions { opacity: 1; }
-/* On the table row, the actions occupy the right slot where the row count sits — hide the count on hover. */
-.treerow .treerow-actions { position: absolute; right: 6px; }
+.treerow:focus-within .treerow-actions { display: flex; }
+/* On the table row the actions take the right slot where the row count sits — hide the count on hover. */
 .treerow:hover .rowcount,
-.treerow:focus-within .rowcount { opacity: 0; }
+.treerow:focus-within .rowcount { display: none; }
 
 /* Sidebar group header: delete action reveals on hover */
 .group-del { opacity: 0; transition: opacity .12s; }

@@ -148,4 +148,14 @@ describe('SchemaBrowser', () => {
     fireEvent.click(screen.getAllByTitle('复制名称')[0]) // first = table 'orders'
     expect(writeText).toHaveBeenCalledWith('orders')
   })
+
+  it('clicking copy shows a brief 已复制 feedback on that node', () => {
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText: vi.fn() }, configurable: true })
+    renderFull(false)
+    expandAll()
+    fireEvent.click(screen.getAllByTitle('复制名称')[0]) // first = table 'orders'
+    // 复制后被点的那个节点反馈为「已复制」,其余仍是「复制名称」。
+    expect(screen.getByTitle('已复制')).toBeInTheDocument()
+    expect(screen.getAllByTitle('复制名称')).toHaveLength(2)
+  })
 })
