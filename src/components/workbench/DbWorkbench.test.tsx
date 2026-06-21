@@ -379,6 +379,47 @@ describe('DbWorkbench unified tabs', () => {
   })
 })
 
+describe('DbWorkbench 标签栏右键菜单 (需求1)', () => {
+  beforeEach(() => {
+    h.list.mockReset(); h.tablePreview.mockReset(); h.getSchema.mockReset(); h.runQuery.mockReset(); h.objectSource.mockReset()
+    h.list.mockReturnValue([])
+    h.tablePreview.mockResolvedValue({ columns: [], rows: [] })
+    h.getSchema.mockResolvedValue(LIVE_SCHEMA)
+    h.runQuery.mockResolvedValue({ columns: [], rows: [] })
+    h.objectSource.mockResolvedValue('')
+  })
+
+  it('对标签右键弹出菜单(含"关闭其他")', async () => {
+    wrap(<DbWorkbench conn={CONN} />)
+    const chip = await screen.findByTestId('wbtab-table:public.orders')
+    fireEvent.contextMenu(chip)
+    expect(screen.getByText(/关闭其他|Close others/)).toBeInTheDocument()
+  })
+
+  it('点击"关闭其他"后仅剩该标签', async () => {
+    wrap(<DbWorkbench conn={CONN} />)
+    const tableChip = await screen.findByTestId('wbtab-table:public.orders')
+    // 展开 schema 并打开另一张表? mock 只有 orders → 改用新建查询造出第二个 tab。
+    fireEvent.click(screen.getByTestId('wb-new-query'))
+    const sqlChip = await screen.findByTestId('wbtab-sql:1')
+    // 对表标签右键 → 关闭其他 → 仅剩表标签
+    fireEvent.contextMenu(tableChip)
+    fireEvent.click(screen.getByText(/关闭其他|Close others/))
+    expect(screen.getByTestId('wbtab-table:public.orders')).toBeInTheDocument()
+    expect(screen.queryByTestId('wbtab-sql:1')).not.toBeInTheDocument()
+    expect(sqlChip).not.toBeInTheDocument()
+  })
+
+  it('点击"关闭所有"后进入空状态', async () => {
+    wrap(<DbWorkbench conn={CONN} />)
+    const chip = await screen.findByTestId('wbtab-table:public.orders')
+    fireEvent.contextMenu(chip)
+    fireEvent.click(screen.getByText(/关闭所有|Close all/))
+    expect(screen.queryByTestId('wbtab-table:public.orders')).not.toBeInTheDocument()
+    expect(screen.getByText(/没有打开的标签|No open tabs/)).toBeInTheDocument()
+  })
+})
+
 describe('DbWorkbench 侧栏整栏收起 (功能#2)', () => {
   beforeEach(() => {
     h.list.mockReset(); h.tablePreview.mockReset(); h.getSchema.mockReset(); h.runQuery.mockReset(); h.objectSource.mockReset()

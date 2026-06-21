@@ -93,6 +93,8 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
   const [createObj, setCreateObj] = useState<{ schema: string; kind: 'table' | 'view' } | null>(null)
   // Error surfaced when a CREATE statement fails to run.
   const [createErr, setCreateErr] = useState<string | null>(null)
+  // 标签右键菜单(需求1):{tabId,x,y} 定位;全局 click / Escape 关闭。
+  const [tabMenu, setTabMenu] = useState<{ tabId: string; x: number; y: number } | null>(null)
   // Horizontally-scrollable tab strip — chevrons scroll it when tabs overflow.
   const tabStripRef = useRef<HTMLDivElement>(null)
   const scrollTabs = (dx: number) => tabStripRef.current?.scrollBy({ left: dx, behavior: 'smooth' })
@@ -191,6 +193,16 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
       return next
     })
   }
+  /** 关闭除 id 外的其余 tab,并激活该 id。 */
+  function closeOthers(id: string) {
+    setTabs(prev => prev.filter(x => x.id === id))
+    setActiveId(id)
+  }
+  /** 关闭全部 tab,进入空状态。 */
+  function closeAll() {
+    setTabs([])
+    setActiveId(null)
+  }
 
   // Live schema 加载后:仅剔除已不存在的表 tab(reconcile);不再自动打开第一张表
   // ——按用户要求把"看哪张表"的选择权交还给用户(连接后停在空状态,树也默认折叠)。
@@ -260,6 +272,19 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
     return () => window.removeEventListener('catio-run', onRun)
   }, [shown])
 
+  // 标签右键菜单:全局 click / Escape 关闭(参照 WorkbenchTabs)。
+  useEffect(() => {
+    if (!tabMenu) return
+    const onClickOutside = () => setTabMenu(null)
+    const onKeyDown = (e: KeyboardEvent) => { if (e.key === 'Escape') setTabMenu(null) }
+    window.addEventListener('click', onClickOutside)
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      window.removeEventListener('click', onClickOutside)
+      window.removeEventListener('keydown', onKeyDown)
+    }
+  }, [tabMenu])
+
   return (
     <div style={{ display: 'flex', alignItems: 'stretch', height: '100%', width: '100%', flex: 1, minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
       <SchemaBrowser onPick={pickTable} onPickObject={pickObject}
@@ -287,7 +312,9 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
                   : tb.kind === 'er' ? `ER · ${tb.schema}`
                   : tb.name
                 return (
-                  <div key={tb.id} data-testid={`wbtab-${tb.id}`} onClick={() => setActiveId(tb.id)} className="row gap6" title={label}
+                  <div key={tb.id} data-testid={`wbtab-${tb.id}`} onClick={() => setActiveId(tb.id)}
+                    onContextMenu={e => { e.preventDefault(); setTabMenu({ tabId: tb.id, x: e.clientX, y: e.clientY }) }}
+                    className="row gap6" title={label}
                     style={{ flex: 'none', alignItems: 'center', height: 26, padding: '0 6px 0 10px', borderRadius: 8, cursor: 'pointer', fontSize: 12,
                       background: isActive ? 'var(--accent-soft)' : 'var(--surface-sunken)', color: isActive ? 'var(--accent-primary)' : 'var(--text-secondary)' }}>
                     <Icon name={icon} size={12} /> <span className="ell mono" style={{ maxWidth: 140 }}>{label}</span>
@@ -297,6 +324,35 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
               })}
             </div>
             <button className="icon-btn bare" style={{ width: 24, height: 24, flex: 'none' }} title={t('workbench.scrollRight')} onClick={() => scrollTabs(160)}><Icon name="chevron-right" size={14} /></button>
+          </div>
+        )}
+        {/* 标签右键菜单(需求1):关闭当前 / 关闭其他 / 关闭所有。 */}
+        {tabMenu && (
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{
+              position: 'fixed', left: tabMenu.x, top: tabMenu.y, zIndex: 200,
+              background: 'var(--surface-card)', border: '1px solid var(--border-hairline)',
+              borderRadius: 10, boxShadow: 'var(--shadow-dropdown)', padding: '4px 0', minWidth: 160,
+            }}>
+            {[
+              { label: t('workbench.closeCurrent'), action: () => { closeTab(tabMenu.tabId); setTabMenu(null) } },
+              { label: t('workbench.closeOthers'), action: () => { closeOthers(tabMenu.tabId); setTabMenu(null) } },
+              { label: t('workbench.closeAll'), action: () => { closeAll(); setTabMenu(null) } },
+            ].map(item => (
+              <button
+                key={item.label}
+                onClick={item.action}
+                style={{
+                  display: 'block', width: '100%', textAlign: 'left', padding: '7px 14px',
+                  border: 'none', background: 'transparent', fontSize: 13, color: 'var(--text-primary)', cursor: 'pointer',
+                }}
+                onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = 'var(--accent-soft)' }}
+                onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}
+              >
+                {item.label}
+              </button>
+            ))}
           </div>
         )}
         {/* panes — 全部 mounted,display 切换,切回状态原样(与原 SQL console 同款机制)。 */}
