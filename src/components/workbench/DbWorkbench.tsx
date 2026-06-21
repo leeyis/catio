@@ -188,19 +188,16 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
     })
   }
 
-  // Live schema 加载后:剔除不存在的表 tab;若没有任何表 tab,自动打开第一张表。
+  // Live schema 加载后:仅剔除已不存在的表 tab(reconcile);不再自动打开第一张表
+  // ——按用户要求把"看哪张表"的选择权交还给用户(连接后停在空状态,树也默认折叠)。
   useEffect(() => {
     if (!connId || !liveSchema || !liveSchema.schemas.length) return
     const exists = (s: string, tname: string) => liveSchema.schemas.some(
       n => n.name === s && (n.tables.some(x => x.name === tname) || n.views.some(v => v.name === tname)),
     )
-    const first = liveSchema.schemas.find(n => n.tables.length) ?? liveSchema.schemas[0]
-    const firstTable = first.tables[0]
     setTabs(prev => {
       const kept = prev.filter(tb => tb.kind !== 'table' || exists(tb.schema, tb.table))
-      if (kept.length === prev.length && (kept.some(tb => tb.kind === 'table') || !firstTable)) return prev
-      if (kept.some(tb => tb.kind === 'table') || !firstTable) return kept
-      return [...kept, { id: tabIdOf.table(first.name, firstTable.name), kind: 'table' as const, schema: first.name, table: firstTable.name }]
+      return kept.length === prev.length ? prev : kept
     })
   }, [connId, liveSchema])
 

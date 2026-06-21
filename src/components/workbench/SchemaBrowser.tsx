@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { ConnGlyph, StatusDot } from '../atoms'
 import { useData } from '../../state/DataContext'
+import { readHiddenSchemas, writeHiddenSchemas } from '../../state/schemaFilter'
 import type { Connection, SchemaNamespace, SchemaTable } from '../../services/types'
 
 export interface SchemaBrowserProps {
@@ -53,6 +54,32 @@ export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpen
   const [q, setQ] = useState('')
   const query = q.toLowerCase()
 
+  // Schema/database visibility filter (persisted per connection). Default = show all.
+  // Users hide schemas they don't care about; the choice survives reconnects.
+  const connKey = conn?.id ?? 'demo'
+  const [hidden, setHidden] = useState<Set<string>>(() => new Set(readHiddenSchemas(connKey)))
+  useEffect(() => { setHidden(new Set(readHiddenSchemas(connKey))) }, [connKey])
+  const [filterOpen, setFilterOpen] = useState(false)
+  const filterRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!filterOpen) return
+    function onDown(e: MouseEvent) {
+      if (filterRef.current && !filterRef.current.contains(e.target as Node)) setFilterOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [filterOpen])
+  function applyHidden(next: Set<string>) {
+    setHidden(next)
+    writeHiddenSchemas(connKey, [...next])
+  }
+  function toggleSchema(name: string) {
+    const next = new Set(hidden)
+    if (next.has(name)) next.delete(name); else next.add(name)
+    applyHidden(next)
+  }
+  const visibleNamespaces = namespaces.filter(ns => !hidden.has(ns.name))
+
   // Header: real connection when available, else the demo connection / text.
   const headerName = conn?.name ?? 'prod-orders'
   const headerEngine = conn ? (conn.engine ?? conn.sub) : 'PostgreSQL 16.2'
@@ -91,10 +118,49 @@ export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpen
           )}
         </div>
       </div>
-      {/* search */}
-      <div className="row gap6" style={{ margin: '0 10px 8px', height: 30, padding: '0 9px', background: 'var(--surface-sunken)', border: '1px solid var(--border-hairline)', borderRadius: 9 }}>
-        <Icon name="search" size={13} style={{ color: 'var(--text-faint)' }} />
-        <input value={q} onChange={e => setQ(e.target.value)} placeholder={t('workbench.searchTablesViews')} style={{ flex: 1, border: 'none', outline: 'none', background: 'transparent', fontSize: 12, color: 'var(--text-primary)' }} />
+      {/* search + schema/database visibility filter */}
+      <div className="row gap6" style={{ margin: '0 10px 8px', position: 'relative' }}>
+        <div className="row gap6" style={{ flex: 1, minWidth: 0, height: 30, padding: '0 9px', background: 'var(--surface-sunken)', border: '1px solid var(--border-hairline)', borderRadius: 9 }}>
+          <Icon name="search" size={13} style={{ color: 'var(--text-faint)' }} />
+          <input value={q} onChange={e => setQ(e.target.value)} placeholder={t('workbench.searchTablesViews')} style={{ flex: 1, minWidth: 0, border: 'none', outline: 'none', background: 'transparent', fontSize: 12, color: 'var(--text-primary)' }} />
+        </div>
+        {namespaces.length > 1 && (
+          <button className="icon-btn bare" data-testid="schema-filter-btn" title={t('workbench.filterSchemas')} aria-label={t('workbench.filterSchemas')}
+            onClick={() => setFilterOpen(o => !o)} data-active={filterOpen ? '1' : undefined}
+            style={{ width: 30, height: 30, flex: 'none', position: 'relative', color: hidden.size ? 'var(--accent-primary)' : 'var(--text-tertiary)' }}>
+            <Icon name="filter" size={14} />
+            {hidden.size > 0 && <span style={{ position: 'absolute', top: 3, right: 3, width: 6, height: 6, borderRadius: '50%', background: 'var(--accent-primary)' }} />}
+          </button>
+        )}
+        {filterOpen && (
+          <div ref={filterRef} data-testid="schema-filter-popover" className="col" style={{ position: 'absolute', top: '100%', right: 0, zIndex: 200, marginTop: 4, width: 224, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', borderRadius: 10, boxShadow: 'var(--shadow-dropdown)', overflow: 'hidden' }}>
+            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', padding: '8px 10px', borderBottom: '1px solid var(--border-hairline)' }}>
+              <span style={{ fontSize: 11.5, fontWeight: 700, color: 'var(--text-tertiary)' }}>{t('workbench.filterSchemas')}</span>
+              <div className="row gap8">
+                <button onClick={() => applyHidden(new Set())} style={{ border: 'none', background: 'transparent', fontSize: 11, color: 'var(--accent-primary)', cursor: 'pointer', padding: 0 }}>{t('workbench.selectAll')}</button>
+                <button onClick={() => applyHidden(new Set(namespaces.map(n => n.name)))} style={{ border: 'none', background: 'transparent', fontSize: 11, color: 'var(--text-tertiary)', cursor: 'pointer', padding: 0 }}>{t('workbench.clearAll')}</button>
+              </div>
+            </div>
+            <div className="col scrollon" style={{ maxHeight: 264, overflowY: 'auto', padding: '4px 0' }}>
+              {namespaces.map(ns => {
+                const shown = !hidden.has(ns.name)
+                return (
+                  <button key={ns.name} data-testid={`schema-filter-item:${ns.name}`} onClick={() => toggleSchema(ns.name)} className="row gap8"
+                    style={{ width: '100%', textAlign: 'left', padding: '6px 10px', border: 'none', background: 'transparent', cursor: 'pointer', alignItems: 'center' }}
+                    onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = 'var(--surface-sunken)' }}
+                    onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}>
+                    <span style={{ width: 15, height: 15, borderRadius: 4, flex: 'none', display: 'grid', placeItems: 'center', border: `1.5px solid ${shown ? 'var(--accent-primary)' : 'var(--border-hairline-alt)'}`, background: shown ? 'var(--accent-primary)' : 'transparent' }}>
+                      {shown && <Icon name="check" size={10} style={{ color: '#fff' }} />}
+                    </span>
+                    <Icon name="database" size={12} style={{ color: 'var(--signal-blue)', flex: 'none' }} />
+                    <span className="ell" style={{ fontSize: 12.5, color: 'var(--text-primary)' }}>{ns.name}</span>
+                    <span className="mono" style={{ marginLeft: 'auto', fontSize: 9.5, color: 'var(--text-faint)', flex: 'none' }}>{ns.tables.length}</span>
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        )}
       </div>
       {/* New query / ER moved into each schema's "⋯" hover menu (see SchemaNode). */}
       {/* tree — one collapsible top-level DB node per schema namespace.
@@ -115,7 +181,14 @@ export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpen
             <Icon name="database" size={22} />
             <span style={{ fontSize: 11.5 }}>{t('workbench.noSchemas')}</span>
           </div>
-        ) : namespaces.map(ns => (
+        ) : namespaces.length > 0 && visibleNamespaces.length === 0 ? (
+          // Every schema is filtered out — offer a one-click "show all" escape hatch.
+          <div className="col" style={{ alignItems: 'center', justifyContent: 'center', gap: 8, padding: '34px 12px', color: 'var(--text-faint)', textAlign: 'center' }}>
+            <Icon name="filter" size={20} />
+            <span style={{ fontSize: 11.5 }}>{t('workbench.allSchemasHidden')}</span>
+            <button onClick={() => applyHidden(new Set())} style={{ border: '1px solid var(--border-hairline)', background: 'transparent', borderRadius: 7, padding: '4px 10px', fontSize: 11.5, color: 'var(--accent-primary)', cursor: 'pointer' }}>{t('workbench.showAllSchemas')}</button>
+          </div>
+        ) : visibleNamespaces.map(ns => (
           <SchemaNode key={ns.name} ns={ns} query={query} active={active} onPick={onPick} onPickObject={onPickObject} live={!!live}
             onNewQuery={onNewQuery} onOpenER={onOpenER} onNewObjectTemplate={onNewObjectTemplate} onRefresh={onRefresh} />
         ))}
@@ -146,8 +219,10 @@ interface SchemaNodeProps {
 function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh }: SchemaNodeProps) {
   const { t } = useTranslation()
   const D = useData()
-  // Default-open the first schema's section so a freshly-connected DB shows tables immediately.
-  const [open, setOpen] = useState({ schema: true, tables: true, views: false, fns: false })
+  // Schemas start COLLAPSED — a freshly-connected DB shows nothing expanded until the
+  // user picks a schema (esp. important for connections with dozens of databases).
+  // `tables` is pre-opened so that expanding a schema reveals its tables in one click.
+  const [open, setOpen] = useState({ schema: false, tables: true, views: false, fns: false })
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   // Hover reveals the "..." action button; the schema-management dropdown opens from it.
   const [hover, setHover] = useState(false)
@@ -181,7 +256,7 @@ function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery,
       <div className="row" style={{ position: 'relative', alignItems: 'center' }}
         onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <TreeNode icon="database" iconColor="var(--signal-blue)" label={ns.name} count={ns.tables.length + ' tables'} open={open.schema} onToggle={() => setOpen(o => ({ ...o, schema: !o.schema }))} depth={0} />
+          <TreeNode icon="database" iconColor="var(--signal-blue)" label={ns.name} count={ns.tables.length + ' tables'} open={open.schema} onToggle={() => setOpen(o => ({ ...o, schema: !o.schema }))} depth={0} testId={`schema-node:${ns.name}`} />
         </div>
         <button className="icon-btn bare" title={t('workbench.schemaMenu')} aria-label={t('workbench.schemaMenu')}
           onClick={e => { e.stopPropagation(); setMenuOpen(o => !o) }}
@@ -223,7 +298,7 @@ function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery,
                       <Icon name="chevron-right" size={11} style={{ color: 'var(--text-faint)', transition: 'transform .15s', transform: isOpen ? 'rotate(90deg)' : 'none' }} />
                     </button>
                   : <span style={{ width: 18, height: 26, flex: 'none' }} />}
-                <button onClick={() => onPick(ns.name, tbl.name)} style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 7, padding: '5px 6px 5px 0', minWidth: 0, color: isActive ? 'var(--accent-primary)' : 'var(--text-secondary)' }}>
+                <button data-testid={`schema-tbl:${ns.name}.${tbl.name}`} onClick={() => onPick(ns.name, tbl.name)} style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 7, padding: '5px 6px 5px 0', minWidth: 0, color: isActive ? 'var(--accent-primary)' : 'var(--text-secondary)' }}>
                   <Icon name="table-2" size={13} style={{ color: isActive ? 'var(--accent-primary)' : 'var(--text-tertiary)', flex: 'none' }} />
                   <span className="ell mono" style={{ fontSize: 12, fontWeight: isActive ? 600 : 400 }}>{tbl.name}</span>
                   {tbl.pinned && <Icon name="star" size={10} style={{ color: 'var(--signal-amber)', fill: 'var(--signal-amber)', flex: 'none' }} />}
@@ -272,11 +347,12 @@ interface TreeNodeProps {
   open: boolean
   onToggle: () => void
   depth: number
+  testId?: string
 }
 
-function TreeNode({ icon, iconColor, label, count, open, onToggle, depth }: TreeNodeProps) {
+function TreeNode({ icon, iconColor, label, count, open, onToggle, depth, testId }: TreeNodeProps) {
   return (
-    <button onClick={onToggle} className="treeleaf" style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px', paddingLeft: 6 + depth * 16, borderRadius: 8, color: 'var(--text-secondary)' }}>
+    <button onClick={onToggle} data-testid={testId} className="treeleaf" style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px', paddingLeft: 6 + depth * 16, borderRadius: 8, color: 'var(--text-secondary)' }}>
       <Icon name="chevron-right" size={11} style={{ transition: 'transform .15s', transform: open ? 'rotate(90deg)' : 'none', color: 'var(--text-faint)', flex: 'none' }} />
       <Icon name={icon} size={13} style={{ color: iconColor || 'var(--text-tertiary)', flex: 'none' }} />
       <span style={{ fontSize: 12.5, fontWeight: 600 }}>{label}</span>
