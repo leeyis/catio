@@ -1,5 +1,5 @@
 import { render, screen, fireEvent } from '@testing-library/react'
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { LanguageProvider } from '../../state/LanguageContext'
 import { DataProvider } from '../../state/DataContext'
 import { DATA } from '../../services/mockData'
@@ -9,6 +9,9 @@ import type { SchemaNamespace } from '../../services/types'
 const NS: SchemaNamespace[] = [
   { name: 'eastmoney', open: false, tables: [{ name: 'orders', rows: '', cols: 0 }], views: [], functions: [] },
   { name: 'esales', open: false, tables: [{ name: 'leads', rows: '', cols: 0 }], views: [], functions: [] },
+]
+const NS_FULL: SchemaNamespace[] = [
+  { name: 'eastmoney', open: false, tables: [{ name: 'orders', rows: '', cols: 0 }], views: [{ name: 'v_daily' }], functions: [{ name: 'fn_total' }] },
 ]
 const CONN = DATA.byId['d-orders'] // stable id 'd-orders' → used as the filter persistence key
 
@@ -94,5 +97,55 @@ describe('SchemaBrowser', () => {
     expect(screen.getByText('新建表')).toBeInTheDocument()
     expect(screen.getByText('新建视图')).toBeInTheDocument()
     expect(screen.getByText('刷新')).toBeInTheDocument()
+  })
+
+  // ---- 需求4: 树叶子节点 hover 复制/插入图标 ----
+  const renderFull = (sqlActive: boolean) => render(
+    <LanguageProvider><DataProvider>
+      <SchemaBrowser onPick={noop} onPickObject={noop} active={null} onNewQuery={noop} onOpenER={noop}
+        erActive={false} sqlActive={sqlActive} schemas={NS_FULL} conn={CONN} live />
+    </DataProvider></LanguageProvider>,
+  )
+  // Expand the schema, then Views / Functions groups, so all leaf nodes are visible.
+  const expandAll = () => {
+    fireEvent.click(screen.getByTestId('schema-node:eastmoney'))
+    fireEvent.click(screen.getByText('Views'))
+    fireEvent.click(screen.getByText('Functions'))
+  }
+
+  it('sqlActive=true: every leaf node has BOTH a copy and an insert button', () => {
+    renderFull(true)
+    expandAll()
+    // 1 table + 1 view + 1 function = 3 of each.
+    expect(screen.getAllByTitle('复制名称')).toHaveLength(3)
+    expect(screen.getAllByTitle('插入到查询')).toHaveLength(3)
+  })
+
+  it('sqlActive=false: leaf nodes have a copy button but NO insert button', () => {
+    renderFull(false)
+    expandAll()
+    expect(screen.getAllByTitle('复制名称')).toHaveLength(3)
+    expect(screen.queryByTitle('插入到查询')).not.toBeInTheDocument()
+  })
+
+  it('clicking the insert button dispatches catio-insert with the node name', () => {
+    renderFull(true)
+    expandAll()
+    const spy = vi.fn()
+    window.addEventListener('catio-insert', spy)
+    fireEvent.click(screen.getAllByTitle('插入到查询')[0]) // first = table 'orders'
+    window.removeEventListener('catio-insert', spy)
+    expect(spy).toHaveBeenCalledTimes(1)
+    const ev = spy.mock.calls[0][0] as CustomEvent
+    expect(ev.detail).toEqual({ kind: 'sql', text: 'orders' })
+  })
+
+  it('clicking the copy button writes the node name to the clipboard', () => {
+    const writeText = vi.fn()
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    renderFull(false)
+    expandAll()
+    fireEvent.click(screen.getAllByTitle('复制名称')[0]) // first = table 'orders'
+    expect(writeText).toHaveBeenCalledWith('orders')
   })
 })

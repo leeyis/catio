@@ -827,6 +827,15 @@ select option { background: var(--surface-elevated); color: var(--text-primary);
 .structrow:hover .structrow-actions,
 .structrow:focus-within .structrow-actions { opacity: 1; }
 
+/* Schema tree leaf rows: copy / insert actions reveal on row hover */
+.treerow-actions { opacity: 0; transition: opacity .12s; }
+.treerow:hover .treerow-actions,
+.treerow:focus-within .treerow-actions { opacity: 1; }
+/* On the table row, the actions occupy the right slot where the row count sits — hide the count on hover. */
+.treerow .treerow-actions { position: absolute; right: 6px; }
+.treerow:hover .rowcount,
+.treerow:focus-within .rowcount { opacity: 0; }
+
 /* Sidebar group header: delete action reveals on hover */
 .group-del { opacity: 0; transition: opacity .12s; }
 .group-head-row:hover .group-del,

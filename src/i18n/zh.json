@@ -245,6 +245,8 @@
     "newTable": "新建表",
     "newView": "新建视图",
     "schemaMenu": "Schema 操作",
+    "copyName": "复制名称",
+    "insertName": "插入到查询",
     "tables": "Tables",
     "views": "Views",
     "functions": "Functions",

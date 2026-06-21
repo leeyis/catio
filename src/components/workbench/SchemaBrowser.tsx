@@ -50,7 +50,7 @@ export interface SchemaBrowserProps {
   onToggleCollapse?: () => void
 }
 
-export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, schemas, conn, live, refreshing, loading, collapsed, onToggleCollapse, canSqlConsole = true, canEr = true, canStructureEdit = true }: SchemaBrowserProps) {
+export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, schemas, conn, live, refreshing, loading, collapsed, onToggleCollapse, sqlActive, canSqlConsole = true, canEr = true, canStructureEdit = true }: SchemaBrowserProps) {
   const { t } = useTranslation()
   const D = useData()
   // Live path: render every supplied namespace; mock path: the single seeded schema (pixel-identical).
@@ -195,7 +195,7 @@ export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpen
         ) : visibleNamespaces.map(ns => (
           <SchemaNode key={ns.name} ns={ns} query={query} active={active} onPick={onPick} onPickObject={onPickObject} live={!!live}
             onNewQuery={onNewQuery} onOpenER={onOpenER} onNewObjectTemplate={onNewObjectTemplate} onRefresh={onRefresh}
-            canSqlConsole={canSqlConsole} canEr={canEr} canStructureEdit={canStructureEdit} />
+            sqlActive={sqlActive} canSqlConsole={canSqlConsole} canEr={canEr} canStructureEdit={canStructureEdit} />
         ))}
       </div>
       {/* footer */}
@@ -218,13 +218,14 @@ interface SchemaNodeProps {
   onOpenER: (schema?: string) => void
   onNewObjectTemplate?: (schema: string, kind: 'table' | 'view') => void
   onRefresh?: () => void
+  sqlActive: boolean
   canSqlConsole: boolean
   canEr: boolean
   canStructureEdit: boolean
 }
 
 /** One schema namespace rendered as a collapsible DB tree node (Tables / Views / Functions). */
-function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, canSqlConsole, canEr, canStructureEdit }: SchemaNodeProps) {
+function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, sqlActive, canSqlConsole, canEr, canStructureEdit }: SchemaNodeProps) {
   const { t } = useTranslation()
   const D = useData()
   // Schemas start COLLAPSED — a freshly-connected DB shows nothing expanded until the
@@ -259,6 +260,25 @@ function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery,
     ] : []),
     ...(onRefresh ? [{ icon: 'refresh-cw', label: t('workbench.refresh'), action: () => onRefresh() }] : []),
   ]
+
+  // Hover-revealed copy/insert actions for a leaf node (table/view/function).
+  // Insert is only offered when the active tab is a SQL console (catio-insert is a no-op otherwise).
+  const leafActions = (name: string) => (
+    <span className="treerow-actions row" style={{ flex: 'none', gap: 2, alignItems: 'center' }}>
+      <button className="icon-btn bare" title={t('workbench.copyName')} aria-label={t('workbench.copyName')}
+        onClick={e => { e.stopPropagation(); navigator.clipboard?.writeText(name) }}
+        style={{ width: 20, height: 20 }}>
+        <Icon name="copy" size={12} style={{ color: 'var(--text-tertiary)' }} />
+      </button>
+      {sqlActive && (
+        <button className="icon-btn bare" title={t('workbench.insertName')} aria-label={t('workbench.insertName')}
+          onClick={e => { e.stopPropagation(); window.dispatchEvent(new CustomEvent('catio-insert', { detail: { kind: 'sql', text: name } })) }}
+          style={{ width: 20, height: 20 }}>
+          <Icon name="plus" size={12} style={{ color: 'var(--accent-primary)' }} />
+        </button>
+      )}
+    </span>
+  )
 
   return (
     <>
@@ -301,7 +321,7 @@ function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery,
           const showExpand = !live && !!st
           return (
             <div key={tbl.name}>
-              <div className="row treeleaf" style={{ alignItems: 'center', gap: 2, paddingLeft: 22, borderRadius: 8, background: isActive ? 'var(--accent-soft)' : 'transparent' }}>
+              <div className="row treeleaf treerow" style={{ position: 'relative', alignItems: 'center', gap: 2, paddingLeft: 22, paddingRight: 6, borderRadius: 8, background: isActive ? 'var(--accent-soft)' : 'transparent' }}>
                 {showExpand
                   ? <button onClick={() => setExpanded(e => ({ ...e, [tbl.name]: !e[tbl.name] }))} style={{ width: 18, height: 26, display: 'grid', placeItems: 'center', flex: 'none' }} title={t('workbench.expandColumns')}>
                       <Icon name="chevron-right" size={11} style={{ color: 'var(--text-faint)', transition: 'transform .15s', transform: isOpen ? 'rotate(90deg)' : 'none' }} />
@@ -311,8 +331,9 @@ function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery,
                   <Icon name="table-2" size={13} style={{ color: isActive ? 'var(--accent-primary)' : 'var(--text-tertiary)', flex: 'none' }} />
                   <span className="ell mono" style={{ fontSize: 12, fontWeight: isActive ? 600 : 400 }}>{tbl.name}</span>
                   {tbl.pinned && <Icon name="star" size={10} style={{ color: 'var(--signal-amber)', fill: 'var(--signal-amber)', flex: 'none' }} />}
-                  <span className="mono" style={{ marginLeft: 'auto', fontSize: 9.5, color: 'var(--text-faint)', flex: 'none' }}>{tbl.rows}</span>
+                  <span className="rowcount mono" style={{ marginLeft: 'auto', fontSize: 9.5, color: 'var(--text-faint)', flex: 'none' }}>{tbl.rows}</span>
                 </button>
+                {leafActions(tbl.name)}
               </div>
               {showExpand && isOpen && st && (
                 <div className="col" style={{ paddingLeft: 40, paddingBottom: 4 }}>
@@ -332,16 +353,22 @@ function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery,
         {open.views && ns.views.map(v => {
           const isActive = active != null && active.schema === ns.name && active.table === v.name
           return (
-            <button key={v.name} onClick={() => onPickObject?.(ns.name, v.name, 'view')} className="treeleaf" style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 7, padding: '5px 8px 5px 40px', borderRadius: 8, background: isActive ? 'var(--accent-soft)' : 'transparent', color: isActive ? 'var(--accent-primary)' : 'var(--text-tertiary)' }}>
-              <Icon name="eye" size={12} style={{ color: 'var(--signal-violet)' }} /><span className="ell mono" style={{ fontSize: 12 }}>{v.name}</span>
-            </button>
+            <div key={v.name} className="row treeleaf treerow" style={{ position: 'relative', alignItems: 'center', gap: 2, paddingRight: 6, borderRadius: 8, background: isActive ? 'var(--accent-soft)' : 'transparent' }}>
+              <button onClick={() => onPickObject?.(ns.name, v.name, 'view')} style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 7, padding: '5px 8px 5px 40px', minWidth: 0, color: isActive ? 'var(--accent-primary)' : 'var(--text-tertiary)' }}>
+                <Icon name="eye" size={12} style={{ color: 'var(--signal-violet)', flex: 'none' }} /><span className="ell mono" style={{ fontSize: 12 }}>{v.name}</span>
+              </button>
+              {leafActions(v.name)}
+            </div>
           )
         })}
         <TreeNode icon="function-square" label={t('workbench.functions')} count={ns.functions.length} open={open.fns} onToggle={() => setOpen(o => ({ ...o, fns: !o.fns }))} depth={1} />
         {open.fns && ns.functions.map(f => (
-          <button key={f.name} onClick={() => onPickObject?.(ns.name, f.name, 'function')} className="treeleaf" style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 7, padding: '5px 8px 5px 40px', borderRadius: 8, background: 'transparent', color: 'var(--text-tertiary)' }}>
-            <Icon name="function-square" size={12} style={{ color: 'var(--signal-green)' }} /><span className="ell mono" style={{ fontSize: 12 }}>{f.name}()</span>
-          </button>
+          <div key={f.name} className="row treeleaf treerow" style={{ position: 'relative', alignItems: 'center', gap: 2, paddingRight: 6, borderRadius: 8, background: 'transparent' }}>
+            <button onClick={() => onPickObject?.(ns.name, f.name, 'function')} style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 7, padding: '5px 8px 5px 40px', minWidth: 0, color: 'var(--text-tertiary)' }}>
+              <Icon name="function-square" size={12} style={{ color: 'var(--signal-green)', flex: 'none' }} /><span className="ell mono" style={{ fontSize: 12 }}>{f.name}()</span>
+            </button>
+            {leafActions(f.name)}
+          </div>
         ))}
       </>}
     </>

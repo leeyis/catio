@@ -245,6 +245,8 @@
     "newTable": "New table",
     "newView": "New view",
     "schemaMenu": "Schema actions",
+    "copyName": "Copy name",
+    "insertName": "Insert into query",
     "tables": "Tables",
     "views": "Views",
     "functions": "Functions",
