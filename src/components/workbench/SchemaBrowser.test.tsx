@@ -60,4 +60,39 @@ describe('SchemaBrowser', () => {
     fireEvent.click(screen.getByText('全选'))
     expect(screen.getByTestId('schema-node:esales')).toBeInTheDocument()
   })
+
+  it('hides ER/new-table/new-view menu items when the engine lacks those capabilities', () => {
+    render(
+      <LanguageProvider><DataProvider>
+        <SchemaBrowser onPick={noop} active={null} onNewQuery={noop} onOpenER={noop}
+          onNewObjectTemplate={noop} onRefresh={noop}
+          erActive={false} sqlActive={false} schemas={NS} conn={CONN} live
+          canSqlConsole canEr={false} canStructureEdit={false} />
+      </DataProvider></LanguageProvider>,
+    )
+    // Open the "..." menu for the first schema node.
+    fireEvent.click(screen.getAllByTitle('Schema 操作')[0])
+    expect(screen.queryByText('ER 图')).not.toBeInTheDocument()
+    expect(screen.queryByText('新建表')).not.toBeInTheDocument()
+    expect(screen.queryByText('新建视图')).not.toBeInTheDocument()
+    expect(screen.getByText('新建查询')).toBeInTheDocument()
+    expect(screen.getByText('刷新')).toBeInTheDocument()
+  })
+
+  it('shows every menu item when all engine capabilities are present', () => {
+    render(
+      <LanguageProvider><DataProvider>
+        <SchemaBrowser onPick={noop} active={null} onNewQuery={noop} onOpenER={noop}
+          onNewObjectTemplate={noop} onRefresh={noop}
+          erActive={false} sqlActive={false} schemas={NS} conn={CONN} live
+          canSqlConsole canEr canStructureEdit />
+      </DataProvider></LanguageProvider>,
+    )
+    fireEvent.click(screen.getAllByTitle('Schema 操作')[0])
+    expect(screen.getByText('新建查询')).toBeInTheDocument()
+    expect(screen.getByText('ER 图')).toBeInTheDocument()
+    expect(screen.getByText('新建表')).toBeInTheDocument()
+    expect(screen.getByText('新建视图')).toBeInTheDocument()
+    expect(screen.getByText('刷新')).toBeInTheDocument()
+  })
 })

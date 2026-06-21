@@ -25,6 +25,10 @@ export interface SchemaBrowserProps {
   sqlActive: boolean
   disabledSql?: boolean
   disabledEr?: boolean
+  /** Engine capability flags — hide unsupported "..." menu items. Default true keeps the mock/demo path unchanged. */
+  canSqlConsole?: boolean
+  canEr?: boolean
+  canStructureEdit?: boolean
   /**
    * When connected to a live backend, ALL real schema namespaces to render the
    * tree from (each becomes its own collapsible top-level DB node). Omitted on
@@ -46,7 +50,7 @@ export interface SchemaBrowserProps {
   onToggleCollapse?: () => void
 }
 
-export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, schemas, conn, live, refreshing, loading, collapsed, onToggleCollapse }: SchemaBrowserProps) {
+export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, schemas, conn, live, refreshing, loading, collapsed, onToggleCollapse, canSqlConsole = true, canEr = true, canStructureEdit = true }: SchemaBrowserProps) {
   const { t } = useTranslation()
   const D = useData()
   // Live path: render every supplied namespace; mock path: the single seeded schema (pixel-identical).
@@ -190,7 +194,8 @@ export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpen
           </div>
         ) : visibleNamespaces.map(ns => (
           <SchemaNode key={ns.name} ns={ns} query={query} active={active} onPick={onPick} onPickObject={onPickObject} live={!!live}
-            onNewQuery={onNewQuery} onOpenER={onOpenER} onNewObjectTemplate={onNewObjectTemplate} onRefresh={onRefresh} />
+            onNewQuery={onNewQuery} onOpenER={onOpenER} onNewObjectTemplate={onNewObjectTemplate} onRefresh={onRefresh}
+            canSqlConsole={canSqlConsole} canEr={canEr} canStructureEdit={canStructureEdit} />
         ))}
       </div>
       {/* footer */}
@@ -213,10 +218,13 @@ interface SchemaNodeProps {
   onOpenER: (schema?: string) => void
   onNewObjectTemplate?: (schema: string, kind: 'table' | 'view') => void
   onRefresh?: () => void
+  canSqlConsole: boolean
+  canEr: boolean
+  canStructureEdit: boolean
 }
 
 /** One schema namespace rendered as a collapsible DB tree node (Tables / Views / Functions). */
-function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh }: SchemaNodeProps) {
+function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, canSqlConsole, canEr, canStructureEdit }: SchemaNodeProps) {
   const { t } = useTranslation()
   const D = useData()
   // Schemas start COLLAPSED — a freshly-connected DB shows nothing expanded until the
@@ -241,10 +249,11 @@ function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery,
     return () => document.removeEventListener('mousedown', onDown)
   }, [menuOpen])
 
+  // 按引擎能力动态构建:不支持的项直接隐藏(而非禁用)。
   const menuItems: { icon: string; label: string; action: () => void }[] = [
-    { icon: 'terminal', label: t('workbench.newQuery'), action: () => onNewQuery(ns.name) },
-    { icon: 'network', label: t('workbench.erDiagram'), action: () => onOpenER(ns.name) },
-    ...(onNewObjectTemplate ? [
+    ...(canSqlConsole ? [{ icon: 'terminal', label: t('workbench.newQuery'), action: () => onNewQuery(ns.name) }] : []),
+    ...(canEr ? [{ icon: 'network', label: t('workbench.erDiagram'), action: () => onOpenER(ns.name) }] : []),
+    ...(canStructureEdit && onNewObjectTemplate ? [
       { icon: 'table-2', label: t('workbench.newTable'), action: () => onNewObjectTemplate(ns.name, 'table') },
       { icon: 'eye', label: t('workbench.newView'), action: () => onNewObjectTemplate(ns.name, 'view') },
     ] : []),

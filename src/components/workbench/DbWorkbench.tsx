@@ -293,6 +293,7 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
         refreshing={refreshing}
         erActive={activeTab?.kind === 'er'} sqlActive={activeTab?.kind === 'sql'}
         disabledSql={!caps.sqlConsole} disabledEr={!caps.er}
+        canSqlConsole={caps.sqlConsole} canEr={caps.er} canStructureEdit={caps.structureEdit}
         collapsed={effectiveCollapsed} onToggleCollapse={() => setSidebarCollapsed(c => !c)}
         schemas={connId ? namespaces : undefined} conn={connId ? conn : undefined} live={!!connId} loading={schemaLoading} />
       <div className="col grow" style={{ minWidth: 0, minHeight: 0, overflow: 'hidden', position: 'relative' }}>
