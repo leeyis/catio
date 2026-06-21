@@ -158,6 +158,9 @@ impl JdbcDriver {
             "username": args.user,
             "password": args.secret.clone().unwrap_or_default(),
             "database": database,
+            // 达梦等数据库首次握手较慢(DBeaver 能连成功但耗时偏长),
+            // plugin 默认 30s 在弱网/冷启动时偶尔不够,放宽到 60s。
+            "connect_timeout_secs": 60,
         });
 
         let jar = plugin_jar_path()?;
