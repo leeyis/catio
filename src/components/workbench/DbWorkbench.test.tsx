@@ -451,6 +451,24 @@ describe('DbWorkbench 历史记录无窗口执行 (功能#3)', () => {
     )
   })
 
+  it('(a2) 新建窗口不重复 seed:编辑器只含一条语句(回归)', async () => {
+    wrap(<DbWorkbench conn={CONN} />)
+    await openTable()
+    fireRun('select 1')
+    await screen.findByTestId('wbtab-sql:1')
+    await waitFor(() => expect(h.runQuery).toHaveBeenCalledTimes(1)) // autoRun 执行一次
+    // 再点"运行"(运行整个编辑器内容):若新建时既 seed initialCode 又 autoRun 插入,
+    // 编辑器会是两行 → runQuery 收到重复语句。修复后应只发一条。
+    h.runQuery.mockClear()
+    await waitFor(() => {
+      fireEvent.click(screen.getByTestId('sql-run'))
+      expect(h.runQuery).toHaveBeenCalledTimes(1)
+    })
+    expect(h.runQuery).toHaveBeenCalledWith(
+      'conn-live', 'select 1', 'public', expect.objectContaining({ profileId: 'd-orders' }),
+    )
+  })
+
   it('(b) 有 SQL tab 但非激活:切到该 tab 并执行,不新建', async () => {
     wrap(<DbWorkbench conn={CONN} />)
     const tableChip = await openTable()

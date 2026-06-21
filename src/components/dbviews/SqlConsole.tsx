@@ -367,7 +367,7 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
               {t('dbviews.stop')}
             </Btn>
           ) : (
-            <Btn size="sm" variant="primary" disabled={!code.trim()} style={{ height: 26, padding: '0 10px', fontSize: 11.5 }} icon="play" onClick={() => run()}>
+            <Btn size="sm" variant="primary" testId="sql-run" disabled={!code.trim()} style={{ height: 26, padding: '0 10px', fontSize: 11.5 }} icon="play" onClick={() => run()}>
               {t('dbviews.run')} <span style={{ opacity: .6, fontSize: 10, marginLeft: 2 }}>Alt↵</span>
             </Btn>
           )}

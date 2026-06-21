@@ -156,13 +156,17 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
   function pickObject(schema: string, name: string, kind: 'view' | 'function' | 'procedure') {
     openTab({ id: tabIdOf.object(kind, schema, name), kind: 'object', schema, name, objKind: kind })
   }
-  /** autoRun=true → 新控制台 seed 入 SQL 并在挂载后自动执行一次(历史「执行」无窗口兜底,功能#3)。 */
+  /** autoRun=true → 新控制台在挂载后自动插入并执行该 SQL 一次(历史「执行」无窗口兜底,功能#3)。 */
   function newQuery(seed?: string, defaultSchema?: string, autoRun = false) {
     if (!caps.sqlConsole) return
     const id = queryN + 1
     setQueryN(id)
-    if (seed != null) setQueryInitialCode(m => ({ ...m, [id]: seed }))
-    if (autoRun && seed != null) setAutoRunByTab(m => ({ ...m, [tabIdOf.sql(id)]: { text: seed, seq: ++autoRunSeq.current } }))
+    // autoRun 由 autoRun 信号统一负责"插入+执行";若同时 seed initialCode 会让 SQL 重复一遍。
+    if (autoRun && seed != null) {
+      setAutoRunByTab(m => ({ ...m, [tabIdOf.sql(id)]: { text: seed, seq: ++autoRunSeq.current } }))
+    } else if (seed != null) {
+      setQueryInitialCode(m => ({ ...m, [id]: seed }))
+    }
     openTab({ id: tabIdOf.sql(id), kind: 'sql', qid: id, defaultSchema })
   }
   /** Open the CREATE TABLE/VIEW form modal for `schema`. No-op without a live connection. */
