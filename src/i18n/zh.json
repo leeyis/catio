@@ -173,6 +173,7 @@
     "applyError": "应用失败：{{message}}",
     "loadError": "加载数据失败：{{message}}",
     "objectDefinition": "定义",
+    "copyDdl": "复制 DDL",
     "noDefinition": "无可显示的定义",
     "objLoading": "正在加载定义…",
     "objViewKind": "视图",

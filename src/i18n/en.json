@@ -173,6 +173,7 @@
     "applyError": "Apply failed: {{message}}",
     "loadError": "Failed to load rows: {{message}}",
     "objectDefinition": "Definition",
+    "copyDdl": "Copy DDL",
     "noDefinition": "No definition to display",
     "objLoading": "Loading definition…",
     "objViewKind": "View",
