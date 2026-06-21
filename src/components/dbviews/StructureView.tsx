@@ -30,6 +30,14 @@ const thCell: React.CSSProperties = { textAlign: 'left', padding: '9px 12px', fo
 const tdCell: React.CSSProperties = { padding: '8px 12px', borderBottom: '1px solid var(--border-hairline)', color: 'var(--text-secondary)', verticalAlign: 'middle' }
 const inputStyle: React.CSSProperties = { border: '1px solid var(--border-hairline)', borderRadius: 7, padding: '6px 9px', background: 'var(--surface-card)', color: 'var(--text-primary)', font: 'inherit', fontSize: 12.5, outline: 'none', width: '100%' }
 
+// Column widths for the fixed-layout structure table, by header index
+// (#, 列名, 类型, 可空, 默认值, 键, 备注). 列名/类型 get the most room; 默认值/备注
+// (undefined) share whatever's left. Cells truncate so nothing overlaps regardless.
+const colWidth: (number | string | undefined)[] = [36, '26%', '18%', 64, undefined, 72, undefined]
+// Single-line ellipsis truncation for a fixed-table cell (maxWidth:0 forces the
+// cell to honor its column width instead of growing to fit the content).
+const ellCell: React.CSSProperties = { maxWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }
+
 function Empty({ icon, text }: { icon: string; text: string }) {
   return <div className="col" style={{ alignItems: 'center', justifyContent: 'center', height: '100%', gap: 8, color: 'var(--text-faint)' }}><Icon name={icon} size={26} /><span style={{ fontSize: 13 }}>{text}</span></div>
 }
@@ -147,7 +155,9 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
           <table style={tblStyle}>
             <thead><tr>
               {['', t('dbviews.colName'), t('dbviews.colType'), t('dbviews.colNullable'), t('dbviews.colDefault'), t('dbviews.colKey'), t('dbviews.colComment')].map((h, i) => (
-                <th key={i} style={{ ...thCell, width: i === 0 ? 36 : undefined, textAlign: i === 3 ? 'center' : 'left' }}>{h}</th>
+                // Fixed-layout widths: give 列名/类型 the most room (long names/types
+                // overflowed into the next column); 可空/键 are narrow, 默认值/备注 share.
+                <th key={i} style={{ ...thCell, width: colWidth[i], textAlign: i === 3 ? 'center' : 'left' }}>{h}</th>
               ))}
               {editable && <th style={{ ...thCell, width: 72, textAlign: 'right' }} />}
             </tr></thead>
@@ -155,8 +165,13 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
               {st.columns.map((c, i) => (
                 <tr key={c.name} className="structrow" style={{ background: i % 2 ? 'var(--surface-subtle)' : 'transparent' }}>
                   <td style={{ ...tdCell, width: 30, color: 'var(--text-disabled)', textAlign: 'center' }}>{i + 1}</td>
-                  <td style={tdCell}><span className="row gap6"><Icon name={c.key === 'PK' ? 'key' : c.key === 'FK' ? 'link' : 'hash'} size={12} style={{ color: c.key ? keyTone[c.key] : 'var(--text-disabled)' }} /><span className="mono" style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{c.name}</span></span></td>
-                  <td style={tdCell}><span className="mono" style={{ color: 'var(--signal-blue)' }}>{c.type}</span></td>
+                  <td style={{ ...tdCell, ...ellCell }}>
+                    <span className="row gap6" style={{ minWidth: 0 }}>
+                      <Icon name={c.key === 'PK' ? 'key' : c.key === 'FK' ? 'link' : 'hash'} size={12} style={{ flex: 'none', color: c.key ? keyTone[c.key] : 'var(--text-disabled)' }} />
+                      <span className="mono" style={{ fontWeight: 600, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={c.name}>{c.name}</span>
+                    </span>
+                  </td>
+                  <td style={{ ...tdCell, ...ellCell }} title={c.type}><span className="mono" style={{ color: 'var(--signal-blue)' }}>{c.type}</span></td>
                   <td style={{ ...tdCell, textAlign: 'center' }}>{c.nullable ? <span style={{ color: 'var(--text-faint)' }}>NULL</span> : <Icon name="check" size={13} style={{ color: 'var(--signal-green)' }} />}</td>
                   <td style={tdCell}><span className="mono" style={{ color: 'var(--text-tertiary)', fontSize: 11.5 }}>{c.default || '—'}</span></td>
                   <td style={tdCell}>{c.key ? <span className="badge-accent" style={{ background: `color-mix(in srgb, ${keyTone[c.key]} 16%, transparent)`, color: keyTone[c.key] }}>{c.key}</span> : ''}</td>
