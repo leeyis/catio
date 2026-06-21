@@ -645,6 +645,9 @@ html, body {
 .mono { font-family: var(--font-mono, 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace); }
 button { font-family: inherit; cursor: pointer; border: none; background: none; }
 input, textarea { font-family: inherit; }
+/* 原生下拉:展开的 option 列表默认是系统白底,深色主题下看不清。
+   统一跟随主题面板色(浅色主题同样协调)。 */
+select option { background: var(--surface-elevated); color: var(--text-primary); }
 ::selection { background: color-mix(in srgb, var(--accent-primary) 26%, transparent); }
 
 /* scrollbars */
