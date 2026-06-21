@@ -130,6 +130,92 @@ fn default_database(profile: Option<&str>) -> Option<String> {
     }
 }
 
+/// Column introspection SQL for PostgreSQL.
+/// Params: $1 = schema, $2 = table. Column 7 (0-based) is the column comment via
+/// col_description(table oid, attnum), resolved through pg_attribute for accuracy.
+fn pg_columns_sql() -> &'static str {
+    "SELECT c.column_name, \
+     CASE WHEN c.data_type = 'USER-DEFINED' THEN c.udt_name ELSE c.data_type END AS full_type, \
+     c.is_nullable = 'YES' AS is_nullable, \
+     c.column_default, \
+     EXISTS ( \
+       SELECT 1 FROM information_schema.table_constraints tc \
+       JOIN information_schema.key_column_usage kcu \
+         ON kcu.constraint_catalog = tc.constraint_catalog \
+        AND kcu.constraint_schema  = tc.constraint_schema \
+        AND kcu.constraint_name    = tc.constraint_name \
+        AND kcu.table_schema       = tc.table_schema \
+        AND kcu.table_name         = tc.table_name \
+       WHERE tc.constraint_type = 'PRIMARY KEY' \
+         AND tc.table_schema = c.table_schema \
+         AND tc.table_name   = c.table_name \
+         AND kcu.column_name = c.column_name \
+     ) AS is_pk, \
+     EXISTS ( \
+       SELECT 1 FROM information_schema.table_constraints tc \
+       JOIN information_schema.key_column_usage kcu \
+         ON kcu.constraint_catalog = tc.constraint_catalog \
+        AND kcu.constraint_schema  = tc.constraint_schema \
+        AND kcu.constraint_name    = tc.constraint_name \
+        AND kcu.table_schema       = tc.table_schema \
+        AND kcu.table_name         = tc.table_name \
+       WHERE tc.constraint_type = 'FOREIGN KEY' \
+         AND tc.table_schema = c.table_schema \
+         AND tc.table_name   = c.table_name \
+         AND kcu.column_name = c.column_name \
+     ) AS is_fk, \
+     EXISTS ( \
+       SELECT 1 FROM information_schema.table_constraints tc \
+       JOIN information_schema.key_column_usage kcu \
+         ON kcu.constraint_catalog = tc.constraint_catalog \
+        AND kcu.constraint_schema  = tc.constraint_schema \
+        AND kcu.constraint_name    = tc.constraint_name \
+        AND kcu.table_schema       = tc.table_schema \
+        AND kcu.table_name         = tc.table_name \
+       WHERE tc.constraint_type = 'UNIQUE' \
+         AND tc.table_schema = c.table_schema \
+         AND tc.table_name   = c.table_name \
+         AND kcu.column_name = c.column_name \
+     ) AS is_uni, \
+     ( \
+       SELECT col_description(a.attrelid, a.attnum) \
+       FROM pg_attribute a \
+       JOIN pg_class cl ON cl.oid = a.attrelid \
+       JOIN pg_namespace nc ON nc.oid = cl.relnamespace \
+       WHERE nc.nspname = c.table_schema AND cl.relname = c.table_name \
+         AND a.attname = c.column_name \
+     ) AS column_comment \
+     FROM information_schema.columns c \
+     WHERE c.table_schema = $1 AND c.table_name = $2 \
+     ORDER BY c.ordinal_position"
+}
+
+/// Table-comment SQL for PostgreSQL (obj_description(oid, 'pg_class')).
+/// Params: $1 = schema, $2 = table.
+fn pg_table_comment_sql() -> &'static str {
+    "SELECT obj_description( \
+       (quote_ident($1) || '.' || quote_ident($2))::regclass, 'pg_class')"
+}
+
+#[cfg(test)]
+mod comment_sql_tests {
+    use super::{pg_columns_sql, pg_table_comment_sql};
+
+    #[test]
+    fn columns_sql_selects_col_description() {
+        let sql = pg_columns_sql();
+        assert!(sql.contains("col_description"), "列 SQL 必须用 col_description 取列注释");
+        assert!(sql.contains("column_comment"));
+    }
+
+    #[test]
+    fn table_comment_sql_uses_obj_description() {
+        let sql = pg_table_comment_sql();
+        assert!(sql.contains("obj_description"), "表注释 SQL 必须用 obj_description");
+        assert!(sql.contains("pg_class"));
+    }
+}
+
 #[cfg(test)]
 mod default_db_tests {
     use super::default_database;
@@ -328,52 +414,7 @@ impl Driver for PostgresDriver {
         // adapted from dbx POSTGRES_COLUMNS_INFORMATION_SCHEMA_SQL L1321 (broadest compat)
         // Also collects FK column names so we can set key="FK" where appropriate.
         let col_rows = client.query(
-            "SELECT c.column_name, \
-             CASE WHEN c.data_type = 'USER-DEFINED' THEN c.udt_name ELSE c.data_type END AS full_type, \
-             c.is_nullable = 'YES' AS is_nullable, \
-             c.column_default, \
-             EXISTS ( \
-               SELECT 1 FROM information_schema.table_constraints tc \
-               JOIN information_schema.key_column_usage kcu \
-                 ON kcu.constraint_catalog = tc.constraint_catalog \
-                AND kcu.constraint_schema  = tc.constraint_schema \
-                AND kcu.constraint_name    = tc.constraint_name \
-                AND kcu.table_schema       = tc.table_schema \
-                AND kcu.table_name         = tc.table_name \
-               WHERE tc.constraint_type = 'PRIMARY KEY' \
-                 AND tc.table_schema = c.table_schema \
-                 AND tc.table_name   = c.table_name \
-                 AND kcu.column_name = c.column_name \
-             ) AS is_pk, \
-             EXISTS ( \
-               SELECT 1 FROM information_schema.table_constraints tc \
-               JOIN information_schema.key_column_usage kcu \
-                 ON kcu.constraint_catalog = tc.constraint_catalog \
-                AND kcu.constraint_schema  = tc.constraint_schema \
-                AND kcu.constraint_name    = tc.constraint_name \
-                AND kcu.table_schema       = tc.table_schema \
-                AND kcu.table_name         = tc.table_name \
-               WHERE tc.constraint_type = 'FOREIGN KEY' \
-                 AND tc.table_schema = c.table_schema \
-                 AND tc.table_name   = c.table_name \
-                 AND kcu.column_name = c.column_name \
-             ) AS is_fk, \
-             EXISTS ( \
-               SELECT 1 FROM information_schema.table_constraints tc \
-               JOIN information_schema.key_column_usage kcu \
-                 ON kcu.constraint_catalog = tc.constraint_catalog \
-                AND kcu.constraint_schema  = tc.constraint_schema \
-                AND kcu.constraint_name    = tc.constraint_name \
-                AND kcu.table_schema       = tc.table_schema \
-                AND kcu.table_name         = tc.table_name \
-               WHERE tc.constraint_type = 'UNIQUE' \
-                 AND tc.table_schema = c.table_schema \
-                 AND tc.table_name   = c.table_name \
-                 AND kcu.column_name = c.column_name \
-             ) AS is_uni \
-             FROM information_schema.columns c \
-             WHERE c.table_schema = $1 AND c.table_name = $2 \
-             ORDER BY c.ordinal_position",
+            pg_columns_sql(),
             &[&schema, &table],
         ).await.map_err(|e| pg_query_err(&e))?;
 
@@ -388,6 +429,7 @@ impl Driver for PostgresDriver {
                 nullable: r.try_get::<_, bool>(2).unwrap_or(true),
                 default: r.try_get::<_, Option<String>>(3).ok().flatten(),
                 key: key.into(),
+                comment: r.try_get::<_, Option<String>>(7).ok().flatten().unwrap_or_default(),
             }
         }).collect();
 
@@ -459,7 +501,15 @@ impl Driver for PostgresDriver {
             }
         }).collect();
 
-        Ok(TableStructure { columns, indexes, fks })
+        // ---- table comment ----
+        let comment = client.query_opt(pg_table_comment_sql(), &[&schema, &table])
+            .await
+            .ok()
+            .flatten()
+            .and_then(|r| r.try_get::<_, Option<String>>(0).ok().flatten())
+            .unwrap_or_default();
+
+        Ok(TableStructure { comment, columns, indexes, fks })
     }
 
     async fn er_relations(&self, schema: &str) -> Result<Vec<ErRelation>, DbError> {

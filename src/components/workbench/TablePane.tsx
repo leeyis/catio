@@ -53,6 +53,10 @@ export function TablePane({ conn, connId, caps, schema, table, density }: TableP
       .then(([res, struct]) => {
         if (cancelled) return
         const pkNames = new Set((struct?.columns ?? []).filter(c => c.key === 'PK').map(c => c.name))
+        // 列名→注释映射（零额外请求,来自并行加载的 structure）。仅表预览使用;
+        // 空注释不入表,避免给所有列硬塞空串而误触发结果区的注释切换按钮。
+        const commentByName = new Map<string, string>()
+        for (const c of struct?.columns ?? []) if (c.comment) commentByName.set(c.name, c.comment)
         const ctidIdx = res.columns.findIndex(c => c.name === '__ctid')
         let cols = res.columns
         let rws = res.rows
@@ -62,9 +66,11 @@ export function TablePane({ conn, connId, caps, schema, table, density }: TableP
           cols = res.columns.filter((_, i) => i !== ctidIdx)
           rws = res.rows.map(r => r.filter((_, i) => i !== ctidIdx))
         }
-        const columns: ResultColumn[] = pkNames.size
-          ? cols.map(c => (pkNames.has(c.name) ? { ...c, pk: true } : c))
-          : cols
+        const columns: ResultColumn[] = cols.map(c => {
+          const comment = commentByName.get(c.name)
+          const pk = pkNames.has(c.name) || undefined
+          return (comment !== undefined || pk) ? { ...c, ...(pk ? { pk: true } : {}), ...(comment !== undefined ? { comment } : {}) } : c
+        })
         setLive({ columns, rows: rws })
         setRowKeys(keys)
       })

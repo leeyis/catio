@@ -33,6 +33,7 @@ export interface BtnProps {
   style?: React.CSSProperties
   title?: string
   disabled?: boolean
+  testId?: string
 }
 
 export interface IconBtnProps {
@@ -106,10 +107,10 @@ export interface SectionHeadProps {
 
 // ---- Components ----
 
-export function Btn({ variant = 'secondary', size = 'md', icon, iconR, children, onClick, style, title, disabled }: BtnProps) {
+export function Btn({ variant = 'secondary', size = 'md', icon, iconR, children, onClick, style, title, disabled, testId }: BtnProps) {
   return (
     <button className={`btn btn-${variant} ${size === 'sm' ? 'sm' : size === 'lg' ? 'lg' : ''}`}
-      onClick={onClick} style={style} title={title} disabled={disabled}>
+      onClick={onClick} style={style} title={title} disabled={disabled} data-testid={testId}>
       {icon && <Icon name={icon} size={size === 'sm' ? 14 : 15} />}
       {children}
       {iconR && <Icon name={iconR} size={size === 'sm' ? 14 : 15} />}

@@ -7,7 +7,7 @@ import { useData } from '../../state/DataContext'
 import { tableStructure, runQuery, dbErrMsg } from '../../services/db'
 import type { StructColumn, TableStructure } from '../../services/types'
 import { highlightSQL } from './highlightSQL'
-import { dialectFor, qualifiedTable, buildAddColumn, buildModifyColumn, buildDropColumn, type ColumnDraft } from './structureDdl'
+import { dialectFor, qualifiedTable, buildAddColumn, buildModifyColumn, buildDropColumn, buildCreateTableDDL, type ColumnDraft } from './structureDdl'
 
 export interface StructureViewProps {
   table: string
@@ -30,11 +30,13 @@ const thCell: React.CSSProperties = { textAlign: 'left', padding: '9px 12px', fo
 const tdCell: React.CSSProperties = { padding: '8px 12px', borderBottom: '1px solid var(--border-hairline)', color: 'var(--text-secondary)', verticalAlign: 'middle' }
 const inputStyle: React.CSSProperties = { border: '1px solid var(--border-hairline)', borderRadius: 7, padding: '6px 9px', background: 'var(--surface-card)', color: 'var(--text-primary)', font: 'inherit', fontSize: 12.5, outline: 'none', width: '100%' }
 
-function buildDDL(qualified: string, st: TableStructure) {
-  const cols = st.columns.map(c => `  ${c.name.padEnd(16)} ${c.type}${c.nullable ? '' : ' not null'}${c.default ? ' default ' + c.default : ''}${c.key === 'PK' ? ' primary key' : ''}`).join(',\n')
-  const fks = st.fks.map(fk => `  foreign key (${fk.col}) references ${fk.ref} on delete ${fk.onDelete}`).join(',\n')
-  return `create table ${qualified} (\n${cols}${fks ? ',\n' + fks : ''}\n);\n\n${st.indexes.filter(i => !i.name.endsWith('pkey')).map(i => `create ${i.unique ? 'unique ' : ''}index ${i.name} on ${qualified} using ${i.method} (${i.cols});`).join('\n')}`
-}
+// Column widths for the fixed-layout structure table, by header index
+// (#, 列名, 类型, 可空, 默认值, 键, 备注). 列名/类型 get the most room; 默认值/备注
+// (undefined) share whatever's left. Cells truncate so nothing overlaps regardless.
+const colWidth: (number | string | undefined)[] = [36, '26%', '18%', 64, undefined, 72, undefined]
+// Single-line ellipsis truncation for a fixed-table cell (maxWidth:0 forces the
+// cell to honor its column width instead of growing to fit the content).
+const ellCell: React.CSSProperties = { maxWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }
 
 function Empty({ icon, text }: { icon: string; text: string }) {
   return <div className="col" style={{ alignItems: 'center', justifyContent: 'center', height: '100%', gap: 8, color: 'var(--text-faint)' }}><Icon name={icon} size={26} /><span style={{ fontSize: 13 }}>{text}</span></div>
@@ -48,6 +50,7 @@ interface ColForm {
   type: string
   nullable: boolean
   default: string
+  comment: string
 }
 
 export function StructureView({ table, connId, schema, engine, canEdit = true }: StructureViewProps) {
@@ -88,18 +91,18 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
 
   function openAdd() {
     setApplyErr(null)
-    setForm({ mode: 'add', name: '', type: '', nullable: true, default: '' })
+    setForm({ mode: 'add', name: '', type: '', nullable: true, default: '', comment: '' })
   }
   function openEdit(c: StructColumn) {
     setApplyErr(null)
-    const original: ColumnDraft = { name: c.name, type: c.type, nullable: c.nullable, default: c.default ?? '' }
-    setForm({ mode: { editing: c.name, original }, name: c.name, type: c.type, nullable: c.nullable, default: c.default ?? '' })
+    const original: ColumnDraft = { name: c.name, type: c.type, nullable: c.nullable, default: c.default ?? '', comment: c.comment ?? '' }
+    setForm({ mode: { editing: c.name, original }, name: c.name, type: c.type, nullable: c.nullable, default: c.default ?? '', comment: c.comment ?? '' })
   }
 
   // Build the statements for the open form and hand them to the preview gate.
   function submitForm() {
     if (!form) return
-    const draft: ColumnDraft = { name: form.name, type: form.type, nullable: form.nullable, default: form.default }
+    const draft: ColumnDraft = { name: form.name, type: form.type, nullable: form.nullable, default: form.default, comment: form.comment }
     const stmts = form.mode === 'add'
       ? buildAddColumn(dialect, sqlQualified, draft)
       : buildModifyColumn(dialect, sqlQualified, form.mode.original, draft)
@@ -143,7 +146,7 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
           { value: 'ddl', label: 'DDL' },
         ]} />
         <div className="grow" />
-        <span style={{ fontSize: 11.5, color: 'var(--text-faint)' }}>{st.comment}</span>
+        <span style={{ fontSize: 11.5, color: 'var(--text-faint)', maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={st.comment || undefined}>{st.comment}</span>
         <Btn size="sm" variant="secondary" icon="plus" onClick={editable ? openAdd : undefined} disabled={!editable}>{t('dbviews.addColumn')}</Btn>
       </div>
       <div className="grow" style={{ overflow: 'auto' }}>
@@ -152,7 +155,9 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
           <table style={tblStyle}>
             <thead><tr>
               {['', t('dbviews.colName'), t('dbviews.colType'), t('dbviews.colNullable'), t('dbviews.colDefault'), t('dbviews.colKey'), t('dbviews.colComment')].map((h, i) => (
-                <th key={i} style={{ ...thCell, width: i === 0 ? 36 : undefined, textAlign: i === 3 ? 'center' : 'left' }}>{h}</th>
+                // Fixed-layout widths: give 列名/类型 the most room (long names/types
+                // overflowed into the next column); 可空/键 are narrow, 默认值/备注 share.
+                <th key={i} style={{ ...thCell, width: colWidth[i], textAlign: i === 3 ? 'center' : 'left' }}>{h}</th>
               ))}
               {editable && <th style={{ ...thCell, width: 72, textAlign: 'right' }} />}
             </tr></thead>
@@ -160,12 +165,17 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
               {st.columns.map((c, i) => (
                 <tr key={c.name} className="structrow" style={{ background: i % 2 ? 'var(--surface-subtle)' : 'transparent' }}>
                   <td style={{ ...tdCell, width: 30, color: 'var(--text-disabled)', textAlign: 'center' }}>{i + 1}</td>
-                  <td style={tdCell}><span className="row gap6"><Icon name={c.key === 'PK' ? 'key' : c.key === 'FK' ? 'link' : 'hash'} size={12} style={{ color: c.key ? keyTone[c.key] : 'var(--text-disabled)' }} /><span className="mono" style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{c.name}</span></span></td>
-                  <td style={tdCell}><span className="mono" style={{ color: 'var(--signal-blue)' }}>{c.type}</span></td>
+                  <td style={{ ...tdCell, ...ellCell }}>
+                    <span className="row gap6" style={{ minWidth: 0 }}>
+                      <Icon name={c.key === 'PK' ? 'key' : c.key === 'FK' ? 'link' : 'hash'} size={12} style={{ flex: 'none', color: c.key ? keyTone[c.key] : 'var(--text-disabled)' }} />
+                      <span className="mono" style={{ fontWeight: 600, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={c.name}>{c.name}</span>
+                    </span>
+                  </td>
+                  <td style={{ ...tdCell, ...ellCell }} title={c.type}><span className="mono" style={{ color: 'var(--signal-blue)' }}>{c.type}</span></td>
                   <td style={{ ...tdCell, textAlign: 'center' }}>{c.nullable ? <span style={{ color: 'var(--text-faint)' }}>NULL</span> : <Icon name="check" size={13} style={{ color: 'var(--signal-green)' }} />}</td>
                   <td style={tdCell}><span className="mono" style={{ color: 'var(--text-tertiary)', fontSize: 11.5 }}>{c.default || '—'}</span></td>
                   <td style={tdCell}>{c.key ? <span className="badge-accent" style={{ background: `color-mix(in srgb, ${keyTone[c.key]} 16%, transparent)`, color: keyTone[c.key] }}>{c.key}</span> : ''}</td>
-                  <td style={{ ...tdCell, color: 'var(--text-faint)', fontSize: 11.5 }}>{c.extra}</td>
+                  <td style={{ ...tdCell, color: 'var(--text-faint)', fontSize: 11.5, maxWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={c.comment || undefined}>{c.comment}</td>
                   {editable && (
                     <td style={{ ...tdCell, textAlign: 'right', whiteSpace: 'nowrap' }}>
                       <span className="structrow-actions row gap6" style={{ justifyContent: 'flex-end' }}>
@@ -215,7 +225,7 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
         )}
         {!structErr && tab === 'ddl' && (
           <pre className="mono" style={{ margin: 0, padding: 16, fontSize: 12.5, lineHeight: 1.7, color: 'var(--text-secondary)', whiteSpace: 'pre-wrap' }}
-            dangerouslySetInnerHTML={{ __html: highlightSQL(buildDDL(ddlQualified, st)) }} />
+            dangerouslySetInnerHTML={{ __html: highlightSQL(buildCreateTableDDL(dialect, ddlQualified, st)) }} />
         )}
       </div>
 
@@ -252,6 +262,12 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
                 <input value={form.default} onChange={e => setForm(f => f && { ...f, default: e.target.value })}
                   placeholder="0, 'pending', now()…"
                   onKeyDown={e => { if (e.key === 'Enter') submitForm() }} style={{ ...inputStyle, fontFamily: 'var(--font-mono, monospace)' }} />
+              </label>
+              <label className="col" style={{ gap: 5 }}>
+                <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('dbviews.colComment')} <span style={{ color: 'var(--text-faint)', fontWeight: 400 }}>({t('dbviews.optional')})</span></span>
+                <input value={form.comment} onChange={e => setForm(f => f && { ...f, comment: e.target.value })}
+                  placeholder={t('dbviews.colCommentPlaceholder')}
+                  onKeyDown={e => { if (e.key === 'Enter') submitForm() }} style={inputStyle} />
               </label>
               <div className="row gap8" style={{ justifyContent: 'flex-end', marginTop: 2 }}>
                 <Btn variant="ghost" onClick={() => setForm(null)}>{t('dbviews.cancel')}</Btn>

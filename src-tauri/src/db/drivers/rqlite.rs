@@ -187,7 +187,7 @@ impl Driver for RqliteDriver {
             let pk: i64 = value_by_column(&col_result.columns, row, "pk")
                 .and_then(|s| s.parse().ok()).unwrap_or(0);
             let key = if pk > 0 { "PK" } else { "" };
-            ColumnDef { name, type_name, nullable, default, key: key.into() }
+            ColumnDef { name, type_name, nullable, default, key: key.into(), comment: String::new() }
         }).collect();
 
         // indexes via PRAGMA index_list
@@ -249,7 +249,7 @@ impl Driver for RqliteDriver {
             }
         }).collect();
 
-        Ok(TableStructure { columns, indexes, fks })
+        Ok(TableStructure { comment: String::new(), columns, indexes, fks })
     }
 
     async fn er_relations(&self, _schema: &str) -> Result<Vec<ErRelation>, DbError> {

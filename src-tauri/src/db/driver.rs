@@ -57,6 +57,7 @@ pub struct ColumnDef {
     pub nullable: bool,
     pub default: Option<String>,
     pub key: String, // "PK" | "FK" | "UNI" | ""
+    pub comment: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -80,6 +81,7 @@ pub struct ForeignKeyDef {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TableStructure {
+    pub comment: String,
     pub columns: Vec<ColumnDef>,
     pub indexes: Vec<IndexDef>,
     pub fks: Vec<ForeignKeyDef>,

@@ -292,6 +292,35 @@ fn map_query_result(v: &Value, max_rows: u32) -> QueryResult {
     QueryResult { columns, rows, rows_affected, truncated }
 }
 
+/// Map the plugin's getColumns result → catio ColumnDef list.
+/// Column comments come from each entry's `comment` (sidecar maps it from the
+/// DatabaseMetaData.getColumns() REMARKS column).
+fn map_column_defs(v: &Value) -> Vec<ColumnDef> {
+    v.as_array().map(|arr| {
+        arr.iter().map(|c| {
+            let is_pk = c.get("is_primary_key").and_then(|x| x.as_bool()).unwrap_or(false);
+            ColumnDef {
+                name: c.get("name").and_then(|n| n.as_str()).unwrap_or_default().to_string(),
+                type_name: c.get("data_type").and_then(|n| n.as_str()).unwrap_or_default().to_string(),
+                nullable: c.get("is_nullable").and_then(|n| n.as_bool()).unwrap_or(true),
+                default: c.get("column_default").and_then(|n| n.as_str()).map(str::to_string),
+                key: if is_pk { "PK".into() } else { String::new() },
+                comment: c.get("comment").and_then(|n| n.as_str()).unwrap_or_default().to_string(),
+            }
+        }).collect()
+    }).unwrap_or_default()
+}
+
+/// Find the table-level comment for `table` in a listTables result. The comment
+/// comes from getTables()'s REMARKS column (surfaced as `comment` per table).
+fn table_comment_for(tables: &Value, table: &str) -> String {
+    tables.as_array().and_then(|arr| {
+        arr.iter().find(|t| {
+            t.get("name").and_then(|n| n.as_str()) == Some(table)
+        }).and_then(|t| t.get("comment").and_then(|c| c.as_str()).map(str::to_string))
+    }).unwrap_or_default()
+}
+
 #[async_trait]
 impl Driver for JdbcDriver {
     fn db_type(&self) -> DatabaseType { DatabaseType::Jdbc }
@@ -364,20 +393,17 @@ impl Driver for JdbcDriver {
         let mut params = self.meta_params(schema);
         if let Value::Object(ref mut m) = params { m.insert("table".into(), json!(table)); }
         let r = self.rpc("getColumns", params).await?;
-        let columns: Vec<ColumnDef> = r.as_array().map(|arr| {
-            arr.iter().map(|c| {
-                let is_pk = c.get("is_primary_key").and_then(|x| x.as_bool()).unwrap_or(false);
-                ColumnDef {
-                    name: c.get("name").and_then(|n| n.as_str()).unwrap_or_default().to_string(),
-                    type_name: c.get("data_type").and_then(|n| n.as_str()).unwrap_or_default().to_string(),
-                    nullable: c.get("is_nullable").and_then(|n| n.as_bool()).unwrap_or(true),
-                    default: c.get("column_default").and_then(|n| n.as_str()).map(str::to_string),
-                    key: if is_pk { "PK".into() } else { String::new() },
-                }
-            }).collect()
-        }).unwrap_or_default();
+        // Column comments ride in each column's `comment` (sidecar maps it from
+        // DatabaseMetaData.getColumns()'s REMARKS).
+        let columns = map_column_defs(&r);
+        // Table comment comes from getTables()'s REMARKS — the listTables RPC already
+        // surfaces it per table, so fetch and pick the matching row (best-effort).
+        let comment = match self.rpc("listTables", self.meta_params(schema)).await {
+            Ok(tables) => table_comment_for(&tables, table),
+            Err(_) => String::new(),
+        };
         // The simple plugin protocol exposes columns only (no index/FK introspection).
-        Ok(TableStructure { columns, indexes: vec![], fks: vec![] })
+        Ok(TableStructure { comment, columns, indexes: vec![], fks: vec![] })
     }
 
     async fn er_relations(&self, _schema: &str) -> Result<Vec<ErRelation>, DbError> {
@@ -410,9 +436,32 @@ impl Driver for JdbcDriver {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_sidecar_error, map_query_result};
+    use super::{classify_sidecar_error, map_column_defs, map_query_result, table_comment_for};
     use crate::db::DbError;
     use serde_json::json;
+
+    #[test]
+    fn map_column_defs_pulls_comment_from_remarks() {
+        let v = json!([
+            { "name": "id", "data_type": "INTEGER", "is_nullable": false, "is_primary_key": true, "comment": "" },
+            { "name": "email", "data_type": "VARCHAR", "is_nullable": true, "comment": "用户邮箱" }
+        ]);
+        let cols = map_column_defs(&v);
+        assert_eq!(cols.len(), 2);
+        assert_eq!(cols[0].comment, "", "无注释列保持空字符串");
+        assert_eq!(cols[1].comment, "用户邮箱", "列注释应来自 getColumns 的 REMARKS→comment");
+        assert_eq!(cols[0].key, "PK");
+    }
+
+    #[test]
+    fn table_comment_for_picks_matching_table_remarks() {
+        let tables = json!([
+            { "name": "orders", "table_type": "TABLE", "comment": "订单表" },
+            { "name": "users", "table_type": "TABLE", "comment": "用户表" }
+        ]);
+        assert_eq!(table_comment_for(&tables, "users"), "用户表", "表注释应来自 getTables 的 REMARKS");
+        assert_eq!(table_comment_for(&tables, "missing"), "", "未找到的表返回空字符串");
+    }
 
     #[test]
     fn connect_phase_errors_are_connect_failed_not_query_failed() {

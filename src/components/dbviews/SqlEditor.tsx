@@ -40,12 +40,13 @@ export interface SqlEditorProps {
  * insertion of snippet / history / AI text into the live CodeMirror doc. */
 export interface SqlEditorHandle {
   /**
-   * Insert `text` at the current caret position (replacing any selection),
-   * using the CodeMirror view so the user's cursor/scroll are respected.
-   * When `newLine` is true, a leading '\n' is prepended unless the caret is
-   * already at the start of a line (so a "run" lands the SQL on its own line).
+   * Insert `text` into the live document and return the resulting full text.
+   * - `newLine` falsy (history「插入编辑器」/ AI insert): insert at the caret,
+   *   replacing any selection, in place — respects the user's cursor/scroll.
+   * - `newLine` true (history「执行」/ snippet run): append at the END of the doc
+   *   on its own fresh line (prefixing '\n' when the doc isn't empty and doesn't
+   *   already end in one), so a run is never concatenated onto the caret line.
    * Moves the caret to the end of the inserted text and focuses the editor.
-   * Returns the resulting full document text (so callers can run it).
    */
   insertAtCursor: (text: string, newLine?: boolean) => string
 }
@@ -275,17 +276,29 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
     insertAtCursor(text: string, newLine?: boolean) {
       const view = viewRef.current
       if (!view) return code
-      let insert = text
       if (newLine) {
-        const head = view.state.selection.main.from
-        // Prepend a newline unless the caret is already at the start of a line
-        // (column 0) — so a "run" always lands the SQL on its own fresh line.
-        const col = head - view.state.doc.lineAt(head).from
-        if (col > 0) insert = '\n' + text
+        // "Run" path (history「执行」/ snippet run): the SQL must land on its OWN
+        // fresh line, never concatenated onto whatever the caret happens to sit on
+        // (which produced `…ordersSELECT …` and a syntax error). Append at the END
+        // of the document, prefixing a newline when the doc isn't empty and doesn't
+        // already end in one. Caret is left after the inserted text. This is robust
+        // regardless of where (or whether) the caret was placed.
+        const docLen = view.state.doc.length
+        const endsWithNl = docLen > 0 && view.state.doc.sliceString(docLen - 1) === '\n'
+        const insert = (docLen > 0 && !endsWithNl ? '\n' : '') + text
+        view.dispatch({
+          changes: { from: docLen, insert },
+          selection: { anchor: docLen + insert.length },
+        })
+        const next = view.state.doc.toString()
+        onChangeRef.current(next)
+        try { view.focus() } catch { /* best-effort */ }
+        return next
       }
-      // replaceSelection inserts at the caret (or replaces the active selection)
-      // and leaves the caret at the end of the inserted text.
-      view.dispatch(view.state.replaceSelection(insert))
+      // Insert-at-cursor path (history「插入编辑器」/ AI insert): replaceSelection
+      // inserts at the caret (or replaces the active selection) in place and leaves
+      // the caret at the end of the inserted text.
+      view.dispatch(view.state.replaceSelection(text))
       const next = view.state.doc.toString()
       // Keep React `code` in sync (the updateListener also fires, but return the
       // fresh doc so the caller can run it synchronously).

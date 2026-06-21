@@ -29,6 +29,14 @@ import { DbWorkbench } from './DbWorkbench'
 const wrap = (ui: React.ReactNode) =>
   render(<LanguageProvider><DataProvider>{ui}</DataProvider></LanguageProvider>)
 
+/** Tables no longer auto-open and schemas are collapsed by default — open a table
+ *  the way a user does: expand its schema node, then click the table. Returns its chip. */
+async function openTable(schema = 'public', table = 'orders') {
+  fireEvent.click(await screen.findByTestId(`schema-node:${schema}`))
+  fireEvent.click(await screen.findByTestId(`schema-tbl:${schema}.${table}`))
+  return screen.findByTestId(`wbtab-table:${schema}.${table}`)
+}
+
 const CONN = DATA.byId['d-orders'] // has id: 'd-orders', kind: 'db'
 
 /** A minimal real schema (public.orders) the backend `getSchema` would return. */
@@ -86,8 +94,9 @@ describe('DbWorkbench capability-gating', () => {
     ])
     wrap(<DbWorkbench conn={CONN} />)
 
-    // Structure tab is viewable regardless of structureEdit. (A live connection
-    // opens its first table after introspection resolves → findByTestId awaits it.)
+    // Structure tab is viewable regardless of structureEdit. Open a table first
+    // (tables no longer auto-open) so the table pane's Structure segment renders.
+    await openTable()
     expect(await screen.findByTestId('seg-structure')).not.toBeDisabled()
   })
 
@@ -110,6 +119,7 @@ describe('DbWorkbench capability-gating', () => {
     ])
     wrap(<DbWorkbench conn={CONN} />)
 
+    await openTable()
     expect(await screen.findByTestId('seg-structure')).not.toBeDisabled()
   })
 
@@ -132,6 +142,7 @@ describe('DbWorkbench capability-gating', () => {
     ])
     wrap(<DbWorkbench conn={CONN} />)
 
+    await openTable()
     expect(await screen.findByTestId('seg-structure')).not.toBeDisabled()
   })
 })
@@ -172,6 +183,7 @@ describe('DbWorkbench live-connection data path', () => {
     })
 
     wrap(<DbWorkbench conn={CONN} />)
+    await openTable()
 
     // tablePreview is called with the REAL schema/table from getSchema — not a
     // hardcoded `SELECT * FROM public.<table>`. (schema='public' here because the
@@ -224,8 +236,8 @@ describe('DbWorkbench unified tabs', () => {
 
   it('新建查询与表预览 tab 共存,切回表预览数据仍在', async () => {
     wrap(<DbWorkbench conn={CONN} />)
-    // live schema 加载后自动打开第一张表的 tab
-    const tableChip = await screen.findByTestId('wbtab-table:public.orders')
+    // 用户从树里打开第一张表(不再自动打开)
+    const tableChip = await openTable()
     expect(await screen.findByText('101')).toBeInTheDocument()
     // 新建查询 → sql tab 出现,表 tab 仍在
     fireEvent.click(screen.getByTestId('wb-new-query'))
@@ -238,7 +250,7 @@ describe('DbWorkbench unified tabs', () => {
 
   it('新建查询入口在左侧更明显,tab strip 不再渲染右侧新建查询按钮', async () => {
     wrap(<DbWorkbench conn={CONN} />)
-    await screen.findByTestId('wbtab-table:public.orders')
+    await screen.findByTestId('schema-node:public')
     const newQueryButtons = screen.getAllByTitle(/新建查询|New query/)
     expect(screen.getByTestId('wb-new-query')).toBeInTheDocument()
     expect(newQueryButtons.filter(el => el.getAttribute('data-testid') === 'wb-new-query')).toHaveLength(1)
@@ -253,7 +265,7 @@ describe('DbWorkbench unified tabs', () => {
       ],
     })
     wrap(<DbWorkbench conn={CONN} />)
-    await screen.findByTestId('wbtab-table:ads.company')
+    await screen.findByTestId('schema-node:ads')
     fireEvent.click(screen.getByTestId('wb-new-query'))
     const select = await screen.findByTestId('sql-default-schema')
     expect(select).toHaveValue('ads')
@@ -281,7 +293,7 @@ describe('DbWorkbench unified tabs', () => {
       ],
     })
     wrap(<DbWorkbench conn={CONN} />)
-    await screen.findByTestId('wbtab-table:admin.system.users')
+    await screen.findByTestId('schema-node:admin')
     fireEvent.click(screen.getByTestId('wb-new-query'))
     const select = await screen.findByTestId('sql-default-schema')
     expect(select).toHaveValue('admin')
@@ -294,16 +306,16 @@ describe('DbWorkbench unified tabs', () => {
 
   it('再次单击同一表复用已开 tab,不重复新开', async () => {
     wrap(<DbWorkbench conn={CONN} />)
-    await screen.findByTestId('wbtab-table:public.orders')
-    const treeItems = await screen.findAllByText('orders')
-    fireEvent.click(treeItems[treeItems.length - 1])
-    fireEvent.click(treeItems[treeItems.length - 1])
+    fireEvent.click(await screen.findByTestId('schema-node:public'))
+    const tbl = await screen.findByTestId('schema-tbl:public.orders')
+    fireEvent.click(tbl)
+    fireEvent.click(tbl)
     expect(screen.getAllByTestId('wbtab-table:public.orders')).toHaveLength(1)
   })
 
   it('函数源码 tab 与查询 tab 并存', async () => {
     wrap(<DbWorkbench conn={CONN} />)
-    await screen.findByTestId('wbtab-table:public.orders')
+    fireEvent.click(await screen.findByTestId('schema-node:public')) // 展开 schema(默认折叠)
     fireEvent.click(screen.getByTestId('wb-new-query'))
     await screen.findByTestId('wbtab-sql:1')
     // 展开 Functions 分组(默认折叠)并点函数
@@ -319,7 +331,7 @@ describe('DbWorkbench unified tabs', () => {
 
   it('关闭当前 tab 后激活相邻 tab', async () => {
     wrap(<DbWorkbench conn={CONN} />)
-    const tableChip = await screen.findByTestId('wbtab-table:public.orders')
+    const tableChip = await openTable()
     fireEvent.click(screen.getByTestId('wb-new-query'))
     await screen.findByTestId('wbtab-sql:1')
     fireEvent.click(screen.getByTestId('wbtab-close-sql:1'))
@@ -329,7 +341,7 @@ describe('DbWorkbench unified tabs', () => {
 
   it('关闭当前 tab 后相邻 tab 成为激活态(内容可见)', async () => {
     wrap(<DbWorkbench conn={CONN} />)
-    await screen.findByTestId('wbtab-table:public.orders')
+    await openTable()
     await screen.findByText('101')
     fireEvent.click(screen.getByTestId('wb-new-query'))
     await screen.findByTestId('wbtab-sql:1')
@@ -340,16 +352,20 @@ describe('DbWorkbench unified tabs', () => {
 
   it('schema 刷新后失效的表 tab 被剔除,activeId 回落到存活 tab', async () => {
     wrap(<DbWorkbench conn={CONN} />)
-    await screen.findByTestId('wbtab-table:public.orders')
-    // 第二次 getSchema(刷新)返回不含 orders 的 schema → orders tab 应被剔除,自动打开新首表
+    await openTable('public', 'orders')
+    // 再开一个查询 tab 作为"存活 tab",再切回 orders 使其激活
+    fireEvent.click(screen.getByTestId('wb-new-query'))
+    await screen.findByTestId('wbtab-sql:1')
+    fireEvent.click(screen.getByTestId('wbtab-table:public.orders'))
+    // 第二次 getSchema(刷新)返回不含 orders 的 schema → orders tab 被剔除(不再自动开新表)
     h.getSchema.mockResolvedValue({
       db: 'conn',
       schemas: [{ name: 'public', open: false, tables: [{ name: 'users', rows: '', cols: 0 }], views: [], functions: [] }],
     })
     fireEvent.click(screen.getByTestId('wb-refresh'))
     await waitFor(() => expect(screen.queryByTestId('wbtab-table:public.orders')).not.toBeInTheDocument())
-    // 新首表 tab 打开且为激活态(其 testid 存在)
-    expect(await screen.findByTestId('wbtab-table:public.users')).toBeInTheDocument()
+    // activeId 回落到存活的 sql tab(不再自动打开新首表)
+    expect(screen.getByTestId('wbtab-sql:1')).toBeInTheDocument()
   })
 
   it('mock 路径(无连接)关闭最后一个 tab 显示空状态', async () => {
@@ -386,5 +402,103 @@ describe('DbWorkbench 侧栏整栏收起 (功能#2)', () => {
     // 展开 → 搜索框恢复
     fireEvent.click(expandBtn)
     expect(screen.getByPlaceholderText(/搜索表|Search/)).toBeInTheDocument()
+  })
+})
+
+describe('DbWorkbench 历史记录无窗口执行 (功能#3)', () => {
+  const LIVE_CONN = {
+    connId: 'conn-live', profileId: 'd-orders', dbType: 'postgres' as const, name: 'prod-orders',
+    capabilities: {
+      writable: true, transactions: true, schemas: true,
+      sqlConsole: true, er: true, structureEdit: true,
+    },
+  }
+  // 只含一张表的库 → 自动打开 public.orders 表预览 tab(激活态非 SQL 控制台)。
+  const SCHEMA = {
+    db: 'conn',
+    schemas: [{
+      name: 'public', open: false,
+      tables: [{ name: 'orders', rows: '', cols: 0 }],
+      views: [], functions: [],
+    }],
+  }
+
+  beforeEach(() => {
+    h.list.mockReset(); h.tablePreview.mockReset(); h.getSchema.mockReset(); h.runQuery.mockReset(); h.objectSource.mockReset()
+    h.list.mockReturnValue([LIVE_CONN])
+    h.getSchema.mockResolvedValue(SCHEMA)
+    h.tablePreview.mockResolvedValue({ columns: [{ name: 'id', type: 'int', pk: true }], rows: [[101]] })
+    h.runQuery.mockResolvedValue({ columns: [], rows: [] })
+    h.objectSource.mockResolvedValue('')
+  })
+
+  const fireRun = (text: string) =>
+    window.dispatchEvent(new CustomEvent('catio-run', { detail: { kind: 'sql', text } }))
+
+  it('(a) 完全没有 SQL tab:派发 catio-run 后新建 SQL tab 并执行', async () => {
+    wrap(<DbWorkbench conn={CONN} />)
+    // 打开表预览 tab(激活,非 SQL);此时没有任何 SQL 控制台。
+    await openTable()
+    expect(screen.queryByTestId('wbtab-sql:1')).not.toBeInTheDocument()
+
+    fireRun('select 1')
+
+    // DbWorkbench 兜底:新建 SQL tab 并 seed + 自动执行。
+    expect(await screen.findByTestId('wbtab-sql:1')).toBeInTheDocument()
+    await waitFor(() => expect(h.runQuery).toHaveBeenCalledTimes(1))
+    expect(h.runQuery).toHaveBeenCalledWith(
+      'conn-live', 'select 1', 'public', expect.objectContaining({ profileId: 'd-orders' }),
+    )
+  })
+
+  it('(a2) 新建窗口不重复 seed:编辑器只含一条语句(回归)', async () => {
+    wrap(<DbWorkbench conn={CONN} />)
+    await openTable()
+    fireRun('select 1')
+    await screen.findByTestId('wbtab-sql:1')
+    await waitFor(() => expect(h.runQuery).toHaveBeenCalledTimes(1)) // autoRun 执行一次
+    // 再点"运行"(运行整个编辑器内容):若新建时既 seed initialCode 又 autoRun 插入,
+    // 编辑器会是两行 → runQuery 收到重复语句。修复后应只发一条。
+    h.runQuery.mockClear()
+    await waitFor(() => {
+      fireEvent.click(screen.getByTestId('sql-run'))
+      expect(h.runQuery).toHaveBeenCalledTimes(1)
+    })
+    expect(h.runQuery).toHaveBeenCalledWith(
+      'conn-live', 'select 1', 'public', expect.objectContaining({ profileId: 'd-orders' }),
+    )
+  })
+
+  it('(b) 有 SQL tab 但非激活:切到该 tab 并执行,不新建', async () => {
+    wrap(<DbWorkbench conn={CONN} />)
+    const tableChip = await openTable()
+    // 先新建一个 SQL tab(sql:1,激活),再切回表预览 → SQL tab 存在但非激活。
+    fireEvent.click(screen.getByTestId('wb-new-query'))
+    await screen.findByTestId('wbtab-sql:1')
+    fireEvent.click(tableChip)
+
+    fireRun('select 2')
+
+    // 不新建第二个 SQL tab;复用 sql:1 并执行。
+    await waitFor(() => expect(h.runQuery).toHaveBeenCalledTimes(1))
+    expect(screen.queryByTestId('wbtab-sql:2')).not.toBeInTheDocument()
+    expect(screen.getByTestId('wbtab-sql:1')).toBeInTheDocument()
+    expect(h.runQuery).toHaveBeenCalledWith(
+      'conn-live', 'select 2', 'public', expect.objectContaining({ profileId: 'd-orders' }),
+    )
+  })
+
+  it('(c) 激活 tab 是 SQL:由 SqlConsole 处理,DbWorkbench 不重复执行', async () => {
+    wrap(<DbWorkbench conn={CONN} />)
+    await screen.findByTestId('schema-node:public')
+    // 新建 SQL tab 并保持激活。
+    fireEvent.click(screen.getByTestId('wb-new-query'))
+    await screen.findByTestId('wbtab-sql:1')
+
+    fireRun('select 3')
+
+    // 仅 SqlConsole 执行一次,DbWorkbench 不介入(不重复执行、不新建 tab)。
+    await waitFor(() => expect(h.runQuery).toHaveBeenCalledTimes(1))
+    expect(screen.queryByTestId('wbtab-sql:2')).not.toBeInTheDocument()
   })
 })

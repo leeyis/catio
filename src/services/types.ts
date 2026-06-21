@@ -103,6 +103,8 @@ export interface ResultColumn {
   fk?: boolean
   /** Explicit icon name; overrides type-derived icon in DataGrid. Set from mock data; absent for real DB columns. */
   icon?: string
+  /** Column comment, filled only for table-preview results; absent for arbitrary SQL results. */
+  comment?: string
 }
 export interface QueryResult {
   columns: ResultColumn[]
@@ -133,6 +135,7 @@ export interface StructColumn {
   default: string | null
   key: 'PK' | 'FK' | 'UNI' | ''
   extra: string
+  comment: string
 }
 
 export interface StructIndex {

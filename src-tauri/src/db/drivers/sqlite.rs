@@ -253,6 +253,7 @@ impl Driver for SqliteDriver {
                     nullable: notnull == 0,
                     default,
                     key: key.into(),
+                    comment: String::new(),
                 }
             })
             .collect();
@@ -267,7 +268,7 @@ impl Driver for SqliteDriver {
             }
         }).collect();
 
-        Ok(TableStructure { columns, indexes, fks })
+        Ok(TableStructure { comment: String::new(), columns, indexes, fks })
     }
 
     async fn er_relations(&self, _schema: &str) -> Result<Vec<ErRelation>, DbError> {

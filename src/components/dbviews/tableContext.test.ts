@@ -5,9 +5,9 @@ import type { TableStructure } from '../../services/types'
 const relStruct: TableStructure = {
   comment: '',
   columns: [
-    { name: 'id', type: 'bigint', nullable: false, default: null, key: 'PK', extra: '' },
-    { name: 'name', type: 'varchar(255)', nullable: true, default: null, key: '', extra: '' },
-    { name: 'status', type: 'text', nullable: false, default: "'new'", key: '', extra: '' },
+    { name: 'id', type: 'bigint', nullable: false, default: null, key: 'PK', extra: '', comment: '' },
+    { name: 'name', type: 'varchar(255)', nullable: true, default: null, key: '', extra: '', comment: '' },
+    { name: 'status', type: 'text', nullable: false, default: "'new'", key: '', extra: '', comment: '' },
   ],
   indexes: [{ name: 'idx_name', cols: 'name', unique: false, method: 'btree' }],
   fks: [{ col: 'owner_id', ref: 'users(id)', onDelete: 'CASCADE', onUpdate: '' }],
@@ -22,9 +22,10 @@ describe('buildTableContext — relational', () => {
     expect(out).toContain('PRIMARY KEY ("id")')
   })
 
-  it('uses MySQL backtick quoting for mysql engine', () => {
+  it('uses MySQL backtick quoting and database-qualifies the table for mysql engine', () => {
     const out = buildTableContext('mysql', 'shop', 'orders', relStruct)
-    expect(out).toContain('CREATE TABLE `orders`')
+    // MySQL "schema" is the database; qualify so cross-database references resolve.
+    expect(out).toContain('CREATE TABLE `shop`.`orders`')
     expect(out).toContain('`id` bigint NOT NULL')
   })
 
@@ -45,8 +46,8 @@ describe('buildTableContext — mongodb', () => {
   const mongoStruct: TableStructure = {
     comment: '',
     columns: [
-      { name: '_id', type: 'objectId', nullable: false, default: null, key: 'PK', extra: '' },
-      { name: 'name', type: 'string', nullable: true, default: null, key: '', extra: '' },
+      { name: '_id', type: 'objectId', nullable: false, default: null, key: 'PK', extra: '', comment: '' },
+      { name: 'name', type: 'string', nullable: true, default: null, key: '', extra: '', comment: '' },
     ],
     indexes: [{ name: 'name_1', cols: 'name', unique: true, method: '' }],
     fks: [],
@@ -73,8 +74,8 @@ describe('buildTableContext — elasticsearch', () => {
   const esStruct: TableStructure = {
     comment: '',
     columns: [
-      { name: '_id', type: 'keyword', nullable: false, default: null, key: 'PK', extra: '' },
-      { name: 'title', type: 'text', nullable: true, default: null, key: '', extra: '' },
+      { name: '_id', type: 'keyword', nullable: false, default: null, key: 'PK', extra: '', comment: '' },
+      { name: 'title', type: 'text', nullable: true, default: null, key: '', extra: '', comment: '' },
     ],
     indexes: [],
     fks: [],
