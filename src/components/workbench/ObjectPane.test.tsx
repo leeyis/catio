@@ -31,5 +31,8 @@ describe('ObjectPane 源码复制', () => {
     const copyBtn = screen.getByTitle('Copy DDL')
     fireEvent.click(copyBtn)
     expect(writeText).toHaveBeenCalledWith('select 1 as one;')
+    // Copy feedback: tooltip switches to the translated 'Copied' (not a raw i18n key).
+    expect(await screen.findByTitle('Copied')).toBeInTheDocument()
+    expect(screen.queryByTitle('common.copied')).toBeNull()
   })
 })

@@ -159,7 +159,7 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
         <div className="grow" />
         {tab === 'ddl' && (
           <IconBtn name={ddlCopied ? 'check' : 'copy'} size={14} variant="bare"
-            title={ddlCopied ? t('common.copied') : t('dbviews.copyDdl')}
+            title={ddlCopied ? t('dbviews.copied') : t('dbviews.copyDdl')}
             style={ddlCopied ? { color: 'var(--signal-green)' } : undefined} onClick={copyDdl} />
         )}
         <span style={{ fontSize: 11.5, color: 'var(--text-faint)', maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={st.comment || undefined}>{st.comment}</span>

@@ -59,7 +59,7 @@ export function ObjectPane({ connId, schema, name, objKind }: ObjectPaneProps) {
         </div>
         <div className="row gap6" style={{ flex: 'none', alignItems: 'center' }}>
           <IconBtn name={copied ? 'check' : 'copy'} size={14} variant="bare"
-            title={copied ? t('common.copied') : t('dbviews.copyDdl')}
+            title={copied ? t('dbviews.copied') : t('dbviews.copyDdl')}
             style={{ color: copied ? 'var(--signal-green)' : undefined, ...(src ? null : { opacity: 0.4, pointerEvents: 'none' }) }}
             onClick={copySrc} />
           <span className="mono" style={{ alignSelf: 'center', height: 22, lineHeight: '22px', padding: '0 9px', borderRadius: 7, fontSize: 11, fontWeight: 600,

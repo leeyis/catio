@@ -79,5 +79,8 @@ describe('StructureView DDL 复制', () => {
     // The copied text is the create table DDL for the qualified table.
     expect(copied).toContain('create table')
     expect(copied).toContain('public.orders')
+    // Copy feedback: tooltip switches to the translated 'Copied' (not a raw i18n key).
+    expect(await screen.findByTitle('Copied')).toBeInTheDocument()
+    expect(screen.queryByTitle('common.copied')).toBeNull()
   })
 })
