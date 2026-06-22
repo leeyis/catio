@@ -1,8 +1,10 @@
 // adapted from dbx crates/dbx-core/src/db/postgres.rs, Apache-2.0
 use async_trait::async_trait;
 use deadpool_postgres::{Manager, ManagerConfig, Pool, PoolError, RecyclingMethod};
-use tokio_postgres::NoTls; // 起步用 NoTls；TLS 变体见 Step 4 备注
+use tokio_postgres::NoTls;
+use tokio_postgres::config::SslMode;
 use tokio_postgres::error::SqlState;
+use std::sync::Arc;
 use crate::db::{DbError, DatabaseType};
 use crate::db::dialect::quote_ident;
 use crate::db::driver::{ConnectArgs, Driver, TableInfo, TableStructure, ErRelation};
@@ -23,14 +25,175 @@ impl PostgresDriver {
         let mut cfg = tokio_postgres::Config::new();
         cfg.host(&args.host).port(args.port).user(&args.user).dbname(&dbname);
         if let Some(pw) = &args.secret { cfg.password(pw); }
-        let mgr = Manager::from_config(cfg, NoTls, ManagerConfig {
-            recycling_method: RecyclingMethod::Fast,
-        });
-        let pool = Pool::builder(mgr).max_size(4).build()
-            .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
+        cfg.ssl_mode(pg_ssl_mode(args));
+
+        // 仅 Disable 走纯 NoTls；其余(Require/Prefer)挂接 rustls connector。
+        // Prefer 语义保持完整:cfg.ssl_mode 已设为 Prefer,tokio-postgres 会先尝试
+        // TLS,若服务端拒绝 SSL 协商则自动以明文重连——挂接 connector 不会破坏这一
+        // 回退(connector 只在服务端同意 SSL 时才被调用)。
+        let pool = if !pg_uses_tls(args) {
+            let mgr = Manager::from_config(cfg, NoTls, ManagerConfig {
+                recycling_method: RecyclingMethod::Fast,
+            });
+            Pool::builder(mgr).max_size(4).build()
+                .map_err(|e| DbError::ConnectFailed(e.to_string()))?
+        } else {
+            let tls_config = build_tls_config(args)
+                .map_err(|e| DbError::ConnectFailed(e))?;
+            let connector = tokio_postgres_rustls::MakeRustlsConnect::new(tls_config);
+            let mgr = Manager::from_config(cfg, connector, ManagerConfig {
+                recycling_method: RecyclingMethod::Fast,
+            });
+            Pool::builder(mgr).max_size(4).build()
+                .map_err(|e| DbError::ConnectFailed(e.to_string()))?
+        };
         // 立即取一个连接验证可达 + 认证
         let _client = pool.get().await.map_err(|e| map_pool_error(e))?;
         Ok(Self { pool, profile: args.driver_profile.clone() })
+    }
+}
+
+/// 将 ConnectArgs 的 ssl/ssl_mode 映射为 tokio-postgres 的 `SslMode`。
+///
+/// 规则：ssl=false → Disable（无 TLS）。ssl=true 且未指定 ssl_mode → Require。
+/// ssl_mode 字符串显式覆盖：disable/prefer/require/verify-ca/verify-full。
+/// 注意 tokio-postgres 本身没有 verify-* 档位（证书校验由 rustls 验证器负责），
+/// 故 verify-ca/verify-full 在协议层仍映射为 Require。
+fn pg_ssl_mode(args: &crate::db::driver::ConnectArgs) -> SslMode {
+    match args.ssl_mode.as_deref().map(|m| m.trim().to_ascii_lowercase()) {
+        Some(ref m) if m == "disable" || m == "disabled" => SslMode::Disable,
+        Some(ref m) if m == "prefer" || m == "preferred" => SslMode::Prefer,
+        Some(ref m)
+            if m == "require"
+                || m == "required"
+                || m == "verify-ca"
+                || m == "verify_ca"
+                || m == "verify-full"
+                || m == "verify_full"
+                || m == "verify-identity" =>
+        {
+            SslMode::Require
+        }
+        // 未指定 ssl_mode：由 ssl 开关决定。
+        _ => {
+            if args.ssl {
+                SslMode::Require
+            } else {
+                SslMode::Disable
+            }
+        }
+    }
+}
+
+/// 是否需要挂接 rustls TLS connector。除 `Disable` 外都需要——包括 `Prefer`:
+/// connector 仅在服务端同意 SSL 协商时才会被 tokio-postgres 调用,服务端拒绝时
+/// `Prefer` 仍按其语义回退到明文连接,故挂接 connector 不会破坏 `Prefer` 的降级。
+fn pg_uses_tls(args: &crate::db::driver::ConnectArgs) -> bool {
+    pg_ssl_mode(args) != SslMode::Disable
+}
+
+/// 是否接受无效服务器证书（自签/过期/主机名不符）。仅当用户显式把
+/// ssl_reject_unauthorized 设为 false 时才接受；缺省与 true 都坚持校验。
+fn pg_accepts_invalid_certs(args: &crate::db::driver::ConnectArgs) -> bool {
+    args.ssl_reject_unauthorized == Some(false)
+}
+
+/// 读取 PEM 文件中的 CA 证书列表。文件缺失/无有效证书时返回 Err（不 panic）。
+fn read_ca_certs(path: &str) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, String> {
+    let data = std::fs::read(path).map_err(|e| format!("读取 CA 证书 {path} 失败: {e}"))?;
+    let mut reader = std::io::BufReader::new(&data[..]);
+    let certs: Vec<_> = rustls_pemfile::certs(&mut reader)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("解析 CA 证书 {path} 失败: {e}"))?;
+    if certs.is_empty() {
+        return Err(format!("CA 证书 {path} 中未找到有效证书"));
+    }
+    Ok(certs)
+}
+
+/// 构建 rustls `ClientConfig`：
+/// - 默认用系统/webpki 根 + 可选自定义 CA（ca_cert_path）校验服务器证书；
+/// - 当 ssl_reject_unauthorized=Some(false) 时安装跳过校验的危险验证器（内网/测试）。
+fn build_tls_config(args: &crate::db::driver::ConnectArgs) -> Result<rustls::ClientConfig, String> {
+    // 安装进程级默认 crypto provider（幂等，忽略已安装的情形）。
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    if pg_accepts_invalid_certs(args) {
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        return Ok(rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(no_verify::NoCertVerifier::new(provider)))
+            .with_no_client_auth());
+    }
+
+    let mut root_store = rustls::RootCertStore::empty();
+    // 内置 webpki 根（公共 CA）。
+    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    // 追加自定义 CA（私有/自签 CA 颁发的服务器证书）。
+    if let Some(path) = args.ca_cert_path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        for cert in read_ca_certs(path)? {
+            root_store
+                .add(cert)
+                .map_err(|e| format!("将 CA 证书加入信任库失败: {e}"))?;
+        }
+    }
+    Ok(rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth())
+}
+
+/// 跳过服务器证书校验的危险验证器，仅在用户显式关闭校验时使用。
+/// 改编自 dbx postgres.rs 的 NoVerify 实现（Apache-2.0）。
+mod no_verify {
+    use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+    use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider};
+    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+    use std::sync::Arc;
+
+    #[derive(Debug)]
+    pub struct NoCertVerifier {
+        provider: Arc<CryptoProvider>,
+    }
+
+    impl NoCertVerifier {
+        pub fn new(provider: Arc<CryptoProvider>) -> Self {
+            Self { provider }
+        }
+    }
+
+    impl ServerCertVerifier for NoCertVerifier {
+        fn verify_server_cert(
+            &self,
+            _end_entity: &CertificateDer<'_>,
+            _intermediates: &[CertificateDer<'_>],
+            _server_name: &ServerName<'_>,
+            _ocsp_response: &[u8],
+            _now: UnixTime,
+        ) -> Result<ServerCertVerified, rustls::Error> {
+            Ok(ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &rustls::DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            verify_tls12_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &rustls::DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            verify_tls13_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+            self.provider.signature_verification_algorithms.supported_schemes()
+        }
     }
 }
 
@@ -213,6 +376,146 @@ mod comment_sql_tests {
         let sql = pg_table_comment_sql();
         assert!(sql.contains("obj_description"), "表注释 SQL 必须用 obj_description");
         assert!(sql.contains("pg_class"));
+    }
+}
+
+#[cfg(test)]
+mod tls_tests {
+    use super::{pg_accepts_invalid_certs, pg_ssl_mode, pg_uses_tls, read_ca_certs};
+    use crate::db::driver::ConnectArgs;
+    use crate::db::DatabaseType;
+    use tokio_postgres::config::SslMode;
+
+    fn args() -> ConnectArgs {
+        ConnectArgs {
+            db_type: DatabaseType::Postgres,
+            host: "h".into(),
+            port: 5432,
+            user: "u".into(),
+            database: None,
+            driver_profile: None,
+            options: None,
+            secret: None,
+            ssl: false,
+            ssl_mode: None,
+            ca_cert_path: None,
+            ssl_reject_unauthorized: None,
+        }
+    }
+
+    #[test]
+    fn ssl_disabled_maps_to_disable() {
+        let a = args();
+        assert_eq!(pg_ssl_mode(&a), SslMode::Disable);
+    }
+
+    #[test]
+    fn ssl_enabled_defaults_to_require() {
+        let mut a = args();
+        a.ssl = true;
+        assert_eq!(pg_ssl_mode(&a), SslMode::Require);
+    }
+
+    #[test]
+    fn ssl_mode_string_overrides() {
+        let mut a = args();
+        a.ssl = true;
+        a.ssl_mode = Some("prefer".into());
+        assert_eq!(pg_ssl_mode(&a), SslMode::Prefer);
+        a.ssl_mode = Some("verify-full".into());
+        // tokio-postgres has no verify-* SslMode; verification is enforced via the
+        // rustls verifier, so verify-* still maps to Require at the protocol layer.
+        assert_eq!(pg_ssl_mode(&a), SslMode::Require);
+        // 显式 disable 即便 ssl=true 也尊重它。
+        a.ssl_mode = Some("disable".into());
+        assert_eq!(pg_ssl_mode(&a), SslMode::Disable);
+    }
+
+    #[test]
+    fn tls_connector_used_for_every_mode_except_disable() {
+        let mut a = args();
+        // 默认(ssl=false)→ Disable → 不挂 TLS connector(纯 NoTls)。
+        assert!(!pg_uses_tls(&a), "默认无 TLS 不应挂接 connector");
+        // ssl=true 默认 Require → 挂接 connector。
+        a.ssl = true;
+        assert!(pg_uses_tls(&a));
+        // Prefer 也挂接 connector;cfg.ssl_mode=Prefer 保证服务端拒绝时回退明文,
+        // connector 只在服务端同意 SSL 时被调用,不破坏 Prefer 的降级语义。
+        a.ssl_mode = Some("prefer".into());
+        assert_eq!(pg_ssl_mode(&a), SslMode::Prefer);
+        assert!(pg_uses_tls(&a), "Prefer 仍需挂接 connector 以便在服务端支持时升级到 TLS");
+        // 显式 disable → 不挂接,回到纯明文路径。
+        a.ssl_mode = Some("disable".into());
+        assert!(!pg_uses_tls(&a));
+    }
+
+    #[test]
+    fn accepts_invalid_certs_only_when_explicitly_rejecting_off() {
+        let mut a = args();
+        a.ssl = true;
+        assert!(!pg_accepts_invalid_certs(&a), "默认必须校验证书");
+        a.ssl_reject_unauthorized = Some(true);
+        assert!(!pg_accepts_invalid_certs(&a));
+        a.ssl_reject_unauthorized = Some(false);
+        assert!(pg_accepts_invalid_certs(&a), "显式关闭校验时接受无效证书");
+    }
+
+    /// A real self-signed X.509 cert (RSA-2048, CN=catio-test-ca, openssl).
+    /// Using a genuine DER body (not bogus base64) ensures rustls-pemfile 2.x's
+    /// strict base64 decoding succeeds — the codex-flagged risk that fake
+    /// base64 could yield a false pass / runtime failure no longer applies.
+    const TEST_CA_PEM: &str = "\
+-----BEGIN CERTIFICATE-----
+MIIC4TCCAcmgAwIBAgIUFwX6DVBaM5oRsKWJLVQcW0wR7cQwDQYJKoZIhvcNAQEL
+BQAwADAeFw0yNjA2MjIyMTQ4MzhaFw0zNjA2MTkyMTQ4MzhaMAAwggEiMA0GCSqG
+SIb3DQEBAQUAA4IBDwAwggEKAoIBAQDSkDnBAdWNMxK9YQFuVt4O8Djd9uMyP+l9
+Ri12B4eQgndsyMqTMUoGprcKNXpWadF6dDAKK6Kg4F7akmToSteUXjx24bMxPebo
+NcjaJOhBDqYJRktTzH2e+kEE9w/1LNMdtNeajU97T7BtAFzzhcMxrXrJvJxpLFxo
+NPQNbiFwcr9w3hiP+TNa4yT5uNvko17Q/Ic9ASOskXIJuDhPk28wTqA/lJMFRstO
+hq6tmgf8sgU0wdbQAWj4wUAL59MptgR/l4cx1Uq6wmQ2bEN1iIYeCg6/znHxN881
+03KG37sd0tik7WZ2qZdsdJ3pO+dkUfbhA4AGFkQDtCd4E7ba/r9zAgMBAAGjUzBR
+MB0GA1UdDgQWBBQzwRlhYiKXO0tEphqsKDWKD0B0ZDAfBgNVHSMEGDAWgBQzwRlh
+YiKXO0tEphqsKDWKD0B0ZDAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUA
+A4IBAQCJ9owczTJIQ07VTcw8HXh8TaXyHVOlkap7SoGj2KLeN/0UE3/aCtz25jvP
+BWO972GFUBPHNlmk+F1/3++rk3Eh1IZzznty3L3aXNfW+/09n/bjMOwQ4YtxHz2N
+c/92bIWpZIX5DxoHien02HzlzRvwjQjbPZdRqPLs1kaKgw4eEw6Lksu4EAA5k3aF
+zwhEX7GxUI82mQXcFzw60cqKtih8ieSlL1SnhWDwmUOfXfFCoageXpuMogF/Tdhf
+7siEPBLM5YnL1DqujsgiFSel8blUER7p3W5NSgg7jley6Enj8xxYRvWRkiNFcPed
+KSL56AK8J0Mimlbt0k2itepUJtZe
+-----END CERTIFICATE-----
+";
+
+    #[test]
+    fn read_ca_certs_parses_pem() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("catio_test_ca_{}.pem", std::process::id()));
+        std::fs::write(&path, TEST_CA_PEM).unwrap();
+        let certs = read_ca_certs(path.to_str().unwrap()).expect("should parse one PEM cert");
+        assert_eq!(certs.len(), 1, "应解析出一张 CA 证书");
+        // The parsed DER must round-trip into the rustls trust store (proves it is
+        // a real, structurally-valid cert, not just base64 that happened to decode).
+        let mut store = rustls::RootCertStore::empty();
+        store.add(certs[0].clone()).expect("real CA cert should add to the trust store");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Garbage that is NOT valid base64 inside the PEM guards must surface an Err
+    /// (rustls-pemfile 2.x rejects it) rather than silently yielding a bogus cert.
+    #[test]
+    fn read_ca_certs_rejects_invalid_base64() {
+        let pem = "-----BEGIN CERTIFICATE-----\n!!!not-base64!!!\n-----END CERTIFICATE-----\n";
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("catio_test_bad_ca_{}.pem", std::process::id()));
+        std::fs::write(&path, pem).unwrap();
+        let res = read_ca_certs(path.to_str().unwrap());
+        let _ = std::fs::remove_file(&path);
+        assert!(res.is_err(), "非法 base64 的 PEM 应报错,而不是假装解析出证书");
+    }
+
+    #[test]
+    fn read_ca_certs_missing_file_errors() {
+        let err = read_ca_certs("/no/such/ca-file-xyz.pem");
+        assert!(err.is_err(), "缺失文件应报错而不是 panic");
     }
 }
 

@@ -34,6 +34,39 @@ describe('services/db', () => {
     expect(invokeMock).not.toHaveBeenCalled()
   })
 
+  it('dbConnectArgsFromProfile threads SSL/TLS fields (the broken direct-connect path)', async () => {
+    const { dbConnectArgsFromProfile } = await import('./db')
+    const args = dbConnectArgsFromProfile({
+      dbType: 'postgres', host: 'db.example.com', port: 5432, user: 'app',
+      database: 'orders', driverProfile: 'cockroachdb', options: 'a=1',
+      ssl: true, sslMode: 'verify-full', caCertPath: '/etc/ssl/ca.pem',
+      sslRejectUnauthorized: false,
+    }, 'secret-pw')
+    expect(args).toMatchObject({
+      dbType: 'postgres', host: 'db.example.com', port: 5432, user: 'app',
+      database: 'orders', driverProfile: 'cockroachdb', options: 'a=1',
+      ssl: true, sslMode: 'verify-full', caCertPath: '/etc/ssl/ca.pem',
+      sslRejectUnauthorized: false, secret: 'secret-pw',
+    })
+  })
+
+  it('dbConnectArgsFromProfile omits SSL fields entirely when SSL is off', async () => {
+    const { dbConnectArgsFromProfile } = await import('./db')
+    const args = dbConnectArgsFromProfile({
+      dbType: 'mysql', host: 'h', port: 3306, user: 'u',
+    }, 'pw')
+    expect('ssl' in args).toBe(false)
+    expect('sslMode' in args).toBe(false)
+    expect('caCertPath' in args).toBe(false)
+    expect('sslRejectUnauthorized' in args).toBe(false)
+  })
+
+  it('dbConnectArgsFromProfile omits secret when none is given', async () => {
+    const { dbConnectArgsFromProfile } = await import('./db')
+    const args = dbConnectArgsFromProfile({ dbType: 'redis', host: 'h', port: 6379, user: '' })
+    expect('secret' in args).toBe(false)
+  })
+
   it('runQuery falls back to mock outside Tauri', async () => {
     const { runQuery } = await import('./db')
     const r = await runQuery('any', 'SELECT 1')

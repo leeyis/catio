@@ -46,6 +46,14 @@ export interface DbConnectArgs {
    *  "authSource=admin&directConnection=true"). Appended by the driver to its
    *  connection URL. Non-secret; persisted in the profile. */
   options?: string
+  /** 启用 SSL/TLS。默认关闭(保留无 TLS 路径)。 */
+  ssl?: boolean
+  /** SSL 模式细化:require / prefer / verify-ca / verify-full / disable。 */
+  sslMode?: string
+  /** 自定义 CA 证书 PEM 文件路径(校验私有/自签 CA 颁发的服务器证书)。非敏感,可入档案。 */
+  caCertPath?: string
+  /** 是否校验服务器证书。缺省/true=校验;false=接受无效证书(内网/测试)。 */
+  sslRejectUnauthorized?: boolean
   secret?: string
 }
 
@@ -73,6 +81,33 @@ export interface DbConnectResult {
 export async function dbConnect(args: DbConnectArgs): Promise<DbConnectResult> {
   if (!isTauri()) throw new Error('dbConnect requires the Tauri runtime')
   return tauriInvoke<DbConnectResult>('db_connect', { args })
+}
+
+/** The non-secret subset of DbConnectArgs a saved profile carries (id/name etc. omitted). */
+export type DbConnectProfileLike = Omit<DbConnectArgs, 'secret'>
+
+/**
+ * Build the `dbConnect` args from a saved profile + an in-memory secret. Centralises
+ * the field threading so EVERY connect path (sidebar/home direct-connect AND the
+ * modal) carries the SAME fields — notably driverProfile/options AND the SSL/TLS
+ * config (ssl/sslMode/caCertPath/sslRejectUnauthorized). Optional fields are omitted
+ * when unset so the backend sees a clean payload (no `ssl: false` noise).
+ */
+export function dbConnectArgsFromProfile(profile: DbConnectProfileLike, secret?: string): DbConnectArgs {
+  return {
+    dbType: profile.dbType,
+    ...(profile.driverProfile ? { driverProfile: profile.driverProfile } : {}),
+    ...(profile.options ? { options: profile.options } : {}),
+    host: profile.host,
+    port: profile.port,
+    user: profile.user,
+    ...(profile.database ? { database: profile.database } : {}),
+    ...(profile.ssl ? { ssl: true } : {}),
+    ...(profile.sslMode ? { sslMode: profile.sslMode } : {}),
+    ...(profile.caCertPath ? { caCertPath: profile.caCertPath } : {}),
+    ...(profile.sslRejectUnauthorized === false ? { sslRejectUnauthorized: false } : {}),
+    ...(secret ? { secret } : {}),
+  }
 }
 
 /** Result of an ephemeral connectivity test — mirrors Rust `TestConnResult` (camelCase). */

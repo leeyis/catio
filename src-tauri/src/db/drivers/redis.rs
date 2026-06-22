@@ -33,8 +33,9 @@ impl RedisDriver {
         let port = args.port;
         let host = &args.host;
 
-        // Build redis URL: redis://[:password@]host:port/
-        let url = build_redis_url(host, port, args.secret.as_deref());
+        // Build redis URL: redis://[:password@]host:port/ (TLS 时为 rediss://)
+        let insecure = args.ssl_reject_unauthorized == Some(false);
+        let url = build_redis_url(host, port, args.secret.as_deref(), args.ssl, insecure);
 
         let client = ::redis::Client::open(url.as_str())
             .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
@@ -61,11 +62,111 @@ impl RedisDriver {
     }
 }
 
-/// Build `redis://[:pw@]host:port/`
-fn build_redis_url(host: &str, port: u16, password: Option<&str>) -> String {
+/// Build a Redis URL. `ssl` 切换 scheme 到 `rediss://`(TLS);`insecure` 为 true 时
+/// 追加 `#insecure` 片段,让 redis-rs 跳过证书校验(自签/内网用)。无 TLS 时维持
+/// 原有 `redis://[:pw@]host:port/` 路径。
+fn build_redis_url(host: &str, port: u16, password: Option<&str>, ssl: bool, insecure: bool) -> String {
+    let scheme = if ssl { "rediss" } else { "redis" };
+    let fragment = if ssl && insecure { "#insecure" } else { "" };
     match password.filter(|p| !p.is_empty()) {
-        Some(pw) => format!("redis://:{}@{}:{}/", pw, host, port),
-        None => format!("redis://{}:{}/", host, port),
+        // 密码必须 percent-encode:含 @ / : ? # 等字符会破坏 URL 解析
+        // (@ 之后被当 host、# 被当 fragment),导致连接失败或用错凭据。
+        Some(pw) => format!("{scheme}://:{}@{host}:{port}/{fragment}", percent_encode_userinfo(pw)),
+        None => format!("{scheme}://{host}:{port}/{fragment}"),
+    }
+}
+
+/// 对 URL userinfo(密码)做 percent-encoding。仅保留 RFC 3986 的 unreserved 字符
+/// (ALPHA / DIGIT / `-` `.` `_` `~`)不转义,其余一律转成 `%XX`——这比只转 @/:/# 更
+/// 稳妥(也覆盖空格、中文等),且对普通密码是恒等映射。
+fn percent_encode_userinfo(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        let unreserved = b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~');
+        if unreserved {
+            out.push(b as char);
+        } else {
+            out.push('%');
+            out.push_str(&format!("{:02X}", b));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod redis_tls_url_tests {
+    use super::build_redis_url;
+
+    #[test]
+    fn no_tls_keeps_redis_scheme() {
+        assert_eq!(build_redis_url("h", 6379, None, false, false), "redis://h:6379/");
+        assert_eq!(build_redis_url("h", 6379, Some("pw"), false, false), "redis://:pw@h:6379/");
+    }
+
+    #[test]
+    fn tls_switches_to_rediss() {
+        assert_eq!(build_redis_url("h", 6379, None, true, false), "rediss://h:6379/");
+        assert_eq!(build_redis_url("h", 6379, Some("pw"), true, false), "rediss://:pw@h:6379/");
+    }
+
+    #[test]
+    fn tls_insecure_appends_fragment() {
+        assert_eq!(build_redis_url("h", 6379, None, true, true), "rediss://h:6379/#insecure");
+        // insecure 只在 ssl 开启时生效。
+        assert_eq!(build_redis_url("h", 6379, None, false, true), "redis://h:6379/");
+    }
+
+    #[test]
+    fn password_special_chars_are_percent_encoded() {
+        // 含 @ / : ? # 等会破坏 URL 解析的字符必须 percent-encode,
+        // 否则 redis-rs 会把 @ 之后误当作 host、或把 # 当作 fragment。
+        let url = build_redis_url("h", 6379, Some("p@ss:w/o?rd#x"), false, false);
+        assert!(
+            !url.contains("p@ss"),
+            "原始密码不应裸露在 URL 里(会破坏解析): {url}"
+        );
+        // 关键的破坏性字符都已转义。
+        assert!(url.contains("%40"), "@ 应转义为 %40: {url}");
+        assert!(url.contains("%2F"), "/ 应转义为 %2F: {url}");
+        assert!(url.contains("%3F"), "? 应转义为 %3F: {url}");
+        assert!(url.contains("%23"), "# 应转义为 %23: {url}");
+        assert!(url.contains("%3A"), ": 应转义为 %3A: {url}");
+        // URL 仍能被 redis-rs 解析,且密码里的字符不会污染 host/port。
+        let parsed = ::redis::parse_redis_url(&url).expect("URL 应可被 redis-rs 解析");
+        assert_eq!(parsed.host_str(), Some("h"), "host 不应被密码里的字符污染");
+        assert_eq!(parsed.port(), Some(6379));
+        // redis-rs 内部对 userinfo 做 percent-decode(connection.rs),故编码后的密码
+        // 必须能精确还原回原文(往返验证)。
+        let raw = parsed.password().expect("应有密码");
+        let decoded = percent_decode_str(raw);
+        assert_eq!(decoded, "p@ss:w/o?rd#x", "percent-decode 应还原原始密码");
+    }
+
+    #[test]
+    fn ordinary_password_round_trips() {
+        let url = build_redis_url("h", 6379, Some("simplepw"), false, false);
+        let parsed = ::redis::parse_redis_url(&url).expect("URL 应可被解析");
+        // 普通密码是恒等映射,无需解码即等于原文。
+        assert_eq!(parsed.password(), Some("simplepw"));
+    }
+
+    /// 测试用 percent-decode 助手(把 %XX 还原为字节再解 UTF-8)。
+    fn percent_decode_str(s: &str) -> String {
+        let bytes = s.as_bytes();
+        let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' && i + 2 < bytes.len() {
+                let hi = (bytes[i + 1] as char).to_digit(16).unwrap();
+                let lo = (bytes[i + 2] as char).to_digit(16).unwrap();
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+            } else {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+        String::from_utf8(out).unwrap()
     }
 }
 

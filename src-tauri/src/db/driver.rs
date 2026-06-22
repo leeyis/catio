@@ -20,6 +20,21 @@ pub struct ConnectArgs {
     pub options: Option<String>,
     /// 密码；仅内存，不落盘、不回前端。
     pub secret: Option<String>,
+    /// 是否启用 SSL/TLS。默认 false（保留无 TLS 路径）。照搬 dbx connection.rs `ssl`。
+    #[serde(default)]
+    pub ssl: bool,
+    /// SSL 模式细化（如 "require"/"prefer"/"verify-ca"/"verify-full"/"disable"）。
+    /// 缺省时 ssl=true 视为 "require"。各驱动按其协议语义映射。
+    #[serde(default)]
+    pub ssl_mode: Option<String>,
+    /// 自定义 CA 证书的 PEM 文件路径（用于校验自签名/私有 CA 颁发的服务器证书）。
+    /// 非敏感，可入连接档案。照搬 dbx connection.rs `ca_cert_path`。
+    #[serde(default)]
+    pub ca_cert_path: Option<String>,
+    /// 是否校验服务器证书。None/Some(true)=校验（默认）；Some(false)=接受无效证书
+    /// （自签/过期/主机名不符），用于内网/测试环境。
+    #[serde(default)]
+    pub ssl_reject_unauthorized: Option<bool>,
 }
 
 // Hand-written Debug that redacts the secret (mirrors ssh/conn.rs ConnectArgs),
@@ -35,6 +50,10 @@ impl std::fmt::Debug for ConnectArgs {
             .field("driver_profile", &self.driver_profile)
             .field("options", &self.options)
             .field("secret", &self.secret.as_ref().map(|_| "<redacted>"))
+            .field("ssl", &self.ssl)
+            .field("ssl_mode", &self.ssl_mode)
+            .field("ca_cert_path", &self.ca_cert_path)
+            .field("ssl_reject_unauthorized", &self.ssl_reject_unauthorized)
             .finish()
     }
 }
@@ -230,6 +249,69 @@ pub trait Driver: Send + Sync {
     /// 关系型/文档型引擎有真正的表结构,不走这条路径。
     async fn keyspace_info(&self, _schema: &str) -> Result<KeyspaceInfo, DbError> {
         Err(DbError::Unsupported("engine has no keyspace info".into()))
+    }
+}
+
+#[cfg(test)]
+mod ssl_serde_tests {
+    use super::ConnectArgs;
+
+    /// 不带任何 ssl 字段的旧 payload 必须仍可反序列化，且 ssl 全部回落默认（关闭、不指定 mode/ca）。
+    #[test]
+    fn ssl_fields_default_when_absent() {
+        let args: ConnectArgs = serde_json::from_value(serde_json::json!({
+            "dbType": "postgres",
+            "host": "127.0.0.1",
+            "port": 5432,
+            "user": "postgres",
+        }))
+        .expect("legacy payload without ssl must still deserialize");
+        assert!(!args.ssl, "ssl 默认应为 false");
+        assert_eq!(args.ssl_mode, None);
+        assert_eq!(args.ca_cert_path, None);
+        assert_eq!(args.ssl_reject_unauthorized, None);
+    }
+
+    /// camelCase 的 ssl 字段必须按前端约定正确反序列化。
+    #[test]
+    fn ssl_fields_deserialize_camel_case() {
+        let args: ConnectArgs = serde_json::from_value(serde_json::json!({
+            "dbType": "postgres",
+            "host": "127.0.0.1",
+            "port": 5432,
+            "user": "postgres",
+            "ssl": true,
+            "sslMode": "verify-full",
+            "caCertPath": "/etc/ssl/ca.pem",
+            "sslRejectUnauthorized": false,
+        }))
+        .expect("ssl payload must deserialize");
+        assert!(args.ssl);
+        assert_eq!(args.ssl_mode.as_deref(), Some("verify-full"));
+        assert_eq!(args.ca_cert_path.as_deref(), Some("/etc/ssl/ca.pem"));
+        assert_eq!(args.ssl_reject_unauthorized, Some(false));
+    }
+
+    /// Debug 实现仍然隐藏 secret，但可以打印 ssl 相关字段（非敏感）。
+    #[test]
+    fn debug_redacts_secret_but_shows_ssl() {
+        let args = ConnectArgs {
+            db_type: crate::db::DatabaseType::Postgres,
+            host: "h".into(),
+            port: 5432,
+            user: "u".into(),
+            database: None,
+            driver_profile: None,
+            options: None,
+            secret: Some("topsecret".into()),
+            ssl: true,
+            ssl_mode: Some("require".into()),
+            ca_cert_path: None,
+            ssl_reject_unauthorized: None,
+        };
+        let dbg = format!("{:?}", args);
+        assert!(!dbg.contains("topsecret"), "secret 不得泄漏到 Debug");
+        assert!(dbg.contains("ssl"), "ssl 字段应出现在 Debug");
     }
 }
 

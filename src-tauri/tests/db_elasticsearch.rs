@@ -18,6 +18,10 @@ fn es_args() -> Option<ConnectArgs> {
         database: Some(parts[4].into()),
         driver_profile: None,
         options: None,
+        ssl: false,
+        ssl_mode: None,
+        ca_cert_path: None,
+        ssl_reject_unauthorized: None,
     })
 }
 

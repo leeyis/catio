@@ -197,6 +197,11 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
   // Advanced connection params (URL query string), e.g. MongoDB
   // "authSource=admin&directConnection=true".
   const [dbOptions, setDbOptions] = useState(editDbProfile?.options ?? '')
+  // SSL/TLS options (DB kind). ssl 开关 + 可选自定义 CA 路径 + 是否校验证书。
+  const [dbSsl, setDbSsl] = useState(editDbProfile?.ssl ?? false)
+  const [dbCaCertPath, setDbCaCertPath] = useState(editDbProfile?.caCertPath ?? '')
+  // sslRejectUnauthorized 缺省视为校验(true);UI 用反向的"不校验"复选框表达。
+  const [dbSslNoVerify, setDbSslNoVerify] = useState(editDbProfile?.sslRejectUnauthorized === false)
   const [dbSecret, setDbSecret] = useState('')
   const [dbConnecting, setDbConnecting] = useState(false)
   const [dbError, setDbError] = useState<string | null>(null)
@@ -394,6 +399,9 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
         user: dbUser,
         ...(dbDatabase ? { database: dbDatabase } : {}),
         ...(dbOptions.trim() ? { options: dbOptions.trim() } : {}),
+        ...(dbSsl ? { ssl: true } : {}),
+        ...(dbSsl && dbCaCertPath.trim() ? { caCertPath: dbCaCertPath.trim() } : {}),
+        ...(dbSsl && dbSslNoVerify ? { sslRejectUnauthorized: false } : {}),
         secret: dbSecret || undefined,
       })
       setDbTestResult(result)
@@ -426,6 +434,9 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
       user: dbUser,
       ...(dbDatabase ? { database: dbDatabase } : {}),
       ...(dbOptions.trim() ? { options: dbOptions.trim() } : {}),
+      ...(dbSsl ? { ssl: true } : {}),
+      ...(dbSsl && dbCaCertPath.trim() ? { caCertPath: dbCaCertPath.trim() } : {}),
+      ...(dbSsl && dbSslNoVerify ? { sslRejectUnauthorized: false } : {}),
     }
     // Persist profile WITHOUT secret. Triggers the reactive store's notify(), so the
     // sidebar / home connection list updates immediately — the connection never
@@ -684,6 +695,32 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
                   style={{ height: 36, padding: '0 12px', borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }} />
                 <span style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{t('modals.fieldOptionsHint')}</span>
               </label>
+            )}
+            {/* SSL/TLS — DB kind only */}
+            {kind === 'db' && (
+              <div className="col" style={{ gap: 8 }}>
+                <label className="row" style={{ gap: 8, alignItems: 'center', cursor: 'pointer' }}>
+                  <input type="checkbox" checked={dbSsl} onChange={e => setDbSsl(e.target.checked)}
+                    aria-label={t('modals.fieldSsl')} style={{ cursor: 'pointer' }} />
+                  <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text-secondary)' }}>{t('modals.fieldSsl')}</span>
+                </label>
+                {dbSsl && (
+                  <div className="col" style={{ gap: 8, paddingLeft: 22 }}>
+                    <label className="col" style={{ gap: 5 }}>
+                      <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.fieldCaCert')}</span>
+                      <input value={dbCaCertPath} onChange={e => setDbCaCertPath(e.target.value)}
+                        placeholder={t('modals.fieldCaCertPlaceholder')} className="mono"
+                        style={{ height: 36, padding: '0 12px', borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }} />
+                    </label>
+                    <label className="row" style={{ gap: 8, alignItems: 'center', cursor: 'pointer' }}>
+                      <input type="checkbox" checked={dbSslNoVerify} onChange={e => setDbSslNoVerify(e.target.checked)}
+                        aria-label={t('modals.fieldSslNoVerify')} style={{ cursor: 'pointer' }} />
+                      <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{t('modals.fieldSslNoVerify')}</span>
+                    </label>
+                    <span style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{t('modals.fieldSslNoVerifyHint')}</span>
+                  </div>
+                )}
+              </div>
             )}
             {/* Error message */}
             {kind === 'db' && dbError && (

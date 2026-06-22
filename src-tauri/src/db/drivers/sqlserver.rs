@@ -73,8 +73,13 @@ impl SqlServerDriver {
         if let Some(db) = &database {
             config.database(db);
         }
-        // Trust self-signed cert used by test server.
-        config.trust_cert();
+        // 证书信任策略:默认(ssl 未开)信任自签,便于内网/测试;ssl 开启后
+        // 按 ca_cert_path / ssl_reject_unauthorized 决定校验方式。
+        match sqlserver_trust_mode(args) {
+            SqlServerTrust::TrustAll => config.trust_cert(),
+            SqlServerTrust::TrustCa(path) => config.trust_cert_ca(path),
+            SqlServerTrust::Verify => {}
+        }
 
         let tcp = TcpStream::connect(config.get_addr())
             .await
@@ -86,6 +91,84 @@ impl SqlServerDriver {
         Ok(Self {
             client: Arc::new(Mutex::new(client)),
         })
+    }
+}
+
+/// SQL Server 的证书信任决策(纯函数,便于单测)。tiberius 默认对 TDS 流加密,
+/// 这里决定是否校验服务器证书:
+/// - `TrustAll`: 跳过校验(自签/测试,或显式 ssl_reject_unauthorized=false);
+/// - `TrustCa(path)`: 用自定义 CA PEM 校验;
+/// - `Verify`: 走系统信任根正常校验。
+#[derive(Debug, PartialEq, Eq)]
+enum SqlServerTrust {
+    TrustAll,
+    TrustCa(String),
+    Verify,
+}
+
+fn sqlserver_trust_mode(args: &crate::db::driver::ConnectArgs) -> SqlServerTrust {
+    // ssl 未显式开启:保持历史行为(信任自签证书,兼容内网/测试实例)。
+    if !args.ssl {
+        return SqlServerTrust::TrustAll;
+    }
+    if let Some(path) = args.ca_cert_path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        return SqlServerTrust::TrustCa(path.to_string());
+    }
+    if args.ssl_reject_unauthorized == Some(false) {
+        return SqlServerTrust::TrustAll;
+    }
+    SqlServerTrust::Verify
+}
+
+#[cfg(test)]
+mod trust_tests {
+    use super::{sqlserver_trust_mode, SqlServerTrust};
+    use crate::db::driver::ConnectArgs;
+    use crate::db::DatabaseType;
+
+    fn args() -> ConnectArgs {
+        ConnectArgs {
+            db_type: DatabaseType::Sqlserver,
+            host: "h".into(),
+            port: 1433,
+            user: "sa".into(),
+            database: None,
+            driver_profile: None,
+            options: None,
+            secret: None,
+            ssl: false,
+            ssl_mode: None,
+            ca_cert_path: None,
+            ssl_reject_unauthorized: None,
+        }
+    }
+
+    #[test]
+    fn ssl_off_trusts_all_for_backward_compat() {
+        assert_eq!(sqlserver_trust_mode(&args()), SqlServerTrust::TrustAll);
+    }
+
+    #[test]
+    fn ssl_on_verifies_by_default() {
+        let mut a = args();
+        a.ssl = true;
+        assert_eq!(sqlserver_trust_mode(&a), SqlServerTrust::Verify);
+    }
+
+    #[test]
+    fn ssl_on_with_ca_uses_ca() {
+        let mut a = args();
+        a.ssl = true;
+        a.ca_cert_path = Some("/etc/ssl/ca.pem".into());
+        assert_eq!(sqlserver_trust_mode(&a), SqlServerTrust::TrustCa("/etc/ssl/ca.pem".into()));
+    }
+
+    #[test]
+    fn ssl_on_insecure_trusts_all() {
+        let mut a = args();
+        a.ssl = true;
+        a.ssl_reject_unauthorized = Some(false);
+        assert_eq!(sqlserver_trust_mode(&a), SqlServerTrust::TrustAll);
     }
 }
 
