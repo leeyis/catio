@@ -10,9 +10,11 @@ import { highlightSQL } from '../dbviews'
 import { useAgentConfig } from '../../state/agentConfig'
 import { getSchema, tableStructure } from '../../services/db'
 import { buildTableContext } from '../dbviews/tableContext'
+import { classifyAiSqlExecution } from '../../services/aiSqlExecutionPolicy'
 import type { Connection } from '../../services/types'
 import type { Conversation } from '../../state/conversations'
 import { PanelShell } from './PanelShell'
+import { ConfirmModal } from '../modals/ConfirmModal'
 
 export interface Attachment {
   kind: 'sql' | 'shell'
@@ -80,13 +82,19 @@ interface BlockCodeProps {
   lang: string
   code: string
   mode: 'sql' | 'shell'
+  /** Active DB connection — drives the AI-SQL risk classification before run. */
+  conn?: Connection
   onInsert?: (code: string) => void
   canInsert?: boolean
 }
 
-function BlockCode({ lang, code, mode, onInsert }: BlockCodeProps) {
+// run 前的风险弹窗:confirm 需用户点「确认执行」才派发;block 仅展示阻断说明。
+type RunGate = { kind: 'confirm' | 'block'; message: string } | null
+
+function BlockCode({ lang, code, mode, conn, onInsert }: BlockCodeProps) {
   const { t } = useTranslation()
   const { copied, copy } = useCopied()
+  const [gate, setGate] = useState<RunGate>(null)
   // In database mode every assistant code block is a runnable DB block (mongo
   // shell / ES REST / SQL) — insert/run target the query editor, not a terminal.
   const isSqlBlock = mode === 'sql' || SQL_LANGS.has(lang)
@@ -97,8 +105,25 @@ function BlockCode({ lang, code, mode, onInsert }: BlockCodeProps) {
     onInsert?.(code)
     window.dispatchEvent(new CustomEvent('catio-insert', { detail: { kind: mode, text: code } }))
   }
-  function doRun() {
+  function dispatchRun() {
     window.dispatchEvent(new CustomEvent('catio-run', { detail: { kind: mode, text: code } }))
+  }
+  // SQL 块先经风险分级:read → 直接执行;write/schema_change/unknown → 确认弹窗;
+  // dangerous → 阻断。非 SQL(shell / mongo / es)沿用直通执行,不改变既有行为。
+  function doRun() {
+    if (!isSqlBlock || mode !== 'sql') { dispatchRun(); return }
+    const decision = classifyAiSqlExecution(code, conn)
+    if (decision.action === 'auto_execute') { dispatchRun(); return }
+    const prodNote = decision.environment === 'production' ? ' ' + t('panels.aiRunConfirmProd') : ''
+    if (decision.action === 'block') {
+      setGate({ kind: 'block', message: t('panels.aiRunBlockBody') })
+      return
+    }
+    const base =
+      decision.category === 'schema_change' ? t('panels.aiRunConfirmSchema')
+        : decision.category === 'unknown' ? t('panels.aiRunConfirmUnknown')
+          : t('panels.aiRunConfirmWrite')
+    setGate({ kind: 'confirm', message: base + prodNote })
   }
 
   return (
@@ -121,12 +146,28 @@ function BlockCode({ lang, code, mode, onInsert }: BlockCodeProps) {
       </div>
       <pre className="mono" style={{ margin: 0, padding: '9px 10px', fontSize: 11.5, lineHeight: 1.55, color: 'var(--text-secondary)', whiteSpace: 'pre-wrap', background: 'var(--surface-subtle)', overflowX: 'auto' }}
         dangerouslySetInnerHTML={{ __html: isSqlBlock ? highlightSQL(code) : shellHL(code) }} />
+      {gate && (
+        <ConfirmModal
+          danger
+          title={gate.kind === 'block' ? t('panels.aiRunBlockTitle') : t('panels.aiRunConfirmTitle')}
+          message={gate.message}
+          // block 仅是确认知晓,没有「确认执行」按钮;confirm 才真正派发 run。
+          confirmLabel={gate.kind === 'block' ? t('panels.aiRunBlockOk') : t('panels.aiRunConfirmBtn')}
+          cancelLabel={t('panels.cancel')}
+          onCancel={() => setGate(null)}
+          onConfirm={() => {
+            const kind = gate.kind
+            setGate(null)
+            if (kind === 'confirm') dispatchRun()
+          }}
+        />
+      )}
     </div>
   )
 }
 
 // ---- Build react-markdown components with closure over mode/onInsert/canInsert ----
-function makeComponents(mode: 'sql' | 'shell', onInsert?: (code: string) => void, canInsert?: boolean): Components {
+function makeComponents(mode: 'sql' | 'shell', conn?: Connection, onInsert?: (code: string) => void, canInsert?: boolean): Components {
   return {
     // ---- code: inline vs block detection ----
     // In react-markdown v10 there is no `inline` prop. Block code has className like "language-sh".
@@ -154,7 +195,7 @@ function makeComponents(mode: 'sql' | 'shell', onInsert?: (code: string) => void
         )
       }
       const code = String(children).replace(/\n$/, '')
-      return <BlockCode lang={lang} code={code} mode={mode} onInsert={onInsert} canInsert={canInsert} />
+      return <BlockCode lang={lang} code={code} mode={mode} conn={conn} onInsert={onInsert} canInsert={canInsert} />
     },
     // pre: let the code component handle block rendering; pre itself just renders children
     pre({ children }) {
@@ -243,17 +284,18 @@ function makeComponents(mode: 'sql' | 'shell', onInsert?: (code: string) => void
 interface AssistantMessageProps {
   text: string
   mode: 'sql' | 'shell'
+  conn?: Connection
   onInsert?: (code: string) => void
   canInsert?: boolean
 }
 
-function AssistantMessage({ text, mode, onInsert, canInsert }: AssistantMessageProps) {
+function AssistantMessage({ text, mode, conn, onInsert, canInsert }: AssistantMessageProps) {
   // Memoize components so react-markdown doesn't remount its subtree on every token update.
   // onInsert and canInsert are stable per conversation turn, so this is safe.
   const components = useMemo(
-    () => makeComponents(mode, onInsert, canInsert),
+    () => makeComponents(mode, conn, onInsert, canInsert),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [mode, onInsert, canInsert],
+    [mode, conn, onInsert, canInsert],
   )
   return (
     <div className="col gap4" style={{ maxWidth: '94%' }}>
@@ -481,7 +523,7 @@ export function AIPanel({ onClose, mode = 'sql', conn, connId, engine, attachmen
         <div ref={scrollRef} className="grow" style={{ overflowY: 'auto', padding: '14px 12px', display: 'flex', flexDirection: 'column', gap: 14 }}>
           {msgs.map((m, i) => m.role === 'user'
             ? <div key={i} style={{ alignSelf: 'flex-end', maxWidth: '88%', background: 'var(--accent-primary)', color: 'var(--on-accent)', padding: '9px 12px', borderRadius: '14px 14px 4px 14px', fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{m.content}</div>
-            : <AssistantMessage key={i} text={m.content} mode={mode} onInsert={onInsert} canInsert={canInsert} />)}
+            : <AssistantMessage key={i} text={m.content} mode={mode} conn={conn} onInsert={onInsert} canInsert={canInsert} />)}
           {busy && msgs.length > 0 && msgs[msgs.length - 1].content === '' && (
             <div className="row gap6" style={{ color: 'var(--text-tertiary)', fontSize: 12 }}>
               <Icon name="loader" size={13} style={{ animation: 'spin 1s linear infinite' }} /> {t('panels.agentThinking')}

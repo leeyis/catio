@@ -7,6 +7,8 @@ import { previewDml, applyEdits, queryPage, tablePreview, exportFile, dbErrMsg, 
 import type { ResultColumn } from '../../services/types'
 import { reduceCellSelection, reduceRowSelection, isCellInRange, normalizeRange, cellsInRange, type GridSelection } from './gridSelection'
 import { filterRows, filterModeNeedsValue, type FilterRule, type FilterMode } from './gridFilter'
+import { buildInsertSql, buildUpdateSql } from './copySql'
+import { dialectFor } from './structureDdl'
 
 export interface DataGridProps {
   columns: ResultColumn[]
@@ -24,6 +26,8 @@ export interface DataGridProps {
   resultLabel?: string
   /** Optional schema qualifier for generated DML. */
   schema?: string
+  /** Connection engine string → drives identifier quoting dialect for "复制为 SQL". */
+  engine?: string
   /** Base SQL re-run for server-side pagination (when connId is set, legacy raw-SQL path). */
   sql?: string
   /** Default database/schema namespace to reuse when paginating an ad-hoc query. */
@@ -105,7 +109,7 @@ function colIcon(col: ResultColumn): string {
   return 'type'
 }
 
-export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortable', writable = true, connId, table = 'orders', schema, sql, defaultNamespace, livePreview, onRefresh, truncated, loadError, resultLabel, rowKeys, keyColumn }: DataGridProps) {
+export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortable', writable = true, connId, table = 'orders', schema, engine, sql, defaultNamespace, livePreview, onRefresh, truncated, loadError, resultLabel, rowKeys, keyColumn }: DataGridProps) {
   const { t } = useTranslation()
   const [sel, setSel] = useState({ r: 2, c: 3 })
   // 多选状态（叠加在单选之上）：单元格矩形 anchor/focus + 行多选集合（origIdx）。
@@ -644,6 +648,31 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   }
   // 菜单「批量编辑」打开对话框。
   function ctxBulkEdit() { setCtxMenu(null); setBulkVal(''); setBulkOpen(true) }
+
+  // 收集选中行的「显示值」矩阵(行多选 > 单元格矩形覆盖到的整行),按 columns 顺序对齐,
+  // 取用户改动后的值(与网格显示一致)。供「复制为 SQL」生成 INSERT/UPDATE。
+  function selectedRowValues(): unknown[][] {
+    return selectedOrigIdxs().map(origIdx => {
+      const entry = tagged.find(e => e.origIdx === origIdx)
+      return columns.map((col, ci) => {
+        if (!entry) return null
+        const k = cellKey(origIdx, col.name)
+        return edits[k] !== undefined ? edits[k] : entry.row[ci]
+      })
+    })
+  }
+  // 菜单「复制为 SQL INSERT / UPDATE」:把选中行渲染成 SQL 写入剪贴板。
+  function ctxCopySql(kind: 'insert' | 'update') {
+    setCtxMenu(null)
+    const data = selectedRowValues()
+    if (data.length === 0) return
+    const dialect = dialectFor(engine)
+    const colNames = columns.map(c => c.name)
+    const text = kind === 'insert'
+      ? buildInsertSql(data, table, colNames, dialect, schema)
+      : buildUpdateSql(data, table, colNames, dialect, schema, pkCols)
+    navigator.clipboard?.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500) }).catch(() => {})
+  }
   // 当前选中单元格数（用于菜单/对话框文案 + 决定批量编辑可用性）。
   const selectedCellCount = useMemo(() => cellsInRange(gridSel).length, [gridSel])
   // 把同一个值写入选中矩形的每个单元格（仅现有行；走 edits 的变更检测，与单格编辑一致）。
@@ -1275,6 +1304,8 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
             style={{ position: 'fixed', top: ctxMenu.y, left: ctxMenu.x, minWidth: 180, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', borderRadius: 10, boxShadow: 'var(--shadow-window)', padding: 4 }}>
             {([
               { key: 'copy', icon: 'copy', label: t('dbviews.ctxCopy'), onClick: ctxCopy, show: true, danger: false },
+              { key: 'copy-insert', icon: 'file-code', label: t('dbviews.ctxCopyInsert', { count: selectedOrigIdxs().length }), onClick: () => ctxCopySql('insert'), show: selectedOrigIdxs().length > 0, danger: false },
+              { key: 'copy-update', icon: 'file-code', label: t('dbviews.ctxCopyUpdate', { count: selectedOrigIdxs().length }), onClick: () => ctxCopySql('update'), show: selectedOrigIdxs().length > 0, danger: false },
               { key: 'delete', icon: 'trash-2', label: t('dbviews.ctxDeleteRows', { count: selectedOrigIdxs().length }), onClick: ctxDeleteRows, show: canEdit && selectedOrigIdxs().length > 0, danger: true },
               { key: 'bulk', icon: 'pencil', label: t('dbviews.ctxBulkEdit', { count: selectedCellCount }), onClick: ctxBulkEdit, show: canEdit && selectedCellCount > 0, danger: false },
             ] as const).filter(it => it.show).map(it => (

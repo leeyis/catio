@@ -113,7 +113,7 @@ export function TablePane({ conn, connId, caps, schema, table, density }: TableP
               columns={(live?.columns ?? [])}
               rows={(live?.rows ?? [])}
               statusTones={D.statusTones} density={density} key={`${schema ?? ''}.${table}`}
-              writable={caps.writable && sqlDml} connId={connId} table={table} schema={schema}
+              writable={caps.writable && sqlDml} connId={connId} table={table} schema={schema} engine={conn.engine}
               rowKeys={rowKeys ?? undefined} keyColumn={rowKeys ? 'ctid' : undefined}
               livePreview loadError={liveErr ?? undefined} />
           : <DataGrid
