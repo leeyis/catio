@@ -173,7 +173,10 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
       if (lintSource) exts.push(linter(view => lintSource(view)), lintGutter())
       return exts
     }
-    return [sql({ dialect: PostgreSQL, schema, upperCaseKeywords: true }), autocompletion()]
+    const exts: Extension[] = [sql({ dialect: PostgreSQL, schema, upperCaseKeywords: true }), autocompletion()]
+    // SQL 诊断(未闭合括号/字符串、未知表名)+ gutter 标记,与 redis 控制台一致。
+    if (lintSource) exts.push(linter(view => lintSource(view)), lintGutter())
+    return exts
   }
   // Keep the latest callbacks without re-running the mount effect.
   const onChangeRef = useRef(onChange)

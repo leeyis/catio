@@ -10,6 +10,7 @@ import { SqlEditor, type SqlEditorHandle } from './SqlEditor'
 import { mongoCompletion } from './mongoCompletion'
 import { redisCompletion } from './redisCompletion'
 import { redisLinter } from './redisDiagnostics'
+import { sqlLinter, linterTableNames } from './sqlDiagnostics'
 import { formatSql } from './sqlFormatter'
 import type { SQLNamespace } from '@codemirror/lang-sql'
 import { DataGrid } from './DataGrid'
@@ -184,8 +185,17 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
       : undefined),
     [engine],
   )
-  // Syntax diagnostics source (redis only) — arity / unknown / blocked / quotes.
-  const lintSource = useMemo(() => (engine === 'redis' ? redisLinter : undefined), [engine])
+  // Known table/view names for the SQL linter's "unknown table" check. Held in a
+  // ref so the (stable-identity) linter reads the latest list without rebuilding
+  // the editor extension as the schema/columns load.
+  const sqlTablesRef = useRef<string[]>([])
+  // Syntax diagnostics source:
+  //  - redis → command arity / unknown / blocked / quotes
+  //  - SQL (non-plain) → unbalanced parens / unclosed strings / unknown tables
+  const lintSource = useMemo(
+    () => (engine === 'redis' ? redisLinter : plain ? undefined : sqlLinter(() => sqlTablesRef.current)),
+    [engine, plain],
+  )
 
   // Stable identity of the schema namespaces (names only) so the column fetch
   // re-runs when connId or the schema list changes, but NOT on every keystroke.
@@ -277,6 +287,10 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
       // Schema name itself: a `class`-typed completion whose children are tables.
       top[ns.name] = { self: { label: ns.name, type: 'class' }, children: tables }
     }
+    // Feed the SQL linter's "unknown table" check (read lazily via sqlTablesRef).
+    // 已连接但 liveSchema 未加载完成时,linterTableNames 会返回 []，避免拿 demo 表名
+    // 对真实库里的表误报"未知的表"。autocomplete 的 editorSchema 仍可用 demo 表名兜底。
+    sqlTablesRef.current = linterTableNames(connId, liveSchema, D.schema)
     return top
   }, [connId, liveSchema, liveColumns, D.schema, D.tableStructures])
 
