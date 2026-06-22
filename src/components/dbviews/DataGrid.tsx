@@ -6,6 +6,7 @@ import { Btn, IconBtn } from '../atoms'
 import { previewDml, applyEdits, queryPage, tablePreview, exportFile, dbErrMsg, type EditRequest } from '../../services/db'
 import type { ResultColumn } from '../../services/types'
 import { reduceCellSelection, reduceRowSelection, isCellInRange, normalizeRange, cellsInRange, type GridSelection } from './gridSelection'
+import { filterRows, filterModeNeedsValue, type FilterRule, type FilterMode } from './gridFilter'
 
 export interface DataGridProps {
   columns: ResultColumn[]
@@ -140,6 +141,9 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   const [refreshing, setRefreshing] = useState(false)
   const [filterOpen, setFilterOpen] = useState(false)
   const [filterText, setFilterText] = useState('')
+  // 列级结构化筛选规则(8 种操作符 + AND/OR)。叠加在全局文本搜索之上,二者同时生效。
+  const [filterRules, setFilterRules] = useState<FilterRule[]>([])
+  const filterRuleSeq = useRef(0)
   const [sortMenuOpen, setSortMenuOpen] = useState(false)
   const [exportMenuOpen, setExportMenuOpen] = useState(false)
   const sortMenuRef = useRef<HTMLDivElement>(null)
@@ -206,15 +210,30 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   // Tag each row with its original (unsorted) index so keys and edits are stable under sort.
   const tagged = useMemo(() => baseRows.map((row, i) => ({ row, origIdx: i })), [baseRows])
 
+  // 列名 → 列下标(供结构化筛选求值)。
+  const colIndexOf = useMemo(() => {
+    const map = new Map(columns.map((c, i) => [c.name, i]))
+    return (name: string) => (map.has(name) ? map.get(name)! : -1)
+  }, [columns])
+
   // Client-side text filter: keep rows where ANY cell's string value contains the
-  // (case-insensitive) filter text. Empty / closed filter → all rows.
+  // (case-insensitive) filter text. Then apply the column-level structured rules
+  // (8 operators + AND/OR) on top. Empty / closed filter + no rules → all rows.
   const filtered = useMemo(() => {
     const q = filterOpen ? filterText.trim().toLowerCase() : ''
-    if (!q) return tagged
-    return tagged.filter(({ row }) =>
-      row.some(v => v != null && String(v).toLowerCase().includes(q)),
-    )
-  }, [tagged, filterOpen, filterText])
+    let out = tagged
+    if (q) {
+      out = out.filter(({ row }) =>
+        row.some(v => v != null && String(v).toLowerCase().includes(q)),
+      )
+    }
+    if (filterOpen && filterRules.length > 0) {
+      // filterRows 作用在裸行上;用 origIdx 映射回 tagged 条目以保留稳定 key。
+      const kept = new Set(filterRows(out.map(e => e.row), filterRules, colIndexOf))
+      out = out.filter(e => kept.has(e.row))
+    }
+    return out
+  }, [tagged, filterOpen, filterText, filterRules, colIndexOf])
 
   const sorted = useMemo(() => {
     if (!sortCol || sortColIdx < 0) return filtered
@@ -230,7 +249,12 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   // When serverRows is set, the rows are already the current page → no client slice.
   // Filtering applies to the displayed rows; with a filter active we render the
   // filtered set directly (no client paging math on a partial page).
-  const filterActive = filterOpen && filterText.trim().length > 0
+  // 有完整的结构化规则(列名 + 需值则有值)时也算筛选生效。
+  const hasActiveRules = useMemo(
+    () => filterRules.some(r => r.columnName && (!filterModeNeedsValue(r.mode) || r.rawValue.trim().length > 0)),
+    [filterRules],
+  )
+  const filterActive = filterOpen && (filterText.trim().length > 0 || hasActiveRules)
   const pageRows = (serverRows || filterActive) ? sorted : sorted.slice((page - 1) * PAGE, page * PAGE)
   const pages = serverRows ? page + (serverTruncated ? 1 : 0) : Math.max(1, Math.ceil(filtered.length / PAGE))
   const showTruncated = serverRows ? serverTruncated : !!truncated
@@ -309,6 +333,39 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
     if (sortCol === name) { setSortDir(d => d === 'asc' ? 'desc' : 'asc') }
     else { setSortCol(name); setSortDir('asc') }
   }
+
+  // --- 列级结构化筛选规则管理 ----------------------------------------------
+  function addFilterRule() {
+    const id = `r${filterRuleSeq.current++}`
+    setFilterRules(rs => [
+      ...rs,
+      { id, columnName: columns[0]?.name ?? '', mode: 'equals', rawValue: '', conjunction: 'AND' },
+    ])
+  }
+  function updateFilterRule(id: string, patch: Partial<FilterRule>) {
+    setFilterRules(rs => rs.map(r => {
+      if (r.id !== id) return r
+      const next = { ...r, ...patch }
+      // 切到无需值的操作符(is-null/is-not-null)时清空已填的值。
+      if (patch.mode && !filterModeNeedsValue(next.mode)) next.rawValue = ''
+      return next
+    }))
+  }
+  function removeFilterRule(id: string) {
+    setFilterRules(rs => rs.filter(r => r.id !== id))
+  }
+  function clearFilterRules() { setFilterRules([]) }
+  // 操作符下拉项:值 → i18n key。
+  const filterModeOptions: { value: FilterMode; labelKey: string }[] = [
+    { value: 'equals', labelKey: 'dbviews.filterModeEquals' },
+    { value: 'not-equals', labelKey: 'dbviews.filterModeNotEquals' },
+    { value: 'like', labelKey: 'dbviews.filterModeContains' },
+    { value: 'not-like', labelKey: 'dbviews.filterModeNotContains' },
+    { value: 'greater-than', labelKey: 'dbviews.filterModeGreaterThan' },
+    { value: 'less-than', labelKey: 'dbviews.filterModeLessThan' },
+    { value: 'is-null', labelKey: 'dbviews.filterModeIsNull' },
+    { value: 'is-not-null', labelKey: 'dbviews.filterModeIsNotNull' },
+  ]
 
   // Refresh: re-fetch the current page from the server when possible, else ask the
   // parent to refresh. Brief spinner while the fetch is in flight.
@@ -876,23 +933,76 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
         </div>
       </div>
 
-      {/* client-side filter row (toggled by the funnel button) */}
+      {/* client-side filter row (toggled by the funnel button): global text search
+          + column-level structured rule builder (8 operators + AND/OR) stacked under it. */}
       {filterOpen && (
-        <div className="row gap8" style={{ padding: '7px 12px', borderBottom: '1px solid var(--border-hairline)', background: 'var(--surface-subtle)' }}>
-          <Icon name="filter" size={13} style={{ color: 'var(--text-faint)' }} />
-          <input autoFocus value={filterText} onChange={e => setFilterText(e.target.value)}
-            placeholder={t('dbviews.filter')}
-            onKeyDown={e => { if (e.key === 'Escape') { setFilterText(''); setFilterOpen(false) } }}
-            style={{ flex: 1, border: '1px solid var(--border-hairline)', borderRadius: 7, padding: '4px 8px', background: 'var(--surface-card)', color: 'var(--text-primary)', font: 'inherit', fontSize: 12.5, outline: 'none' }} />
-          {filterActive && (
-            <span style={{ fontSize: 11.5, color: 'var(--text-tertiary)' }}>
-              <b className="mono" style={{ color: 'var(--text-secondary)' }}>{filtered.length}</b> {t('dbviews.rows')}
-            </span>
-          )}
-          <button className="icon-btn bare" style={{ width: 22, height: 22 }}
-            title={t('dbviews.cancel')} onClick={() => { setFilterText(''); setFilterOpen(false) }}>
-            <Icon name="x" size={14} />
-          </button>
+        <div className="col" style={{ padding: '7px 12px', borderBottom: '1px solid var(--border-hairline)', background: 'var(--surface-subtle)', gap: 7 }}>
+          <div className="row gap8">
+            <Icon name="filter" size={13} style={{ color: 'var(--text-faint)' }} />
+            <input autoFocus value={filterText} onChange={e => setFilterText(e.target.value)}
+              placeholder={t('dbviews.filter')}
+              onKeyDown={e => { if (e.key === 'Escape') { setFilterText(''); setFilterOpen(false) } }}
+              style={{ flex: 1, border: '1px solid var(--border-hairline)', borderRadius: 7, padding: '4px 8px', background: 'var(--surface-card)', color: 'var(--text-primary)', font: 'inherit', fontSize: 12.5, outline: 'none' }} />
+            {filterActive && (
+              <span style={{ fontSize: 11.5, color: 'var(--text-tertiary)' }}>
+                <b className="mono" style={{ color: 'var(--text-secondary)' }}>{filtered.length}</b> {t('dbviews.rows')}
+              </span>
+            )}
+            <button className="icon-btn bare" style={{ width: 22, height: 22 }}
+              title={t('dbviews.cancel')} onClick={() => { setFilterText(''); setFilterRules([]); setFilterOpen(false) }}>
+              <Icon name="x" size={14} />
+            </button>
+          </div>
+          {/* 列级条件构建器 */}
+          <div className="col" style={{ gap: 6 }}>
+            {filterRules.map((rule, idx) => (
+              <div key={rule.id} className="row gap6" data-filter-rule style={{ alignItems: 'center' }}>
+                {/* 第一条规则不显示逻辑连接;其后显示 AND/OR 切换 */}
+                {idx === 0 ? (
+                  <span style={{ width: 58, fontSize: 11.5, color: 'var(--text-faint)' }}>{t('dbviews.filterColumns')}</span>
+                ) : (
+                  <select aria-label="conjunction" value={rule.conjunction}
+                    onChange={e => updateFilterRule(rule.id, { conjunction: e.target.value as 'AND' | 'OR' })}
+                    style={{ width: 58, border: '1px solid var(--border-hairline)', borderRadius: 7, padding: '4px 6px', background: 'var(--surface-card)', color: 'var(--text-primary)', font: 'inherit', fontSize: 12, outline: 'none' }}>
+                    <option value="AND">AND</option>
+                    <option value="OR">OR</option>
+                  </select>
+                )}
+                <select aria-label="filter-column" value={rule.columnName}
+                  onChange={e => updateFilterRule(rule.id, { columnName: e.target.value })}
+                  style={{ flex: '0 0 130px', border: '1px solid var(--border-hairline)', borderRadius: 7, padding: '4px 6px', background: 'var(--surface-card)', color: 'var(--text-primary)', font: 'inherit', fontSize: 12, outline: 'none' }}>
+                  {columns.map(c => <option key={c.name} value={c.name}>{c.name}</option>)}
+                </select>
+                <select aria-label="filter-mode" value={rule.mode}
+                  onChange={e => updateFilterRule(rule.id, { mode: e.target.value as FilterMode })}
+                  style={{ flex: '0 0 120px', border: '1px solid var(--border-hairline)', borderRadius: 7, padding: '4px 6px', background: 'var(--surface-card)', color: 'var(--text-primary)', font: 'inherit', fontSize: 12, outline: 'none' }}>
+                  {filterModeOptions.map(o => <option key={o.value} value={o.value}>{t(o.labelKey)}</option>)}
+                </select>
+                {filterModeNeedsValue(rule.mode) && (
+                  <input aria-label="filter-value" value={rule.rawValue}
+                    onChange={e => updateFilterRule(rule.id, { rawValue: e.target.value })}
+                    placeholder={t('dbviews.filterValuePlaceholder')}
+                    style={{ flex: 1, minWidth: 80, border: '1px solid var(--border-hairline)', borderRadius: 7, padding: '4px 8px', background: 'var(--surface-card)', color: 'var(--text-primary)', font: 'inherit', fontSize: 12, outline: 'none' }} />
+                )}
+                <button className="icon-btn bare" style={{ width: 22, height: 22 }}
+                  title={t('dbviews.filterRemoveRule')} onClick={() => removeFilterRule(rule.id)}>
+                  <Icon name="x" size={13} />
+                </button>
+              </div>
+            ))}
+            <div className="row gap6">
+              <button className="icon-btn bare" data-add-filter-rule onClick={addFilterRule}
+                style={{ width: 'auto', padding: '3px 8px', gap: 5, fontSize: 12, color: 'var(--accent-primary)' }}>
+                <Icon name="plus" size={13} /> {t('dbviews.filterAddRule')}
+              </button>
+              {filterRules.length > 0 && (
+                <button className="icon-btn bare" onClick={clearFilterRules}
+                  style={{ width: 'auto', padding: '3px 8px', gap: 5, fontSize: 12, color: 'var(--text-tertiary)' }}>
+                  {t('dbviews.filterClearRules')}
+                </button>
+              )}
+            </div>
+          </div>
         </div>
       )}
 

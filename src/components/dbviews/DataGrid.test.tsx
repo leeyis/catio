@@ -383,4 +383,43 @@ describe('DataGrid generic rows', () => {
     expect(within(grid).getAllByText('ZZZ').length).toBe(3)
     expect(screen.getByTitle('3 edited')).toBeInTheDocument()
   })
+
+  it('column filter builder filters the grid by a structured rule', () => {
+    const columns: ResultColumn[] = [
+      { name: 'id', type: 'int', pk: true },
+      { name: 'name', type: 'text' },
+    ]
+    const rows: unknown[][] = [[1, 'alice'], [2, 'bob'], [3, 'carol']]
+    wrap(<DataGrid columns={columns} rows={rows} statusTones={{}} density="comfortable" />)
+    // 打开筛选 → 添加一条规则 → name equals bob
+    fireEvent.click(screen.getByTitle('Filter'))
+    fireEvent.click(screen.getByText('Add condition'))
+    fireEvent.change(screen.getByLabelText('filter-column'), { target: { value: 'name' } })
+    fireEvent.change(screen.getByLabelText('filter-mode'), { target: { value: 'equals' } })
+    fireEvent.change(screen.getByLabelText('filter-value'), { target: { value: 'bob' } })
+    const grid = document.querySelector('.scrollon') as HTMLElement
+    expect(within(grid).getByText('bob')).toBeInTheDocument()
+    expect(within(grid).queryByText('alice')).toBeNull()
+    expect(within(grid).queryByText('carol')).toBeNull()
+  })
+
+  it('is-null filter hides the value input and keeps null rows', () => {
+    const columns: ResultColumn[] = [
+      { name: 'id', type: 'int', pk: true },
+      { name: 'note', type: 'text' },
+    ]
+    const rows: unknown[][] = [[1, 'x'], [2, null], [3, 'y']]
+    wrap(<DataGrid columns={columns} rows={rows} statusTones={{}} density="comfortable" />)
+    fireEvent.click(screen.getByTitle('Filter'))
+    fireEvent.click(screen.getByText('Add condition'))
+    fireEvent.change(screen.getByLabelText('filter-column'), { target: { value: 'note' } })
+    fireEvent.change(screen.getByLabelText('filter-mode'), { target: { value: 'is-null' } })
+    // is-null 不需要值输入框
+    expect(screen.queryByLabelText('filter-value')).toBeNull()
+    const grid = document.querySelector('.scrollon') as HTMLElement
+    expect(within(grid).queryByText('x')).toBeNull()
+    expect(within(grid).queryByText('y')).toBeNull()
+    // null 行(id=2)仍在
+    expect(within(grid).getByText('2')).toBeInTheDocument()
+  })
 })
