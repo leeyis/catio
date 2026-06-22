@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeAll } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { LanguageProvider } from '../../state/LanguageContext'
 import { DataProvider } from '../../state/DataContext'
 import i18n from '../../i18n'
@@ -56,5 +56,31 @@ describe('StructureView 备注列', () => {
     await waitFor(() => expect(tableStructure).toHaveBeenCalled())
     const tableComment = await screen.findByText(struct.comment)
     expect(tableComment).toHaveAttribute('title', struct.comment)
+  })
+})
+
+describe('StructureView DDL 复制', () => {
+  beforeAll(async () => { await i18n.changeLanguage('en') })
+
+  it('shows a copy button only on the DDL tab and copies the full DDL', async () => {
+    const writeText = vi.fn()
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    tableStructure.mockResolvedValue(struct)
+    wrap(<StructureView table="orders" connId="c1" schema="public" />)
+    // No copy button on the default (columns) tab.
+    await screen.findByText('主键编号')
+    expect(screen.queryByTitle('Copy DDL')).toBeNull()
+    // Switch to the DDL tab.
+    fireEvent.click(screen.getByText('DDL'))
+    const copyBtn = await screen.findByTitle('Copy DDL')
+    fireEvent.click(copyBtn)
+    expect(writeText).toHaveBeenCalledTimes(1)
+    const copied = writeText.mock.calls[0][0] as string
+    // The copied text is the create table DDL for the qualified table.
+    expect(copied).toContain('create table')
+    expect(copied).toContain('public.orders')
+    // Copy feedback: tooltip switches to the translated 'Copied' (not a raw i18n key).
+    expect(await screen.findByTitle('Copied')).toBeInTheDocument()
+    expect(screen.queryByTitle('common.copied')).toBeNull()
   })
 })

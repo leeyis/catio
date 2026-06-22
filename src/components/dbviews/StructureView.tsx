@@ -77,6 +77,17 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
   const [tab, setTab] = useState('columns')
   const keyTone: Record<string, string> = { PK: 'var(--signal-amber)', FK: 'var(--signal-blue)', UNI: 'var(--signal-violet)' }
 
+  // ---- One-tap DDL copy: copy → switch icon to `check` for ~1.2s → revert. ----
+  const [ddlCopied, setDdlCopied] = useState(false)
+  const ddlCopyTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => { if (ddlCopyTimer.current) clearTimeout(ddlCopyTimer.current) }, [])
+  function copyDdl() {
+    navigator.clipboard.writeText(buildCreateTableDDL(dialect, ddlQualified, st))
+    setDdlCopied(true)
+    if (ddlCopyTimer.current) clearTimeout(ddlCopyTimer.current)
+    ddlCopyTimer.current = setTimeout(() => setDdlCopied(false), 1200)
+  }
+
   // ---- Column editing (live path only, and only when the engine supports
   // structure edits — MongoDB/ClickHouse/… can VIEW structure but not ALTER it). ----
   const editable = !!connId && canEdit
@@ -146,6 +157,11 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
           { value: 'ddl', label: 'DDL' },
         ]} />
         <div className="grow" />
+        {tab === 'ddl' && (
+          <IconBtn name={ddlCopied ? 'check' : 'copy'} size={14} variant="bare"
+            title={ddlCopied ? t('dbviews.copied') : t('dbviews.copyDdl')}
+            style={ddlCopied ? { color: 'var(--signal-green)' } : undefined} onClick={copyDdl} />
+        )}
         <span style={{ fontSize: 11.5, color: 'var(--text-faint)', maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={st.comment || undefined}>{st.comment}</span>
         <Btn size="sm" variant="secondary" icon="plus" onClick={editable ? openAdd : undefined} disabled={!editable}>{t('dbviews.addColumn')}</Btn>
       </div>
