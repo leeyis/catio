@@ -89,6 +89,8 @@ describe('DbWorkbench capability-gating', () => {
           sqlConsole: false,
           er: false,
           structureEdit: false,
+          views: false,
+          functions: false,
         },
       },
     ])
@@ -114,6 +116,8 @@ describe('DbWorkbench capability-gating', () => {
           sqlConsole: true,
           er: true,
           structureEdit: false,
+          views: false,
+          functions: false,
         },
       },
     ])
@@ -137,6 +141,8 @@ describe('DbWorkbench capability-gating', () => {
           sqlConsole: true,
           er: true,
           structureEdit: true,
+          views: true,
+          functions: true,
         },
       },
     ])
@@ -170,6 +176,7 @@ describe('DbWorkbench live-connection data path', () => {
         capabilities: {
           writable: true, transactions: true, schemas: true,
           sqlConsole: true, er: true, structureEdit: true,
+          views: true, functions: true,
         },
       },
     ])
@@ -211,6 +218,7 @@ describe('DbWorkbench unified tabs', () => {
     capabilities: {
       writable: true, transactions: true, schemas: true,
       sqlConsole: true, er: true, structureEdit: true,
+      views: true, functions: true,
     },
   }
   const SCHEMA_WITH_FN = {
@@ -283,6 +291,7 @@ describe('DbWorkbench unified tabs', () => {
       capabilities: {
         writable: true, transactions: false, schemas: true,
         sqlConsole: true, er: false, structureEdit: false,
+        views: false, functions: false,
       },
     }])
     h.getSchema.mockResolvedValue({
@@ -452,6 +461,7 @@ describe('DbWorkbench 历史记录无窗口执行 (功能#3)', () => {
     capabilities: {
       writable: true, transactions: true, schemas: true,
       sqlConsole: true, er: true, structureEdit: true,
+      views: true, functions: true,
     },
   }
   // 只含一张表的库 → 自动打开 public.orders 表预览 tab(激活态非 SQL 控制台)。

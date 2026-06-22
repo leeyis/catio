@@ -29,6 +29,10 @@ export interface SchemaBrowserProps {
   canSqlConsole?: boolean
   canEr?: boolean
   canStructureEdit?: boolean
+  /** Engine has a "view" concept — false hides the Views tree node entirely (Redis/Mongo/ES). */
+  canViews?: boolean
+  /** Engine has a "stored function/procedure" concept — false hides the Functions node (SQLite/Mongo/ES/Redis…). */
+  canFunctions?: boolean
   /**
    * When connected to a live backend, ALL real schema namespaces to render the
    * tree from (each becomes its own collapsible top-level DB node). Omitted on
@@ -50,7 +54,7 @@ export interface SchemaBrowserProps {
   onToggleCollapse?: () => void
 }
 
-export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, schemas, conn, live, refreshing, loading, collapsed, onToggleCollapse, sqlActive, canSqlConsole = true, canEr = true, canStructureEdit = true }: SchemaBrowserProps) {
+export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, schemas, conn, live, refreshing, loading, collapsed, onToggleCollapse, sqlActive, canSqlConsole = true, canEr = true, canStructureEdit = true, canViews = true, canFunctions = true }: SchemaBrowserProps) {
   const { t } = useTranslation()
   const D = useData()
   // Live path: render every supplied namespace; mock path: the single seeded schema (pixel-identical).
@@ -195,7 +199,8 @@ export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpen
         ) : visibleNamespaces.map(ns => (
           <SchemaNode key={ns.name} ns={ns} query={query} active={active} onPick={onPick} onPickObject={onPickObject} live={!!live}
             onNewQuery={onNewQuery} onOpenER={onOpenER} onNewObjectTemplate={onNewObjectTemplate} onRefresh={onRefresh}
-            sqlActive={sqlActive} canSqlConsole={canSqlConsole} canEr={canEr} canStructureEdit={canStructureEdit} />
+            sqlActive={sqlActive} canSqlConsole={canSqlConsole} canEr={canEr} canStructureEdit={canStructureEdit}
+            canViews={canViews} canFunctions={canFunctions} />
         ))}
       </div>
       {/* footer */}
@@ -222,10 +227,12 @@ interface SchemaNodeProps {
   canSqlConsole: boolean
   canEr: boolean
   canStructureEdit: boolean
+  canViews: boolean
+  canFunctions: boolean
 }
 
 /** One schema namespace rendered as a collapsible DB tree node (Tables / Views / Functions). */
-function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, sqlActive, canSqlConsole, canEr, canStructureEdit }: SchemaNodeProps) {
+function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, sqlActive, canSqlConsole, canEr, canStructureEdit, canViews, canFunctions }: SchemaNodeProps) {
   const { t } = useTranslation()
   const D = useData()
   // Schemas start COLLAPSED — a freshly-connected DB shows nothing expanded until the
@@ -363,6 +370,7 @@ function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery,
             </div>
           )
         })}
+        {canViews && <>
         <TreeNode icon="eye" label={t('workbench.views')} count={ns.views.length} open={open.views} onToggle={() => setOpen(o => ({ ...o, views: !o.views }))} depth={1} />
         {open.views && ns.views.map(v => {
           const isActive = active != null && active.schema === ns.name && active.table === v.name
@@ -375,6 +383,8 @@ function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery,
             </div>
           )
         })}
+        </>}
+        {canFunctions && <>
         <TreeNode icon="function-square" label={t('workbench.functions')} count={ns.functions.length} open={open.fns} onToggle={() => setOpen(o => ({ ...o, fns: !o.fns }))} depth={1} />
         {open.fns && ns.functions.map(f => (
           <div key={f.name} className="row treeleaf treerow" style={{ position: 'relative', alignItems: 'center', gap: 2, paddingRight: 6, borderRadius: 8, background: 'transparent' }}>
@@ -384,6 +394,7 @@ function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery,
             {leafActions(f.name)}
           </div>
         ))}
+        </>}
       </>}
     </>
   )

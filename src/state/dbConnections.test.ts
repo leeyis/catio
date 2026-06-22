@@ -88,6 +88,8 @@ describe('active DB connection store (in-memory)', () => {
       sqlConsole: true,
       er: true,
       structureEdit: true,
+      views: true,
+      functions: true,
     },
   }
   const mockProfile = { id: 'db-profile-1', name: 'prod-orders', dbType: 'postgres' as const }

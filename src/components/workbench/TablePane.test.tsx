@@ -28,6 +28,7 @@ vi.mock('../../services/db', () => ({
 
 const caps: DbCapabilities = {
   writable: true, transactions: true, schemas: true, sqlConsole: true, er: true, structureEdit: true,
+  views: true, functions: true,
 }
 const conn = { id: 'p1', engine: 'postgres', name: 'pg' } as unknown as Connection
 

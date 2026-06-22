@@ -56,6 +56,10 @@ export interface DbCapabilities {
   sqlConsole: boolean
   er: boolean
   structureEdit: boolean
+  /** 引擎是否有"视图"概念 — 无则在 schema 树中隐藏 Views 节点（Redis/Mongo/ES 为 false）。 */
+  views: boolean
+  /** 引擎是否有"存储函数/过程"概念 — 无则隐藏 Functions 节点（SQLite/Rqlite/Mongo/ES/Redis 为 false）。 */
+  functions: boolean
 }
 
 export interface DbConnectResult {

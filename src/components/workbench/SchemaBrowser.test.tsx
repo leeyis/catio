@@ -99,6 +99,34 @@ describe('SchemaBrowser', () => {
     expect(screen.getByText('刷新')).toBeInTheDocument()
   })
 
+  it('hides Views/Functions tree nodes when the engine lacks those concepts (e.g. Redis)', () => {
+    render(
+      <LanguageProvider><DataProvider>
+        <SchemaBrowser onPick={noop} onPickObject={noop} active={null} onNewQuery={noop} onOpenER={noop}
+          erActive={false} sqlActive={false} schemas={NS_FULL} conn={CONN} live
+          canViews={false} canFunctions={false} />
+      </DataProvider></LanguageProvider>,
+    )
+    fireEvent.click(screen.getByTestId('schema-node:eastmoney'))
+    expect(screen.queryByText('Views')).not.toBeInTheDocument()
+    expect(screen.queryByText('Functions')).not.toBeInTheDocument()
+    // Tables stay visible regardless.
+    expect(screen.getByTestId('schema-tbl:eastmoney.orders')).toBeInTheDocument()
+  })
+
+  it('shows Views but hides Functions when the engine has views only (e.g. SQLite)', () => {
+    render(
+      <LanguageProvider><DataProvider>
+        <SchemaBrowser onPick={noop} onPickObject={noop} active={null} onNewQuery={noop} onOpenER={noop}
+          erActive={false} sqlActive={false} schemas={NS_FULL} conn={CONN} live
+          canViews canFunctions={false} />
+      </DataProvider></LanguageProvider>,
+    )
+    fireEvent.click(screen.getByTestId('schema-node:eastmoney'))
+    expect(screen.getByText('Views')).toBeInTheDocument()
+    expect(screen.queryByText('Functions')).not.toBeInTheDocument()
+  })
+
   // ---- 需求4: 树叶子节点 hover 复制/插入图标 ----
   const renderFull = (sqlActive: boolean) => render(
     <LanguageProvider><DataProvider>

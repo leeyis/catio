@@ -33,6 +33,8 @@ const ALL_ENABLED: DbCapabilities = {
   sqlConsole: true,
   er: true,
   structureEdit: true,
+  views: true,
+  functions: true,
 }
 
 /** 统一 tab:表预览 / 对象源码 / SQL 查询 / ER 图(照 dbx 的 QueryTab.mode 思路)。
@@ -294,6 +296,7 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
         erActive={activeTab?.kind === 'er'} sqlActive={activeTab?.kind === 'sql'}
         disabledSql={!caps.sqlConsole} disabledEr={!caps.er}
         canSqlConsole={caps.sqlConsole} canEr={caps.er} canStructureEdit={caps.structureEdit}
+        canViews={caps.views} canFunctions={caps.functions}
         collapsed={effectiveCollapsed} onToggleCollapse={() => setSidebarCollapsed(c => !c)}
         schemas={connId ? namespaces : undefined} conn={connId ? conn : undefined} live={!!connId} loading={schemaLoading} />
       <div className="col grow" style={{ minWidth: 0, minHeight: 0, overflow: 'hidden', position: 'relative' }}>
