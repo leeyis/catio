@@ -5,6 +5,7 @@ import { Icon } from '../Icon'
 import { Btn, IconBtn } from '../atoms'
 import { previewDml, applyEdits, queryPage, tablePreview, exportFile, dbErrMsg, type EditRequest } from '../../services/db'
 import type { ResultColumn } from '../../services/types'
+import { reduceCellSelection, reduceRowSelection, isCellInRange, normalizeRange, cellsInRange, type GridSelection } from './gridSelection'
 
 export interface DataGridProps {
   columns: ResultColumn[]
@@ -106,6 +107,15 @@ function colIcon(col: ResultColumn): string {
 export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortable', writable = true, connId, table = 'orders', schema, sql, defaultNamespace, livePreview, onRefresh, truncated, loadError, resultLabel, rowKeys, keyColumn }: DataGridProps) {
   const { t } = useTranslation()
   const [sel, setSel] = useState({ r: 2, c: 3 })
+  // 多选状态（叠加在单选之上）：单元格矩形 anchor/focus + 行多选集合（origIdx）。
+  // 纯函数 reduce* 负责把点击事件归约为新选择，组件只持有状态。
+  const [gridSel, setGridSel] = useState<GridSelection>({ anchor: null, focus: null, rows: new Set() })
+  const lastRowRef = useRef<number | null>(null)
+  // 右键上下文菜单：屏幕坐标 + 触发处的列下标（用于批量编辑写哪一列）。null=关闭。
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; col: number } | null>(null)
+  // 批量编辑对话框：开关 + 输入值。
+  const [bulkOpen, setBulkOpen] = useState(false)
+  const [bulkVal, setBulkVal] = useState('')
   const [sortCol, setSortCol] = useState<string | null>(null)
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
   const [edits, setEdits] = useState<Record<string, string | number>>({})
@@ -488,6 +498,120 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
     setNewRows(rs => rs.filter(r => r.id !== id))
     if (editing && editing.r === -(id + 1)) setEditing(null)
   }
+  // --- 多选 + 右键菜单 + 批量编辑 -------------------------------------------
+  // 行号单元格点击：用 reduceRowSelection 归约（按显示下标 ri 计算范围/集合），
+  // 记录 lastRow 供 shift 范围使用。普通左键单格选择仍由各单元格的 onClick 处理。
+  function onRowSelect(ri: number, e: React.MouseEvent) {
+    e.stopPropagation()
+    // lastRow 必须在 setGridSel 之前快照：updater 闭包是延迟执行的，若在其内部读 ref，
+    // 会读到本函数末尾刚被改写的新值（=ri），导致 shift 范围塌缩成单格。
+    const lastRow = lastRowRef.current
+    setGridSel(prev => reduceRowSelection(prev, ri, { lastRow }, { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey }))
+    lastRowRef.current = ri
+  }
+  // 单元格左键：在保留原单选（setSel by origIdx）之外，更新矩形选择（按显示下标 ri）。
+  function onCellSelect(ri: number, ci: number, origIdx: number, e: React.MouseEvent) {
+    setSel({ r: origIdx, c: ci })
+    setGridSel(prev => reduceCellSelection(prev, ri, ci, { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey }))
+    lastRowRef.current = ri
+  }
+  // 右键单元格：若该单元格不在当前选择内，则先把它选为单格，再弹菜单。
+  function onCellContext(ri: number, ci: number, origIdx: number, e: React.MouseEvent) {
+    e.preventDefault()
+    const range = gridSel.anchor && gridSel.focus ? normalizeRange(gridSel.anchor, gridSel.focus) : null
+    const inCellSel = isCellInRange(ri, ci, range)
+    const inRowSel = gridSel.rows.has(ri)
+    if (!inCellSel && !inRowSel) {
+      setSel({ r: origIdx, c: ci })
+      setGridSel({ anchor: { r: ri, c: ci }, focus: { r: ri, c: ci }, rows: new Set() })
+    }
+    setCtxMenu({ x: e.clientX, y: e.clientY, col: ci })
+  }
+  // 单元格的「显示值」文本：有 pending edit 则取 edits，否则取原始 row 值。
+  // codex P2-2：复制必须反映用户改动后的值，与网格显示一致。
+  function displayCellText(origIdx: number, ci: number, raw: unknown): string {
+    const col = columns[ci]
+    if (!col) return cellText(raw)
+    const k = cellKey(origIdx, col.name)
+    return cellText(edits[k] !== undefined ? edits[k] : raw)
+  }
+  // 菜单「复制」：行多选 > 单元格矩形 > 单格回显，依次取值并按 TSV 拼接。
+  function ctxCopy() {
+    setCtxMenu(null)
+    let text: string
+    if (gridSel.rows.size > 0) {
+      // codex P2-3：行多选场景，按选中行（显示顺序）拼接整行所有列的 TSV，
+      // 而非 fallback 到与选择无关的上一次单格回显。
+      const sortedRows = [...gridSel.rows].sort((a, b) => a - b)
+      const lines: string[] = []
+      for (const r of sortedRows) {
+        const entry = pageRows[r]
+        if (!entry) continue
+        const parts = columns.map((_, c) => displayCellText(entry.origIdx, c, entry.row[c]))
+        lines.push(parts.join('\t'))
+      }
+      text = lines.join('\n')
+    } else if (cellsInRange(gridSel).length > 1) {
+      const { r0, r1, c0, c1 } = normalizeRange(gridSel.anchor!, gridSel.focus!)
+      const lines: string[] = []
+      for (let r = r0; r <= r1; r++) {
+        const entry = pageRows[r]
+        if (!entry) continue
+        const parts: string[] = []
+        for (let c = c0; c <= c1; c++) parts.push(displayCellText(entry.origIdx, c, entry.row[c]))
+        lines.push(parts.join('\t'))
+      }
+      text = lines.join('\n')
+    } else {
+      text = selCell?.full ?? ''
+    }
+    navigator.clipboard?.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500) }).catch(() => {})
+  }
+  // 选中的行集合（按 origIdx）：行多选优先；否则取单元格矩形覆盖的各行。
+  function selectedOrigIdxs(): number[] {
+    const out = new Set<number>()
+    if (gridSel.rows.size > 0) {
+      for (const ri of gridSel.rows) { const e = pageRows[ri]; if (e) out.add(e.origIdx) }
+    } else if (gridSel.anchor && gridSel.focus) {
+      const { r0, r1 } = normalizeRange(gridSel.anchor, gridSel.focus)
+      for (let r = r0; r <= r1; r++) { const e = pageRows[r]; if (e) out.add(e.origIdx) }
+    }
+    return [...out]
+  }
+  // 菜单「删除选中行」：把选中行（origIdx）并入 pending-delete 集合。
+  function ctxDeleteRows() {
+    setCtxMenu(null)
+    const idxs = selectedOrigIdxs()
+    if (idxs.length === 0) return
+    setDeleted(d => { const next = new Set(d); for (const i of idxs) next.add(i); return next })
+  }
+  // 菜单「批量编辑」打开对话框。
+  function ctxBulkEdit() { setCtxMenu(null); setBulkVal(''); setBulkOpen(true) }
+  // 当前选中单元格数（用于菜单/对话框文案 + 决定批量编辑可用性）。
+  const selectedCellCount = useMemo(() => cellsInRange(gridSel).length, [gridSel])
+  // 把同一个值写入选中矩形的每个单元格（仅现有行；走 edits 的变更检测，与单格编辑一致）。
+  function applyBulkEdit() {
+    if (!gridSel.anchor || !gridSel.focus) { setBulkOpen(false); return }
+    const { r0, r1, c0, c1 } = normalizeRange(gridSel.anchor, gridSel.focus)
+    setEdits(prev => {
+      const next = { ...prev }
+      for (let r = r0; r <= r1; r++) {
+        const entry = pageRows[r]
+        if (!entry || entry.origIdx < 0) continue
+        for (let c = c0; c <= c1; c++) {
+          const col = columns[c]
+          if (!col) continue
+          const k = cellKey(entry.origIdx, col.name)
+          const orig = entry.row[c]
+          if (bulkVal === String(orig ?? '')) { delete next[k] }
+          else next[k] = bulkVal
+        }
+      }
+      return next
+    })
+    setBulkOpen(false)
+  }
+
   // Toggle an existing row (by its origIdx) in/out of the pending-delete set.
   function toggleDelete(origIdx: number) {
     if (!canEdit) return
@@ -798,13 +922,16 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
             return (
               <div key={origIdx} style={{ display: 'grid', gridTemplateColumns: gridTemplate, height: rowH, background: isDel ? 'color-mix(in srgb, var(--danger-fg) 12%, transparent)' : ri % 2 ? 'var(--surface-subtle)' : 'transparent', opacity: isDel ? 0.6 : 1, textDecoration: isDel ? 'line-through' : 'none' }}
                 className="gridrow">
-                <div style={{ ...tdStyle, justifyContent: 'center', color: 'var(--text-faint)', fontSize: 11, background: 'var(--surface-sunken)', borderRight: '1px solid var(--border-hairline)', position: 'sticky', left: 0, zIndex: 1 }}>
+                <div data-row-select onClick={e => onRowSelect(ri, e)}
+                  onContextMenu={e => { e.preventDefault(); if (!gridSel.rows.has(ri)) setGridSel(reduceRowSelection({ ...gridSel }, ri, { lastRow: lastRowRef.current }, {})); setCtxMenu({ x: e.clientX, y: e.clientY, col: 0 }) }}
+                  style={{ ...tdStyle, justifyContent: 'center', color: 'var(--text-faint)', fontSize: 11, background: gridSel.rows.has(ri) ? 'var(--accent-soft)' : 'var(--surface-sunken)', borderRight: '1px solid var(--border-hairline)', position: 'sticky', left: 0, zIndex: 1, cursor: 'pointer' }}>
                   {globalIdx + 1}
-                  {/* 悬浮行时浮出"查看明细"按钮，覆盖行号并上下左右居中；点击打开该行的纵向明细弹窗。
-                      不用 .icon-btn（其固定 30px 宽会与 inset:0 冲突，使图标偏左），改为显式撑满单元格 + flex 居中。 */}
+                  {/* 悬浮行时浮出"查看明细"按钮，居中悬浮于行号上方；点击打开该行的纵向明细弹窗。
+                      codex P2-1：按钮只占图标大小（22x22）并居中定位，不再 inset:0/100% 铺满整格，
+                      否则悬浮态 pointer-events:auto 会拦截「点行号选行」。剩余区域仍可点行号触发多选。 */}
                   <button className="row-detail-btn" title={t('dbviews.viewRowDetail')}
                     onClick={e => { e.stopPropagation(); setDetailIdx(ri) }}
-                    style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', border: 'none', padding: 0, background: 'var(--surface-sunken)', cursor: 'pointer' }}>
+                    style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', width: 22, height: 22, display: 'flex', alignItems: 'center', justifyContent: 'center', border: 'none', borderRadius: 6, padding: 0, background: 'var(--surface-sunken)', cursor: 'pointer' }}>
                     <Icon name="maximize-2" size={13} style={{ color: 'var(--accent-primary)' }} />
                   </button>
                 </div>
@@ -813,14 +940,18 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
                   const isEdited = edits[k] !== undefined
                   const val = isEdited ? edits[k] : row[ci]
                   const isSel = sel.r === origIdx && sel.c === ci
+                  // 多选高亮：单元格落在矩形内，或该行被行多选选中。
+                  const inRange = isCellInRange(ri, ci, gridSel.anchor && gridSel.focus ? normalizeRange(gridSel.anchor, gridSel.focus) : null)
+                  const inMultiSel = inRange || gridSel.rows.has(ri)
                   const isEditing = editing && editing.r === origIdx && editing.c === ci
                   return (
-                    <div key={col.name} onClick={() => setSel({ r: origIdx, c: ci })}
+                    <div key={col.name} onClick={e => onCellSelect(ri, ci, origIdx, e)}
+                      onContextMenu={e => onCellContext(ri, ci, origIdx, e)}
                       onDoubleClick={() => startEdit(origIdx, ci, origIdx, col.name, val)}
                       style={{
                         ...tdStyle,
                         cursor: canEdit ? 'cell' : 'default',
-                        background: isEditing ? 'var(--surface-card)' : isEdited ? 'color-mix(in srgb, var(--signal-amber) 14%, transparent)' : isSel ? 'var(--accent-soft-alt)' : 'transparent',
+                        background: isEditing ? 'var(--surface-card)' : isEdited ? 'color-mix(in srgb, var(--signal-amber) 14%, transparent)' : isSel ? 'var(--accent-soft-alt)' : inMultiSel ? 'var(--accent-soft)' : 'transparent',
                         boxShadow: isSel && !isEditing ? 'inset 0 0 0 1.5px var(--accent-primary)' : isEdited ? 'inset 0 0 0 1px color-mix(in srgb, var(--signal-amber) 40%, transparent)' : 'none',
                         color: 'var(--text-secondary)',
                       }}>
@@ -1021,6 +1152,54 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
                   </div>
                 )
               })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 右键上下文菜单：复制 / 删除选中行 / 批量编辑。点击空白处或选项后关闭。 */}
+      {ctxMenu && (
+        <div onClick={() => setCtxMenu(null)} onContextMenu={e => { e.preventDefault(); setCtxMenu(null) }}
+          style={{ position: 'fixed', inset: 0, zIndex: 80 }}>
+          <div role="menu" onClick={e => e.stopPropagation()} className="pop-in"
+            style={{ position: 'fixed', top: ctxMenu.y, left: ctxMenu.x, minWidth: 180, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', borderRadius: 10, boxShadow: 'var(--shadow-window)', padding: 4 }}>
+            {([
+              { key: 'copy', icon: 'copy', label: t('dbviews.ctxCopy'), onClick: ctxCopy, show: true, danger: false },
+              { key: 'delete', icon: 'trash-2', label: t('dbviews.ctxDeleteRows', { count: selectedOrigIdxs().length }), onClick: ctxDeleteRows, show: canEdit && selectedOrigIdxs().length > 0, danger: true },
+              { key: 'bulk', icon: 'pencil', label: t('dbviews.ctxBulkEdit', { count: selectedCellCount }), onClick: ctxBulkEdit, show: canEdit && selectedCellCount > 0, danger: false },
+            ] as const).filter(it => it.show).map(it => (
+              <button key={it.key} role="menuitem" className="row" onClick={it.onClick}
+                style={{ width: '100%', gap: 8, padding: '6px 10px', borderRadius: 7, border: 'none', background: 'transparent', color: it.danger ? 'var(--danger-fg)' : 'var(--text-secondary)', cursor: 'pointer', fontSize: 12.5, textAlign: 'left' }}>
+                <Icon name={it.icon} size={13} />
+                {it.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* 批量编辑对话框：把同一个值写入选中的所有单元格（作为 pending edits）。 */}
+      {bulkOpen && (
+        <div onClick={() => setBulkOpen(false)}
+          style={{ position: 'fixed', inset: 0, zIndex: 80, background: 'color-mix(in srgb, var(--cta-bg) 42%, transparent)', backdropFilter: 'blur(3px)', display: 'grid', placeItems: 'center' }}>
+          <div onClick={e => e.stopPropagation()} className="pop-in"
+            style={{ width: 460, maxWidth: '90%', background: 'var(--surface-card)', borderRadius: 18, border: '1px solid var(--border-hairline)', boxShadow: 'var(--shadow-window)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+            <div className="row" style={{ justifyContent: 'space-between', padding: '18px 20px 14px', borderBottom: '1px solid var(--border-hairline)' }}>
+              <div className="col" style={{ gap: 2 }}>
+                <span style={{ fontSize: 15, fontWeight: 700, letterSpacing: '-0.2px' }}>{t('dbviews.bulkEditTitle')}</span>
+                <span style={{ fontSize: 11.5, color: 'var(--text-tertiary)' }}>{t('dbviews.bulkEditDesc', { count: selectedCellCount })}</span>
+              </div>
+              <IconBtn name="x" size={16} variant="bare" onClick={() => setBulkOpen(false)} />
+            </div>
+            <div className="col" style={{ gap: 12, padding: '16px 20px 20px' }}>
+              <input autoFocus value={bulkVal} onChange={e => setBulkVal(e.target.value)}
+                placeholder={t('dbviews.bulkEditPlaceholder')}
+                onKeyDown={e => { if (e.key === 'Enter') applyBulkEdit(); if (e.key === 'Escape') setBulkOpen(false) }}
+                style={{ border: '1px solid var(--border-hairline)', borderRadius: 8, padding: '8px 10px', background: 'var(--surface-sunken)', color: 'var(--text-primary)', font: 'inherit', fontSize: 13, outline: 'none' }} />
+              <div className="row gap8" style={{ justifyContent: 'flex-end' }}>
+                <Btn variant="ghost" onClick={() => setBulkOpen(false)}>{t('dbviews.cancel')}</Btn>
+                <Btn variant="primary" icon="check" onClick={applyBulkEdit}>{t('dbviews.bulkEditApply')}</Btn>
+              </div>
             </div>
           </div>
         </div>
