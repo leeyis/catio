@@ -4,10 +4,11 @@ import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn } from '../atoms'
 import { useData } from '../../state/DataContext'
-import { runQuery, getSchema, schemaColumns, dbErrMsg } from '../../services/db'
+import { runQuery, getSchema, schemaColumns, tablePreview, dbErrMsg } from '../../services/db'
 import type { ResultColumn, Schema } from '../../services/types'
 import { SqlEditor, type SqlEditorHandle } from './SqlEditor'
 import { mongoCompletion } from './mongoCompletion'
+import { redisCompletion } from './redisCompletion'
 import type { SQLNamespace } from '@codemirror/lang-sql'
 import { DataGrid } from './DataGrid'
 
@@ -128,6 +129,8 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
   // ref so the (stable-identity) completion source reads the latest list without
   // rebuilding the editor extension on every schema change.
   const collectionsRef = useRef<string[]>([])
+  // Sampled Redis key names for the plain-mode redis completion source (key args).
+  const redisKeysRef = useRef<string[]>([])
 
   useEffect(() => {
     if (!connId || !supportsDefaultNamespace) { setLiveSchema(null); return }
@@ -156,10 +159,27 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
     return () => { alive = false }
   }, [connId, engine])
 
-  // Stable completion source for the editor (mongo only for now). Identity is
-  // keyed on engine so the editor extension isn't rebuilt as collections load.
+  // Plain-mode (redis) key-name sample for argument completion. SCAN-based
+  // preview of the connected default DB (the pseudo-table "keys"); best-effort.
+  useEffect(() => {
+    if (!connId || engine !== 'redis') { redisKeysRef.current = []; return }
+    let alive = true
+    tablePreview(connId, undefined, 'keys', 300, 0)
+      .then(res => {
+        if (!alive) return
+        const ki = res.columns.findIndex(c => c.name === 'key')
+        redisKeysRef.current = ki >= 0 ? res.rows.map(r => String(r[ki])).filter(Boolean) : []
+      })
+      .catch(() => { if (alive) redisKeysRef.current = [] })
+    return () => { alive = false }
+  }, [connId, engine])
+
+  // Stable completion source for the editor (mongo + redis). Identity is keyed on
+  // engine so the editor extension isn't rebuilt as the live name lists load.
   const completion = useMemo(
-    () => (engine === 'mongodb' ? mongoCompletion(() => collectionsRef.current) : undefined),
+    () => (engine === 'mongodb' ? mongoCompletion(() => collectionsRef.current)
+      : engine === 'redis' ? redisCompletion(() => redisKeysRef.current)
+      : undefined),
     [engine],
   )
 
