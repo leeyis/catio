@@ -163,6 +163,18 @@ export async function runQuery(connId: string, sql: string, defaultNamespace?: s
   return tauriInvoke<QueryResult>('db_query', args)
 }
 
+/**
+ * Run EXPLAIN against the live backend and return the raw plan result (a single
+ * JSON cell). The backend builds the dialect-correct `EXPLAIN (FORMAT JSON)` /
+ * `EXPLAIN FORMAT=JSON`, gates to read-only statements, executes, and returns the
+ * result; the frontend parses it via `parseExplainResult`. Only PG/MySQL support
+ * this. Throws outside Tauri (no meaningful mock for a real plan).
+ */
+export async function runExplain(connId: string, sql: string): Promise<QueryResult> {
+  if (!isTauri()) throw new Error('执行计划需要 Tauri 运行时')
+  return tauriInvoke<QueryResult>('db_explain', { connId, sql })
+}
+
 // ---- Edits (DML preview / apply) ----
 
 /** A single row mutation. Mirrors the Rust `EditRequest` (camelCase via serde). */

@@ -112,6 +112,8 @@
     "running": "执行中",
     "run": "运行",
     "stop": "停止",
+    "explain": "解释",
+    "explainTitle": "查看执行计划",
     "newQueryComment": "新建查询",
     "queryResult": "查询结果",
     "runSelection": "运行",
@@ -227,6 +229,21 @@
     "keyspaceTypes": "类型分布",
     "keyspaceSampled": "采样 {{n}} 个键",
     "keyspaceEmpty": "该库暂无键"
+  },
+  "explain": {
+    "title": "执行计划",
+    "tree": "树形",
+    "summary": "摘要",
+    "running": "正在生成执行计划…",
+    "empty": "暂无执行计划",
+    "nodeCount": "{{count}} 个节点",
+    "node": "节点",
+    "relation": "表/关系",
+    "index": "索引",
+    "cost": "代价",
+    "rows": "行数",
+    "details": "详情",
+    "close": "关闭"
   },
   "workbench": {
     "collapseSidebar": "收起侧栏",

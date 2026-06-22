@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeAll } from 'vitest'
-import { forwardRef } from 'react'
+import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest'
+import { forwardRef, useImperativeHandle } from 'react'
 import { render, screen, fireEvent } from '@testing-library/react'
 import { LanguageProvider } from '../../state/LanguageContext'
 import { DataProvider } from '../../state/DataContext'
@@ -8,18 +8,34 @@ import { SqlConsole } from './SqlConsole'
 
 // CodeMirror 在 jsdom 下难以稳定挂载,且本测试只关心 SqlConsole 自身的分屏/最大化布局,
 // 故把 SqlEditor 替换成一个轻量桩件。
+// 测试可通过此变量给桩件设定「当前选中文本」,以验证 EXPLAIN 走选中优先逻辑。
+let stubSelectedText = ''
 vi.mock('./SqlEditor', () => ({
-  // 桩件回显 code,使格式化按钮的接线(对编辑器内容做格式化替换)可被断言。
-  SqlEditor: forwardRef<unknown, { code?: string }>((props, _ref) => (
-    <div data-testid="sql-editor-stub">{props.code}</div>
-  )),
+  // 桩件回显 code,使格式化按钮的接线(对编辑器内容做格式化替换)可被断言;
+  // 同时暴露 getSelectedText 句柄,模拟用户选中片段的场景。
+  SqlEditor: forwardRef<{ getSelectedText: () => string }, { code?: string }>((props, ref) => {
+    useImperativeHandle(ref, () => ({
+      getSelectedText: () => stubSelectedText,
+      insertAtCursor: (t: string) => t,
+    }), [])
+    return <div data-testid="sql-editor-stub">{props.code}</div>
+  }),
 }))
 
 // db 服务在非 connId(mock)路径下不会被调用,但 import 时仍需存在。
+const runExplainMock = vi.fn(() =>
+  Promise.resolve({
+    columns: [{ name: 'QUERY PLAN', type: 'json' }],
+    rows: [[JSON.stringify([{ Plan: { 'Node Type': 'Seq Scan', 'Relation Name': 'orders' } }])]],
+  }),
+)
+
 vi.mock('../../services/db', () => ({
   runQuery: vi.fn(),
+  runExplain: (...args: unknown[]) => runExplainMock(...(args as [])),
   getSchema: vi.fn(() => Promise.resolve({ schemas: [] })),
   schemaColumns: vi.fn(() => Promise.resolve([])),
+  tablePreview: vi.fn(() => Promise.resolve({ columns: [], rows: [] })),
   dbErrMsg: (e: unknown) => (e instanceof Error ? e.message : String(e)),
 }))
 
@@ -111,5 +127,45 @@ describe('SqlConsole 格式化按钮接线', () => {
   it('非 SQL 引擎(redis)plain 模式下格式化按钮禁用', () => {
     wrap(<SqlConsole fresh engine="redis" initialCode="GET foo" />)
     expect(screen.getByTitle('Format')).toBeDisabled()
+  })
+})
+
+describe('SqlConsole 执行计划(EXPLAIN)入口', () => {
+  beforeAll(async () => { await i18n.changeLanguage('en') })
+  beforeEach(() => { runExplainMock.mockClear(); stubSelectedText = '' })
+
+  it('已连接且引擎支持(postgres)时显示「解释」按钮', () => {
+    wrap(<SqlConsole connId="c1" engine="postgres" initialCode="select 1" fresh />)
+    expect(screen.getByTitle('Show execution plan')).toBeInTheDocument()
+  })
+
+  it('引擎不支持(redis)或未连接时不显示「解释」按钮', () => {
+    const { rerender } = wrap(<SqlConsole connId="c1" engine="redis" initialCode="GET k" fresh />)
+    expect(screen.queryByTitle('Show execution plan')).toBeNull()
+    // 未连接(mock 路径)也不显示。
+    rerender(<LanguageProvider><DataProvider><SqlConsole engine="postgres" initialCode="select 1" fresh /></DataProvider></LanguageProvider>)
+    expect(screen.queryByTitle('Show execution plan')).toBeNull()
+  })
+
+  it('无 SQL 时「解释」按钮禁用', () => {
+    wrap(<SqlConsole connId="c1" engine="postgres" fresh />)
+    expect(screen.getByTitle('Show execution plan')).toBeDisabled()
+  })
+
+  it('点击「解释」调用 runExplain 并渲染执行计划查看器', async () => {
+    wrap(<SqlConsole connId="c1" engine="postgres" initialCode="select * from orders" fresh />)
+    fireEvent.click(screen.getByTitle('Show execution plan'))
+    expect(runExplainMock).toHaveBeenCalledWith('c1', 'select * from orders')
+    // 解析后的计划树出现在结果区(节点标题含表名)。
+    expect(await screen.findByText('Seq Scan on orders')).toBeInTheDocument()
+  })
+
+  it('编辑区有选中片段时「解释」仅对选中的 SQL 取计划(与普通运行选中优先一致)', () => {
+    // 多语句编辑区,用户选中其中一条 SELECT —— EXPLAIN 应只对选中文本执行,
+    // 而不是对整段 code 运行(否则多语句会拼出非法 EXPLAIN)。
+    stubSelectedText = 'select * from orders'
+    wrap(<SqlConsole connId="c1" engine="postgres" initialCode="select 1;\nselect * from orders;" fresh />)
+    fireEvent.click(screen.getByTitle('Show execution plan'))
+    expect(runExplainMock).toHaveBeenCalledWith('c1', 'select * from orders')
   })
 })

@@ -10,6 +10,7 @@ pub mod drivers;
 pub mod manager;
 pub mod commands;
 pub mod dml;
+pub mod query_explain_sql;
 pub mod db_admin_sql;
 pub mod object_source_sql;
 pub mod history;

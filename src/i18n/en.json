@@ -112,6 +112,8 @@
     "running": "Running",
     "run": "Run",
     "stop": "Stop",
+    "explain": "Explain",
+    "explainTitle": "Show execution plan",
     "newQueryComment": "New query",
     "queryResult": "Query result",
     "runSelection": "Run",
@@ -227,6 +229,21 @@
     "keyspaceTypes": "Type distribution",
     "keyspaceSampled": "{{n}} keys sampled",
     "keyspaceEmpty": "No keys in this database"
+  },
+  "explain": {
+    "title": "Execution plan",
+    "tree": "Tree",
+    "summary": "Summary",
+    "running": "Building execution plan…",
+    "empty": "No execution plan yet",
+    "nodeCount": "{{count}} node(s)",
+    "node": "Node",
+    "relation": "Relation",
+    "index": "Index",
+    "cost": "Cost",
+    "rows": "Rows",
+    "details": "Details",
+    "close": "Close"
   },
   "workbench": {
     "collapseSidebar": "Collapse sidebar",

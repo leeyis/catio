@@ -4,6 +4,7 @@ use crate::db::manager::ConnManager;
 use crate::db::result::QueryResult;
 use crate::db::capabilities::Capabilities;
 use crate::db::dml::{self, CellEdit};
+use crate::db::query_explain_sql;
 use crate::db::db_admin_sql::{
     self, DatabaseObjectType, DropObjectSqlOptions, DropTableChildObjectSqlOptions,
     DuplicateTableStructureSqlOptions, RenameObjectSqlOptions, TableAdminSqlOptions,
@@ -433,6 +434,24 @@ pub async fn db_query_page(conn_id: String, sql: String, limit: u32, offset: u32
     mgr: tauri::State<'_, ConnManager>) -> Result<QueryResult, DbError> {
     let drv = mgr.get(&conn_id).await.ok_or(DbError::NotFound(conn_id))?;
     drv.paginated_query_with_default_namespace(&sql, limit, offset, default_namespace.as_deref()).await
+}
+
+/// 执行计划(EXPLAIN)。按连接的引擎方言拼出 EXPLAIN (FORMAT JSON) / EXPLAIN
+/// FORMAT=JSON,只对只读语句放行,然后执行并把原始计划结果(单行单列 JSON)交给
+/// 前端解析。仅 PG/MySQL 支持;其他引擎或不安全/空 SQL 返回 Unsupported/QueryFailed。
+#[tauri::command]
+pub async fn db_explain(conn_id: String, sql: String,
+    mgr: tauri::State<'_, ConnManager>) -> Result<QueryResult, DbError> {
+    let drv = mgr.get(&conn_id).await.ok_or_else(|| DbError::NotFound(conn_id.clone()))?;
+    let built = query_explain_sql::build_explain_sql(drv.db_type(), &sql);
+    match built.sql {
+        Some(explain_sql) => drv.query(&explain_sql, 1000).await,
+        None => Err(match built.reason.as_deref() {
+            Some("unsupported") => DbError::Unsupported("此引擎不支持执行计划".into()),
+            Some("empty") => DbError::QueryFailed("没有可解释的 SQL".into()),
+            _ => DbError::QueryFailed("仅支持解释只读查询(SELECT/WITH/TABLE/VALUES)".into()),
+        }),
+    }
 }
 
 /// Paginated table-data preview. Delegates to the driver's `table_data`, which
