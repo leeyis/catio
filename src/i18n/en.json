@@ -190,7 +190,8 @@
     "removeColumn": "Remove column",
     "create": "Create",
     "mongoPlaceholder": "db.collection.find({ ... })  —  supports find / countDocuments / aggregate / getIndexes / insertOne·Many / updateOne·Many / deleteOne·Many",
-    "esPlaceholder": "GET /index/_search\n{ \"query\": { \"match_all\": {} } }  —  SELECT * FROM index also works"
+    "esPlaceholder": "GET /index/_search\n{ \"query\": { \"match_all\": {} } }  —  SELECT * FROM index also works",
+    "redisPlaceholder": "user:*  —  type a key glob pattern to SCAN, empty matches all *; returns key/type/ttl/value"
   },
   "workbench": {
     "collapseSidebar": "Collapse sidebar",

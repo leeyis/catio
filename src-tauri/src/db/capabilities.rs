@@ -44,10 +44,12 @@ pub fn capabilities_for(db: DatabaseType) -> Capabilities {
             sql_console: true, er: false, structure_edit: false,
             views: false, functions: false,
         },
-        // KV 存储:无表/视图/函数概念,树里只保留 keys。
+        // KV 存储:无表/视图/函数概念,树里只保留 keys。查询控制台可用——
+        // 但语义不是 SQL,而是把输入当 key 的 glob 模式做 SCAN(见 redis driver
+        // 的 query()),前端 SqlConsole 对 Redis 走 plain 模式(不挂 SQL 补全)。
         Redis => Capabilities {
             writable: true, transactions: false, schemas: true,
-            sql_console: false, er: false, structure_edit: false,
+            sql_console: true, er: false, structure_edit: false,
             views: false, functions: false,
         },
         // JDBC sidecar: SQL console + writes work; the simple plugin protocol
@@ -71,9 +73,10 @@ mod tests {
         assert!(c.schemas && c.er && c.sql_console && c.writable);
     }
     #[test]
-    fn redis_has_no_sql_console_or_er() {
+    fn redis_has_query_console_but_no_er() {
+        // Redis 的查询页用 key glob 模式 SCAN(非 SQL),控制台可用但无 ER。
         let c = capabilities_for(DatabaseType::Redis);
-        assert!(!c.sql_console && !c.er);
+        assert!(c.sql_console && !c.er);
     }
     #[test]
     fn non_relational_stores_have_no_views_or_functions() {

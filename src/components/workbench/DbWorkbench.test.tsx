@@ -256,6 +256,21 @@ describe('DbWorkbench unified tabs', () => {
     expect(screen.getByText('101')).toBeVisible()
   })
 
+  it('Redis 连接也能新建查询(sqlConsole=true,查询页走 key glob 模式)', async () => {
+    // 回归:此前 Redis sqlConsole=false → newQuery 直接 return,点"新建查询"无反应。
+    h.list.mockReturnValue([{
+      ...LIVE_CONN, dbType: 'redis',
+      capabilities: {
+        writable: true, transactions: false, schemas: true,
+        sqlConsole: true, er: false, structureEdit: false,
+        views: false, functions: false,
+      },
+    }])
+    wrap(<DbWorkbench conn={CONN} />)
+    fireEvent.click(screen.getByTestId('wb-new-query'))
+    expect(await screen.findByTestId('wbtab-sql:1')).toBeInTheDocument()
+  })
+
   it('新建查询入口在左侧更明显,tab strip 不再渲染右侧新建查询按钮', async () => {
     wrap(<DbWorkbench conn={CONN} />)
     await screen.findByTestId('schema-node:public')

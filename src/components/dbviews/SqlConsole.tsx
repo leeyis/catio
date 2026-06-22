@@ -52,13 +52,17 @@ export interface SqlConsoleProps {
 
 export function SqlConsole({ density, fresh, writable = true, connId, initialCode, initialDefaultSchema, autoRun, active, engine, connName, profileId, onFullscreenChange }: SqlConsoleProps) {
   const { t } = useTranslation()
-  // mongodb/elasticsearch 用各自语法(mongo shell / REST+SQL),编辑器走 plain 模式:
-  // 不挂 SQL 补全、显示语法占位提示、结果网格只读(mongo 的 _id 带 pk 标记,
-  // 会让 DataGrid 误开 SQL DML 编辑——对 mongo 必然失败)。
-  const plain = engine === 'mongodb' || engine === 'elasticsearch'
-  const supportsDefaultNamespace = engine !== 'elasticsearch'
+  // mongodb/elasticsearch/redis 用各自语法(mongo shell / REST+SQL / key glob 模式),
+  // 编辑器走 plain 模式:不挂 SQL 补全、显示语法占位提示、结果网格只读(mongo 的 _id
+  // 带 pk 标记会让 DataGrid 误开 SQL DML 编辑——对这些引擎必然失败)。
+  // Redis 的查询页把输入当 key 的 glob 模式做 SCAN(见 redis driver 的 query())。
+  const plain = engine === 'mongodb' || engine === 'elasticsearch' || engine === 'redis'
+  // Redis 的 query() 固定扫描连接时选定的 default_db(不接受查询页传入的库),
+  // 故不显示库选择器,避免"选了 db 却不生效"的误导(ES 本就无多库概念)。
+  const supportsDefaultNamespace = engine !== 'elasticsearch' && engine !== 'redis'
   const editorPlaceholder = engine === 'mongodb' ? t('dbviews.mongoPlaceholder')
     : engine === 'elasticsearch' ? t('dbviews.esPlaceholder')
+    : engine === 'redis' ? t('dbviews.redisPlaceholder')
     : undefined
   const D = useData()
   const [code, setCode] = useState(

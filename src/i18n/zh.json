@@ -190,7 +190,8 @@
     "removeColumn": "移除列",
     "create": "创建",
     "mongoPlaceholder": "db.collection.find({ ... })  —  支持 find / countDocuments / aggregate / getIndexes / insertOne·Many / updateOne·Many / deleteOne·Many",
-    "esPlaceholder": "GET /index/_search\n{ \"query\": { \"match_all\": {} } }  —  也支持 SELECT * FROM index"
+    "esPlaceholder": "GET /index/_search\n{ \"query\": { \"match_all\": {} } }  —  也支持 SELECT * FROM index",
+    "redisPlaceholder": "user:*  —  输入 key 匹配模式(glob)做 SCAN 扫描,留空则匹配全部 *;返回 key/type/ttl/value"
   },
   "workbench": {
     "collapseSidebar": "收起侧栏",

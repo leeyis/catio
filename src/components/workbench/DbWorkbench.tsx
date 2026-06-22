@@ -291,7 +291,7 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
     <div style={{ display: 'flex', alignItems: 'stretch', height: '100%', width: '100%', flex: 1, minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
       <SchemaBrowser onPick={pickTable} onPickObject={pickObject}
         active={activeTab?.kind === 'table' ? { schema: activeTab.schema, table: activeTab.table } : null}
-        onNewQuery={(schema) => newQuery(undefined, schema ?? namespace.name)} onOpenER={openER} onNewObjectTemplate={onNewObjectTemplate} onRefresh={refreshSchema}
+        onNewQuery={(schema) => newQuery(undefined, schema ?? namespace?.name)} onOpenER={openER} onNewObjectTemplate={onNewObjectTemplate} onRefresh={refreshSchema}
         refreshing={refreshing}
         erActive={activeTab?.kind === 'er'} sqlActive={activeTab?.kind === 'sql'}
         disabledSql={!caps.sqlConsole} disabledEr={!caps.er}
