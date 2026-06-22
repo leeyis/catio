@@ -473,6 +473,99 @@ pub async fn export_file(path: String, contents: String) -> Result<(), String> {
     std::fs::write(&path, contents).map_err(|e| e.to_string())
 }
 
+/// 解析整库导出的「单表行上限」。
+///
+/// codex 评审阻断项修复：调用方**省略** `row_limit` 时返回 `None`（无上限，导出全部
+/// 行），而不是默默截断到 10_000——后者会让还原时数据缺失却无任何报错。只有调用方
+/// **显式**传入一个值（含 0：仅导结构不导行）时才按该值截断,且截断会在脚本里以
+/// `(truncated)` 注释显式标注。
+fn resolve_export_row_cap(row_limit: Option<u32>) -> Option<u32> {
+    row_limit
+}
+
+/// 整库导出为 SQL 脚本（DDL + 数据 INSERT 批 + 头注释）。枚举所选 schema 下的表,
+/// 逐表分页取数,DDL 由前端按结构面板已有逻辑生成后随 `table_ddls` 传入（后端不重复
+/// 实现各引擎 DDL 反射）。脚本拼装走 export::build_database_sql_export（纯函数,已单测）。
+///
+/// 真实串流取数依赖驱动 I/O,无法本地单测：行获取照搬 table_data 既有模式,逐表累计。
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn db_export_database(conn_id: String, database: String, schema: String,
+    selected_tables: Vec<String>, table_ddls: std::collections::HashMap<String, String>,
+    include_structure: bool, include_data: bool, batch_size: Option<usize>, row_limit: Option<u32>,
+    mgr: tauri::State<'_, ConnManager>) -> Result<String, DbError> {
+    let drv = mgr.get(&conn_id).await.ok_or_else(|| DbError::NotFound(conn_id.clone()))?;
+    let has_schemas = drv.capabilities().schemas;
+    let batch = batch_size.unwrap_or(crate::db::export::DEFAULT_INSERT_BATCH_SIZE);
+    // None = 无上限（导出全部行）；Some(n) = 显式截断到 n 行并在脚本里标注 truncated。
+    let cap = resolve_export_row_cap(row_limit);
+
+    // 枚举要导出的表：未指定则取该 schema 下全部（排除视图，仅 kind=="table"）。
+    let all = drv.list_tables(&schema).await?;
+    let wanted: std::collections::HashSet<&str> = selected_tables.iter().map(String::as_str).collect();
+    let tables_iter = all.iter().filter(|t| t.kind != "view"
+        && (wanted.is_empty() || wanted.contains(t.name.as_str())));
+
+    let schema_opt = if has_schemas && !schema.is_empty() { Some(schema.as_str()) } else { None };
+    let mut export_tables: Vec<crate::db::export::ExportTable> = Vec::new();
+
+    for info in tables_iter {
+        let name = &info.name;
+        let (mut columns, mut rows, mut truncated) = (Vec::new(), Vec::new(), false);
+
+        if include_data {
+            // 分页取数，逐批累计到内存。cap=None 时导出全部行（无上限）；cap=Some(n)
+            // 时截断到 n 行并标记 truncated（对齐 dbx 的可选整库行上限,但默认不静默截断）。
+            let mut offset: u32 = 0;
+            loop {
+                let page = match cap {
+                    Some(c) => {
+                        let remaining = c.saturating_sub(rows.len() as u32);
+                        if remaining == 0 { truncated = true; break; }
+                        remaining.min(batch as u32)
+                    }
+                    None => batch as u32,
+                };
+                let res = drv.table_data(schema_opt, name, page, offset).await?;
+                if columns.is_empty() {
+                    // 去掉 Postgres 注入的 __ctid 隐藏列（仅用于无主键行定位，非真实列）。
+                    columns = res.columns.iter().map(|c| c.name.clone())
+                        .filter(|c| c != "__ctid").collect();
+                }
+                let ctid_idx = res.columns.iter().position(|c| c.name == "__ctid");
+                let got = res.rows.len();
+                for row in res.rows {
+                    let row: Vec<serde_json::Value> = match ctid_idx {
+                        Some(i) => row.into_iter().enumerate()
+                            .filter(|(j, _)| *j != i).map(|(_, v)| v).collect(),
+                        None => row,
+                    };
+                    rows.push(row);
+                }
+                offset += got as u32;
+                if (got as u32) < page { break; }
+            }
+        }
+
+        export_tables.push(crate::db::export::ExportTable {
+            display_name: name.clone(),
+            schema: schema_opt.map(str::to_string),
+            table_name: name.clone(),
+            ddl: table_ddls.get(name).cloned(),
+            columns,
+            rows,
+            truncated,
+        });
+    }
+
+    // chrono 此处未启用 clock feature；用既有 now_stamp()（unix 秒）作时间戳即可。
+    let exported_at = now_stamp();
+    Ok(crate::db::export::build_database_sql_export(
+        drv.db_type(), has_schemas, &database, &exported_at, &export_tables,
+        include_structure, include_data, batch,
+    ))
+}
+
 // ── JDBC driver management (DBeaver-style one-click download) ─────────────────
 
 /// Resolve the directory where JDBC driver JARs live: `CATIO_JDBC_DRIVERS_DIR`
@@ -727,5 +820,30 @@ mod jdbc_status_tests {
         let status = super::import_driver_to_dir("dameng", &jar, dir.path()).unwrap();
         assert!(status.jars.contains(&"DmJdbcDriver18-8.1.3.62.jar".to_string()));
         assert_eq!(fs::read(&jar).unwrap(), b"JARBYTES", "原文件内容未被破坏");
+    }
+}
+
+#[cfg(test)]
+mod export_row_cap_tests {
+    use super::resolve_export_row_cap;
+
+    #[test]
+    fn omitted_limit_means_unlimited_not_silent_10k_cap() {
+        // codex 阻断项：调用方省略 row_limit 时,整库导出必须导出全部行（无上限），
+        // 而不是默默截断到 10_000 导致还原数据缺失。
+        assert_eq!(resolve_export_row_cap(None), None);
+    }
+
+    #[test]
+    fn explicit_limit_is_respected() {
+        // 调用方显式传入上限时,按该上限截断（用于预览/抽样导出）。
+        assert_eq!(resolve_export_row_cap(Some(500)), Some(500));
+        assert_eq!(resolve_export_row_cap(Some(10_000)), Some(10_000));
+    }
+
+    #[test]
+    fn explicit_zero_limit_is_respected_not_treated_as_unlimited() {
+        // 显式 0 与「省略」语义不同：0 表示只导结构不导行,不应被当成无上限。
+        assert_eq!(resolve_export_row_cap(Some(0)), Some(0));
     }
 }

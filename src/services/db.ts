@@ -296,6 +296,20 @@ export async function exportFile(path: string, contents: string): Promise<void> 
   return tauriInvoke('export_file', { path, contents })
 }
 
+/**
+ * Whole-database SQL export: DDL (supplied per table) + data INSERT batches.
+ * The frontend gathers the per-table DDL (its structure-panel logic) and passes
+ * it as `tableDdls`; the backend pages through rows and assembles the script.
+ */
+export async function exportDatabaseSql(args: {
+  connId: string; database: string; schema: string; selectedTables: string[];
+  tableDdls: Record<string, string>; includeStructure: boolean; includeData: boolean;
+  batchSize?: number; rowLimit?: number;
+}): Promise<string> {
+  if (!isTauri()) throw new Error('exportDatabaseSql requires the Tauri runtime')
+  return tauriInvoke<string>('db_export_database', args)
+}
+
 // ---- History & saved snippets ----
 
 /** Execution history for a connection (most-recent first). Falls back to mock outside Tauri. */

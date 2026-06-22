@@ -409,10 +409,17 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   const isTauri = () =>
     typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window)
 
-  // Build the export text (CSV or JSON) from the CURRENTLY displayed rows
-  // (after filter + sort) and columns.
-  function buildExport(format: 'csv' | 'json'): { text: string; type: string } {
+  // Build the export text (CSV / JSON / SQL) from the CURRENTLY displayed rows
+  // (after filter + sort) and columns. SQL reuses the same INSERT builder as the
+  // grid's "copy as SQL" path (copySql.buildInsertSql), so escaping/quoting stays
+  // consistent with single-row edits (dml.rs::build_insert).
+  function buildExport(format: 'csv' | 'json' | 'sql'): { text: string; type: string } {
     const displayRows = pageRows.map(({ row }) => row)
+    if (format === 'sql') {
+      const colNames = columns.map(c => c.name)
+      const sql = buildInsertSql(displayRows, table, colNames, dialectFor(engine), schema)
+      return { text: sql, type: 'text/plain' }
+    }
     if (format === 'csv') {
       const header = columns.map(c => csvEscape(c.name)).join(',')
       const lines = displayRows.map(row => columns.map((_, ci) => csvEscape(row[ci])).join(','))
@@ -429,7 +436,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   // Export the displayed rows. Inside Tauri the webview `<a download>` is a no-op,
   // so pick a destination via the dialog plugin and write the file through the
   // backend. Outside Tauri keep the Blob download so the demo still works.
-  async function exportAs(format: 'csv' | 'json') {
+  async function exportAs(format: 'csv' | 'json' | 'sql') {
     setExportMenuOpen(false)
     setExportErr(null)
     const { text, type } = buildExport(format)
@@ -949,10 +956,10 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
               onClick={() => { setExportMenuOpen(o => !o); setSortMenuOpen(false) }}>{t('dbviews.export')}</Btn>
             {exportMenuOpen && (
               <div className="pop-in" style={{ position: 'absolute', top: 'calc(100% + 6px)', right: 0, zIndex: 60, minWidth: 120, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', borderRadius: 10, boxShadow: 'var(--shadow-window)', padding: 4 }}>
-                {(['csv', 'json'] as const).map(fmt => (
+                {(['csv', 'json', 'sql'] as const).map(fmt => (
                   <button key={fmt} className="row" onClick={() => exportAs(fmt)}
                     style={{ width: '100%', gap: 8, padding: '6px 10px', borderRadius: 7, border: 'none', background: 'transparent', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 12.5, textAlign: 'left' }}>
-                    <Icon name={fmt === 'csv' ? 'table-2' : 'file-code'} size={13} />
+                    <Icon name={fmt === 'csv' ? 'table-2' : fmt === 'sql' ? 'database' : 'file-code'} size={13} />
                     {fmt.toUpperCase()}
                   </button>
                 ))}

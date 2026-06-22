@@ -20,6 +20,9 @@ vi.mock('../../services/db', () => ({
   dbErrMsg: (e: unknown) => (e instanceof Error ? e.message : String(e)),
 }))
 
+const dialogSave = vi.fn()
+vi.mock('@tauri-apps/plugin-dialog', () => ({ save: (...a: unknown[]) => dialogSave(...a) }))
+
 const wrap = (ui: React.ReactNode) => render(<LanguageProvider>{ui}</LanguageProvider>)
 
 describe('DataGrid generic rows', () => {
@@ -421,5 +424,32 @@ describe('DataGrid generic rows', () => {
     expect(within(grid).queryByText('y')).toBeNull()
     // null 行(id=2)仍在
     expect(within(grid).getByText('2')).toBeInTheDocument()
+  })
+
+  it('Export → SQL writes batched INSERT statements for the displayed rows', async () => {
+    // T13: SQL 导出选项 —— 把当前显示行渲染成 INSERT 语句,经 exportFile 落盘。
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: {}, configurable: true })
+    dialogSave.mockReset()
+    dialogSave.mockResolvedValue('/tmp/export.sql')
+    const columns: ResultColumn[] = [
+      { name: 'id', type: 'int', pk: true },
+      { name: 'name', type: 'text' },
+    ]
+    const rows: unknown[][] = [[1, 'alice'], [2, "O'Hara"]]
+    wrap(<DataGrid columns={columns} rows={rows} connId="c1" table="orders" engine="postgres" />)
+
+    // 打开导出菜单 → 出现 SQL 选项
+    fireEvent.click(screen.getByText('Export'))
+    const sqlBtn = screen.getByText('SQL')
+    expect(sqlBtn).toBeInTheDocument()
+    fireEvent.click(sqlBtn)
+
+    await waitFor(() => expect(exportFile).toHaveBeenCalledTimes(1))
+    const [path, contents] = exportFile.mock.calls[0] as [string, string]
+    expect(path).toBe('/tmp/export.sql')
+    expect(contents).toContain('INSERT INTO "orders" ("id", "name") VALUES (1, \'alice\');')
+    // 单引号转义为加倍单引号(对齐 dml.rs)
+    expect(contents).toContain("(2, 'O''Hara')")
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
   })
 })

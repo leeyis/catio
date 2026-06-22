@@ -71,6 +71,7 @@ pub fn run() {
             db::commands::db_snippets,
             db::commands::db_save_snippet,
             db::commands::export_file,
+            db::commands::db_export_database,
             db::commands::jdbc_driver_status,
             db::commands::jdbc_download_driver,
             db::commands::jdbc_import_driver,
