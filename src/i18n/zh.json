@@ -191,7 +191,7 @@
     "create": "创建",
     "mongoPlaceholder": "db.collection.find({ ... })  —  支持 find / countDocuments / aggregate / getIndexes / insertOne·Many / updateOne·Many / deleteOne·Many",
     "esPlaceholder": "GET /index/_search\n{ \"query\": { \"match_all\": {} } }  —  也支持 SELECT * FROM index",
-    "redisPlaceholder": "user:*  —  输入 key 匹配模式(glob)做 SCAN 扫描,留空则匹配全部 *;返回 key/type/ttl/value"
+    "redisPlaceholder": "GET user:1  —  直接输入 Redis 命令(GET / HGETALL / SCAN / ZREVRANGE 等),每行一条;破坏性命令(FLUSHALL/CONFIG 等)已禁用"
   },
   "workbench": {
     "collapseSidebar": "收起侧栏",

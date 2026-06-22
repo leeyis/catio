@@ -11,5 +11,6 @@ pub mod es_query;
 pub mod mongo;
 pub mod mongo_shell;
 pub mod redis;
+pub mod redis_command;
 pub mod jdbc;
 pub mod jdbc_config;

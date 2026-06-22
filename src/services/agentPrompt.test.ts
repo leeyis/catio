@@ -24,6 +24,17 @@ describe('buildAgentSystemPrompt', () => {
     expect(p).toContain('Query DSL')
   })
 
+  it('redis → raw Redis commands, not SQL, never suggests it lacks SQL', () => {
+    const p = buildAgentSystemPrompt('sql', '192.168.10.20:6379', 'redis')
+    expect(p).toContain('Redis')
+    expect(p).toContain('HGETALL')
+    expect(p).toContain('SCAN')
+    // must steer away from SQL framing (the bug: agent said "Redis has no SQL")
+    expect(p).toMatch(/never emit SELECT/i)
+    // destructive commands are disabled in the console
+    expect(p).toContain('FLUSHALL')
+  })
+
   it('relational engine → that SQL dialect', () => {
     const p = buildAgentSystemPrompt('sql', 'pg', 'postgres')
     expect(p).toContain('postgres')

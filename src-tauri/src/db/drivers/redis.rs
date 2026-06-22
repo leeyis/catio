@@ -372,49 +372,36 @@ impl Driver for RedisDriver {
         }])
     }
 
-    /// Treat `sql` as a key glob pattern (default "*" if empty).
-    /// Scans the connected DB and returns columns ["key","type","ttl","value"].
+    /// Execute a real Redis command typed in the query console (GET/SET/KEYS/
+    /// HGETALL/SCAN/ZRANGE/TTL/TYPE…). The input is parsed into argv, safety-
+    /// classified (destructive/admin commands are rejected), executed, and the
+    /// heterogeneous reply is mapped into a tabular QueryResult.
     /// v1: operates on default_db (db0 unless overridden at connect).
     async fn query(&self, sql: &str, max_rows: u32) -> Result<QueryResult, DbError> {
-        let pattern = {
-            let trimmed = sql.trim();
-            if trimmed.is_empty() { "*" } else { trimmed }
-        };
+        use crate::db::drivers::redis_command::{classify_command, parse_command_argv, to_query_result, CmdSafety};
 
-        let columns = vec![
-            ColumnInfo { name: "key".into(),   type_name: "string".into(), pk: true  },
-            ColumnInfo { name: "type".into(),  type_name: "string".into(), pk: false },
-            ColumnInfo { name: "ttl".into(),   type_name: "integer".into(), pk: false },
-            ColumnInfo { name: "value".into(), type_name: "mixed".into(),  pk: false },
-        ];
-
-        let mut conn = self.conn.lock().await;
-
-        // SELECT the default DB (ensures we are on the right db after any list_tables call)
-        let _ = select_db(&mut *conn, self.default_db).await;
-
-        let max = max_rows as usize;
-        let (keys, truncated) = scan_keys(&mut *conn, pattern, max).await?;
-
-        let actual_keys: Vec<String> = if truncated {
-            keys[..max].to_vec()
-        } else {
-            keys
-        };
-
-        let mut rows: Vec<Vec<serde_json::Value>> = Vec::with_capacity(actual_keys.len());
-        for key in &actual_keys {
-            if let Some(row) = read_key_row(&mut *conn, key).await {
-                rows.push(row);
-            }
+        let argv = parse_command_argv(sql).map_err(DbError::QueryFailed)?;
+        let cmd_name = argv[0].to_ascii_uppercase();
+        if classify_command(&cmd_name) == CmdSafety::Blocked {
+            return Err(DbError::QueryFailed(format!(
+                "命令 {cmd_name} 在查询控制台中被禁用(破坏性或管理类),请改用 redis-cli 执行"
+            )));
         }
 
-        Ok(QueryResult {
-            columns,
-            rows,
-            rows_affected: None,
-            truncated,
-        })
+        let mut conn = self.conn.lock().await;
+        // SELECT the default DB (ensures we are on the right db after any list_tables call).
+        let _ = select_db(&mut *conn, self.default_db).await;
+
+        let mut cmd = ::redis::cmd(&argv[0]);
+        for a in &argv[1..] {
+            cmd.arg(a.as_str());
+        }
+        let raw: RedisValue = cmd
+            .query_async(&mut *conn)
+            .await
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+
+        Ok(to_query_result(raw, max_rows as usize))
     }
 
     /// Native key-space preview for the data grid: `schema` is the logical DB
