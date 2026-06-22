@@ -24,6 +24,17 @@ pub enum DatabaseObjectType {
     Function,
 }
 
+/// 可被删除的“表的子对象”类型（索引/外键约束/触发器；列由前端 structureDdl
+/// 的 buildDropColumn 处理，这里也保留 Column 以对齐 dbx 的枚举语义、便于后端兜底）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum TableChildObjectType {
+    Column,
+    Index,
+    ForeignKey,
+    Trigger,
+}
+
 /// DROP 对象的入参。schema 仅在 schema-aware 引擎且非空时参与限定。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,6 +56,19 @@ pub struct RenameObjectSqlOptions {
     pub schema: Option<String>,
     pub old_name: String,
     pub new_name: String,
+}
+
+/// DROP 表的子对象（索引/外键/触发器）的入参。`table_name` 是子对象所属的表，
+/// `name` 是子对象自身的名字（索引名/约束名/触发器名）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DropTableChildObjectSqlOptions {
+    pub database_type: DatabaseType,
+    pub object_type: TableChildObjectType,
+    #[serde(default)]
+    pub schema: Option<String>,
+    pub table_name: String,
+    pub name: String,
 }
 
 /// TRUNCATE / 清空表的入参（也用于复制表结构的“源/目标”载体之外的简单表操作）。
@@ -132,6 +156,73 @@ pub fn build_drop_object_sql(options: DropObjectSqlOptions) -> Result<String, St
     ))
 }
 
+/// `schema.name` 的 schema 限定（不带表名，用于 PG 系的 `DROP INDEX schema.idx`、
+/// `DROP TRIGGER schema.trg`）。仅在该引擎应按 schema 限定且 schema 非空时加前缀。
+fn schema_qualified(db: DatabaseType, schema: Option<&str>, name: &str) -> String {
+    match schema {
+        Some(s) if should_qualify_with_schema(db) && !s.is_empty() => {
+            format!("{}.{}", quote_ident(db, s), quote_ident(db, name))
+        }
+        _ => quote_ident(db, name),
+    }
+}
+
+/// DROP 表的子对象（列/索引/外键/触发器），按方言生成正确语法。不支持的组合返回
+/// Err（前端按引擎隐藏入口，这里作后端兜底防御）。
+///
+/// 适配 Catio 引擎集（参考 dbx db_admin_sql.rs build_drop_table_child_object_sql）：
+/// - 列：`ALTER TABLE t DROP COLUMN c`（所有 SQL 引擎）。
+/// - 索引：MySQL/SQLServer 用 `DROP INDEX i ON t`；PG 系（schema 非空）用
+///   `DROP INDEX schema.i`；SQLite/Rqlite/DuckDB/JDBC/PG（无 schema）用 `DROP INDEX i`；
+///   ClickHouse 不支持单独删除二级索引（需 ALTER TABLE ... DROP INDEX，且形态特殊）→ Err。
+/// - 外键：MySQL 用 `ALTER TABLE t DROP FOREIGN KEY fk`；SQLite/Rqlite 无 ALTER DROP
+///   CONSTRAINT → Err；其余用 `ALTER TABLE t DROP CONSTRAINT fk`。
+/// - 触发器：Postgres 用 `DROP TRIGGER trg ON t`；SQLServer 用 `DROP TRIGGER trg`；
+///   ClickHouse 无触发器 → Err；其余（含 schema 限定）用 `DROP TRIGGER [schema.]trg`。
+pub fn build_drop_table_child_object_sql(
+    options: DropTableChildObjectSqlOptions,
+) -> Result<String, String> {
+    let db = options.database_type;
+    ensure_sql_engine(db)?;
+    let table = qualified(db, options.schema.as_deref(), &options.table_name);
+    let name = quote_ident(db, &options.name);
+    match options.object_type {
+        TableChildObjectType::Column => Ok(format!("ALTER TABLE {table} DROP COLUMN {name};")),
+        TableChildObjectType::Index => {
+            if matches!(db, DatabaseType::Clickhouse) {
+                return Err(format!("Dropping indexes is not supported for {}.", database_label(db)));
+            }
+            if matches!(db, DatabaseType::Mysql | DatabaseType::Sqlserver) {
+                return Ok(format!("DROP INDEX {name} ON {table};"));
+            }
+            // Postgres/JDBC：索引按 schema 限定（DROP INDEX 不接表名）。
+            Ok(format!("DROP INDEX {};", schema_qualified(db, options.schema.as_deref(), &options.name)))
+        }
+        TableChildObjectType::ForeignKey => {
+            if matches!(db, DatabaseType::Mysql) {
+                Ok(format!("ALTER TABLE {table} DROP FOREIGN KEY {name};"))
+            } else if matches!(db, DatabaseType::Sqlite | DatabaseType::Rqlite) {
+                Err(format!("Dropping foreign keys is not supported for {}.", database_label(db)))
+            } else {
+                Ok(format!("ALTER TABLE {table} DROP CONSTRAINT {name};"))
+            }
+        }
+        TableChildObjectType::Trigger => {
+            if matches!(db, DatabaseType::Clickhouse) {
+                return Err(format!("Triggers are not supported for {}.", database_label(db)));
+            }
+            if matches!(db, DatabaseType::Postgres) {
+                return Ok(format!("DROP TRIGGER {name} ON {table};"));
+            }
+            if matches!(db, DatabaseType::Sqlserver) {
+                return Ok(format!("DROP TRIGGER {name};"));
+            }
+            // MySQL/SQLite/Rqlite/DuckDB/JDBC：DROP TRIGGER [schema.]trg。
+            Ok(format!("DROP TRIGGER {};", schema_qualified(db, options.schema.as_deref(), &options.name)))
+        }
+    }
+}
+
 /// TRUNCATE TABLE。SQLite/DuckDB 无 TRUNCATE，退化为 DELETE FROM；ClickHouse 支持
 /// TRUNCATE TABLE。
 pub fn build_truncate_table_sql(options: TableAdminSqlOptions) -> Result<String, String> {
@@ -185,14 +276,15 @@ pub fn build_rename_object_sql(options: RenameObjectSqlOptions) -> Result<String
 
     Ok(match db {
         DatabaseType::Sqlserver => {
-            // sp_rename 'schema.old', 'new', 'OBJECT'
+            // sp_rename 'schema.old', 'new', 'OBJECT'。schema 与 old_name 各自先做单引号
+            // 转义再拼接，避免任一含单引号（如 O'Brien）时拼出畸形的 N'...' 字面量。
             let target = match options.schema.as_deref().filter(|s| !s.is_empty()) {
-                Some(s) => format!("{s}.{}", options.old_name),
-                None => options.old_name.clone(),
+                Some(s) => format!("{}.{}", sqlserver_escape(s), sqlserver_escape(&options.old_name)),
+                None => sqlserver_escape(&options.old_name),
             };
             format!(
-                "EXEC sp_rename {}, {}, N'OBJECT';",
-                sqlserver_string(&target),
+                "EXEC sp_rename N'{}', {}, N'OBJECT';",
+                target,
                 sqlserver_string(&options.new_name)
             )
         }
@@ -228,8 +320,14 @@ pub fn build_duplicate_table_structure_sql(
     })
 }
 
+/// SQLServer 字符串字面量内的单引号转义（不含外层 N'…' 包裹），用于把多个标识符
+/// 片段（schema / 对象名）各自转义后再拼接成 sp_rename 的目标字符串。
+fn sqlserver_escape(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
 fn sqlserver_string(value: &str) -> String {
-    format!("N'{}'", value.replace('\'', "''"))
+    format!("N'{}'", sqlserver_escape(value))
 }
 
 #[cfg(test)]
@@ -334,6 +432,159 @@ mod tests {
             })
             .is_err());
         }
+    }
+
+    // ── DROP TABLE CHILD OBJECT (index / FK / trigger / column) ─────────────
+    fn child(
+        db: DatabaseType,
+        object_type: TableChildObjectType,
+        schema: Option<&str>,
+        table: &str,
+        name: &str,
+    ) -> Result<String, String> {
+        build_drop_table_child_object_sql(DropTableChildObjectSqlOptions {
+            database_type: db,
+            object_type,
+            schema: schema.map(str::to_string),
+            table_name: table.into(),
+            name: name.into(),
+        })
+    }
+
+    #[test]
+    fn drops_column_via_alter_table() {
+        assert_eq!(
+            child(DatabaseType::Postgres, TableChildObjectType::Column, Some("public"), "orders", "status").unwrap(),
+            r#"ALTER TABLE "public"."orders" DROP COLUMN "status";"#
+        );
+    }
+
+    #[test]
+    fn drops_mysql_index_with_on_table() {
+        assert_eq!(
+            child(DatabaseType::Mysql, TableChildObjectType::Index, None, "orders", "idx_orders_status").unwrap(),
+            "DROP INDEX `idx_orders_status` ON `orders`;"
+        );
+    }
+
+    #[test]
+    fn drops_mysql_index_qualifies_table_with_database() {
+        // MySQL 的 schema 即库名：DROP INDEX i ON `db`.`t`，避免落到当前库。
+        assert_eq!(
+            child(DatabaseType::Mysql, TableChildObjectType::Index, Some("mydb"), "orders", "idx_status").unwrap(),
+            "DROP INDEX `idx_status` ON `mydb`.`orders`;"
+        );
+    }
+
+    #[test]
+    fn drops_sqlserver_index_with_on_table() {
+        assert_eq!(
+            child(DatabaseType::Sqlserver, TableChildObjectType::Index, Some("dbo"), "orders", "ix_status").unwrap(),
+            "DROP INDEX [ix_status] ON [dbo].[orders];"
+        );
+    }
+
+    #[test]
+    fn drops_postgres_index_schema_qualified_no_table() {
+        assert_eq!(
+            child(DatabaseType::Postgres, TableChildObjectType::Index, Some("public"), "orders", "idx_orders_status").unwrap(),
+            r#"DROP INDEX "public"."idx_orders_status";"#
+        );
+    }
+
+    #[test]
+    fn drops_sqlite_index_bare() {
+        assert_eq!(
+            child(DatabaseType::Sqlite, TableChildObjectType::Index, None, "orders", "idx_status").unwrap(),
+            r#"DROP INDEX "idx_status";"#
+        );
+    }
+
+    #[test]
+    fn drop_index_rejects_clickhouse() {
+        assert!(child(DatabaseType::Clickhouse, TableChildObjectType::Index, None, "t", "i").is_err());
+    }
+
+    #[test]
+    fn drops_mysql_foreign_key() {
+        assert_eq!(
+            child(DatabaseType::Mysql, TableChildObjectType::ForeignKey, None, "orders", "fk_orders_user").unwrap(),
+            "ALTER TABLE `orders` DROP FOREIGN KEY `fk_orders_user`;"
+        );
+    }
+
+    #[test]
+    fn drops_postgres_foreign_key_as_constraint() {
+        assert_eq!(
+            child(DatabaseType::Postgres, TableChildObjectType::ForeignKey, Some("public"), "orders", "fk_orders_user").unwrap(),
+            r#"ALTER TABLE "public"."orders" DROP CONSTRAINT "fk_orders_user";"#
+        );
+    }
+
+    #[test]
+    fn drops_sqlserver_foreign_key_as_constraint() {
+        assert_eq!(
+            child(DatabaseType::Sqlserver, TableChildObjectType::ForeignKey, Some("dbo"), "orders", "fk_orders_user").unwrap(),
+            "ALTER TABLE [dbo].[orders] DROP CONSTRAINT [fk_orders_user];"
+        );
+    }
+
+    #[test]
+    fn drop_foreign_key_rejects_sqlite() {
+        assert!(child(DatabaseType::Sqlite, TableChildObjectType::ForeignKey, None, "t", "fk").is_err());
+        assert!(child(DatabaseType::Rqlite, TableChildObjectType::ForeignKey, None, "t", "fk").is_err());
+    }
+
+    #[test]
+    fn drops_postgres_trigger_on_table() {
+        assert_eq!(
+            child(DatabaseType::Postgres, TableChildObjectType::Trigger, Some("public"), "orders", "orders_audit").unwrap(),
+            r#"DROP TRIGGER "orders_audit" ON "public"."orders";"#
+        );
+    }
+
+    #[test]
+    fn drops_sqlserver_trigger_bare() {
+        assert_eq!(
+            child(DatabaseType::Sqlserver, TableChildObjectType::Trigger, Some("dbo"), "orders", "trg_audit").unwrap(),
+            "DROP TRIGGER [trg_audit];"
+        );
+    }
+
+    #[test]
+    fn drops_mysql_trigger_qualified_with_database() {
+        assert_eq!(
+            child(DatabaseType::Mysql, TableChildObjectType::Trigger, Some("mydb"), "orders", "trg_audit").unwrap(),
+            "DROP TRIGGER `mydb`.`trg_audit`;"
+        );
+    }
+
+    #[test]
+    fn drops_sqlite_trigger_bare() {
+        assert_eq!(
+            child(DatabaseType::Sqlite, TableChildObjectType::Trigger, None, "orders", "trg_audit").unwrap(),
+            r#"DROP TRIGGER "trg_audit";"#
+        );
+    }
+
+    #[test]
+    fn drop_trigger_rejects_clickhouse() {
+        assert!(child(DatabaseType::Clickhouse, TableChildObjectType::Trigger, None, "t", "trg").is_err());
+    }
+
+    #[test]
+    fn drop_child_rejects_non_sql_engines() {
+        for db in [DatabaseType::Redis, DatabaseType::Mongodb, DatabaseType::Elasticsearch] {
+            assert!(child(db, TableChildObjectType::Index, None, "t", "i").is_err());
+        }
+    }
+
+    #[test]
+    fn drop_child_quotes_injection_in_name() {
+        assert_eq!(
+            child(DatabaseType::Postgres, TableChildObjectType::Index, None, "t", r#"a"b"#).unwrap(),
+            r#"DROP INDEX "a""b";"#
+        );
     }
 
     // ── TRUNCATE ──────────────────────────────────────────────────────────
@@ -496,6 +747,23 @@ mod tests {
             new_name: "v2".into(),
         })
         .is_err());
+    }
+
+    // 复现 codex 阻断项：schema / old_name 含单引号（如 O'Brien）时，sp_rename 的目标
+    // 字符串必须仍是合法的 N'...'（单引号成对转义）。
+    #[test]
+    fn renames_sqlserver_escapes_single_quote_in_schema_and_name() {
+        assert_eq!(
+            build_rename_object_sql(RenameObjectSqlOptions {
+                database_type: DatabaseType::Sqlserver,
+                object_type: DatabaseObjectType::Table,
+                schema: Some("O'Brien".into()),
+                old_name: "ord'ers".into(),
+                new_name: "arch'ive".into(),
+            })
+            .unwrap(),
+            "EXEC sp_rename N'O''Brien.ord''ers', N'arch''ive', N'OBJECT';"
+        );
     }
 
     #[test]

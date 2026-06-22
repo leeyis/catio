@@ -9,9 +9,11 @@ import type { TableStructure } from '../../services/types'
 // Backend structure fetch is mocked so the live path renders a known structure
 // (including column comments) without Tauri.
 const tableStructure = vi.fn()
+const dropTableChildObject = vi.fn()
 vi.mock('../../services/db', () => ({
   tableStructure: (...a: unknown[]) => tableStructure(...a),
   runQuery: vi.fn(),
+  dropTableChildObject: (...a: unknown[]) => dropTableChildObject(...a),
   dbErrMsg: (e: unknown) => (e instanceof Error ? e.message : String(e)),
 }))
 
@@ -79,6 +81,39 @@ describe('StructureView 非关系型裁剪', () => {
     // 列/索引 segments stay (Columns label carries a count suffix).
     expect(screen.getByText(/^Columns/)).toBeInTheDocument()
     expect(screen.getByText(/^Indexes/)).toBeInTheDocument()
+  })
+})
+
+describe('StructureView 索引删除安全门控', () => {
+  beforeAll(async () => { await i18n.changeLanguage('en') })
+
+  const withIndex: TableStructure = {
+    ...struct,
+    indexes: [{ name: 'idx_orders_status', cols: 'status', unique: false, method: 'btree' }],
+  }
+
+  it('索引删除需输入索引名原文才放行,确认按钮为 danger 且初始禁用', async () => {
+    tableStructure.mockResolvedValue(withIndex)
+    dropTableChildObject.mockResolvedValue(0)
+    wrap(<StructureView table="orders" connId="c1" schema="public" engine="postgres" />)
+    await screen.findByText('主键编号')
+    fireEvent.click(screen.getByText(/^Indexes/))
+    // 打开删除确认弹窗
+    fireEvent.click(await screen.findByTitle('Drop index'))
+    const confirm = await screen.findByTestId('child-drop-confirm')
+    // 未输入名字时禁用,且不会触发删除
+    expect(confirm).toBeDisabled()
+    fireEvent.click(confirm)
+    expect(dropTableChildObject).not.toHaveBeenCalled()
+    // 输入错误名字仍禁用
+    const input = screen.getByTestId('child-drop-input')
+    fireEvent.change(input, { target: { value: 'wrong' } })
+    expect(confirm).toBeDisabled()
+    // 输入正确名字后放行,删除被调用
+    fireEvent.change(input, { target: { value: 'idx_orders_status' } })
+    expect(confirm).not.toBeDisabled()
+    fireEvent.click(confirm)
+    await waitFor(() => expect(dropTableChildObject).toHaveBeenCalledWith('c1', 'INDEX', 'public', 'orders', 'idx_orders_status'))
   })
 })
 

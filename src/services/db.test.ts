@@ -214,6 +214,23 @@ describe('services/db', () => {
     delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
   })
 
+  it('dropTableChildObject forwards index/FK/trigger to db_drop_table_child_object under Tauri', async () => {
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+    invokeMock.mockResolvedValue(0)
+    const { dropTableChildObject } = await import('./db')
+    await dropTableChildObject('conn-1', 'INDEX', 'public', 'orders', 'idx_status')
+    expect(invokeMock).toHaveBeenCalledWith('db_drop_table_child_object', {
+      connId: 'conn-1', objectType: 'INDEX', schema: 'public', table: 'orders', name: 'idx_status',
+    })
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
+
+  it('dropTableChildObject throws outside Tauri (no silent no-op for destructive ops)', async () => {
+    const { dropTableChildObject } = await import('./db')
+    await expect(dropTableChildObject('c', 'TRIGGER', undefined, 't', 'trg')).rejects.toThrow('Tauri')
+    expect(invokeMock).not.toHaveBeenCalled()
+  })
+
   it('getHistory forwards to db_history under Tauri', async () => {
     ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
     invokeMock.mockResolvedValue([{ id: 'hist-1', kind: 'sql', target: 'conn-1', text: 'SELECT 1', when: '0', dur: '1ms' }])

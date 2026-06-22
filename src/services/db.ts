@@ -176,6 +176,20 @@ export async function dropObject(connId: string, objectType: DbObjectType, schem
   return tauriInvoke<number>('db_drop_object', { connId, objectType, schema, name })
 }
 
+/** Table child-object kinds that can be dropped (mirrors Rust `TableChildObjectType`). */
+export type TableChildObjectKind = 'COLUMN' | 'INDEX' | 'FOREIGN_KEY' | 'TRIGGER'
+
+/**
+ * Drop a table's child object (index/foreign key/trigger; columns go through the
+ * structure-tab DDL flow). The backend generates dialect-correct DROP/ALTER SQL and
+ * executes it, returning rows affected. Destructive — the UI gates this behind a
+ * typed confirmation. Throws outside Tauri.
+ */
+export async function dropTableChildObject(connId: string, objectType: TableChildObjectKind, schema: string | undefined, table: string, name: string): Promise<number> {
+  if (!isTauri()) throw new Error('删除子对象需要 Tauri 运行时')
+  return tauriInvoke<number>('db_drop_table_child_object', { connId, objectType, schema, table, name })
+}
+
 /**
  * Rename a database object (table/view; procedures/functions only on engines that
  * support it). The backend rejects unsupported engine/kind combinations. Throws

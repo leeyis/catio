@@ -5,8 +5,9 @@ use crate::db::result::QueryResult;
 use crate::db::capabilities::Capabilities;
 use crate::db::dml::{self, CellEdit};
 use crate::db::db_admin_sql::{
-    self, DatabaseObjectType, DropObjectSqlOptions, DuplicateTableStructureSqlOptions,
-    RenameObjectSqlOptions, TableAdminSqlOptions,
+    self, DatabaseObjectType, DropObjectSqlOptions, DropTableChildObjectSqlOptions,
+    DuplicateTableStructureSqlOptions, RenameObjectSqlOptions, TableAdminSqlOptions,
+    TableChildObjectType,
 };
 use crate::db::history::{self, HistoryEntry, SnippetEntry};
 use serde::Serialize;
@@ -315,6 +316,36 @@ async fn writable_drv(conn_id: &str, mgr: &ConnManager)
     Ok(drv)
 }
 
+/// 把 DROP/ALTER DROP 执行结果里的「对象不存在」类错误归一化为成功（Ok(0)）。
+///
+/// 背景：并非所有引擎/语句都支持 `IF EXISTS`（如 MySQL 的 `DROP INDEX`、
+/// `ALTER TABLE ... DROP FOREIGN KEY`、`sp_rename` 都不支持），因此无法在 SQL 层统一
+/// 加 IF EXISTS。删除/重试或竞态下目标已不存在时，后端会抛出裸的「does not exist」类
+/// DB 错误，前端无法与真实失败区分。这里在命令层把这类错误吞掉、当作幂等成功返回，
+/// 真实失败（权限/语法/连接等）仍照常上抛。
+fn drop_or_absent(result: Result<QueryResult, DbError>) -> Result<u64, DbError> {
+    match result {
+        Ok(r) => Ok(r.rows_affected.unwrap_or(0)),
+        Err(DbError::QueryFailed(msg)) if is_object_absent_error(&msg) => Ok(0),
+        Err(e) => Err(e),
+    }
+}
+
+/// 判定一条 DB 错误消息是否属于「对象不存在」类（跨引擎，大小写无关）。
+fn is_object_absent_error(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    // Postgres/通用：does not exist；SQLServer：…because it does not exist；
+    // SQLite：no such index/trigger/table；MySQL：Can't DROP …check that…exists /
+    // Unknown table / Unknown trigger (1051/1091/…)。
+    m.contains("does not exist")
+        || m.contains("no such index")
+        || m.contains("no such trigger")
+        || m.contains("no such table")
+        || m.contains("unknown table")
+        || m.contains("unknown trigger")
+        || (m.contains("can't drop") && m.contains("check that"))
+}
+
 /// 删除一个数据库对象（表/视图/存储过程/函数）。生成方言正确的 DROP 后执行。
 #[tauri::command]
 pub async fn db_drop_object(conn_id: String, object_type: DatabaseObjectType,
@@ -324,8 +355,20 @@ pub async fn db_drop_object(conn_id: String, object_type: DatabaseObjectType,
     let sql = db_admin_sql::build_drop_object_sql(DropObjectSqlOptions {
         database_type: drv.db_type(), object_type, schema, name,
     }).map_err(DbError::Unsupported)?;
-    let r = drv.query(&sql, 0).await?;
-    Ok(r.rows_affected.unwrap_or(0))
+    drop_or_absent(drv.query(&sql, 0).await)
+}
+
+/// 删除表的子对象（索引/外键约束/触发器；列由前端 DDL 流程处理）。生成方言正确的
+/// DROP / ALTER 后执行。
+#[tauri::command]
+pub async fn db_drop_table_child_object(conn_id: String, object_type: TableChildObjectType,
+    schema: Option<String>, table: String, name: String, mgr: tauri::State<'_, ConnManager>)
+    -> Result<u64, DbError> {
+    let drv = writable_drv(&conn_id, &mgr).await?;
+    let sql = db_admin_sql::build_drop_table_child_object_sql(DropTableChildObjectSqlOptions {
+        database_type: drv.db_type(), object_type, schema, table_name: table, name,
+    }).map_err(DbError::Unsupported)?;
+    drop_or_absent(drv.query(&sql, 0).await)
 }
 
 /// 重命名一个数据库对象（表/视图，部分引擎支持过程/函数）。
@@ -560,6 +603,39 @@ pub async fn jdbc_open_drivers_dir(app: tauri::AppHandle) -> Result<(), DbError>
 }
 
 // qualified-table tests moved to dialect.rs (`qualified_table`).
+
+#[cfg(test)]
+mod drop_absent_tests {
+    use super::is_object_absent_error;
+
+    #[test]
+    fn detects_postgres_does_not_exist() {
+        assert!(is_object_absent_error("ERROR: table \"orders\" does not exist"));
+        assert!(is_object_absent_error("trigger \"t\" for table \"orders\" does not exist"));
+    }
+
+    #[test]
+    fn detects_mysql_unknown_or_cant_drop() {
+        // MySQL DROP INDEX / DROP FOREIGN KEY 不支持 IF EXISTS，重试/竞态时报这些。
+        assert!(is_object_absent_error("Error 1091: Can't DROP 'idx_status'; check that column/key exists"));
+        assert!(is_object_absent_error("Error 1051: Unknown table 'mydb.orders'"));
+        assert!(is_object_absent_error("Unknown trigger 'trg_audit'"));
+    }
+
+    #[test]
+    fn detects_sqlserver_and_sqlite() {
+        assert!(is_object_absent_error("Cannot drop the index 'ix_status', because it does not exist"));
+        assert!(is_object_absent_error("no such index: idx_status"));
+        assert!(is_object_absent_error("no such trigger: trg_audit"));
+    }
+
+    #[test]
+    fn does_not_match_real_failures() {
+        assert!(!is_object_absent_error("permission denied for table orders"));
+        assert!(!is_object_absent_error("syntax error at or near \"DROP\""));
+        assert!(!is_object_absent_error("connection reset by peer"));
+    }
+}
 
 #[cfg(test)]
 mod jdbc_status_tests {

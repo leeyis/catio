@@ -56,6 +56,7 @@ pub fn run() {
             db::commands::db_preview_dml,
             db::commands::db_apply_edits,
             db::commands::db_drop_object,
+            db::commands::db_drop_table_child_object,
             db::commands::db_rename_object,
             db::commands::db_truncate_table,
             db::commands::db_duplicate_table_structure,
