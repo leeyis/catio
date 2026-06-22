@@ -4,7 +4,7 @@ import { useState, useEffect, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Segmented } from '../atoms'
-import { DataGrid, StructureView } from '../dbviews'
+import { DataGrid, StructureView, RedisKeyspaceView } from '../dbviews'
 import { useData } from '../../state/DataContext'
 import { tablePreview, tableStructure, dbErrMsg, type DbCapabilities } from '../../services/db'
 import type { Connection, ResultColumn } from '../../services/types'
@@ -81,6 +81,8 @@ export function TablePane({ conn, connId, caps, schema, table, density }: TableP
 
   // mongo/es 的数据网格编辑会生成 SQL DML(db_apply_edits),对这两类引擎必败 → 预览只读。
   const sqlDml = conn.engine !== 'mongodb' && conn.engine !== 'elasticsearch'
+  // Redis 无表结构:第二个 segment 改为展示 key 元信息(keyspace 概览)而非列/DDL。
+  const isRedis = (conn.engine ?? '').toLowerCase() === 'redis'
 
   return (
     <>
@@ -96,7 +98,7 @@ export function TablePane({ conn, connId, caps, schema, table, density }: TableP
         </div>
         <Segmented value={tableTab} onChange={setTableTab} options={[
           { value: 'data', label: t('workbench.tabData'), icon: 'table-2' },
-          { value: 'structure', label: t('workbench.tabStructure'), icon: 'columns', testId: 'seg-structure' },
+          { value: 'structure', label: isRedis ? t('workbench.tabKeyspace') : t('workbench.tabStructure'), icon: isRedis ? 'database' : 'columns', testId: 'seg-structure' },
         ]} />
       </div>
       <div className="grow" style={{ minHeight: 0, position: 'relative' }}>
@@ -118,7 +120,9 @@ export function TablePane({ conn, connId, caps, schema, table, density }: TableP
               columns={D.ordersColumns.map((c): ResultColumn => ({ name: c.name, type: c.type, pk: c.pk, fk: c.fk, icon: c.icon }))}
               rows={D.ordersRows.map(r => D.ordersColumns.map(c => (r as unknown as Record<string, unknown>)[c.name]))}
               statusTones={D.statusTones} density={density} key={table} />)}
-        {tableTab === 'structure' && <StructureView table={table} schema={schema} connId={connId ?? undefined} engine={conn.engine} canEdit={caps.structureEdit} key={`${schema ?? ''}.${table}`} />}
+        {tableTab === 'structure' && (isRedis
+          ? <RedisKeyspaceView connId={connId ?? undefined} schema={schema} key={`ks.${schema ?? ''}`} />
+          : <StructureView table={table} schema={schema} connId={connId ?? undefined} engine={conn.engine} canEdit={caps.structureEdit} key={`${schema ?? ''}.${table}`} />)}
       </div>
     </>
   )

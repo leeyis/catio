@@ -92,6 +92,15 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
   // structure edits — MongoDB/ClickHouse/… can VIEW structure but not ALTER it). ----
   const editable = !!connId && canEdit
   const dialect = dialectFor(engine)
+  // Schemaless / non-relational engines have no DDL: hide the DDL + 外键 tabs and
+  // the 添加列 button (MongoDB infers 列/索引 from sampled docs but has no
+  // CREATE TABLE / FK concept). Relational engines keep the full set.
+  const eng = (engine ?? '').toLowerCase()
+  const hasDdl = !['mongodb', 'elasticsearch', 'redis'].includes(eng)
+  // If the engine lacks DDL but the active tab is one of the hidden ones, fall back.
+  useEffect(() => {
+    if (!hasDdl && (tab === 'ddl' || tab === 'fks')) setTab('columns')
+  }, [hasDdl, tab])
   const sqlQualified = qualifiedTable(dialect, schema, table)
   // Open add/modify form (null = closed).
   const [form, setForm] = useState<ColForm | null>(null)
@@ -153,8 +162,10 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
         <Segmented size="sm" value={tab} onChange={setTab} options={[
           { value: 'columns', label: `${t('dbviews.tabColumns')} (${st.columns.length})` },
           { value: 'indexes', label: `${t('dbviews.tabIndexes')} (${st.indexes.length})` },
-          { value: 'fks', label: `${t('dbviews.tabFks')} (${st.fks.length})` },
-          { value: 'ddl', label: 'DDL' },
+          ...(hasDdl ? [
+            { value: 'fks', label: `${t('dbviews.tabFks')} (${st.fks.length})` },
+            { value: 'ddl', label: 'DDL' },
+          ] : []),
         ]} />
         <div className="grow" />
         {tab === 'ddl' && (
@@ -163,7 +174,7 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
             style={ddlCopied ? { color: 'var(--signal-green)' } : undefined} onClick={copyDdl} />
         )}
         <span style={{ fontSize: 11.5, color: 'var(--text-faint)', maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={st.comment || undefined}>{st.comment}</span>
-        <Btn size="sm" variant="secondary" icon="plus" onClick={editable ? openAdd : undefined} disabled={!editable}>{t('dbviews.addColumn')}</Btn>
+        {hasDdl && <Btn size="sm" variant="secondary" icon="plus" onClick={editable ? openAdd : undefined} disabled={!editable}>{t('dbviews.addColumn')}</Btn>}
       </div>
       <div className="grow" style={{ overflow: 'auto' }}>
         {structErr && <Empty icon="alert-triangle" text={structErr} />}

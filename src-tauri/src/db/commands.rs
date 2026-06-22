@@ -217,6 +217,15 @@ pub async fn db_schema_functions(conn_id: String, schema: String,
     drv.list_functions(&schema).await
 }
 
+/// Keyspace overview (DBSIZE + sampled type distribution) for KV engines (Redis),
+/// shown in the structure panel in place of a table structure.
+#[tauri::command]
+pub async fn db_keyspace_info(conn_id: String, schema: String,
+    mgr: tauri::State<'_, ConnManager>) -> Result<crate::db::driver::KeyspaceInfo, DbError> {
+    let drv = mgr.get(&conn_id).await.ok_or(DbError::NotFound(conn_id))?;
+    drv.keyspace_info(&schema).await
+}
+
 #[tauri::command]
 pub async fn db_er_model(conn_id: String, schema: String,
     mgr: tauri::State<'_, ConnManager>) -> Result<Vec<ErRelation>, DbError> {

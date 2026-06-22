@@ -191,7 +191,11 @@
     "create": "创建",
     "mongoPlaceholder": "db.collection.find({ ... })  —  支持 find / countDocuments / aggregate / getIndexes / insertOne·Many / updateOne·Many / deleteOne·Many",
     "esPlaceholder": "GET /index/_search\n{ \"query\": { \"match_all\": {} } }  —  也支持 SELECT * FROM index",
-    "redisPlaceholder": "GET user:1  —  直接输入 Redis 命令(GET / HGETALL / SCAN / ZREVRANGE 等),每行一条;破坏性命令(FLUSHALL/CONFIG 等)已禁用"
+    "redisPlaceholder": "GET user:1  —  直接输入 Redis 命令(GET / HGETALL / SCAN / ZREVRANGE 等),每行一条;破坏性命令(FLUSHALL/CONFIG 等)已禁用",
+    "keyspaceTotal": "键总数",
+    "keyspaceTypes": "类型分布",
+    "keyspaceSampled": "采样 {{n}} 个键",
+    "keyspaceEmpty": "该库暂无键"
   },
   "workbench": {
     "collapseSidebar": "收起侧栏",
@@ -258,6 +262,7 @@
     "colsLabel": "列",
     "tabData": "数据",
     "tabStructure": "结构",
+    "tabKeyspace": "键空间",
     "noTabs": "没有打开的标签",
     "noTabsHint": "从左侧选择表、视图或函数，或新建查询",
     "historySuggestHint": "↑↓ 选择 · Tab/↵ 补全 · Esc 关闭",

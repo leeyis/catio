@@ -48,6 +48,24 @@ pub struct TableInfo {
     pub rows_estimate: Option<i64>,
 }
 
+/// KV 引擎(Redis)的 key 元信息:替代"表结构"展示。`types` 为采样得到的
+/// 键类型分布(string/hash/list/set/zset/stream…),`total_keys` 为 DBSIZE。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyspaceInfo {
+    pub total_keys: u64,
+    /// 实际采样统计的键数(可能小于 total_keys —— 大库只采样前若干个)。
+    pub sampled: u64,
+    pub types: Vec<KeyspaceType>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyspaceType {
+    pub name: String,
+    pub count: u64,
+}
+
 /// 表结构：一列。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -206,6 +224,12 @@ pub trait Driver: Send + Sync {
     /// compile and degrade to a "no definition" state in the UI.
     async fn object_source(&self, _schema: &str, _name: &str, _kind: &str) -> Result<String, DbError> {
         Ok(String::new())
+    }
+
+    /// KV 引擎(Redis)的 key 元信息,用于结构面板的 keyspace 概览。默认 Unsupported:
+    /// 关系型/文档型引擎有真正的表结构,不走这条路径。
+    async fn keyspace_info(&self, _schema: &str) -> Result<KeyspaceInfo, DbError> {
+        Err(DbError::Unsupported("engine has no keyspace info".into()))
     }
 }
 

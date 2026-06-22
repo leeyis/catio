@@ -445,4 +445,39 @@ impl Driver for RedisDriver {
     async fn er_relations(&self, _schema: &str) -> Result<Vec<ErRelation>, DbError> {
         Ok(vec![])
     }
+
+    /// Keyspace overview for the structure panel: DBSIZE + a sampled type
+    /// distribution (TYPE on up to SAMPLE_MAX scanned keys). Redis has no table
+    /// structure, so this replaces the columns/DDL view in the UI.
+    async fn keyspace_info(&self, schema: &str) -> Result<crate::db::driver::KeyspaceInfo, DbError> {
+        use crate::db::driver::{KeyspaceInfo, KeyspaceType};
+        const SAMPLE_MAX: usize = 1000;
+
+        let db = parse_db_number(Some(schema)).unwrap_or(self.default_db);
+        let mut conn = self.conn.lock().await;
+        let _ = select_db(&mut *conn, db).await;
+
+        let total: i64 = ::redis::cmd("DBSIZE").query_async(&mut *conn).await.unwrap_or(0);
+        let (keys, _truncated) = scan_keys(&mut *conn, "*", SAMPLE_MAX).await?;
+        let sample: Vec<String> = keys.into_iter().take(SAMPLE_MAX).collect();
+
+        let mut counts: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        for key in &sample {
+            let t: Result<String, _> = ::redis::cmd("TYPE").arg(key).query_async(&mut *conn).await;
+            if let Ok(t) = t {
+                if t != "none" {
+                    *counts.entry(t).or_insert(0) += 1;
+                }
+            }
+        }
+        // Restore the default db for subsequent reads on the shared connection.
+        let _ = select_db(&mut *conn, self.default_db).await;
+
+        let mut types: Vec<KeyspaceType> =
+            counts.into_iter().map(|(name, count)| KeyspaceType { name, count }).collect();
+        // Most-common type first; stable tiebreak by name.
+        types.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
+
+        Ok(KeyspaceInfo { total_keys: total.max(0) as u64, sampled: sample.len() as u64, types })
+    }
 }

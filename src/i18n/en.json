@@ -191,7 +191,11 @@
     "create": "Create",
     "mongoPlaceholder": "db.collection.find({ ... })  —  supports find / countDocuments / aggregate / getIndexes / insertOne·Many / updateOne·Many / deleteOne·Many",
     "esPlaceholder": "GET /index/_search\n{ \"query\": { \"match_all\": {} } }  —  SELECT * FROM index also works",
-    "redisPlaceholder": "GET user:1  —  type Redis commands directly (GET / HGETALL / SCAN / ZREVRANGE …), one per line; destructive commands (FLUSHALL/CONFIG…) are disabled"
+    "redisPlaceholder": "GET user:1  —  type Redis commands directly (GET / HGETALL / SCAN / ZREVRANGE …), one per line; destructive commands (FLUSHALL/CONFIG…) are disabled",
+    "keyspaceTotal": "Total keys",
+    "keyspaceTypes": "Type distribution",
+    "keyspaceSampled": "{{n}} keys sampled",
+    "keyspaceEmpty": "No keys in this database"
   },
   "workbench": {
     "collapseSidebar": "Collapse sidebar",
@@ -258,6 +262,7 @@
     "colsLabel": "cols",
     "tabData": "Data",
     "tabStructure": "Structure",
+    "tabKeyspace": "Keyspace",
     "noTabs": "No open tabs",
     "noTabsHint": "Pick a table, view or function from the sidebar, or open a new query",
     "historySuggestHint": "↑↓ select · Tab/↵ complete · Esc close",

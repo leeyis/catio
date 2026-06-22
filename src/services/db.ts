@@ -310,6 +310,21 @@ export async function schemaFunctions(connId: string, schema: string): Promise<s
   return tauriInvoke<string[]>('db_schema_functions', { connId, schema })
 }
 
+/** One key-type bucket in a Redis keyspace overview (mirrors Rust KeyspaceType). */
+export interface KeyspaceType { name: string; count: number }
+/** Redis keyspace overview shown in the structure panel (mirrors Rust KeyspaceInfo). */
+export interface KeyspaceInfo { totalKeys: number; sampled: number; types: KeyspaceType[] }
+
+/**
+ * Keyspace overview (DBSIZE + sampled key-type distribution) for KV engines
+ * (Redis), shown in the structure panel instead of a table structure. Outside
+ * Tauri returns an empty overview.
+ */
+export async function keyspaceInfo(connId: string, schema: string): Promise<KeyspaceInfo> {
+  if (!isTauri()) return { totalKeys: 0, sampled: 0, types: [] }
+  return tauriInvoke<KeyspaceInfo>('db_keyspace_info', { connId, schema })
+}
+
 /**
  * Source/DDL of a view, function, or procedure — used by the definition viewer.
  * `kind` is one of 'view' | 'function' | 'procedure'. Outside Tauri returns ''

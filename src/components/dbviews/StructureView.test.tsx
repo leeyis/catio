@@ -59,6 +59,29 @@ describe('StructureView 备注列', () => {
   })
 })
 
+describe('StructureView 非关系型裁剪', () => {
+  beforeAll(async () => { await i18n.changeLanguage('en') })
+
+  it('relational engine shows DDL + 外键 tabs and 添加列', async () => {
+    tableStructure.mockResolvedValue(struct)
+    wrap(<StructureView table="orders" connId="c1" schema="public" engine="postgres" />)
+    await screen.findByText('主键编号')
+    expect(screen.getByText('DDL')).toBeInTheDocument()
+    expect(screen.getByText('Add column')).toBeInTheDocument()
+  })
+
+  it('MongoDB hides DDL + 外键 tabs and 添加列 (no DDL concept), keeps 列/索引', async () => {
+    tableStructure.mockResolvedValue(struct)
+    wrap(<StructureView table="users" connId="c1" schema="app" engine="mongodb" />)
+    await screen.findByText('主键编号')
+    expect(screen.queryByText('DDL')).toBeNull()
+    expect(screen.queryByText('Add column')).toBeNull()
+    // 列/索引 segments stay (Columns label carries a count suffix).
+    expect(screen.getByText(/^Columns/)).toBeInTheDocument()
+    expect(screen.getByText(/^Indexes/)).toBeInTheDocument()
+  })
+})
+
 describe('StructureView DDL 复制', () => {
   beforeAll(async () => { await i18n.changeLanguage('en') })
 
