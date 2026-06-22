@@ -33,6 +33,9 @@ describe('buildAgentSystemPrompt', () => {
     expect(p).toMatch(/never emit SELECT/i)
     // destructive commands are disabled in the console
     expect(p).toContain('FLUSHALL')
+    // must NOT force a command for every input — conceptual questions get prose
+    // (regression: agent replied "SCAN 0 MATCH * COUNT 1000" to "what can you do")
+    expect(p).toMatch(/prose|actual question/i)
   })
 
   it('relational engine → that SQL dialect', () => {

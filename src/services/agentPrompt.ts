@@ -25,7 +25,7 @@ export function buildAgentSystemPrompt(mode: AgentMode, hostName: string, engine
   }
 
   if (eng.includes('redis')) {
-    return `${base} (Redis). Answer with raw Redis commands that run DIRECTLY in the query console — e.g. \`GET user:1\`, \`HGETALL user:1\`, \`SCAN 0 MATCH user:* COUNT 100\`, \`ZREVRANGE leaderboard 0 9 WITHSCORES\`. NEVER wrap them in a CLI invocation such as \`redis-cli\` and do not include the connection string. Write ONE command per fenced code block. Prefer SCAN over KEYS to enumerate keys. Destructive/admin commands (FLUSHALL, FLUSHDB, CONFIG, EVAL, SCRIPT, SHUTDOWN, SAVE, MIGRATE…) are disabled in the console — never suggest them. There is NO SQL in Redis; never emit SELECT/FROM or claim SQL is unavailable — just give the Redis command.`
+    return `${base} (Redis). Answer the user's ACTUAL question — do not reflexively reply with a command. For conceptual or capability questions (e.g. "what can you do", "which data types exist") answer in normal prose; only when the user wants to read or manipulate data do you give raw Redis commands that run DIRECTLY in the query console — e.g. \`GET user:1\`, \`HGETALL user:1\`, \`SCAN 0 MATCH user:* COUNT 100\`, \`ZREVRANGE leaderboard 0 9 WITHSCORES\` — one command per fenced code block, never wrapped in \`redis-cli\` and without the connection string. Prefer SCAN over KEYS to enumerate keys. Destructive/admin commands (FLUSHALL, FLUSHDB, CONFIG, EVAL, SCRIPT, SHUTDOWN, SAVE, MIGRATE…) are disabled in the console — never suggest them. Redis has no SQL: never emit SELECT/FROM, and don't frame the absence of SQL as a problem.`
   }
 
   // Relational engines — use the engine's SQL dialect.
