@@ -161,6 +161,48 @@ export async function applyEdits(connId: string, reqs: EditRequest[]): Promise<n
   return tauriInvoke<number>('db_apply_edits', { connId, reqs })
 }
 
+// ---- Object administration (drop / rename / truncate / duplicate) ----
+
+/** Top-level database object kinds that can be dropped/renamed (mirrors Rust `DatabaseObjectType`). */
+export type DbObjectType = 'TABLE' | 'VIEW' | 'PROCEDURE' | 'FUNCTION'
+
+/**
+ * Drop a database object (table/view/procedure/function). The backend generates
+ * dialect-correct `DROP <kind>` SQL and executes it, returning rows affected.
+ * Destructive — the UI gates this behind a typed confirmation. Throws outside Tauri.
+ */
+export async function dropObject(connId: string, objectType: DbObjectType, schema: string | undefined, name: string): Promise<number> {
+  if (!isTauri()) throw new Error('删除对象需要 Tauri 运行时')
+  return tauriInvoke<number>('db_drop_object', { connId, objectType, schema, name })
+}
+
+/**
+ * Rename a database object (table/view; procedures/functions only on engines that
+ * support it). The backend rejects unsupported engine/kind combinations. Throws
+ * outside Tauri.
+ */
+export async function renameObject(connId: string, objectType: DbObjectType, schema: string | undefined, oldName: string, newName: string): Promise<number> {
+  if (!isTauri()) throw new Error('重命名对象需要 Tauri 运行时')
+  return tauriInvoke<number>('db_rename_object', { connId, objectType, schema, oldName, newName })
+}
+
+/**
+ * Truncate a table (delete all rows). SQLite/Rqlite/DuckDB degrade to DELETE FROM.
+ * Destructive — gated behind a typed confirmation in the UI. Throws outside Tauri.
+ */
+export async function truncateTable(connId: string, schema: string | undefined, table: string): Promise<number> {
+  if (!isTauri()) throw new Error('清空表需要 Tauri 运行时')
+  return tauriInvoke<number>('db_truncate_table', { connId, schema, table })
+}
+
+/**
+ * Duplicate a table's structure (no data) into a new empty table. Throws outside Tauri.
+ */
+export async function duplicateTableStructure(connId: string, schema: string | undefined, source: string, target: string): Promise<number> {
+  if (!isTauri()) throw new Error('复制表结构需要 Tauri 运行时')
+  return tauriInvoke<number>('db_duplicate_table_structure', { connId, schema, source, target })
+}
+
 /** Paginated query — same shape as runQuery but with limit/offset windowing. */
 export async function queryPage(connId: string, sql: string, limit: number, offset: number, defaultNamespace?: string): Promise<QueryResult> {
   if (!isTauri()) return mockQueryResult()

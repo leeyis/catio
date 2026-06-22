@@ -21,6 +21,12 @@ export interface SchemaBrowserProps {
   onNewObjectTemplate?: (schema: string, kind: 'table' | 'view') => void
   /** Re-introspect the schema tree (drives both the header refresh button and the per-schema 刷新). */
   onRefresh?: () => void
+  /**
+   * Object administration entry — invoked from a table/view leaf's "..." menu. The
+   * parent (DbWorkbench) opens the confirmation modal and runs the operation
+   * against the live connection. Omitted on the mock/demo path (menu hidden).
+   */
+  onObjectAdmin?: (op: 'drop' | 'rename' | 'truncate' | 'duplicate', objectType: 'TABLE' | 'VIEW', schema: string, name: string) => void
   erActive: boolean
   sqlActive: boolean
   disabledSql?: boolean
@@ -54,7 +60,7 @@ export interface SchemaBrowserProps {
   onToggleCollapse?: () => void
 }
 
-export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, schemas, conn, live, refreshing, loading, collapsed, onToggleCollapse, sqlActive, canSqlConsole = true, canEr = true, canStructureEdit = true, canViews = true, canFunctions = true }: SchemaBrowserProps) {
+export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, onObjectAdmin, schemas, conn, live, refreshing, loading, collapsed, onToggleCollapse, sqlActive, canSqlConsole = true, canEr = true, canStructureEdit = true, canViews = true, canFunctions = true }: SchemaBrowserProps) {
   const { t } = useTranslation()
   const D = useData()
   // Live path: render every supplied namespace; mock path: the single seeded schema (pixel-identical).
@@ -198,7 +204,7 @@ export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpen
           </div>
         ) : visibleNamespaces.map(ns => (
           <SchemaNode key={ns.name} ns={ns} query={query} active={active} onPick={onPick} onPickObject={onPickObject} live={!!live}
-            onNewQuery={onNewQuery} onOpenER={onOpenER} onNewObjectTemplate={onNewObjectTemplate} onRefresh={onRefresh}
+            onNewQuery={onNewQuery} onOpenER={onOpenER} onNewObjectTemplate={onNewObjectTemplate} onRefresh={onRefresh} onObjectAdmin={onObjectAdmin}
             sqlActive={sqlActive} canSqlConsole={canSqlConsole} canEr={canEr} canStructureEdit={canStructureEdit}
             canViews={canViews} canFunctions={canFunctions} />
         ))}
@@ -223,6 +229,7 @@ interface SchemaNodeProps {
   onOpenER: (schema?: string) => void
   onNewObjectTemplate?: (schema: string, kind: 'table' | 'view') => void
   onRefresh?: () => void
+  onObjectAdmin?: (op: 'drop' | 'rename' | 'truncate' | 'duplicate', objectType: 'TABLE' | 'VIEW', schema: string, name: string) => void
   sqlActive: boolean
   canSqlConsole: boolean
   canEr: boolean
@@ -232,7 +239,7 @@ interface SchemaNodeProps {
 }
 
 /** One schema namespace rendered as a collapsible DB tree node (Tables / Views / Functions). */
-function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, sqlActive, canSqlConsole, canEr, canStructureEdit, canViews, canFunctions }: SchemaNodeProps) {
+function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, onObjectAdmin, sqlActive, canSqlConsole, canEr, canStructureEdit, canViews, canFunctions }: SchemaNodeProps) {
   const { t } = useTranslation()
   const D = useData()
   // Schemas start COLLAPSED — a freshly-connected DB shows nothing expanded until the
@@ -277,6 +284,61 @@ function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery,
     ] : []),
     ...(onRefresh ? [{ icon: 'refresh-cw', label: t('workbench.refresh'), action: () => onRefresh() }] : []),
   ]
+
+  // 单叶节点(表/视图)的对象管理"..."菜单:删除/重命名/清空表/复制表结构。
+  // 仅在 live + 支持结构编辑 + 父级提供 onObjectAdmin 时出现(mock/只读引擎隐藏)。
+  const [leafMenu, setLeafMenu] = useState<string | null>(null)
+  const leafMenuRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!leafMenu) return
+    function onDown(e: MouseEvent) {
+      if (leafMenuRef.current && !leafMenuRef.current.contains(e.target as Node)) setLeafMenu(null)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [leafMenu])
+
+  // 表叶含全部四项;视图叶只含删除/重命名(无清空/复制结构)。
+  const leafAdminMenu = (objectType: 'TABLE' | 'VIEW', name: string) => {
+    if (!(live && canStructureEdit && onObjectAdmin)) return null
+    const key = `${objectType}:${name}`
+    const items: { icon: string; label: string; op: 'drop' | 'rename' | 'truncate' | 'duplicate'; danger?: boolean }[] = [
+      { icon: 'pencil', label: t('workbench.objAdmin.rename'), op: 'rename' },
+      ...(objectType === 'TABLE' ? [
+        { icon: 'copy', label: t('workbench.objAdmin.duplicate'), op: 'duplicate' as const },
+        { icon: 'eraser', label: t('workbench.objAdmin.truncate'), op: 'truncate' as const, danger: true },
+      ] : []),
+      { icon: 'trash-2', label: t('workbench.objAdmin.drop'), op: 'drop', danger: true },
+    ]
+    return (
+      <span style={{ position: 'relative', flex: 'none' }}>
+        <button className="icon-btn bare" data-testid={`leaf-admin-btn:${key}`} title={t('workbench.schemaMenu')} aria-label={t('workbench.schemaMenu')}
+          onClick={e => { e.stopPropagation(); setLeafMenu(m => m === key ? null : key) }}
+          style={{ width: 20, height: 20 }}>
+          <Icon name="more-horizontal" size={12} style={{ color: 'var(--text-tertiary)' }} />
+        </button>
+        {leafMenu === key && (
+          <div ref={leafMenuRef} onClick={e => e.stopPropagation()}
+            style={{ position: 'absolute', top: '100%', right: 0, zIndex: 200, marginTop: 2,
+              background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', borderRadius: 10,
+              boxShadow: 'var(--shadow-dropdown)', padding: '4px 0', minWidth: 150 }}>
+            {items.map(item => (
+              <button key={item.op} data-testid={`leaf-admin-item:${item.op}:${key}`}
+                onClick={() => { setLeafMenu(null); onObjectAdmin(item.op, objectType, ns.name, name) }}
+                className="row gap8"
+                style={{ width: '100%', textAlign: 'left', padding: '7px 12px', border: 'none', background: 'transparent',
+                  fontSize: 12.5, color: item.danger ? 'var(--danger-fg)' : 'var(--text-primary)', cursor: 'pointer', alignItems: 'center' }}
+                onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = item.danger ? 'var(--danger-soft)' : 'var(--accent-soft)' }}
+                onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}>
+                <Icon name={item.icon} size={13} style={{ color: item.danger ? 'var(--danger-fg)' : 'var(--text-tertiary)', flex: 'none' }} />
+                <span className="ell">{item.label}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </span>
+    )
+  }
 
   // Hover-revealed copy/insert actions for a leaf node (table/view/function).
   // Insert is only offered when the active tab is a SQL console (catio-insert is a no-op otherwise).
@@ -355,6 +417,7 @@ function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery,
                   <span className="rowcount mono" style={{ marginLeft: 'auto', fontSize: 9.5, color: 'var(--text-faint)', flex: 'none' }}>{tbl.rows}</span>
                 </button>
                 {leafActions(tbl.name)}
+                {leafAdminMenu('TABLE', tbl.name)}
               </div>
               {showExpand && isOpen && st && (
                 <div className="col" style={{ paddingLeft: 40, paddingBottom: 4 }}>
@@ -380,6 +443,7 @@ function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery,
                 <Icon name="eye" size={12} style={{ color: 'var(--signal-violet)', flex: 'none' }} /><span className="ell mono" style={{ fontSize: 12 }}>{v.name}</span>
               </button>
               {leafActions(v.name)}
+              {leafAdminMenu('VIEW', v.name)}
             </div>
           )
         })}

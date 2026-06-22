@@ -4,6 +4,10 @@ use crate::db::manager::ConnManager;
 use crate::db::result::QueryResult;
 use crate::db::capabilities::Capabilities;
 use crate::db::dml::{self, CellEdit};
+use crate::db::db_admin_sql::{
+    self, DatabaseObjectType, DropObjectSqlOptions, DuplicateTableStructureSqlOptions,
+    RenameObjectSqlOptions, TableAdminSqlOptions,
+};
 use crate::db::history::{self, HistoryEntry, SnippetEntry};
 use serde::Serialize;
 use std::path::PathBuf;
@@ -297,6 +301,68 @@ pub async fn db_apply_edits(conn_id: String, reqs: Vec<EditRequest>,
         affected += r.rows_affected.unwrap_or(0);
     }
     Ok(affected)
+}
+
+/// 危险操作的统一前置：取连接、确认可写引擎。对象管理（DROP/RENAME/TRUNCATE/复制
+/// 表结构）都要改写数据库结构，只读引擎一律拒绝；具体引擎的能力差异由 db_admin_sql
+/// 的纯函数兜底（返回 Unsupported）。
+async fn writable_drv(conn_id: &str, mgr: &ConnManager)
+    -> Result<std::sync::Arc<dyn driver::Driver>, DbError> {
+    let drv = mgr.get(conn_id).await.ok_or_else(|| DbError::NotFound(conn_id.to_string()))?;
+    if !drv.capabilities().writable {
+        return Err(DbError::Unsupported("read-only engine".into()));
+    }
+    Ok(drv)
+}
+
+/// 删除一个数据库对象（表/视图/存储过程/函数）。生成方言正确的 DROP 后执行。
+#[tauri::command]
+pub async fn db_drop_object(conn_id: String, object_type: DatabaseObjectType,
+    schema: Option<String>, name: String, mgr: tauri::State<'_, ConnManager>)
+    -> Result<u64, DbError> {
+    let drv = writable_drv(&conn_id, &mgr).await?;
+    let sql = db_admin_sql::build_drop_object_sql(DropObjectSqlOptions {
+        database_type: drv.db_type(), object_type, schema, name,
+    }).map_err(DbError::Unsupported)?;
+    let r = drv.query(&sql, 0).await?;
+    Ok(r.rows_affected.unwrap_or(0))
+}
+
+/// 重命名一个数据库对象（表/视图，部分引擎支持过程/函数）。
+#[tauri::command]
+pub async fn db_rename_object(conn_id: String, object_type: DatabaseObjectType,
+    schema: Option<String>, old_name: String, new_name: String, mgr: tauri::State<'_, ConnManager>)
+    -> Result<u64, DbError> {
+    let drv = writable_drv(&conn_id, &mgr).await?;
+    let sql = db_admin_sql::build_rename_object_sql(RenameObjectSqlOptions {
+        database_type: drv.db_type(), object_type, schema, old_name, new_name,
+    }).map_err(DbError::Unsupported)?;
+    let r = drv.query(&sql, 0).await?;
+    Ok(r.rows_affected.unwrap_or(0))
+}
+
+/// 截断一张表（清空所有行）。SQLite/Rqlite/DuckDB 退化为 DELETE FROM。
+#[tauri::command]
+pub async fn db_truncate_table(conn_id: String, schema: Option<String>, table: String,
+    mgr: tauri::State<'_, ConnManager>) -> Result<u64, DbError> {
+    let drv = writable_drv(&conn_id, &mgr).await?;
+    let sql = db_admin_sql::build_truncate_table_sql(TableAdminSqlOptions {
+        database_type: drv.db_type(), schema, table_name: table,
+    }).map_err(DbError::Unsupported)?;
+    let r = drv.query(&sql, 0).await?;
+    Ok(r.rows_affected.unwrap_or(0))
+}
+
+/// 复制一张表的结构（不含数据），新建空表。
+#[tauri::command]
+pub async fn db_duplicate_table_structure(conn_id: String, schema: Option<String>,
+    source: String, target: String, mgr: tauri::State<'_, ConnManager>) -> Result<u64, DbError> {
+    let drv = writable_drv(&conn_id, &mgr).await?;
+    let sql = db_admin_sql::build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+        database_type: drv.db_type(), schema, source_name: source, target_name: target,
+    }).map_err(DbError::Unsupported)?;
+    let r = drv.query(&sql, 0).await?;
+    Ok(r.rows_affected.unwrap_or(0))
 }
 
 #[tauri::command]

@@ -164,6 +164,56 @@ describe('services/db', () => {
     delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
   })
 
+  it('dropObject forwards to db_drop_object under Tauri', async () => {
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+    invokeMock.mockResolvedValue(0)
+    const { dropObject } = await import('./db')
+    await dropObject('conn-1', 'TABLE', 'public', 'events')
+    expect(invokeMock).toHaveBeenCalledWith('db_drop_object', {
+      connId: 'conn-1', objectType: 'TABLE', schema: 'public', name: 'events',
+    })
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
+
+  it('dropObject throws outside Tauri (no silent no-op for destructive ops)', async () => {
+    const { dropObject } = await import('./db')
+    await expect(dropObject('c', 'TABLE', undefined, 't')).rejects.toThrow('Tauri')
+    expect(invokeMock).not.toHaveBeenCalled()
+  })
+
+  it('renameObject forwards old/new names to db_rename_object under Tauri', async () => {
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+    invokeMock.mockResolvedValue(0)
+    const { renameObject } = await import('./db')
+    await renameObject('conn-1', 'VIEW', 'public', 'active_users', 'enabled_users')
+    expect(invokeMock).toHaveBeenCalledWith('db_rename_object', {
+      connId: 'conn-1', objectType: 'VIEW', schema: 'public', oldName: 'active_users', newName: 'enabled_users',
+    })
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
+
+  it('truncateTable forwards to db_truncate_table under Tauri', async () => {
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+    invokeMock.mockResolvedValue(0)
+    const { truncateTable } = await import('./db')
+    await truncateTable('conn-1', undefined, 'events')
+    expect(invokeMock).toHaveBeenCalledWith('db_truncate_table', {
+      connId: 'conn-1', schema: undefined, table: 'events',
+    })
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
+
+  it('duplicateTableStructure forwards source/target to db_duplicate_table_structure under Tauri', async () => {
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+    invokeMock.mockResolvedValue(0)
+    const { duplicateTableStructure } = await import('./db')
+    await duplicateTableStructure('conn-1', 'public', 'users', 'users_copy')
+    expect(invokeMock).toHaveBeenCalledWith('db_duplicate_table_structure', {
+      connId: 'conn-1', schema: 'public', source: 'users', target: 'users_copy',
+    })
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
+
   it('getHistory forwards to db_history under Tauri', async () => {
     ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
     invokeMock.mockResolvedValue([{ id: 'hist-1', kind: 'sql', target: 'conn-1', text: 'SELECT 1', when: '0', dur: '1ms' }])

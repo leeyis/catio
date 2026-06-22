@@ -5,12 +5,13 @@ import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { SqlConsole, ERDiagram } from '../dbviews'
 import { CreateObjectModal } from '../dbviews/CreateObjectModal'
+import { ObjectAdminModal } from '../dbviews/ObjectAdminModal'
 import { SchemaBrowser } from './SchemaBrowser'
 import { TablePane } from './TablePane'
 import { ObjectPane } from './ObjectPane'
 import { useData } from '../../state/DataContext'
 import { listActiveDbConnections } from '../../state/dbConnections'
-import { getSchema, runQuery, dbErrMsg, type DbCapabilities } from '../../services/db'
+import { getSchema, runQuery, dropObject, renameObject, truncateTable, duplicateTableStructure, dbErrMsg, type DbCapabilities } from '../../services/db'
 import type { Connection, Schema, SchemaNamespace } from '../../services/types'
 
 export interface DbWorkbenchProps {
@@ -93,6 +94,10 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
 
   // Open CREATE TABLE/VIEW form modal (null → closed). Carries the target schema + kind.
   const [createObj, setCreateObj] = useState<{ schema: string; kind: 'table' | 'view' } | null>(null)
+  // 对象管理(删除/重命名/清空表/复制表结构)的目标 + 操作,驱动 ObjectAdminModal。
+  const [adminObj, setAdminObj] = useState<{ op: 'drop' | 'rename' | 'truncate' | 'duplicate'; objectType: 'TABLE' | 'VIEW'; schema: string; name: string } | null>(null)
+  // 对象管理操作的结果提示(成功 toast / 失败错误)。
+  const [adminMsg, setAdminMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
   // Error surfaced when a CREATE statement fails to run.
   const [createErr, setCreateErr] = useState<string | null>(null)
   // 标签右键菜单(需求1):{tabId,x,y} 定位;全局 click / Escape 关闭。
@@ -292,6 +297,7 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
       <SchemaBrowser onPick={pickTable} onPickObject={pickObject}
         active={activeTab?.kind === 'table' ? { schema: activeTab.schema, table: activeTab.table } : null}
         onNewQuery={(schema) => newQuery(undefined, schema ?? namespace?.name)} onOpenER={openER} onNewObjectTemplate={onNewObjectTemplate} onRefresh={refreshSchema}
+        onObjectAdmin={connId ? (op, objectType, schema, name) => setAdminObj({ op, objectType, schema, name }) : undefined}
         refreshing={refreshing}
         erActive={activeTab?.kind === 'er'} sqlActive={activeTab?.kind === 'sql'}
         disabledSql={!caps.sqlConsole} disabledEr={!caps.er}
@@ -406,6 +412,42 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
               }
             }}
           />
+        )}
+        {/* 对象管理(删除/重命名/清空表/复制表结构)确认弹窗 — 仅 live 连接。 */}
+        {adminObj && connId && (
+          <ObjectAdminModal
+            op={adminObj.op}
+            objectType={adminObj.objectType}
+            schema={adminObj.schema}
+            name={adminObj.name}
+            onCancel={() => setAdminObj(null)}
+            onConfirm={async payload => {
+              const { op, objectType, schema, name } = adminObj
+              try {
+                if (op === 'drop') await dropObject(connId, objectType, schema, name)
+                else if (op === 'truncate') await truncateTable(connId, schema, name)
+                else if (op === 'rename') await renameObject(connId, objectType, schema, name, payload ?? '')
+                else await duplicateTableStructure(connId, schema, name, payload ?? '')
+                setAdminObj(null)
+                const okKey = op === 'drop' ? 'okDrop' : op === 'truncate' ? 'okTruncate' : op === 'rename' ? 'okRename' : 'okDuplicate'
+                setAdminMsg({ kind: 'ok', text: t('workbench.objAdmin.' + okKey) })
+                refreshSchema()
+              } catch (e) {
+                setAdminObj(null)
+                setAdminMsg({ kind: 'err', text: t('workbench.objAdmin.failed', { msg: dbErrMsg(e) }) })
+              }
+            }}
+          />
+        )}
+        {adminMsg && (
+          <div className="row gap6" style={{ position: 'absolute', left: 12, bottom: 12, zIndex: 80, maxWidth: 420, padding: '9px 12px', borderRadius: 10,
+            border: `1px solid ${adminMsg.kind === 'ok' ? 'var(--border-hairline)' : 'var(--danger-border)'}`,
+            background: adminMsg.kind === 'ok' ? 'var(--surface-card)' : 'var(--danger-soft)',
+            color: adminMsg.kind === 'ok' ? 'var(--text-primary)' : 'var(--danger-fg)', fontSize: 12, boxShadow: 'var(--shadow-window)' }}>
+            <Icon name={adminMsg.kind === 'ok' ? 'check' : 'alert-triangle'} size={14} style={{ flex: 'none' }} />
+            <span>{adminMsg.text}</span>
+            <button className="icon-btn bare" style={{ width: 20, height: 20, marginLeft: 'auto' }} onClick={() => setAdminMsg(null)}><Icon name="x" size={12} /></button>
+          </div>
         )}
         {createErr && (
           <div className="row gap6" style={{ position: 'absolute', left: 12, bottom: 12, zIndex: 80, maxWidth: 420, padding: '9px 12px', borderRadius: 10, border: '1px solid var(--danger-border)', background: 'var(--danger-soft)', color: 'var(--danger-fg)', fontSize: 12, boxShadow: 'var(--shadow-window)' }}>
