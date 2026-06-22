@@ -9,7 +9,10 @@ import { SqlConsole } from './SqlConsole'
 // CodeMirror 在 jsdom 下难以稳定挂载,且本测试只关心 SqlConsole 自身的分屏/最大化布局,
 // 故把 SqlEditor 替换成一个轻量桩件。
 vi.mock('./SqlEditor', () => ({
-  SqlEditor: forwardRef<unknown, unknown>(() => <div data-testid="sql-editor-stub" />),
+  // 桩件回显 code,使格式化按钮的接线(对编辑器内容做格式化替换)可被断言。
+  SqlEditor: forwardRef<unknown, { code?: string }>((props, _ref) => (
+    <div data-testid="sql-editor-stub">{props.code}</div>
+  )),
 }))
 
 // db 服务在非 connId(mock)路径下不会被调用,但 import 时仍需存在。
@@ -85,5 +88,28 @@ describe('SqlConsole 分屏与最大化', () => {
     wrap(<SqlConsole />)
     const bar = screen.getByRole('separator')
     expect(() => fireEvent.mouseDown(bar, { clientY: 100 })).not.toThrow()
+  })
+})
+
+describe('SqlConsole 格式化按钮接线', () => {
+  beforeAll(async () => { await i18n.changeLanguage('en') })
+
+  it('点击格式化按钮:按引擎方言重写编辑器内容(关键字大写、多行缩进)', () => {
+    wrap(<SqlConsole fresh engine="postgres" initialCode="select a,b from t where x=1" />)
+    fireEvent.click(screen.getByTitle('Format'))
+    const stub = screen.getByTestId('sql-editor-stub')
+    expect(stub.textContent).toContain('SELECT')
+    expect(stub.textContent).toContain('FROM')
+    expect(stub.textContent).toMatch(/SELECT\n\s+a,/)
+  })
+
+  it('无内容时格式化按钮禁用', () => {
+    wrap(<SqlConsole fresh engine="postgres" />)
+    expect(screen.getByTitle('Format')).toBeDisabled()
+  })
+
+  it('非 SQL 引擎(redis)plain 模式下格式化按钮禁用', () => {
+    wrap(<SqlConsole fresh engine="redis" initialCode="GET foo" />)
+    expect(screen.getByTitle('Format')).toBeDisabled()
   })
 })

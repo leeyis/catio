@@ -32,7 +32,8 @@
     "react-dom": "^18.3.1",
     "react-i18next": "^17.0.8",
     "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1"
+    "remark-gfm": "^4.0.1",
+    "sql-formatter": "^15.8.2"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

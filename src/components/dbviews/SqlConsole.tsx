@@ -10,6 +10,7 @@ import { SqlEditor, type SqlEditorHandle } from './SqlEditor'
 import { mongoCompletion } from './mongoCompletion'
 import { redisCompletion } from './redisCompletion'
 import { redisLinter } from './redisDiagnostics'
+import { formatSql } from './sqlFormatter'
 import type { SQLNamespace } from '@codemirror/lang-sql'
 import { DataGrid } from './DataGrid'
 
@@ -399,7 +400,8 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
             </Btn>
           )}
           <div style={{ width: 1, height: 18, background: 'var(--border-hairline)' }} />
-          <button className="icon-btn bare" title={t('dbviews.format')}><Icon name="wrench" size={15} /></button>
+          <button className="icon-btn bare" title={t('dbviews.format')} disabled={plain || !code.trim()}
+            onClick={() => setCode(prev => formatSql(prev, engine))}><Icon name="wrench" size={15} /></button>
           <button className="icon-btn bare" title={t('dbviews.clear')} onClick={() => setCode('')}><Icon name="eraser" size={15} /></button>
         </div>
         <div className="row gap6" style={{ minWidth: 0 }}>
