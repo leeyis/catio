@@ -392,6 +392,17 @@ export async function objectSource(connId: string, schema: string, name: string,
 }
 
 /**
+ * Save an edited object (view/function/procedure) source. The backend builds the
+ * dialect-correct CREATE OR REPLACE / CREATE OR ALTER statement and executes it.
+ * `kind` is one of 'view' | 'function' | 'procedure'. Returns rows affected (0 for
+ * most DDL). Throws outside Tauri (save needs a live connection).
+ */
+export async function saveObjectSource(connId: string, schema: string, name: string, kind: 'view' | 'function' | 'procedure', source: string): Promise<number> {
+  if (!isTauri()) throw new Error('保存对象源码需要 Tauri 运行时')
+  return tauriInvoke<number>('db_save_object_source', { connId, schema, name, kind, source })
+}
+
+/**
  * Foreign-key relations of a schema, used to draw the ER diagram's edges.
  * Each relation is `{ from, fromCol, to, toCol }` (table + column names).
  * Outside Tauri falls back to the seeded mock ER relations so the demo stays

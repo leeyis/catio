@@ -60,6 +60,7 @@ pub fn run() {
             db::commands::db_rename_object,
             db::commands::db_truncate_table,
             db::commands::db_duplicate_table_structure,
+            db::commands::db_save_object_source,
             db::commands::db_query_page,
             db::commands::db_table_preview,
             db::commands::db_history,

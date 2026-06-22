@@ -9,6 +9,9 @@ use crate::db::db_admin_sql::{
     DuplicateTableStructureSqlOptions, RenameObjectSqlOptions, TableAdminSqlOptions,
     TableChildObjectType,
 };
+use crate::db::object_source_sql::{
+    self, EditableObjectSourceSqlInput, ObjectSourceKind,
+};
 use crate::db::history::{self, HistoryEntry, SnippetEntry};
 use serde::Serialize;
 use std::path::PathBuf;
@@ -391,6 +394,23 @@ pub async fn db_truncate_table(conn_id: String, schema: Option<String>, table: S
     let drv = writable_drv(&conn_id, &mgr).await?;
     let sql = db_admin_sql::build_truncate_table_sql(TableAdminSqlOptions {
         database_type: drv.db_type(), schema, table_name: table,
+    }).map_err(DbError::Unsupported)?;
+    let r = drv.query(&sql, 0).await?;
+    Ok(r.rows_affected.unwrap_or(0))
+}
+
+/// 保存编辑后的对象（视图/函数/存储过程）源码：按方言生成可执行的
+/// CREATE OR REPLACE / CREATE OR ALTER 语句后执行。`kind` 取 "view"|"function"|
+/// "procedure"（与 db_object_source 一致）。返回 rows_affected（DDL 多为 0）。
+#[tauri::command]
+pub async fn db_save_object_source(conn_id: String, schema: Option<String>, name: String,
+    kind: String, source: String, mgr: tauri::State<'_, ConnManager>)
+    -> Result<u64, DbError> {
+    let drv = writable_drv(&conn_id, &mgr).await?;
+    let object_type = ObjectSourceKind::parse(&kind)
+        .ok_or_else(|| DbError::Unsupported(format!("unknown object kind: {kind}")))?;
+    let sql = object_source_sql::build_executable_object_source_sql(EditableObjectSourceSqlInput {
+        database_type: drv.db_type(), object_type, schema, name, source,
     }).map_err(DbError::Unsupported)?;
     let r = drv.query(&sql, 0).await?;
     Ok(r.rows_affected.unwrap_or(0))

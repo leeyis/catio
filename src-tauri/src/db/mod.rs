@@ -11,6 +11,7 @@ pub mod manager;
 pub mod commands;
 pub mod dml;
 pub mod db_admin_sql;
+pub mod object_source_sql;
 pub mod history;
 
 use serde::{Deserialize, Serialize};
