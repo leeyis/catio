@@ -1,82 +1,151 @@
 /**
- * Lightweight Redis command autocompletion for the plain-mode query editor.
- * Modeled on dbx's redisCompletion.ts (apps/desktop/src/lib) but trimmed to what
- * catio's console needs: command-name completion + key-name completion (no arity
- * diagnostics, no subcommands). Blocked/admin commands are intentionally omitted
- * so the menu only offers things that actually run (mirrors redis_command.rs).
+ * Redis command autocompletion for the plain-mode query editor.
  *
- * The core is a pure planner over the text-before-cursor so it unit-tests without
- * a CodeMirror state; `redisCompletion()` wraps it as a CompletionSource — same
- * shape as `mongoCompletion()`.
+ * Backed by the full official command table (`redisCommands.generated.ts`, 370
+ * commands incl. subcommands, generated from Redis commands.json). Goes beyond
+ * dbx's arity-only completion: each item carries the official summary, parameter
+ * signature, complexity, version and safety. Three modes — command / subcommand
+ * / argument (key names) — plus key-name completion sampled from the live DB.
+ *
+ * The planner is pure (text-before-cursor → options) so it unit-tests without a
+ * CodeMirror state; `redisCompletion()` wraps it as a CompletionSource.
  */
 import type { CompletionContext, CompletionResult, Completion } from '@codemirror/autocomplete'
+import { REDIS_COMMANDS, type RedisCommandDoc } from './redisCommands.generated'
 
 export interface RedisOption {
   label: string
   apply?: string
   detail?: string
+  info?: string
   type?: string
+  boost?: number
 }
 
 export interface RedisPlan {
-  /** Number of chars before the cursor that the inserted text replaces. */
   replaceLen: number
   options: RedisOption[]
 }
 
-interface CmdMeta { name: string; group: string }
+// ---- Indexes derived once from the generated table ----
+interface MainEntry { name: string; doc: RedisCommandDoc }
+interface SubEntry { sub: string; doc: RedisCommandDoc }
 
-// Command set, grouped. Blocked/admin commands (FLUSHALL/CONFIG/EVAL/SHUTDOWN/…)
-// are deliberately absent — they're rejected by the backend. KEYS is kept (it
-// runs) but users are nudged toward SCAN by the prompt/placeholder.
-const COMMANDS: CmdMeta[] = [
-  // string
-  ...['GET', 'SET', 'SETEX', 'SETNX', 'GETSET', 'GETDEL', 'GETRANGE', 'SETRANGE', 'APPEND', 'STRLEN', 'MGET', 'MSET', 'MSETNX', 'INCR', 'INCRBY', 'INCRBYFLOAT', 'DECR', 'DECRBY'].map(name => ({ name, group: 'string' })),
-  // generic key
-  ...['DEL', 'UNLINK', 'EXISTS', 'EXPIRE', 'EXPIREAT', 'PEXPIRE', 'PERSIST', 'TTL', 'PTTL', 'TYPE', 'RENAME', 'RENAMENX', 'COPY', 'MOVE', 'TOUCH', 'DUMP', 'RESTORE', 'SCAN', 'KEYS', 'RANDOMKEY', 'SORT'].map(name => ({ name, group: 'generic' })),
-  // list
-  ...['LPUSH', 'RPUSH', 'LPUSHX', 'RPUSHX', 'LPOP', 'RPOP', 'LRANGE', 'LLEN', 'LINDEX', 'LSET', 'LINSERT', 'LREM', 'LTRIM', 'LMOVE', 'RPOPLPUSH', 'LPOS'].map(name => ({ name, group: 'list' })),
-  // hash
-  ...['HSET', 'HSETNX', 'HGET', 'HMGET', 'HGETALL', 'HDEL', 'HEXISTS', 'HKEYS', 'HVALS', 'HLEN', 'HINCRBY', 'HINCRBYFLOAT', 'HSTRLEN', 'HSCAN', 'HRANDFIELD'].map(name => ({ name, group: 'hash' })),
-  // set
-  ...['SADD', 'SREM', 'SMEMBERS', 'SISMEMBER', 'SMISMEMBER', 'SCARD', 'SPOP', 'SRANDMEMBER', 'SMOVE', 'SSCAN', 'SINTER', 'SUNION', 'SDIFF', 'SINTERCARD'].map(name => ({ name, group: 'set' })),
-  // zset
-  ...['ZADD', 'ZREM', 'ZSCORE', 'ZMSCORE', 'ZCARD', 'ZCOUNT', 'ZINCRBY', 'ZRANK', 'ZREVRANK', 'ZRANGE', 'ZREVRANGE', 'ZRANGEBYSCORE', 'ZREVRANGEBYSCORE', 'ZREMRANGEBYRANK', 'ZREMRANGEBYSCORE', 'ZSCAN'].map(name => ({ name, group: 'zset' })),
-  // stream
-  ...['XADD', 'XLEN', 'XRANGE', 'XREVRANGE', 'XREAD', 'XDEL', 'XTRIM', 'XINFO'].map(name => ({ name, group: 'stream' })),
-  // bitmap / hll / geo
-  ...['SETBIT', 'GETBIT', 'BITCOUNT', 'BITPOS'].map(name => ({ name, group: 'bitmap' })),
-  ...['PFADD', 'PFCOUNT', 'PFMERGE'].map(name => ({ name, group: 'hyperloglog' })),
-  ...['GEOADD', 'GEODIST', 'GEOPOS', 'GEOSEARCH'].map(name => ({ name, group: 'geo' })),
-  // server / connection (no key argument)
-  ...['DBSIZE', 'INFO', 'TIME', 'COMMAND', 'LASTSAVE'].map(name => ({ name, group: 'server' })),
-  ...['PING', 'ECHO', 'SELECT'].map(name => ({ name, group: 'connection' })),
-]
+const MAIN_COMMANDS: MainEntry[] = []
+const SUBS_BY_CONTAINER = new Map<string, SubEntry[]>()
+const SUB_CONTAINERS = new Set<string>()
 
-const CMD_BY_NAME = new Map(COMMANDS.map(c => [c.name, c]))
+for (const [name, doc] of Object.entries(REDIS_COMMANDS)) {
+  if (doc.container && doc.sub) {
+    const list = SUBS_BY_CONTAINER.get(doc.container) ?? []
+    list.push({ sub: doc.sub, doc })
+    SUBS_BY_CONTAINER.set(doc.container, list)
+    SUB_CONTAINERS.add(doc.container)
+  } else {
+    MAIN_COMMANDS.push({ name, doc })
+  }
+}
+// Container commands (CONFIG/XINFO/ACL…) that have no standalone entry still need
+// a main-name option so the user can type the container token first.
+for (const cont of SUB_CONTAINERS) {
+  if (!REDIS_COMMANDS[cont]) {
+    const subs = SUBS_BY_CONTAINER.get(cont) ?? []
+    MAIN_COMMANDS.push({
+      name: cont,
+      doc: {
+        arity: -2,
+        group: subs[0]?.doc.group ?? 'server',
+        summary: `${cont} 容器命令(含 ${subs.length} 个子命令)`,
+        safety: subs.every(s => s.doc.safety === 'blocked') ? 'blocked' : 'allowed',
+        takesKey: false,
+        multiKey: false,
+      },
+    })
+  }
+}
+MAIN_COMMANDS.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
 
-// Groups whose first argument is a key name → enable key completion there.
-const KEY_GROUPS = new Set(['string', 'generic', 'list', 'hash', 'set', 'zset', 'stream', 'bitmap', 'hyperloglog', 'geo'])
-// Commands taking a variadic list of keys — keep suggesting keys past the first slot.
-const MULTI_KEY = new Set(['DEL', 'UNLINK', 'EXISTS', 'TOUCH', 'MGET', 'PFCOUNT', 'PFMERGE', 'SINTER', 'SUNION', 'SDIFF'])
+// Surface common groups higher in the menu.
+const GROUP_BOOST: Record<string, number> = { string: 12, generic: 11, hash: 9, list: 9, set: 9, 'sorted-set': 9, connection: 6, server: 4 }
+
+function describeArity(arity: number): string {
+  if (arity > 0) { const n = arity - 1; return `精确 ${n} 个参数` }
+  const n = -arity - 1
+  return `至少 ${n} 个参数`
+}
+
+function buildInfo(label: string, doc: RedisCommandDoc): string {
+  const head = doc.syntax ? `${label} ${doc.syntax}` : label
+  const meta: string[] = []
+  if (doc.complexity) meta.push(`复杂度 ${doc.complexity}`)
+  if (doc.since) meta.push(`since ${doc.since}`)
+  meta.push(`group ${doc.group}`)
+  meta.push(describeArity(doc.arity))
+  if (doc.safety === 'blocked') meta.push('⛔ 控制台已禁用')
+  else if (doc.safety === 'confirm') meta.push('⚠ 写命令(会修改数据)')
+  return [head, doc.summary, meta.join(' · ')].filter(Boolean).join('\n')
+}
+
+function safetyDetail(doc: RedisCommandDoc): string {
+  if (doc.safety === 'blocked') return `${doc.group} · ⛔`
+  if (doc.safety === 'confirm') return `${doc.group} · 写`
+  return doc.group
+}
+
+function optFor(label: string, doc: RedisCommandDoc, applyExtra = ' '): RedisOption {
+  return {
+    label,
+    apply: `${label}${applyExtra}`,
+    detail: safetyDetail(doc),
+    info: buildInfo(label, doc),
+    type: 'keyword',
+    boost: (GROUP_BOOST[doc.group] ?? 0) - (doc.safety === 'blocked' ? 30 : 0),
+  }
+}
 
 function commandOptions(prefix: string): RedisOption[] {
   const p = prefix.toLowerCase()
-  return COMMANDS
-    .filter(c => !p || c.name.toLowerCase().startsWith(p))
-    // Trailing space so the user flows straight into the first argument.
-    .map(c => ({ label: c.name, apply: `${c.name} `, detail: c.group, type: 'keyword' }))
+  return MAIN_COMMANDS
+    .filter(e => !p || e.name.toLowerCase().startsWith(p))
+    .map(e => optFor(e.name, e.doc))
+}
+
+function subcommandOptions(container: string, prefix: string): RedisOption[] {
+  const p = prefix.toLowerCase()
+  return (SUBS_BY_CONTAINER.get(container) ?? [])
+    .filter(e => !p || e.sub.toLowerCase().startsWith(p))
+    .map(e => optFor(e.sub, e.doc))
 }
 
 function keyOptions(prefix: string, keys: string[]): RedisOption[] {
   const p = prefix.toLowerCase()
   const matched = p ? keys.filter(k => k.toLowerCase().includes(p)) : keys
-  return matched.slice(0, 100).map(k => ({ label: k, apply: k, detail: 'key', type: 'variable' }))
+  return matched.slice(0, 100).map(k => ({
+    label: k,
+    apply: k,
+    detail: 'key',
+    type: 'variable',
+    boost: p && k.toLowerCase().startsWith(p) ? 5 : 0,
+  }))
+}
+
+/** Resolve the command doc for a tokenized line (prefers "MAIN SUB" over "MAIN"). */
+export function resolveRedisDoc(upperTokens: string[]): RedisCommandDoc | null {
+  if (upperTokens.length === 0) return null
+  if (upperTokens.length >= 2) {
+    const two = REDIS_COMMANDS[`${upperTokens[0]} ${upperTokens[1]}`]
+    if (two) return two
+  }
+  return REDIS_COMMANDS[upperTokens[0]] ?? null
+}
+
+/** True if the first typed token is a container that has subcommands. */
+export function isRedisContainer(token: string): boolean {
+  return SUB_CONTAINERS.has(token.toUpperCase())
 }
 
 /**
  * Plan a completion from the text before the cursor on the current line.
- * Returns null when no candidate applies.
  */
 export function redisCompletionPlan(before: string, keys: string[]): RedisPlan | null {
   const endsWithSpace = before.length > 0 && /\s$/.test(before)
@@ -90,12 +159,21 @@ export function redisCompletionPlan(before: string, keys: string[]): RedisPlan |
     return opts.length ? { replaceLen: currentWord.length, options: opts } : null
   }
 
-  // Argument position — offer key names when the command's first arg is a key.
   const main = typed[0].toUpperCase()
-  const meta = CMD_BY_NAME.get(main)
-  if (!meta || !KEY_GROUPS.has(meta.group)) return null
-  const argIndex = typed.length - 1 // 0-based, after the command token
-  const suggestKey = MULTI_KEY.has(main) || argIndex === 0
+
+  // Subcommand position — `CONFIG <here>`, `XINFO <here>`, etc.
+  if (typed.length === 1 && SUB_CONTAINERS.has(main)) {
+    const opts = subcommandOptions(main, currentWord)
+    if (opts.length) return { replaceLen: currentWord.length, options: opts }
+    // fall through to argument handling if no subcommand matches
+  }
+
+  // Argument position — offer key names at the key slot of a key command.
+  const headLen = typed.length >= 2 && REDIS_COMMANDS[`${main} ${typed[1].toUpperCase()}`] ? 2 : 1
+  const doc = resolveRedisDoc(typed.map(t => t.toUpperCase()))
+  if (!doc || !doc.takesKey) return null
+  const argIndex = typed.length - headLen // 0-based after the command head
+  const suggestKey = doc.multiKey || argIndex === 0
   if (!suggestKey) return null
   const opts = keyOptions(currentWord, keys)
   return opts.length ? { replaceLen: currentWord.length, options: opts } : null
@@ -113,7 +191,9 @@ export function redisCompletion(getKeys: () => string[]) {
     if (!plan) return null
     return {
       from: context.pos - plan.replaceLen,
-      options: plan.options.map(o => ({ label: o.label, apply: o.apply, detail: o.detail, type: o.type } as Completion)),
+      options: plan.options.map(o => ({
+        label: o.label, apply: o.apply, detail: o.detail, info: o.info, type: o.type, boost: o.boost,
+      } as Completion)),
       validFor: /[\w:*.\-]*$/,
     }
   }

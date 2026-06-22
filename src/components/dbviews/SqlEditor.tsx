@@ -9,6 +9,7 @@ import { EditorView, keymap, placeholder as cmPlaceholder, lineNumbers, highligh
 import { EditorState, Compartment, type Extension } from '@codemirror/state'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
 import { autocompletion, completionKeymap, closeBrackets, closeBracketsKeymap, type CompletionSource } from '@codemirror/autocomplete'
+import { linter, lintGutter, type Diagnostic } from '@codemirror/lint'
 import { syntaxHighlighting, HighlightStyle, bracketMatching, indentOnInput } from '@codemirror/language'
 import { tags as t } from '@lezer/highlight'
 import { sql, PostgreSQL, MySQL, SQLite, MSSQL, type SQLDialect, type SQLNamespace } from '@codemirror/lang-sql'
@@ -34,6 +35,8 @@ export interface SqlEditorProps {
   plain?: boolean
   /** plain 模式下的自定义补全源(如 mongo shell 补全)。非 plain 时忽略。 */
   completion?: CompletionSource
+  /** plain 模式下的语法诊断源(如 redis 命令诊断)。非 plain 时忽略。 */
+  lintSource?: (view: EditorView) => Diagnostic[]
 }
 
 /** Imperative handle exposed to parents (e.g. SqlConsole) for cursor-aware
@@ -152,7 +155,7 @@ const catioTheme = EditorView.theme(
 )
 
 export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function SqlEditor(
-  { code, onChange, minHeight, target = 'prod-orders', schema, onRun, onRunSelection, placeholder, plain, completion },
+  { code, onChange, minHeight, target = 'prod-orders', schema, onRun, onRunSelection, placeholder, plain, completion, lintSource },
   ref,
 ) {
   const { t: tr } = useTranslation()
@@ -163,7 +166,13 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
   // Build the language/completion extension for the SQL compartment. Plain mode
   // (mongo/es) drops lang-sql; it gets a custom completion source when provided.
   function langExt(): Extension {
-    if (plain) return completion ? autocompletion({ override: [completion] }) : []
+    if (plain) {
+      const exts: Extension[] = []
+      if (completion) exts.push(autocompletion({ override: [completion] }))
+      // Inline syntax diagnostics (e.g. redis arity/unknown/blocked) + gutter marks.
+      if (lintSource) exts.push(linter(view => lintSource(view)), lintGutter())
+      return exts
+    }
     return [sql({ dialect: PostgreSQL, schema, upperCaseKeywords: true }), autocompletion()]
   }
   // Keep the latest callbacks without re-running the mount effect.
@@ -257,7 +266,7 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
     if (!view) return
     view.dispatch({ effects: sqlCompartment.current.reconfigure(langExt()) })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [schema, plain, completion])
+  }, [schema, plain, completion, lintSource])
 
   // Sync external `code` changes (e.g. AI-inserted SQL, Clear button) into the
   // doc without clobbering the cursor while the user types locally.

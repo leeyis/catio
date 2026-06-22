@@ -9,6 +9,7 @@ import type { ResultColumn, Schema } from '../../services/types'
 import { SqlEditor, type SqlEditorHandle } from './SqlEditor'
 import { mongoCompletion } from './mongoCompletion'
 import { redisCompletion } from './redisCompletion'
+import { redisLinter } from './redisDiagnostics'
 import type { SQLNamespace } from '@codemirror/lang-sql'
 import { DataGrid } from './DataGrid'
 
@@ -182,6 +183,8 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
       : undefined),
     [engine],
   )
+  // Syntax diagnostics source (redis only) — arity / unknown / blocked / quotes.
+  const lintSource = useMemo(() => (engine === 'redis' ? redisLinter : undefined), [engine])
 
   // Stable identity of the schema namespaces (names only) so the column fetch
   // re-runs when connId or the schema list changes, but NOT on every keystroke.
@@ -435,7 +438,7 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
           width: '100%',
           borderBottom: phase === 'idle' ? 'none' : '1px solid var(--border-hairline)',
         }}>
-          <SqlEditor ref={editorRef} code={code} onChange={setCode} schema={editorSchema} onRun={run} onRunSelection={connId ? (sql => run(sql)) : undefined} placeholder={editorPlaceholder} plain={plain} completion={completion} />
+          <SqlEditor ref={editorRef} code={code} onChange={setCode} schema={editorSchema} onRun={run} onRunSelection={connId ? (sql => run(sql)) : undefined} placeholder={editorPlaceholder} plain={plain} completion={completion} lintSource={lintSource} />
         </div>
       )}
       {/* 功能#5:编辑区与结果区之间的水平拖动分隔条。仅在 split 态且有结果区时显示。 */}
