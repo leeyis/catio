@@ -129,6 +129,27 @@ describe('classifyAiSqlExecution — categories', () => {
     expect(d.category).toBe('low_risk_write')
     expect(d.action).toBe('auto_execute')
   })
+
+  it('EXPLAIN ANALYZE wrapping a write must NOT be read / auto_execute', () => {
+    // PG 等引擎 EXPLAIN ANALYZE 会真实执行被包裹的语句,不能当只读直通执行。
+    const upd = classifyAiSqlExecution('EXPLAIN ANALYZE UPDATE orders SET paid = true', conn({ name: 'dev-db' }))
+    expect(upd.category).not.toBe('read')
+    expect(upd.action).not.toBe('auto_execute')
+
+    const del = classifyAiSqlExecution('EXPLAIN ANALYZE DELETE FROM orders WHERE id = 1', conn({ name: 'dev-db' }))
+    expect(del.category).not.toBe('read')
+    expect(del.action).not.toBe('auto_execute')
+
+    const drop = classifyAiSqlExecution('EXPLAIN ANALYZE DROP TABLE orders', conn({ name: 'dev-db' }))
+    expect(drop.category).toBe('dangerous')
+    expect(drop.action).toBe('block')
+  })
+
+  it('plain EXPLAIN (no ANALYZE) of a SELECT stays read / auto_execute', () => {
+    const d = classifyAiSqlExecution('EXPLAIN SELECT * FROM orders', conn())
+    expect(d.category).toBe('read')
+    expect(d.action).toBe('auto_execute')
+  })
 })
 
 describe('classifyAiSqlExecution — multi-statement', () => {
@@ -149,6 +170,29 @@ describe('classifyAiSqlExecution — multi-statement', () => {
     const d = classifyAiSqlExecution('SELECT 1; SELECT 2', conn())
     expect(d.category).toBe('read')
     expect(d.action).toBe('auto_execute')
+  })
+
+  it('a -- inside a string literal must NOT comment out a trailing dangerous statement', () => {
+    // 字符串内的 -- 不应被当作行注释把后续 DROP 语句掩盖掉
+    const d = classifyAiSqlExecution("SELECT '--'; DROP TABLE orders", conn({ name: 'dev-db' }))
+    expect(d.category).toBe('dangerous')
+    expect(d.action).toBe('block')
+  })
+
+  it('a line comment containing an unpaired quote must NOT swallow a trailing dangerous statement', () => {
+    // 攻击路径:行注释里含未配对引号时,若先 mask 字符串字面量再剥注释,
+    // regex 会把 -- '...SELECT 'ok' 整体当成一个字符串字面量跨行吞掉,消掉分号,
+    // 使 DROP TABLE 逃逸分类被 auto_execute,但 DB 实际会执行 DROP。
+    const d = classifyAiSqlExecution("SELECT 1; -- '\nDROP TABLE t; SELECT 'ok'", conn({ name: 'dev-db' }))
+    expect(d.category).toBe('dangerous')
+    expect(d.action).toBe('block')
+  })
+
+  it('a block comment containing an unpaired quote must NOT swallow a trailing dangerous statement', () => {
+    // 同理:块注释里的未配对引号也不能让后续 DROP 逃逸。
+    const d = classifyAiSqlExecution("SELECT 1 /* ' */; DROP TABLE t; SELECT 'ok'", conn({ name: 'dev-db' }))
+    expect(d.category).toBe('dangerous')
+    expect(d.action).toBe('block')
   })
 })
 
