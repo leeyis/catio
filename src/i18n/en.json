@@ -324,7 +324,10 @@
     "transferApply": "Migrate {{count}} column(s)",
     "transferring": "Migrating…",
     "transferDone": "Migrated {{count}} row(s).",
-    "transferError": "Migration failed: {{message}}"
+    "transferError": "Migration failed: {{message}}",
+    "transferProgress": "Migrated {{transferred}} / {{total}} rows ({{pct}}%)",
+    "transferProgressUnknown": "Migrated {{transferred}} rows…",
+    "close": "Close"
   },
   "dbexport": {
     "title": "Export Database",

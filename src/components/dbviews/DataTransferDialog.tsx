@@ -58,6 +58,8 @@ export function DataTransferDialog({
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [summary, setSummary] = useState<number | null>(null)
+  // 迁移进度(后端 db://transfer-progress 事件):total 可能未知(COUNT 失败)→ 无百分比。
+  const [progress, setProgress] = useState<{ transferred: number; total: number | null } | null>(null)
 
   const targetEngine = useMemo(
     () => connections.find(c => c.id === targetConnId)?.engine,
@@ -145,8 +147,18 @@ export function DataTransferDialog({
   async function runTransfer() {
     if (!ready) return
     setErr(null)
+    setProgress(null)
     setBusy(true)
+    // 订阅后端进度事件(仅 Tauri 运行时;jsdom/测试下跳过,不影响行为)。
+    let unlisten: (() => void) | null = null
     try {
+      if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
+        const { listen } = await import('@tauri-apps/api/event')
+        unlisten = await listen<{ transferred: number; total: number | null; done: boolean }>(
+          'db://transfer-progress',
+          e => setProgress({ transferred: e.payload.transferred, total: e.payload.total ?? null }),
+        )
+      }
       const mappings: TransferColumnMapping[] = Object.entries(mapping)
         .filter(([, target]) => target.trim() !== '')
         .map(([sourceColumn, targetColumn]) => ({ sourceColumn, targetColumn }))
@@ -167,6 +179,8 @@ export function DataTransferDialog({
     } catch (e) {
       setErr(dbErrMsg(e))
     } finally {
+      if (unlisten) unlisten()
+      setProgress(null)
       setBusy(false)
     }
   }
@@ -319,6 +333,29 @@ export function DataTransferDialog({
               <span>{t('dbviews.transferError', { message: err })}</span>
             </div>
           )}
+          {busy && (() => {
+            const t0 = progress?.transferred ?? 0
+            const total = progress?.total ?? null
+            const pct = total && total > 0 ? Math.min(100, Math.round((t0 / total) * 100)) : null
+            return (
+              <div className="col" style={{ gap: 6 }}>
+                <div className="row" style={{ alignItems: 'center', gap: 8, fontSize: 12.5, color: 'var(--text-secondary)' }}>
+                  <Icon name="loader" size={14} style={{ animation: 'spin 1s linear infinite', flex: 'none' }} />
+                  <span>{pct != null
+                    ? t('dbviews.transferProgress', { transferred: t0, total, pct })
+                    : t('dbviews.transferProgressUnknown', { transferred: t0 })}</span>
+                </div>
+                {/* 已知总数时显示百分比进度条;未知时显示不确定态(满宽淡色)。 */}
+                <div style={{ height: 6, borderRadius: 999, background: 'var(--surface-sunken)', overflow: 'hidden' }}>
+                  <div style={{
+                    height: '100%', borderRadius: 999, background: 'var(--accent-primary)',
+                    width: pct != null ? `${pct}%` : '100%', opacity: pct != null ? 1 : 0.35,
+                    transition: 'width 0.2s ease',
+                  }} />
+                </div>
+              </div>
+            )
+          })()}
           {summary != null && (
             <div className="row gap8" style={{ alignItems: 'center', color: 'var(--accent-primary)', fontSize: 12.5 }}>
               <Icon name="circle-check" size={14} />

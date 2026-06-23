@@ -324,7 +324,10 @@
     "transferApply": "迁移 {{count}} 列",
     "transferring": "迁移中…",
     "transferDone": "已迁移 {{count}} 行。",
-    "transferError": "迁移失败：{{message}}"
+    "transferError": "迁移失败：{{message}}",
+    "transferProgress": "已迁移 {{transferred}} / {{total}} 行（{{pct}}%）",
+    "transferProgressUnknown": "已迁移 {{transferred}} 行…",
+    "close": "关闭"
   },
   "dbexport": {
     "title": "整库导出",

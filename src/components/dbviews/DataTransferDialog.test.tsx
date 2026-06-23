@@ -109,6 +109,9 @@ describe('DataTransferDialog', () => {
       upsertKeys: undefined,
     })
     await waitFor(() => expect(screen.getByText(/Migrated 42 row/i)).toBeInTheDocument())
+    // 成功后取消按钮变「关闭」—— i18n key 必须存在(回归:此前 dbviews.close 缺失显示原文)。
+    expect(screen.getByRole('button', { name: 'Close' })).toBeInTheDocument()
+    expect(screen.queryByText('dbviews.close')).not.toBeInTheDocument()
   })
 
   it('requires typing the target table name to confirm a destructive overwrite, and sends allowDestructive', async () => {

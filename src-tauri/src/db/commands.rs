@@ -763,9 +763,11 @@ pub async fn db_transfer_table(
     batch_size: Option<usize>,
     allow_destructive: Option<bool>,
     mgr: tauri::State<'_, ConnManager>,
+    app: tauri::AppHandle,
 ) -> Result<TransferSummary, DbError> {
     use crate::db::transfer as tr;
     use crate::db::table_import as ti;
+    use tauri::Emitter;
 
     let src = mgr.get(&source_conn_id).await.ok_or_else(|| DbError::NotFound(source_conn_id.clone()))?;
     let dst = mgr.get(&target_conn_id).await.ok_or_else(|| DbError::NotFound(target_conn_id.clone()))?;
@@ -781,6 +783,24 @@ pub async fn db_transfer_table(
     let batch = batch_size.unwrap_or(tr::DEFAULT_TRANSFER_BATCH_SIZE).max(1);
     let upsert_keys = upsert_keys.unwrap_or_default();
     let allow_destructive = allow_destructive.unwrap_or(false);
+
+    // ── 进度上报 ───────────────────────────────────────────────────────────────
+    // 真机反馈:迁移大表时一直转圈无反馈。先 best-effort 取源表总行数(COUNT(*)),再在
+    // 每批写入后 emit `db://transfer-progress`,前端据此显示 已迁移/总数/百分比。
+    #[derive(serde::Serialize, Clone)]
+    #[serde(rename_all = "camelCase")]
+    struct TransferProgress { transferred: u64, total: Option<u64>, done: bool }
+    let total: Option<u64> = {
+        let q = crate::db::dialect::qualified_table(src.db_type(), src_schema_opt.is_some(), src_schema_opt, &source_table);
+        match src.query(&format!("SELECT COUNT(*) FROM {q}"), 1).await {
+            Ok(r) => r.rows.first().and_then(|row| row.first()).and_then(|v| {
+                v.as_u64().or_else(|| v.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
+            }),
+            Err(_) => None, // 计数失败不阻断迁移,前端退化为「已迁移 N 行…」无百分比
+        }
+    };
+    let _ = app.emit("db://transfer-progress", TransferProgress { transferred: 0, total, done: false });
+    let app_w = app.clone();
 
     // ── 前置校验（在任何写入/清表之前）─────────────────────────────────────────
     // Upsert: 引擎须原生支持 + 键合法;Overwrite: 必须已显式确认破坏性操作（codex 阻断项）。
@@ -832,6 +852,10 @@ pub async fn db_transfer_table(
                 if !sql.is_empty() {
                     dst_w.query(&sql, 0).await?;
                     rows_transferred += pending.len();
+                    let _ = app_w.emit(
+                        "db://transfer-progress",
+                        TransferProgress { transferred: rows_transferred as u64, total, done: false },
+                    );
                 }
             }
             if (got as u32) < batch as u32 {
@@ -846,7 +870,7 @@ pub async fn db_transfer_table(
     };
 
     // Overwrite 走「清表 + 写入」原子化路径;Append/Upsert 直接写。
-    if mode == tr::TransferMode::Overwrite {
+    let result = if mode == tr::TransferMode::Overwrite {
         let truncate_sql = tr::build_overwrite_pre_sql(dst_db, dst_qualify, dst_schema_opt, &target_table);
         if ti::import_supports_transaction(dst_db) {
             // 支持事务: 清表 + 全部写入包进同一事务,任一步失败即 ROLLBACK,目标表保持原状,
@@ -876,7 +900,15 @@ pub async fn db_transfer_table(
     } else {
         let rows_transferred = do_writes(first_rows, first_got).await?;
         Ok(TransferSummary { rows_transferred })
+    };
+    // 完成事件(done=true):让前端把进度收尾到 100% 再切到成功态。
+    if let Ok(ref s) = result {
+        let _ = app.emit(
+            "db://transfer-progress",
+            TransferProgress { transferred: s.rows_transferred as u64, total, done: true },
+        );
     }
+    result
 }
 
 // ── JDBC driver management (DBeaver-style one-click download) ─────────────────
