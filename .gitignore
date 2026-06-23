@@ -33,3 +33,6 @@ deploy/
 
 # misc local tooling state
 .nezha/
+
+# arm64 deb 构建产物
+dist-deb/
