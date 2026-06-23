@@ -235,6 +235,27 @@ pub async fn db_keyspace_info(conn_id: String, schema: String,
     drv.keyspace_info(&schema).await
 }
 
+/// 对 Redis key 执行一次原生类型编辑(string/hash/list/set/zset 的增删改 + TTL)。
+/// 把前端的 RedisEdit 翻译成命令 argv(build_confirmed_edit_argv,已单测),拼成可被
+/// 统一 query() 路径无损解析的命令串(argv_to_command_string,已单测)后执行。仅 Redis
+/// 引擎放行,其余引擎拒绝。`confirm` 是不可逆操作(DEL 整个 key)的确认门禁:未确认时
+/// 拒绝执行(照 dbx 的 Confirm 档保护意图,前端再叠加确认弹窗)。返回受影响计数 ——
+/// 经 rows_affected_from_result 从结果标量解析整数(HSET/SADD/DEL 等返回计数),
+/// 无计数语义(SET 返回 OK / GET 返回值)时返回 0。
+#[tauri::command]
+pub async fn db_redis_edit(conn_id: String, edit: crate::db::drivers::redis_command::RedisEdit,
+    confirm: Option<bool>, mgr: tauri::State<'_, ConnManager>) -> Result<u64, DbError> {
+    use crate::db::drivers::redis_command::{argv_to_command_string, build_confirmed_edit_argv, rows_affected_from_result};
+    let drv = mgr.get(&conn_id).await.ok_or_else(|| DbError::NotFound(conn_id.clone()))?;
+    if drv.db_type() != crate::db::DatabaseType::Redis {
+        return Err(DbError::Unsupported("db_redis_edit 仅支持 Redis 引擎".into()));
+    }
+    let argv = build_confirmed_edit_argv(&edit, confirm.unwrap_or(false)).map_err(DbError::QueryFailed)?;
+    let cmd = argv_to_command_string(&argv);
+    let r = drv.query(&cmd, 0).await?;
+    Ok(rows_affected_from_result(&r).unwrap_or(0))
+}
+
 #[tauri::command]
 pub async fn db_er_model(conn_id: String, schema: String,
     mgr: tauri::State<'_, ConnManager>) -> Result<Vec<ErRelation>, DbError> {

@@ -54,6 +54,7 @@ pub fn run() {
             db::commands::db_object_source,
             db::commands::db_er_model,
             db::commands::db_keyspace_info,
+            db::commands::db_redis_edit,
             db::commands::db_preview_dml,
             db::commands::db_apply_edits,
             db::commands::db_drop_object,

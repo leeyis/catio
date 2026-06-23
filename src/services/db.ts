@@ -1,5 +1,6 @@
 import { DATA } from './mockData'
 import type { ErRelation, HistoryItem, QueryResult, ResultColumn, Schema, Snippet, TableStructure } from './types'
+import type { RedisEdit } from '../components/dbviews/redisEdit'
 
 // ---- Tauri guard — function so tests can set window.__TAURI_INTERNALS__ dynamically ----
 const isTauri = (): boolean =>
@@ -535,6 +536,18 @@ export interface KeyspaceInfo { totalKeys: number; sampled: number; types: Keysp
 export async function keyspaceInfo(connId: string, schema: string): Promise<KeyspaceInfo> {
   if (!isTauri()) return { totalKeys: 0, sampled: 0, types: [] }
   return tauriInvoke<KeyspaceInfo>('db_keyspace_info', { connId, schema })
+}
+
+/**
+ * 对 Redis key 执行一次原生类型编辑(string/hash/list/set/zset 增删改 + TTL)。
+ * `edit` 与后端 RedisEdit(tag=kind, camelCase)对齐。返回受影响计数(尽力)。
+ * `confirm` 是不可逆操作(DEL 整个 key)的确认门禁:删 key 时必须传 true,
+ * 后端未确认会拒绝执行(与 dbx 的 Confirm 档对齐)。非 Tauri(mock/demo)环境下
+ * 抛错——编辑需要真实连接。
+ */
+export async function redisEdit(connId: string, edit: RedisEdit, confirm = false): Promise<number> {
+  if (!isTauri()) throw new Error('Redis 编辑仅在桌面应用内可用')
+  return tauriInvoke<number>('db_redis_edit', { connId, edit, confirm })
 }
 
 /**
