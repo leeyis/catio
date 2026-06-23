@@ -217,8 +217,10 @@ export function DataTransferDialog({
           <IconBtn name="x" size={16} variant="bare" onClick={onClose} />
         </div>
 
-        {/* body */}
-        <div className="col" style={{ gap: 14, padding: '16px 20px', overflow: 'auto', flex: 1, minHeight: 0 }}>
+        {/* body — 外层不滚动:只让列映射区滚动,模式+进度固定在底部始终可见 */}
+        <div className="col" style={{ flex: 1, minHeight: 0 }}>
+          {/* 可滚动区:源/目标选择 + 列映射 */}
+          <div className="col" style={{ gap: 14, padding: '16px 20px', overflow: 'auto', flex: 1, minHeight: 0 }}>
           {/* source (read-only summary) + target pickers */}
           <div className="row" style={{ gap: 12, alignItems: 'flex-start' }}>
             <div className="col" style={{ gap: 6, flex: 1, minWidth: 0 }}>
@@ -327,6 +329,12 @@ export function DataTransferDialog({
             </div>
           )}
 
+          </div>{/* /可滚动区(源/目标 + 列映射 + 模式 + upsert) */}
+
+          {/* 固定状态区:错误 / 进度 / 结果 —— 始终钉在底部,列再多也不会把进度条挤出视口。
+              无内容时不占位、不显示分隔线。 */}
+          <div className="col" style={{ gap: 10, flex: 'none',
+            ...((err || busy || summary != null) ? { padding: '12px 20px 4px', borderTop: '1px solid var(--border-hairline)' } : {}) }}>
           {err && (
             <div className="row gap8" style={{ alignItems: 'center', color: 'var(--danger, #d9534f)', fontSize: 12 }}>
               <Icon name="alert-triangle" size={14} />
@@ -362,7 +370,8 @@ export function DataTransferDialog({
               <span>{t('dbviews.transferDone', { count: summary })}</span>
             </div>
           )}
-        </div>
+          </div>{/* /固定状态区 */}
+        </div>{/* /body 外层 */}
 
         {/* footer */}
         <div className="row gap8" style={{ justifyContent: 'flex-end', padding: '14px 20px 18px', borderTop: '1px solid var(--border-hairline)', flex: 'none' }}>
