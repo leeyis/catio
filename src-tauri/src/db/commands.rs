@@ -461,12 +461,14 @@ pub async fn db_query_page(conn_id: String, sql: String, limit: u32, offset: u32
 /// FORMAT=JSON,只对只读语句放行,然后执行并把原始计划结果(单行单列 JSON)交给
 /// 前端解析。仅 PG/MySQL 支持;其他引擎或不安全/空 SQL 返回 Unsupported/QueryFailed。
 #[tauri::command]
-pub async fn db_explain(conn_id: String, sql: String,
+pub async fn db_explain(conn_id: String, sql: String, default_namespace: Option<String>,
     mgr: tauri::State<'_, ConnManager>) -> Result<QueryResult, DbError> {
     let drv = mgr.get(&conn_id).await.ok_or_else(|| DbError::NotFound(conn_id.clone()))?;
     let built = query_explain_sql::build_explain_sql(drv.db_type(), &sql);
     match built.sql {
-        Some(explain_sql) => drv.query(&explain_sql, 1000).await,
+        // 真机缺陷修复:必须沿用选中的 schema/库(default_namespace)执行 EXPLAIN,否则落
+        // 连接默认库,对未限定库名的查询报「默认库.表 不存在」(与普通 db_query 一致)。
+        Some(explain_sql) => drv.query_with_default_namespace(&explain_sql, 1000, default_namespace.as_deref()).await,
         None => Err(match built.reason.as_deref() {
             Some("unsupported") => DbError::Unsupported("此引擎不支持执行计划".into()),
             Some("empty") => DbError::QueryFailed("没有可解释的 SQL".into()),
@@ -504,6 +506,17 @@ fn resolve_export_row_cap(row_limit: Option<u32>) -> Option<u32> {
     row_limit
 }
 
+/// 整库导出时,是否用选中的 schema/库名限定取数。
+///
+/// 真机缺陷修复:原先用 `capabilities().schemas` 门控,但 MySQL 的 capabilities.schemas=false
+/// (MySQL 库即 schema、无独立命名空间),导致导出时 `table_data` 落回连接默认库而非用户
+/// 选中的库,报「默认库.表 不存在」。正确语义与 `db_table_preview` 一致:只要选中了非空
+/// schema 就透传给驱动(各驱动 `table_data` 自行决定如何限定),为空才回落默认库。
+fn resolve_export_schema_qualifier(schema: &str) -> Option<&str> {
+    let s = schema.trim();
+    if s.is_empty() { None } else { Some(s) }
+}
+
 /// 整库导出为 SQL 脚本（DDL + 数据 INSERT 批 + 头注释）。枚举所选 schema 下的表,
 /// 逐表分页取数,DDL 由前端按结构面板已有逻辑生成后随 `table_ddls` 传入（后端不重复
 /// 实现各引擎 DDL 反射）。脚本拼装走 export::build_database_sql_export（纯函数,已单测）。
@@ -527,7 +540,7 @@ pub async fn db_export_database(conn_id: String, database: String, schema: Strin
     let tables_iter = all.iter().filter(|t| t.kind != "view"
         && (wanted.is_empty() || wanted.contains(t.name.as_str())));
 
-    let schema_opt = if has_schemas && !schema.is_empty() { Some(schema.as_str()) } else { None };
+    let schema_opt = resolve_export_schema_qualifier(&schema);
     let mut export_tables: Vec<crate::db::export::ExportTable> = Vec::new();
 
     for info in tables_iter {
@@ -1316,5 +1329,23 @@ mod export_row_cap_tests {
     fn explicit_zero_limit_is_respected_not_treated_as_unlimited() {
         // 显式 0 与「省略」语义不同：0 表示只导结构不导行,不应被当成无上限。
         assert_eq!(resolve_export_row_cap(Some(0)), Some(0));
+    }
+}
+
+#[cfg(test)]
+mod export_schema_tests {
+    use super::resolve_export_schema_qualifier;
+
+    #[test]
+    fn nonempty_schema_qualifies_regardless_of_engine_schema_capability() {
+        // 真机缺陷:MySQL capabilities.schemas=false,但导出仍须用用户选中的库名限定取数,
+        // 否则 table_data 落回连接默认库,报「默认库.表 不存在」。
+        assert_eq!(resolve_export_schema_qualifier("eastmoney"), Some("eastmoney"));
+    }
+
+    #[test]
+    fn blank_schema_falls_back_to_default_namespace() {
+        assert_eq!(resolve_export_schema_qualifier(""), None);
+        assert_eq!(resolve_export_schema_qualifier("   "), None);
     }
 }

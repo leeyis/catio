@@ -87,6 +87,20 @@ describe('services/db', () => {
     delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
   })
 
+  it('runExplain forwards default namespace so EXPLAIN runs against the selected schema', async () => {
+    // 真机缺陷:不传选中库时 EXPLAIN 落连接默认库,对未限定库名的查询报「默认库.表 不存在」。
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+    invokeMock.mockResolvedValue({ columns: [], rows: [] })
+    const { runExplain } = await import('./db')
+    await runExplain('conn-1', 'SELECT * FROM ods_org_issueinfo', 'eastmoney')
+    expect(invokeMock).toHaveBeenCalledWith('db_explain', {
+      connId: 'conn-1',
+      sql: 'SELECT * FROM ods_org_issueinfo',
+      defaultNamespace: 'eastmoney',
+    })
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
+
   it('runQuery forwards connection meta (name/engine/profileId) under Tauri', async () => {
     ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
     invokeMock.mockResolvedValue({ columns: [], rows: [] })

@@ -371,7 +371,11 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
     const myToken = ++runToken.current
     setPaneMode('split')
     setExplain({ loading: true })
-    runExplain(connId!, sql)
+    // 与普通 run() 一致:把选中的默认库/Schema 传给 EXPLAIN,否则后端落连接默认库报表不存在。
+    const explainNamespace = supportsDefaultNamespace && defaultNamespace && schemaOptions.includes(defaultNamespace)
+      ? defaultNamespace
+      : undefined
+    runExplain(connId!, sql, explainNamespace)
       .then(res => {
         if (myToken !== runToken.current) return
         // engine 已被 canExplain 收窄为 PG/MySQL 之一。

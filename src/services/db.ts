@@ -171,9 +171,12 @@ export async function runQuery(connId: string, sql: string, defaultNamespace?: s
  * result; the frontend parses it via `parseExplainResult`. Only PG/MySQL support
  * this. Throws outside Tauri (no meaningful mock for a real plan).
  */
-export async function runExplain(connId: string, sql: string): Promise<QueryResult> {
+export async function runExplain(connId: string, sql: string, defaultNamespace?: string): Promise<QueryResult> {
   if (!isTauri()) throw new Error('执行计划需要 Tauri 运行时')
-  return tauriInvoke<QueryResult>('db_explain', { connId, sql })
+  const args: Record<string, unknown> = { connId, sql }
+  // 沿用选中的 schema/库执行 EXPLAIN,否则后端落连接默认库,对未限定库名的查询报表不存在。
+  if (defaultNamespace) args.defaultNamespace = defaultNamespace
+  return tauriInvoke<QueryResult>('db_explain', args)
 }
 
 // ---- Edits (DML preview / apply) ----
