@@ -279,7 +279,7 @@
     "sqlFileAborted": "首个错误处已中止",
     "importChooseFile": "选择文件",
     "importFileFilter": "数据文件",
-    "importSupported": "支持 CSV、TSV、JSON（Excel 请先另存为 CSV/JSON）。",
+    "importSupported": "支持 CSV、TSV、JSON、Excel（.xlsx / .xlsm / .xls）。",
     "importRowCount": "{{count}} 行",
     "importMapping": "列映射",
     "importSourceColumn": "源列",

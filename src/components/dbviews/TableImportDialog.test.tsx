@@ -102,6 +102,18 @@ describe('TableImportDialog', () => {
     expect(arg.mappings).toEqual([{ sourceColumn: 'user_id', targetColumn: 'user_id' }])
   })
 
+  it('offers Excel extensions in the file picker filter', async () => {
+    dialogOpen.mockResolvedValue(null) // user cancels — we only inspect the filter passed in
+    wrap(<TableImportDialog connId="c1" table="users" onClose={() => {}} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Choose file' }))
+
+    await waitFor(() => expect(dialogOpen).toHaveBeenCalledTimes(1))
+    const opts = dialogOpen.mock.calls[0][0] as { filters: { extensions: string[] }[] }
+    const exts = opts.filters[0].extensions
+    // 后端经 calamine 已支持 Excel,UI 选择器必须放行 .xlsx/.xlsm/.xls。
+    expect(exts).toEqual(expect.arrayContaining(['csv', 'tsv', 'json', 'xlsx', 'xlsm', 'xls']))
+  })
+
   it('surfaces a preview error', async () => {
     dialogOpen.mockResolvedValue('/data/bad.xlsx')
     importPreview.mockRejectedValue(new Error('Excel import not supported'))

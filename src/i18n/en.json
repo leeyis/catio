@@ -279,7 +279,7 @@
     "sqlFileAborted": "Aborted on first error",
     "importChooseFile": "Choose file",
     "importFileFilter": "Data files",
-    "importSupported": "Supported: CSV, TSV, JSON (Excel — save as CSV/JSON first).",
+    "importSupported": "Supported: CSV, TSV, JSON, Excel (.xlsx / .xlsm / .xls).",
     "importRowCount": "{{count}} row(s)",
     "importMapping": "Column mapping",
     "importSourceColumn": "Source column",

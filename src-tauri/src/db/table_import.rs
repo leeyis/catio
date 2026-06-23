@@ -5,9 +5,12 @@
 //! 与 export.rs 的 `build_insert_statements` 保持一致的标识符引用 + 字面量转义。
 //!
 //! 真实文件读取 / 执行由 commands.rs 接线（参考 export_file / db_export_database）。
-//! 本阶段做 CSV/TSV/JSON 解析;Xlsx 依赖成本较高,标注后续（见 import_file_kind）。
+//! 解析覆盖 CSV/TSV/JSON 与 Excel（.xlsx/.xlsm/.xls，经 calamine 走 bytes 路径）。
 
 use std::collections::HashSet;
+use std::io::Cursor;
+
+use calamine::{open_workbook_auto_from_rs, Data, Reader};
 
 use crate::db::DatabaseType;
 use crate::db::dialect::{quote_ident, qualified_table};
@@ -93,6 +96,7 @@ pub enum ImportFileKind {
     Csv,
     Tsv,
     Json,
+    Xlsx,
 }
 
 impl ImportFileKind {
@@ -101,12 +105,13 @@ impl ImportFileKind {
             ImportFileKind::Csv => "csv",
             ImportFileKind::Tsv => "tsv",
             ImportFileKind::Json => "json",
+            ImportFileKind::Xlsx => "xlsx",
         }
     }
 }
 
-/// 按扩展名识别文件类型。Xlsx/Xls 依赖成本较高（需 calamine），本阶段不支持,
-/// 显式报错让前端提示「先转成 CSV/JSON」（后续可补 calamine 解析）。
+/// 按扩展名识别文件类型。.xlsx/.xlsm/.xls 走 calamine 解析（open_workbook_auto_from_rs
+/// 自动探测格式,xls/xlsx 共用一条路径）。
 pub fn import_file_kind(path: &str) -> Result<ImportFileKind, String> {
     let lower = path.to_lowercase();
     if lower.ends_with(".csv") {
@@ -116,7 +121,7 @@ pub fn import_file_kind(path: &str) -> Result<ImportFileKind, String> {
     } else if lower.ends_with(".json") {
         Ok(ImportFileKind::Json)
     } else if lower.ends_with(".xlsx") || lower.ends_with(".xlsm") || lower.ends_with(".xls") {
-        Err("Excel 导入暂未支持，请先另存为 CSV 或 JSON".to_string())
+        Ok(ImportFileKind::Xlsx)
     } else {
         Err("不支持的导入文件类型".to_string())
     }
@@ -235,12 +240,87 @@ pub fn parse_json_bytes(bytes: &[u8], preview_limit: usize) -> Result<ParsedImpo
     Err("JSON 行必须全为对象或全为数组".to_string())
 }
 
-/// 按文件类型解析字节（CSV/TSV/JSON）。文件读取在 commands.rs 接线。
+/// Excel 单元格 → JSON 值：空单元格视为 NULL；字符串复用 csv_value（空串亦为 NULL）;
+/// 数字/布尔保留为对应 JSON 类型；日期/时长按字符串忠实搬运（类型转换交给下游
+/// value_to_sql，与 CSV/JSON 路径一致）。
+pub fn xlsx_cell_value(cell: &Data) -> Value {
+    match cell {
+        Data::Empty => Value::Null,
+        Data::String(s) => csv_value(s),
+        Data::Float(n) => serde_json::Number::from_f64(*n).map(Value::Number).unwrap_or(Value::Null),
+        Data::Int(n) => Value::Number((*n).into()),
+        Data::Bool(v) => Value::Bool(*v),
+        Data::DateTime(v) => Value::String(v.to_string()),
+        Data::DateTimeIso(v) => Value::String(v.clone()),
+        Data::DurationIso(v) => Value::String(v.clone()),
+        Data::Error(v) => Value::String(v.to_string()),
+    }
+}
+
+/// Excel 表头单元格 → 文本标签（供 normalize_header 处理空表头回落）。
+pub fn xlsx_cell_label(cell: &Data) -> String {
+    match cell {
+        Data::Empty => String::new(),
+        Data::String(s) => s.clone(),
+        Data::Float(n) => n.to_string(),
+        Data::Int(n) => n.to_string(),
+        Data::Bool(v) => v.to_string(),
+        Data::DateTime(v) => v.to_string(),
+        Data::DateTimeIso(v) => v.clone(),
+        Data::DurationIso(v) => v.clone(),
+        Data::Error(v) => v.to_string(),
+    }
+}
+
+/// 解析 Excel 字节（.xlsx/.xlsm/.xls）：取首个工作表,首行为表头,其余为数据行。
+/// 用 Cursor 包裹字节走 open_workbook_auto_from_rs（自动探测格式,无需落盘）,与
+/// CSV/JSON 的 bytes 解析风格一致。列映射 + 批量 INSERT 由下游共用路径处理。
+pub fn parse_xlsx_bytes(bytes: &[u8], preview_limit: usize) -> Result<ParsedImportFile, String> {
+    // Cursor<&[u8]> 已满足 open_workbook_auto_from_rs 的 Read + Seek + Clone 约束,
+    // 直接借用切片,避免 .to_vec() 把整文件再拷一份(否则峰值内存翻倍,削弱 check_import_size 的体积闸门)。
+    let cursor = Cursor::new(bytes);
+    let mut workbook = open_workbook_auto_from_rs(cursor).map_err(|e| e.to_string())?;
+    let sheet_name = workbook
+        .sheet_names()
+        .first()
+        .cloned()
+        .ok_or_else(|| "工作簿没有工作表".to_string())?;
+    let range = workbook.worksheet_range(&sheet_name).map_err(|e| e.to_string())?;
+    let mut rows_iter = range.rows();
+    let header = rows_iter.next().ok_or_else(|| "导入文件没有数据行".to_string())?;
+    let columns = header
+        .iter()
+        .enumerate()
+        .map(|(index, cell)| normalize_header(&xlsx_cell_label(cell), index))
+        .collect::<Vec<_>>();
+    if columns.is_empty() {
+        return Err("导入文件没有列".to_string());
+    }
+
+    let mut rows = Vec::new();
+    let mut total_rows = 0;
+    for source_row in rows_iter {
+        total_rows += 1;
+        if rows.len() >= preview_limit {
+            continue;
+        }
+        let mut row = Vec::with_capacity(columns.len());
+        for index in 0..columns.len() {
+            row.push(source_row.get(index).map(xlsx_cell_value).unwrap_or(Value::Null));
+        }
+        rows.push(row);
+    }
+
+    Ok(ParsedImportFile { columns, rows, total_rows })
+}
+
+/// 按文件类型解析字节（CSV/TSV/JSON/Xlsx）。文件读取在 commands.rs 接线。
 pub fn parse_import_bytes(kind: ImportFileKind, bytes: &[u8], preview_limit: usize) -> Result<ParsedImportFile, String> {
     match kind {
         ImportFileKind::Csv => parse_csv_bytes(bytes, preview_limit),
         ImportFileKind::Tsv => parse_delimited_bytes(bytes, b'\t', preview_limit),
         ImportFileKind::Json => parse_json_bytes(bytes, preview_limit),
+        ImportFileKind::Xlsx => parse_xlsx_bytes(bytes, preview_limit),
     }
 }
 
@@ -343,8 +423,121 @@ mod tests {
         assert_eq!(import_file_kind("a/b/data.csv").unwrap(), ImportFileKind::Csv);
         assert_eq!(import_file_kind("DATA.TSV").unwrap(), ImportFileKind::Tsv);
         assert_eq!(import_file_kind("x.json").unwrap(), ImportFileKind::Json);
-        assert!(import_file_kind("x.xlsx").is_err());
+        assert_eq!(import_file_kind("x.xlsx").unwrap(), ImportFileKind::Xlsx);
         assert!(import_file_kind("x.txt").is_err());
+    }
+
+    /// base64 编码的最小 xlsx（openpyxl 生成）：Sheet1，首行表头 id/name/score/active，
+    /// 两条数据行覆盖 int/string/float/bool 与空单元格,用于驱动真实 calamine 解析路径。
+    const SAMPLE_XLSX_B64: &str = concat!(
+        "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",
+    );
+
+    fn sample_xlsx_bytes() -> Vec<u8> {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.decode(SAMPLE_XLSX_B64).expect("valid base64 fixture")
+    }
+
+    #[test]
+    fn parses_xlsx_headers_and_rows() {
+        let bytes = sample_xlsx_bytes();
+        let parsed = parse_xlsx_bytes(&bytes, 10).unwrap();
+        assert_eq!(parsed.columns, vec!["id", "name", "score", "active"]);
+        assert_eq!(parsed.total_rows, 2);
+        // 第 1 行：int 1 → Number, string "Ada", float 9.5 → Number, bool true。
+        assert_eq!(parsed.rows[0], vec![json!(1.0), json!("Ada"), json!(9.5), json!(true)]);
+        // 第 2 行：空 name 单元格 → NULL。
+        assert_eq!(parsed.rows[1][0], json!(2.0));
+        assert_eq!(parsed.rows[1][1], Value::Null);
+        assert_eq!(parsed.rows[1][3], json!(false));
+    }
+
+    #[test]
+    fn xlsx_preview_limit_truncates_rows_but_counts_total() {
+        let bytes = sample_xlsx_bytes();
+        let parsed = parse_xlsx_bytes(&bytes, 1).unwrap();
+        assert_eq!(parsed.rows.len(), 1);
+        assert_eq!(parsed.total_rows, 2);
+    }
+
+    #[test]
+    fn detects_xlsx_kind_by_extension() {
+        assert_eq!(import_file_kind("book.xlsx").unwrap(), ImportFileKind::Xlsx);
+        assert_eq!(import_file_kind("BOOK.XLS").unwrap(), ImportFileKind::Xlsx);
+        assert_eq!(import_file_kind("data.xlsm").unwrap(), ImportFileKind::Xlsx);
+        assert_eq!(ImportFileKind::Xlsx.label(), "xlsx");
+    }
+
+    #[test]
+    fn parse_import_bytes_routes_xlsx() {
+        let bytes = sample_xlsx_bytes();
+        let parsed = parse_import_bytes(ImportFileKind::Xlsx, &bytes, 10).unwrap();
+        assert_eq!(parsed.columns, vec!["id", "name", "score", "active"]);
     }
 
     #[test]

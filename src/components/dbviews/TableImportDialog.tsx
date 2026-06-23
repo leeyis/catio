@@ -59,7 +59,7 @@ export function TableImportDialog({ connId, schema, table, engine, onClose, onIm
       const { open } = await import('@tauri-apps/plugin-dialog')
       const picked = await open({
         multiple: false,
-        filters: [{ name: t('dbviews.importFileFilter'), extensions: ['csv', 'tsv', 'json'] }],
+        filters: [{ name: t('dbviews.importFileFilter'), extensions: ['csv', 'tsv', 'json', 'xlsx', 'xlsm', 'xls'] }],
       })
       const path = Array.isArray(picked) ? picked[0] : picked
       if (!path) return
