@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, beforeAll } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import { LanguageProvider } from '../../state/LanguageContext'
 import i18n from '../../i18n'
 import { DataTransferDialog } from './DataTransferDialog'
@@ -7,13 +7,24 @@ import { DataTransferDialog } from './DataTransferDialog'
 // Mock the db service so the dialog runs without the Tauri runtime.
 const transferTable = vi.fn()
 const tableStructure = vi.fn()
+const getSchema = vi.fn()
 vi.mock('../../services/db', () => ({
   transferTable: (...a: unknown[]) => transferTable(...a),
   tableStructure: (...a: unknown[]) => tableStructure(...a),
+  getSchema: (...a: unknown[]) => getSchema(...a),
   dbErrMsg: (e: unknown) => (e instanceof Error ? e.message : String(e)),
 }))
 
 const wrap = (ui: React.ReactNode) => render(<LanguageProvider>{ui}</LanguageProvider>)
+
+// 目标表是下拉框,选项要等 getSchema 异步加载后才出现 —— 先等选项,再选中。
+async function selectTargetTable(value: string) {
+  const sel = await screen.findByLabelText('transfer-target-table')
+  await waitFor(() =>
+    expect(within(sel as HTMLElement).queryByRole('option', { name: value })).toBeInTheDocument(),
+  )
+  fireEvent.change(sel, { target: { value } })
+}
 
 const connections = [
   { id: 'src', name: 'prod-pg', engine: 'postgres' },
@@ -23,7 +34,11 @@ const connections = [
 describe('DataTransferDialog', () => {
   beforeAll(async () => { await i18n.changeLanguage('en') })
   beforeEach(() => {
-    transferTable.mockReset(); tableStructure.mockReset()
+    transferTable.mockReset(); tableStructure.mockReset(); getSchema.mockReset()
+    // Target connection schema: a single namespace whose tables back the table dropdown.
+    getSchema.mockResolvedValue({
+      schemas: [{ name: 'analytics', tables: [{ name: 'users_copy' }, { name: 'users' }] }],
+    })
     // Source table columns (user_id, display_name); target table same names.
     tableStructure.mockResolvedValue({
       comment: '', indexes: [], fks: [],
@@ -32,6 +47,31 @@ describe('DataTransferDialog', () => {
         { name: 'display_name', type: 'text', nullable: true, default: null, key: '', extra: '', comment: '' },
       ],
     })
+  })
+
+  it('renders target schema and table as dropdowns populated from the target connection', async () => {
+    // 真机反馈:目标 Schema / 表应为下拉框(从目标连接内省得到),而非自由输入。
+    wrap(
+      <DataTransferDialog
+        connections={connections}
+        initialSourceConnId="src"
+        initialSourceSchema="public"
+        initialSourceTable="users"
+        onClose={() => {}}
+      />,
+    )
+    fireEvent.change(screen.getByLabelText('transfer-target-conn'), { target: { value: 'dst' } })
+
+    // 目标表必须是 <select>,选项来自目标连接 schema 的表(getSchema)。
+    const tableSelect = await screen.findByLabelText('transfer-target-table')
+    expect(tableSelect.tagName).toBe('SELECT')
+    await waitFor(() =>
+      expect(within(tableSelect as HTMLElement).getByRole('option', { name: 'users_copy' })).toBeInTheDocument(),
+    )
+    // 目标 Schema 也必须是 <select>(单一命名空间时自动选中)。
+    const schemaSelect = screen.getByLabelText('transfer-target-schema')
+    expect(schemaSelect.tagName).toBe('SELECT')
+    expect((schemaSelect as HTMLSelectElement).value).toBe('analytics')
   })
 
   it('auto-maps matching columns and migrates with append by default', async () => {
@@ -49,7 +89,7 @@ describe('DataTransferDialog', () => {
 
     // Pick a target connection + table.
     fireEvent.change(screen.getByLabelText('transfer-target-conn'), { target: { value: 'dst' } })
-    fireEvent.change(screen.getByLabelText('transfer-target-table'), { target: { value: 'users_copy' } })
+    await selectTargetTable('users_copy')
 
     // Target columns load → auto-map matches both → migrate enabled (2 columns).
     const apply = await screen.findByRole('button', { name: /Migrate 2 column/i })
@@ -60,7 +100,7 @@ describe('DataTransferDialog', () => {
     await waitFor(() => expect(transferTable).toHaveBeenCalledTimes(1))
     expect(transferTable).toHaveBeenCalledWith({
       sourceConnId: 'src', sourceSchema: 'public', sourceTable: 'users',
-      targetConnId: 'dst', targetSchema: undefined, targetTable: 'users_copy',
+      targetConnId: 'dst', targetSchema: 'analytics', targetTable: 'users_copy',
       mode: 'append',
       mappings: [
         { sourceColumn: 'user_id', targetColumn: 'user_id' },
@@ -85,7 +125,7 @@ describe('DataTransferDialog', () => {
     )
 
     fireEvent.change(screen.getByLabelText('transfer-target-conn'), { target: { value: 'dst' } })
-    fireEvent.change(screen.getByLabelText('transfer-target-table'), { target: { value: 'users_copy' } })
+    await selectTargetTable('users_copy')
 
     // Switch to the destructive overwrite mode (label = "Truncate first").
     fireEvent.click(await screen.findByRole('button', { name: 'Truncate first' }))
@@ -123,7 +163,7 @@ describe('DataTransferDialog', () => {
       />,
     )
     fireEvent.change(screen.getByLabelText('transfer-target-conn'), { target: { value: 'dst' } })
-    fireEvent.change(screen.getByLabelText('transfer-target-table'), { target: { value: 'users_copy' } })
+    await selectTargetTable('users_copy')
     fireEvent.click(await screen.findByRole('button', { name: /Migrate 2 column/i }))
     await waitFor(() => expect(transferTable).toHaveBeenCalledTimes(1))
     expect(transferTable.mock.calls[0][0].allowDestructive).toBeUndefined()
@@ -162,7 +202,7 @@ describe('DataTransferDialog', () => {
       />,
     )
     fireEvent.change(screen.getByLabelText('transfer-target-conn'), { target: { value: 'dst' } })
-    fireEvent.change(screen.getByLabelText('transfer-target-table'), { target: { value: 'users' } })
+    await selectTargetTable('users')
 
     // Switch to upsert mode.
     fireEvent.click(await screen.findByRole('button', { name: 'Upsert' }))

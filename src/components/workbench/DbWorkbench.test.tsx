@@ -1,4 +1,4 @@
-import { render, screen, waitFor, fireEvent, act } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent, act, within } from '@testing-library/react'
 import { vi, describe, it, expect, beforeEach } from 'vitest'
 import { LanguageProvider } from '../../state/LanguageContext'
 import { DataProvider } from '../../state/DataContext'
@@ -722,9 +722,11 @@ describe('DbWorkbench D3 跨库迁移 UI 接入', () => {
     // 对话框出现(标题 = "迁移数据" / "Migrate data")+ 源连接显示。
     expect(await screen.findByText(/迁移数据|Migrate data/)).toBeInTheDocument()
 
-    // 选目标连接 + 目标表,自动映射 id→id 后提交。
+    // 选目标连接 → 目标表下拉从 getSchema(目标) 异步填充(public.orders),选中后自动映射 id→id。
     fireEvent.change(screen.getByLabelText('transfer-target-conn'), { target: { value: 'conn-dst' } })
-    fireEvent.change(screen.getByLabelText('transfer-target-table'), { target: { value: 'orders_copy' } })
+    const tableSel = screen.getByLabelText('transfer-target-table')
+    await waitFor(() => expect(within(tableSel as HTMLElement).queryByRole('option', { name: 'orders' })).toBeInTheDocument())
+    fireEvent.change(tableSel, { target: { value: 'orders' } })
     const apply = await screen.findByRole('button', { name: /迁移 \d+ 列|Migrate \d+ column/i })
     await waitFor(() => expect(apply).not.toBeDisabled())
     fireEvent.click(apply)
@@ -738,7 +740,7 @@ describe('DbWorkbench D3 跨库迁移 UI 接入', () => {
     expect(arg.sourceSchema).toBe('public')
     expect(arg.sourceTable).toBe('orders')
     expect(arg.targetConnId).toBe('conn-dst')
-    expect(arg.targetTable).toBe('orders_copy')
+    expect(arg.targetTable).toBe('orders')
   })
 
   it('无 live 连接(mock 路径)不渲染迁移入口', async () => {

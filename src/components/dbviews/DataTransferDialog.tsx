@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn, IconBtn } from '../atoms'
 import {
-  transferTable, tableStructure, dbErrMsg,
+  transferTable, tableStructure, getSchema, dbErrMsg,
   type TransferColumnMapping, type TransferMode,
 } from '../../services/db'
 import { autoMapImportColumns, IMPORT_SKIP_TARGET } from './tableImport'
@@ -42,6 +42,8 @@ export function DataTransferDialog({
   const [targetConnId, setTargetConnId] = useState('')
   const [targetSchema, setTargetSchema] = useState('')
   const [targetTable, setTargetTable] = useState('')
+  // 目标连接的库/Schema 树(用于把目标 Schema、表做成下拉框,而非自由输入)。
+  const [targetNamespaces, setTargetNamespaces] = useState<{ name: string; tables: string[] }[]>([])
 
   const [sourceColumns, setSourceColumns] = useState<string[]>([])
   const [targetColumns, setTargetColumns] = useState<string[]>([])
@@ -75,6 +77,30 @@ export function DataTransferDialog({
       .catch(() => { /* best-effort */ })
     return () => { alive = false }
   }, [initialSourceConnId, initialSourceSchema, initialSourceTable])
+
+  // 选定目标连接后,内省其库/Schema 树,把目标 Schema 与表做成下拉框(对齐真机反馈)。
+  // 单一命名空间时自动选中(省一步);多库时留空由用户选,避免误默认到错误的库。
+  useEffect(() => {
+    let alive = true
+    if (!targetConnId) { setTargetNamespaces([]); setTargetSchema(''); setTargetTable(''); return }
+    getSchema(targetConnId)
+      .then(s => {
+        if (!alive) return
+        const ns = s.schemas.map(x => ({ name: x.name, tables: x.tables.map(t => t.name) }))
+        setTargetNamespaces(ns)
+        setTargetSchema(ns.length === 1 ? ns[0].name : '')
+        setTargetTable('')
+      })
+      .catch(() => { if (alive) setTargetNamespaces([]) })
+    return () => { alive = false }
+  }, [targetConnId])
+
+  // 当前目标 Schema 下的表名(下拉选项)。未选 Schema 但只有一个命名空间时回退到它。
+  const targetTableOptions = useMemo(() => {
+    const ns = targetNamespaces.find(n => n.name === targetSchema)
+      ?? (targetNamespaces.length === 1 ? targetNamespaces[0] : undefined)
+    return ns?.tables ?? []
+  }, [targetNamespaces, targetSchema])
 
   // 加载目标表列（用于映射下拉 + upsert 键候选）。失败不阻断——用户仍可手填目标列。
   useEffect(() => {
@@ -195,12 +221,20 @@ export function DataTransferDialog({
                 <option value="">{t('dbviews.transferSelectConnection')}</option>
                 {connections.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
               </select>
-              <input aria-label="transfer-target-schema" value={targetSchema}
-                onChange={e => setTargetSchema(e.target.value)}
-                placeholder={t('dbviews.transferSchema')} style={inputStyle} />
-              <input aria-label="transfer-target-table" value={targetTable}
+              <select aria-label="transfer-target-schema" value={targetSchema}
+                onChange={e => { setTargetSchema(e.target.value); setTargetTable(''); setUserEdited(false) }}
+                disabled={targetNamespaces.length === 0}
+                style={{ ...inputStyle, cursor: 'pointer' }}>
+                <option value="">{t('dbviews.transferSchema')}</option>
+                {targetNamespaces.map(n => <option key={n.name} value={n.name}>{n.name}</option>)}
+              </select>
+              <select aria-label="transfer-target-table" value={targetTable}
                 onChange={e => { setTargetTable(e.target.value); setUserEdited(false) }}
-                placeholder={t('dbviews.transferSelectTable')} style={inputStyle} />
+                disabled={targetTableOptions.length === 0}
+                style={{ ...inputStyle, cursor: 'pointer' }}>
+                <option value="">{t('dbviews.transferSelectTable')}</option>
+                {targetTableOptions.map(name => <option key={name} value={name}>{name}</option>)}
+              </select>
             </div>
           </div>
 
