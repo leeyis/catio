@@ -9,6 +9,7 @@ import { reduceCellSelection, reduceRowSelection, isCellInRange, normalizeRange,
 import { filterRows, filterModeNeedsValue, type FilterRule, type FilterMode } from './gridFilter'
 import { buildInsertSql, buildUpdateSql } from './copySql'
 import { dialectFor } from './structureDdl'
+import { TableImportDialog } from './TableImportDialog'
 
 export interface DataGridProps {
   columns: ResultColumn[]
@@ -133,6 +134,8 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   // Original indexes (into baseRows) of existing rows marked for deletion.
   const [deleted, setDeleted] = useState<Set<number>>(new Set())
   const [exportErr, setExportErr] = useState<string | null>(null)
+  // 表数据导入对话框开关。仅在「真实可写单表」(livePreview + writable + connId + table) 时可用。
+  const [importOpen, setImportOpen] = useState(false)
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(100)
   // server-side page rows (when connId set); null → use client-side slice of `rows`
@@ -951,6 +954,9 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
             <Icon name="refresh-cw" size={15} style={refreshing ? { animation: 'spin 0.8s linear infinite' } : undefined} />
           </button>
           <div style={{ width: 1, height: 18, background: 'var(--border-hairline)' }} />
+          {livePreview && writable && connId && table && (
+            <Btn size="sm" variant="secondary" icon="upload" onClick={() => setImportOpen(true)}>{t('dbviews.import')}</Btn>
+          )}
           <div ref={exportMenuRef} style={{ position: 'relative' }}>
             <Btn size="sm" variant="secondary" icon="download" iconR="chevron-down"
               onClick={() => { setExportMenuOpen(o => !o); setSortMenuOpen(false) }}>{t('dbviews.export')}</Btn>
@@ -1351,6 +1357,17 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
             </div>
           </div>
         </div>
+      )}
+
+      {importOpen && connId && table && (
+        <TableImportDialog
+          connId={connId}
+          schema={schema}
+          table={table}
+          engine={engine}
+          onClose={() => setImportOpen(false)}
+          onImported={() => { setImportOpen(false); refresh() }}
+        />
       )}
     </div>
   )

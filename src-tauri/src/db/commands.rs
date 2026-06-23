@@ -566,6 +566,137 @@ pub async fn db_export_database(conn_id: String, database: String, schema: Strin
     ))
 }
 
+// ── 表数据导入（CSV/TSV/JSON → 批量 INSERT）────────────────────────────────────
+
+/// 文件预览结果：文件名/类型/大小 + 列 + 样本行（受 DEFAULT_PREVIEW_LIMIT 截断）+ 总行数。
+/// 供导入对话框预览数据与初始化列映射。纯解析逻辑走 table_import（已单测）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportPreview {
+    pub file_name: String,
+    pub file_type: String,
+    pub size_bytes: u64,
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<serde_json::Value>>,
+    pub total_rows: usize,
+    /// 预览是否被 DEFAULT_PREVIEW_LIMIT 截断（用于 UI 提示「仅展示前 N 行」）。
+    pub truncated: bool,
+}
+
+/// 读取并预览导入文件。读文件 I/O 在此接线，解析为纯函数（table_import,已单测）。
+#[tauri::command]
+pub async fn db_import_preview(file_path: String) -> Result<ImportPreview, DbError> {
+    use crate::db::table_import as ti;
+    let kind = ti::import_file_kind(&file_path).map_err(DbError::QueryFailed)?;
+    // 读盘前先按元数据校验大小,超限直接拒绝（避免把过大文件读入内存导致 OOM）。
+    let meta = tokio::fs::metadata(&file_path).await.map_err(|e| DbError::Io(e.to_string()))?;
+    ti::check_import_size(meta.len() as usize).map_err(DbError::QueryFailed)?;
+    let bytes = tokio::fs::read(&file_path).await.map_err(|e| DbError::Io(e.to_string()))?;
+    let size_bytes = bytes.len() as u64;
+    let parsed = ti::parse_import_bytes(kind, &bytes, ti::DEFAULT_PREVIEW_LIMIT).map_err(DbError::QueryFailed)?;
+    let file_name = std::path::Path::new(&file_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&file_path)
+        .to_string();
+    let truncated = parsed.total_rows > parsed.rows.len();
+    Ok(ImportPreview {
+        file_name,
+        file_type: kind.label().to_string(),
+        size_bytes,
+        columns: parsed.columns,
+        rows: parsed.rows,
+        total_rows: parsed.total_rows,
+        truncated,
+    })
+}
+
+/// 导入执行结果。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSummary {
+    pub rows_imported: usize,
+    pub total_rows: usize,
+}
+
+/// 把文件按列映射导入目标表：解析全部行 → 校验映射 → 生成批量 INSERT → 逐批执行。
+///
+/// `mode` 为 "truncate" 时先清空目标表（SQLite 用 DELETE）。语句生成为纯函数
+/// （table_import,已单测）；执行走驱动 query I/O,照搬 db_export_database 的 mgr 取连接模式,
+/// 需真机验证执行落库。
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn db_import_table(
+    conn_id: String,
+    schema: Option<String>,
+    table: String,
+    file_path: String,
+    mappings: Vec<crate::db::table_import::ImportColumnMapping>,
+    mode: String,
+    batch_size: Option<usize>,
+    mgr: tauri::State<'_, ConnManager>,
+) -> Result<ImportSummary, DbError> {
+    use crate::db::table_import as ti;
+    let drv = mgr.get(&conn_id).await.ok_or_else(|| DbError::NotFound(conn_id.clone()))?;
+    let db = drv.db_type();
+    let has_schemas = drv.capabilities().schemas;
+    let schema_opt = schema.as_deref().filter(|s| has_schemas && !s.is_empty());
+    let batch = batch_size.unwrap_or(ti::DEFAULT_BATCH_SIZE);
+
+    let kind = ti::import_file_kind(&file_path).map_err(DbError::QueryFailed)?;
+    // 读盘前先按元数据校验大小,超限直接拒绝（避免整文件 + 展开行同时驻留堆 → OOM）。
+    let meta = tokio::fs::metadata(&file_path).await.map_err(|e| DbError::Io(e.to_string()))?;
+    ti::check_import_size(meta.len() as usize).map_err(DbError::QueryFailed)?;
+    let bytes = tokio::fs::read(&file_path).await.map_err(|e| DbError::Io(e.to_string()))?;
+    // usize::MAX：导入读取全部行（预览才截断）。
+    let parsed = ti::parse_import_bytes(kind, &bytes, usize::MAX).map_err(DbError::QueryFailed)?;
+    let total_rows = parsed.total_rows;
+
+    let batches = ti::build_import_insert_batches(db, has_schemas, schema_opt, &table, &parsed, &mappings, batch)
+        .map_err(DbError::QueryFailed)?;
+
+    let truncate = mode.eq_ignore_ascii_case("truncate");
+    // 支持事务的引擎（PG/MySQL/SQLite/SQLServer/DuckDB）在 truncate 模式下把
+    // 「清表 + 所有 INSERT 批次」包进同一事务,任一步失败即 ROLLBACK,保证原子性;
+    // 不支持事务的引擎（ClickHouse/Redis 等）退化为逐条执行（无回滚,见前端告警）。
+    let use_txn = truncate && ti::import_supports_transaction(db);
+
+    if use_txn {
+        let (begin, commit, rollback) = ti::transaction_keywords(db);
+        drv.query(begin, 0).await?;
+        // 事务内任一步失败 → 先尽力 ROLLBACK,再把原始错误返回。
+        let run = async {
+            let sql = ti::truncate_sql(db, has_schemas, schema_opt, &table);
+            drv.query(&sql, 0).await?;
+            for b in &batches {
+                drv.query(&b.sql, 0).await?;
+            }
+            Ok::<(), DbError>(())
+        };
+        if let Err(e) = run.await {
+            let _ = drv.query(rollback, 0).await; // best-effort 回滚,保留原错误
+            return Err(e);
+        }
+        drv.query(commit, 0).await?;
+        let rows_imported = batches.iter().map(|b| b.row_count).sum::<usize>().min(total_rows);
+        return Ok(ImportSummary { rows_imported, total_rows });
+    }
+
+    // 非事务路径：append 模式,或不支持事务的引擎的 truncate 模式（无回滚）。
+    if truncate {
+        let sql = ti::truncate_sql(db, has_schemas, schema_opt, &table);
+        drv.query(&sql, 0).await?;
+    }
+
+    let mut rows_imported = 0usize;
+    for b in &batches {
+        drv.query(&b.sql, 0).await?;
+        rows_imported = (rows_imported + b.row_count).min(total_rows);
+    }
+
+    Ok(ImportSummary { rows_imported, total_rows })
+}
+
 // ── JDBC driver management (DBeaver-style one-click download) ─────────────────
 
 /// Resolve the directory where JDBC driver JARs live: `CATIO_JDBC_DRIVERS_DIR`

@@ -11,6 +11,7 @@ pub mod manager;
 pub mod commands;
 pub mod dml;
 pub mod export;
+pub mod table_import;
 pub mod query_explain_sql;
 pub mod db_admin_sql;
 pub mod object_source_sql;

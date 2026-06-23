@@ -45,6 +45,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 mongodb = "3.7.0"
 redis = { version = "1.2.2", features = ["tokio-comp", "tls-rustls", "tokio-rustls-comp", "cluster-async"] }
 ipnet = "2.11"
+csv = "1.3"
 
 [profile.release]
 panic = "abort"

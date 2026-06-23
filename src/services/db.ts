@@ -310,6 +310,39 @@ export async function exportDatabaseSql(args: {
   return tauriInvoke<string>('db_export_database', args)
 }
 
+// ---- 表数据导入（CSV/TSV/JSON → 批量 INSERT）----
+
+/** 一对源列→目标列映射（目标为空串=跳过该列）。 */
+export interface ImportColumnMapping { sourceColumn: string; targetColumn: string }
+
+/** 导入文件预览：列 + 样本行（后端按 50 行截断）+ 总行数。 */
+export interface ImportPreview {
+  fileName: string
+  fileType: string
+  sizeBytes: number
+  columns: string[]
+  rows: unknown[][]
+  totalRows: number
+  truncated: boolean
+}
+
+export interface ImportSummary { rowsImported: number; totalRows: number }
+
+/** 读取并预览导入文件（解析在后端 table_import，纯函数已单测）。 */
+export async function importPreview(filePath: string): Promise<ImportPreview> {
+  if (!isTauri()) throw new Error('importPreview requires the Tauri runtime')
+  return tauriInvoke<ImportPreview>('db_import_preview', { filePath })
+}
+
+/** 按列映射把文件导入目标表。mode: 'append' | 'truncate'。 */
+export async function importTable(args: {
+  connId: string; schema?: string; table: string; filePath: string;
+  mappings: ImportColumnMapping[]; mode: 'append' | 'truncate'; batchSize?: number;
+}): Promise<ImportSummary> {
+  if (!isTauri()) throw new Error('importTable requires the Tauri runtime')
+  return tauriInvoke<ImportSummary>('db_import_table', args)
+}
+
 // ---- History & saved snippets ----
 
 /** Execution history for a connection (most-recent first). Falls back to mock outside Tauri. */
