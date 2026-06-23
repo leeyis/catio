@@ -424,6 +424,7 @@
       "truncate": "Truncate",
       "drop": "Drop",
       "duplicate": "Duplicate structure",
+      "transferData": "Migrate data",
       "renameTitle": "Rename {{name}}",
       "truncateTitle": "Truncate {{name}}",
       "dropTitle": "Drop {{name}}",

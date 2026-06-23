@@ -33,6 +33,11 @@ export interface SchemaBrowserProps {
    * against the live connection. Omitted on the mock/demo path (menu hidden).
    */
   onObjectAdmin?: (op: 'drop' | 'rename' | 'truncate' | 'duplicate', objectType: 'TABLE' | 'VIEW', schema: string, name: string) => void
+  /**
+   * 跨库/跨表数据迁移入口 — 由表叶节点的"..."菜单触发。父级(DbWorkbench)以该
+   * schema.table 为迁移源打开 DataTransferDialog。仅 live 连接提供(mock/演示路径隐藏)。
+   */
+  onTransferData?: (schema: string, table: string) => void
   erActive: boolean
   sqlActive: boolean
   disabledSql?: boolean
@@ -66,7 +71,7 @@ export interface SchemaBrowserProps {
   onToggleCollapse?: () => void
 }
 
-export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, onObjectAdmin, onExportDatabase, schemas, conn, live, refreshing, loading, collapsed, onToggleCollapse, sqlActive, canSqlConsole = true, canEr = true, canStructureEdit = true, canViews = true, canFunctions = true }: SchemaBrowserProps) {
+export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, onObjectAdmin, onTransferData, onExportDatabase, schemas, conn, live, refreshing, loading, collapsed, onToggleCollapse, sqlActive, canSqlConsole = true, canEr = true, canStructureEdit = true, canViews = true, canFunctions = true }: SchemaBrowserProps) {
   const { t } = useTranslation()
   const D = useData()
   // Live path: render every supplied namespace; mock path: the single seeded schema (pixel-identical).
@@ -210,7 +215,7 @@ export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpen
           </div>
         ) : visibleNamespaces.map(ns => (
           <SchemaNode key={ns.name} ns={ns} query={query} active={active} onPick={onPick} onPickObject={onPickObject} live={!!live}
-            onNewQuery={onNewQuery} onOpenER={onOpenER} onNewObjectTemplate={onNewObjectTemplate} onRefresh={onRefresh} onObjectAdmin={onObjectAdmin} onExportDatabase={onExportDatabase}
+            onNewQuery={onNewQuery} onOpenER={onOpenER} onNewObjectTemplate={onNewObjectTemplate} onRefresh={onRefresh} onObjectAdmin={onObjectAdmin} onTransferData={onTransferData} onExportDatabase={onExportDatabase}
             sqlActive={sqlActive} canSqlConsole={canSqlConsole} canEr={canEr} canStructureEdit={canStructureEdit}
             canViews={canViews} canFunctions={canFunctions} />
         ))}
@@ -236,6 +241,7 @@ interface SchemaNodeProps {
   onNewObjectTemplate?: (schema: string, kind: 'table' | 'view') => void
   onRefresh?: () => void
   onObjectAdmin?: (op: 'drop' | 'rename' | 'truncate' | 'duplicate', objectType: 'TABLE' | 'VIEW', schema: string, name: string) => void
+  onTransferData?: (schema: string, table: string) => void
   onExportDatabase?: (schema: string) => void
   sqlActive: boolean
   canSqlConsole: boolean
@@ -246,7 +252,7 @@ interface SchemaNodeProps {
 }
 
 /** One schema namespace rendered as a collapsible DB tree node (Tables / Views / Functions). */
-function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, onObjectAdmin, onExportDatabase, sqlActive, canSqlConsole, canEr, canStructureEdit, canViews, canFunctions }: SchemaNodeProps) {
+function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, onObjectAdmin, onTransferData, onExportDatabase, sqlActive, canSqlConsole, canEr, canStructureEdit, canViews, canFunctions }: SchemaNodeProps) {
   const { t } = useTranslation()
   const D = useData()
   // Schemas start COLLAPSED — a freshly-connected DB shows nothing expanded until the
@@ -306,18 +312,22 @@ function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery,
     return () => document.removeEventListener('mousedown', onDown)
   }, [leafMenu])
 
-  // 表叶含全部四项;视图叶只含删除/重命名(无清空/复制结构)。
+  // 表叶含全部四项 + 「迁移数据」(D3 跨库迁移);视图叶只含删除/重命名(无清空/复制结构/迁移)。
+  // 结构编辑类操作走 onObjectAdmin;「迁移数据」走 onTransferData,二者各自独立 —— 即便引擎
+  // 不支持结构编辑(canStructureEdit=false),只要 live 且提供了 onTransferData 也能迁移数据。
   const leafAdminMenu = (objectType: 'TABLE' | 'VIEW', name: string) => {
-    if (!(live && canStructureEdit && onObjectAdmin)) return null
+    const canAdmin = live && canStructureEdit && !!onObjectAdmin
+    const canTransfer = live && objectType === 'TABLE' && !!onTransferData
+    if (!canAdmin && !canTransfer) return null
     const key = `${objectType}:${name}`
-    const items: { icon: string; label: string; op: 'drop' | 'rename' | 'truncate' | 'duplicate'; danger?: boolean }[] = [
+    const items: { icon: string; label: string; op: 'drop' | 'rename' | 'truncate' | 'duplicate'; danger?: boolean }[] = canAdmin ? [
       { icon: 'pencil', label: t('workbench.objAdmin.rename'), op: 'rename' },
       ...(objectType === 'TABLE' ? [
         { icon: 'copy', label: t('workbench.objAdmin.duplicate'), op: 'duplicate' as const },
         { icon: 'eraser', label: t('workbench.objAdmin.truncate'), op: 'truncate' as const, danger: true },
       ] : []),
       { icon: 'trash-2', label: t('workbench.objAdmin.drop'), op: 'drop', danger: true },
-    ]
+    ] : []
     return (
       <span style={{ position: 'relative', flex: 'none' }}>
         <button className="icon-btn bare" data-testid={`leaf-admin-btn:${key}`} title={t('workbench.schemaMenu')} aria-label={t('workbench.schemaMenu')}
@@ -332,7 +342,7 @@ function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery,
               boxShadow: 'var(--shadow-dropdown)', padding: '4px 0', minWidth: 150 }}>
             {items.map(item => (
               <button key={item.op} data-testid={`leaf-admin-item:${item.op}:${key}`}
-                onClick={() => { setLeafMenu(null); onObjectAdmin(item.op, objectType, ns.name, name) }}
+                onClick={() => { setLeafMenu(null); onObjectAdmin?.(item.op, objectType, ns.name, name) }}
                 className="row gap8"
                 style={{ width: '100%', textAlign: 'left', padding: '7px 12px', border: 'none', background: 'transparent',
                   fontSize: 12.5, color: item.danger ? 'var(--danger-fg)' : 'var(--text-primary)', cursor: 'pointer', alignItems: 'center' }}
@@ -342,6 +352,19 @@ function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery,
                 <span className="ell">{item.label}</span>
               </button>
             ))}
+            {/* D3 跨库迁移入口:仅表叶 + live + 父级提供 onTransferData。以本表为迁移源。 */}
+            {canTransfer && (
+              <button data-testid={`leaf-transfer:${key}`}
+                onClick={() => { setLeafMenu(null); onTransferData!(ns.name, name) }}
+                className="row gap8"
+                style={{ width: '100%', textAlign: 'left', padding: '7px 12px', border: 'none', background: 'transparent',
+                  fontSize: 12.5, color: 'var(--text-primary)', cursor: 'pointer', alignItems: 'center' }}
+                onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = 'var(--accent-soft)' }}
+                onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}>
+                <Icon name="repeat" size={13} style={{ color: 'var(--text-tertiary)', flex: 'none' }} />
+                <span className="ell">{t('workbench.objAdmin.transferData')}</span>
+              </button>
+            )}
           </div>
         )}
       </span>

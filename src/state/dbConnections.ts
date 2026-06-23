@@ -123,6 +123,32 @@ export interface ActiveDbConnection {
 
 const _activeConnections = new Map<string, ActiveDbConnection>()
 
+// ---- Reactive layer for the active-connection store (pub/sub + useSyncExternalStore) ----
+// Mirrors the persisted-profile reactive layer above. Needed because consumers
+// (e.g. 跨库迁移的连接候选 in DbWorkbench) must re-render when a *new* live
+// connection is opened while they are already mounted — otherwise a target DB
+// connected after a source workbench opens is silently absent from the picker.
+const _activeListeners = new Set<() => void>()
+
+/** Cached snapshot — useSyncExternalStore requires getSnapshot to return a stable
+ *  reference between notifies, so we rebuild the array only on mutation. */
+let _activeSnapshot: ActiveDbConnection[] = []
+
+function subscribeActive(fn: () => void): () => void {
+  _activeListeners.add(fn)
+  return () => { _activeListeners.delete(fn) }
+}
+
+function getActiveSnapshot(): ActiveDbConnection[] {
+  return _activeSnapshot
+}
+
+/** Rebuild the cached snapshot and notify subscribers. Called on every write. */
+function notifyActive(): void {
+  _activeSnapshot = Array.from(_activeConnections.values())
+  _activeListeners.forEach(fn => fn())
+}
+
 /**
  * Record a successful dbConnect result alongside profile metadata.
  * The secret is never passed here — only connId, capabilities, and profile fields.
@@ -138,6 +164,7 @@ export function setActiveDbConnection(
     dbType: profile.dbType,
     name: profile.name,
   })
+  notifyActive()
 }
 
 /** Retrieve an active connection by its backend connId. */
@@ -153,4 +180,12 @@ export function listActiveDbConnections(): ActiveDbConnection[] {
 /** Remove an active connection (e.g. after dbDisconnect). */
 export function removeActiveDbConnection(connId: string): void {
   _activeConnections.delete(connId)
+  notifyActive()
+}
+
+/** React hook: the current list of active live connections, reactive to
+ *  connect/disconnect. Returns a stable array reference between mutations so
+ *  components re-render only when the active set actually changes. */
+export function useActiveDbConnections(): ActiveDbConnection[] {
+  return useSyncExternalStore(subscribeActive, getActiveSnapshot, getActiveSnapshot)
 }

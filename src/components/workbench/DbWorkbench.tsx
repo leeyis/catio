@@ -7,12 +7,13 @@ import { SqlConsole, ERDiagram } from '../dbviews'
 import { CreateObjectModal } from '../dbviews/CreateObjectModal'
 import { ObjectAdminModal } from '../dbviews/ObjectAdminModal'
 import { DatabaseExportDialog, type DatabaseExportRequest } from '../dbviews/DatabaseExportDialog'
+import { DataTransferDialog, type TransferConnectionOption } from '../dbviews/DataTransferDialog'
 import { buildCreateTableDDL, dialectFor, qualifiedTable, supportsDdlExport } from '../dbviews/structureDdl'
 import { SchemaBrowser } from './SchemaBrowser'
 import { TablePane } from './TablePane'
 import { ObjectPane } from './ObjectPane'
 import { useData } from '../../state/DataContext'
-import { listActiveDbConnections } from '../../state/dbConnections'
+import { listActiveDbConnections, useActiveDbConnections } from '../../state/dbConnections'
 import { getSchema, runQuery, dropObject, renameObject, truncateTable, duplicateTableStructure, tableStructure, exportDatabaseSql, exportFile, dbErrMsg, type DbCapabilities } from '../../services/db'
 import type { Connection, Schema, SchemaNamespace } from '../../services/types'
 
@@ -69,6 +70,17 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
   const caps: DbCapabilities = active ? active.capabilities : ALL_ENABLED
   const connId = active?.connId ?? null
 
+  // 跨库迁移的连接候选(源+目标都从这里选):全部当前活动连接,以 connId 为标识。
+  // engine=dbType 用于判定目标是否支持原生 upsert(DataTransferDialog 内部用)。
+  // 用响应式 useActiveDbConnections 订阅活动连接store:用户在本 workbench 挂载之后
+  // 才连上目标库时,候选列表会随之刷新(否则目标会从迁移对话框的连接选择器里消失,
+  // 让跨库迁移这个核心场景静默失效)。
+  const activeConns = useActiveDbConnections()
+  const transferConnections: TransferConnectionOption[] = useMemo(
+    () => activeConns.map(c => ({ id: c.connId, name: c.name, engine: c.dbType })),
+    [activeConns],
+  )
+
   // ---- Unified tab state ----
   // No live connection → seed the pixel-identical mock demo tab (public.orders).
   // A LIVE connection starts with NO table tab: the real first table is opened once
@@ -102,6 +114,8 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
   const [adminMsg, setAdminMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
   // 整库导出对话框的目标 schema(null → 关闭)。
   const [exportSchema, setExportSchema] = useState<string | null>(null)
+  // D3 跨库迁移对话框的迁移源(schema.table;null → 关闭)。源连接固定为当前 live connId。
+  const [transferSource, setTransferSource] = useState<{ schema: string; table: string } | null>(null)
   // Error surfaced when a CREATE statement fails to run.
   const [createErr, setCreateErr] = useState<string | null>(null)
   // 标签右键菜单(需求1):{tabId,x,y} 定位;全局 click / Escape 关闭。
@@ -345,6 +359,7 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
         active={activeTab?.kind === 'table' ? { schema: activeTab.schema, table: activeTab.table } : null}
         onNewQuery={(schema) => newQuery(undefined, schema ?? namespace?.name)} onOpenER={openER} onNewObjectTemplate={onNewObjectTemplate} onRefresh={refreshSchema}
         onObjectAdmin={connId ? (op, objectType, schema, name) => setAdminObj({ op, objectType, schema, name }) : undefined}
+        onTransferData={connId ? (schema, table) => setTransferSource({ schema, table }) : undefined}
         onExportDatabase={connId && supportsDdlExport(conn.engine) ? (schema) => setExportSchema(schema) : undefined}
         refreshing={refreshing}
         erActive={activeTab?.kind === 'er'} sqlActive={activeTab?.kind === 'sql'}
@@ -494,6 +509,17 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
             allTables={(namespaces.find(n => n.name === exportSchema)?.tables ?? []).map(t => t.name)}
             onClose={() => setExportSchema(null)}
             onExport={req => runDatabaseExport(exportSchema, req)}
+          />
+        )}
+        {/* D3 跨库/跨表数据迁移对话框 — 仅 live 连接;源固定为当前连接的被选表。 */}
+        {transferSource && connId && (
+          <DataTransferDialog
+            connections={transferConnections}
+            initialSourceConnId={connId}
+            initialSourceSchema={transferSource.schema || undefined}
+            initialSourceTable={transferSource.table}
+            onClose={() => setTransferSource(null)}
+            onTransferred={count => setAdminMsg({ kind: 'ok', text: t('dbviews.transferDone', { count }) })}
           />
         )}
         {adminMsg && (

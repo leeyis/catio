@@ -424,6 +424,7 @@
       "truncate": "清空表",
       "drop": "删除",
       "duplicate": "复制表结构",
+      "transferData": "迁移数据",
       "renameTitle": "重命名 {{name}}",
       "truncateTitle": "清空表 {{name}}",
       "dropTitle": "删除 {{name}}",

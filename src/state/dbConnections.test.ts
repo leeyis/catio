@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeEach } from 'vitest'
+import { renderHook, act } from '@testing-library/react'
 import {
   listDbConnections, saveDbConnection, removeDbConnection,
   setActiveDbConnection, getActiveDbConnection, listActiveDbConnections, removeActiveDbConnection,
+  useActiveDbConnections,
   generateProfileId, dbProfileToConnection,
 } from './dbConnections'
 import type { DbProfile } from './dbConnections'
@@ -137,6 +139,31 @@ describe('active DB connection store (in-memory)', () => {
     const list = listActiveDbConnections()
     expect(list).toHaveLength(2)
     expect(list.map(c => c.connId).sort()).toEqual(['conn-abc-123', 'conn-xyz-999'])
+  })
+
+  // 回归(codex P2):跨库迁移的连接候选必须在「workbench 已挂载后」新连接接入时刷新。
+  // useActiveDbConnections 须在 set/remove 后通知订阅者重渲染。
+  it('useActiveDbConnections re-renders when a NEW connection is added after subscribe', () => {
+    const { result } = renderHook(() => useActiveDbConnections())
+    expect(result.current).toHaveLength(0)
+
+    act(() => { setActiveDbConnection(mockResult, mockProfile) })
+    expect(result.current).toHaveLength(1)
+    expect(result.current[0].connId).toBe('conn-abc-123')
+
+    // 第二个连接(模拟在源 workbench 打开之后才连上的目标库)。
+    const result2: DbConnectResult = { connId: 'conn-target', version: '16', capabilities: mockResult.capabilities }
+    act(() => { setActiveDbConnection(result2, { id: 'db-profile-2', name: 'target-pg', dbType: 'postgres' }) })
+    expect(result.current).toHaveLength(2)
+    expect(result.current.map(c => c.connId)).toContain('conn-target')
+  })
+
+  it('useActiveDbConnections re-renders when a connection is removed', () => {
+    setActiveDbConnection(mockResult, mockProfile)
+    const { result } = renderHook(() => useActiveDbConnections())
+    expect(result.current).toHaveLength(1)
+    act(() => { removeActiveDbConnection('conn-abc-123') })
+    expect(result.current).toHaveLength(0)
   })
 })
 
