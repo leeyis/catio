@@ -39,7 +39,7 @@ function TreeNode({ node, depth }: { node: ExplainPlanNode; depth: number }) {
         border: '1px solid var(--border-hairline)', background: 'var(--surface-sunken)',
       }}>
         <div className="row gap6" style={{ alignItems: 'center' }}>
-          <Icon name="git-branch" size={13} style={{ color: 'var(--accent-primary)', flex: 'none' }} />
+          <Icon name="box" size={13} style={{ color: 'var(--accent-primary)', flex: 'none' }} />
           <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text-primary)' }}>{node.title}</span>
           {node.cost && (
             <span style={{ fontSize: 11, color: 'var(--text-tertiary)', fontFamily: "'Geist Mono', monospace" }}>
@@ -84,7 +84,7 @@ export function ExplainPlanViewer({ plan, error, loading, onClose }: ExplainPlan
       title={label}
       style={{
         display: 'inline-flex', alignItems: 'center', gap: 4, height: 22, padding: '0 8px',
-        fontSize: 11, borderRadius: 7,
+        fontSize: 11, borderRadius: 7, whiteSpace: 'nowrap', flex: 'none',
         background: view === mode ? 'var(--surface-raised)' : 'transparent',
         color: view === mode ? 'var(--text-primary)' : 'var(--text-tertiary)',
       }}
@@ -111,7 +111,7 @@ export function ExplainPlanViewer({ plan, error, loading, onClose }: ExplainPlan
         )}
         <span style={{ flex: 1 }} />
         {plan && (
-          <div className="row" style={{ gap: 2, padding: 2, borderRadius: 9, background: 'var(--surface-sunken)' }}>
+          <div className="row" style={{ gap: 2, padding: 2, borderRadius: 9, background: 'var(--surface-sunken)', flex: 'none' }}>
             {tabBtn('tree', t('explain.tree'), 'git-branch', 'explain-view-tree')}
             {tabBtn('summary', t('explain.summary'), 'table-2', 'explain-view-summary')}
             {tabBtn('json', 'JSON', 'file-code', 'explain-view-json')}

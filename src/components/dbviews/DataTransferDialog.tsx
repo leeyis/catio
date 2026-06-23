@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn, IconBtn } from '../atoms'
@@ -177,15 +178,18 @@ export function DataTransferDialog({
   }
   const labelStyle: React.CSSProperties = { fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }
 
-  const modeIcon = (m: TransferMode) => m === 'append' ? 'plus' : m === 'overwrite' ? 'trash-2' : 'repeat'
+  // 注意:图标名必须是 Icon 组件已定义的,否则会渲染成无意义的兜底圆圈(repeat 即不存在)。
+  const modeIcon = (m: TransferMode) => m === 'append' ? 'plus' : m === 'overwrite' ? 'eraser' : 'refresh-cw'
   const modeLabel = (m: TransferMode) =>
     m === 'append' ? t('dbviews.importModeAppend')
       : m === 'overwrite' ? t('dbviews.importModeTruncate')
         : t('dbviews.transferModeUpsert')
 
-  return (
+  // 通过 portal 渲染到 body 并用 position:fixed 全屏遮罩,确保连左侧数据库连接/目录树一并遮住
+  // (此前 absolute 只覆盖工作台内容区,挡不住侧边栏)。
+  return createPortal(
     <div onClick={onClose}
-      style={{ position: 'absolute', inset: 0, zIndex: 70, background: 'color-mix(in srgb, var(--cta-bg) 42%, transparent)', backdropFilter: 'blur(3px)', display: 'grid', placeItems: 'center' }}>
+      style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'color-mix(in srgb, var(--cta-bg) 42%, transparent)', backdropFilter: 'blur(3px)', display: 'grid', placeItems: 'center' }}>
       <div onClick={e => e.stopPropagation()} className="pop-in"
         style={{ width: 680, maxWidth: '92%', maxHeight: '88%', background: 'var(--surface-card)', borderRadius: 18, border: '1px solid var(--border-hairline)', boxShadow: 'var(--shadow-window)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
         {/* header */}
@@ -326,13 +330,14 @@ export function DataTransferDialog({
         {/* footer */}
         <div className="row gap8" style={{ justifyContent: 'flex-end', padding: '14px 20px 18px', borderTop: '1px solid var(--border-hairline)', flex: 'none' }}>
           <Btn variant="ghost" onClick={onClose}>{summary != null ? t('dbviews.close') : t('dbviews.cancel')}</Btn>
-          <Btn variant="primary" icon="repeat"
+          <Btn variant="primary" icon="arrow-right-to-line"
             onClick={runTransfer}
             disabled={busy || !ready}>
             {busy ? t('dbviews.transferring') : t('dbviews.transferApply', { count: mappedCount })}
           </Btn>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }
