@@ -506,13 +506,13 @@ fn resolve_export_row_cap(row_limit: Option<u32>) -> Option<u32> {
     row_limit
 }
 
-/// 整库导出时,是否用选中的 schema/库名限定取数。
+/// 取数/写入时,是否用选中的 schema/库名限定。整库导出、跨库迁移共用。
 ///
 /// 真机缺陷修复:原先用 `capabilities().schemas` 门控,但 MySQL 的 capabilities.schemas=false
-/// (MySQL 库即 schema、无独立命名空间),导致导出时 `table_data` 落回连接默认库而非用户
+/// (MySQL 库即 schema、无独立命名空间),导致 `table_data`/写入落回连接默认库而非用户
 /// 选中的库,报「默认库.表 不存在」。正确语义与 `db_table_preview` 一致:只要选中了非空
-/// schema 就透传给驱动(各驱动 `table_data` 自行决定如何限定),为空才回落默认库。
-fn resolve_export_schema_qualifier(schema: &str) -> Option<&str> {
+/// schema 就透传给驱动(各驱动自行决定如何限定),为空才回落默认库。
+fn resolve_schema_qualifier(schema: &str) -> Option<&str> {
     let s = schema.trim();
     if s.is_empty() { None } else { Some(s) }
 }
@@ -540,7 +540,7 @@ pub async fn db_export_database(conn_id: String, database: String, schema: Strin
     let tables_iter = all.iter().filter(|t| t.kind != "view"
         && (wanted.is_empty() || wanted.contains(t.name.as_str())));
 
-    let schema_opt = resolve_export_schema_qualifier(&schema);
+    let schema_opt = resolve_schema_qualifier(&schema);
     let mut export_tables: Vec<crate::db::export::ExportTable> = Vec::new();
 
     for info in tables_iter {
@@ -770,11 +770,14 @@ pub async fn db_transfer_table(
     let src = mgr.get(&source_conn_id).await.ok_or_else(|| DbError::NotFound(source_conn_id.clone()))?;
     let dst = mgr.get(&target_conn_id).await.ok_or_else(|| DbError::NotFound(target_conn_id.clone()))?;
 
-    let src_has_schemas = src.capabilities().schemas;
     let dst_db = dst.db_type();
-    let dst_has_schemas = dst.capabilities().schemas;
-    let src_schema_opt = source_schema.as_deref().filter(|s| src_has_schemas && !s.is_empty());
-    let dst_schema_opt = target_schema.as_deref().filter(|s| dst_has_schemas && !s.is_empty());
+    // 真机缺陷修复:此前用 capabilities().schemas 门控,MySQL(schemas=false)会丢弃用户选中的
+    // 目标库,导致迁移落回连接默认库报「默认库.表 不存在」。与导出一致:非空即透传。
+    let src_schema_opt = source_schema.as_deref().and_then(resolve_schema_qualifier);
+    let dst_schema_opt = target_schema.as_deref().and_then(resolve_schema_qualifier);
+    // 写/清表 SQL 是否加库前缀,以「是否选了目标库」为准(而非引擎能力位)——这样 MySQL 选了
+    // eastmoney 也会生成 `eastmoney`.`tbl`,不再落默认库。无选库时退回默认库(default schema)。
+    let dst_qualify = dst_schema_opt.is_some();
     let batch = batch_size.unwrap_or(tr::DEFAULT_TRANSFER_BATCH_SIZE).max(1);
     let upsert_keys = upsert_keys.unwrap_or_default();
     let allow_destructive = allow_destructive.unwrap_or(false);
@@ -824,7 +827,7 @@ pub async fn db_transfer_table(
         loop {
             if !pending.is_empty() {
                 let sql = tr::build_transfer_write_sql(
-                    mode, dst_db, dst_has_schemas, dst_schema_opt, &target_table_w, &mapped_w, &pending, &upsert_keys_w,
+                    mode, dst_db, dst_qualify, dst_schema_opt, &target_table_w, &mapped_w, &pending, &upsert_keys_w,
                 );
                 if !sql.is_empty() {
                     dst_w.query(&sql, 0).await?;
@@ -844,7 +847,7 @@ pub async fn db_transfer_table(
 
     // Overwrite 走「清表 + 写入」原子化路径;Append/Upsert 直接写。
     if mode == tr::TransferMode::Overwrite {
-        let truncate_sql = tr::build_overwrite_pre_sql(dst_db, dst_has_schemas, dst_schema_opt, &target_table);
+        let truncate_sql = tr::build_overwrite_pre_sql(dst_db, dst_qualify, dst_schema_opt, &target_table);
         if ti::import_supports_transaction(dst_db) {
             // 支持事务: 清表 + 全部写入包进同一事务,任一步失败即 ROLLBACK,目标表保持原状,
             // 杜绝「已清表但写入失败」的不可恢复数据丢失（codex 阻断项）。
@@ -1334,18 +1337,18 @@ mod export_row_cap_tests {
 
 #[cfg(test)]
 mod export_schema_tests {
-    use super::resolve_export_schema_qualifier;
+    use super::resolve_schema_qualifier;
 
     #[test]
     fn nonempty_schema_qualifies_regardless_of_engine_schema_capability() {
         // 真机缺陷:MySQL capabilities.schemas=false,但导出仍须用用户选中的库名限定取数,
         // 否则 table_data 落回连接默认库,报「默认库.表 不存在」。
-        assert_eq!(resolve_export_schema_qualifier("eastmoney"), Some("eastmoney"));
+        assert_eq!(resolve_schema_qualifier("eastmoney"), Some("eastmoney"));
     }
 
     #[test]
     fn blank_schema_falls_back_to_default_namespace() {
-        assert_eq!(resolve_export_schema_qualifier(""), None);
-        assert_eq!(resolve_export_schema_qualifier("   "), None);
+        assert_eq!(resolve_schema_qualifier(""), None);
+        assert_eq!(resolve_schema_qualifier("   "), None);
     }
 }
