@@ -13,12 +13,43 @@ pub mod dml;
 pub mod export;
 pub mod table_import;
 pub mod transfer;
+pub mod sql_file;
 pub mod query_explain_sql;
 pub mod db_admin_sql;
 pub mod object_source_sql;
 pub mod history;
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
+
+/// executionId → 取消令牌的并发表（SQL 文件批量执行的取消，照搬 scan::ScanState 模式）。
+/// 由 lib.rs 经 `.manage(SqlFileState::default())` 注册。
+#[derive(Default, Clone)]
+pub struct SqlFileState {
+    inner: Arc<Mutex<HashMap<String, CancellationToken>>>,
+}
+
+impl SqlFileState {
+    /// 登记一个 executionId 的取消令牌，返回其克隆供执行任务监听。
+    pub async fn register(&self, execution_id: String) -> CancellationToken {
+        let token = CancellationToken::new();
+        self.inner.lock().await.insert(execution_id, token.clone());
+        token
+    }
+    /// 触发某 executionId 的取消（不存在则 no-op）。
+    pub async fn cancel(&self, execution_id: &str) {
+        if let Some(token) = self.inner.lock().await.get(execution_id) {
+            token.cancel();
+        }
+    }
+    /// 执行结束后移除登记，避免取消表无限增长。
+    pub async fn remove(&self, execution_id: &str) {
+        self.inner.lock().await.remove(execution_id);
+    }
+}
 
 /// 序列化成前端可判别标签联合：{ kind: "ConnectFailed", message: "..." }
 #[derive(Debug, thiserror::Error)]

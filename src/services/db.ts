@@ -369,6 +369,42 @@ export async function transferTable(args: {
   return tauriInvoke<TransferSummary>('db_transfer_table', args)
 }
 
+// ---- SQL 文件批量执行（选文件 → 后端按方言切分 → 逐句执行 + 进度/错误恢复 + 取消）----
+
+import type { SqlFileProgress } from '../components/dbviews/sqlFileRun'
+
+/** SQL 文件预览：文件名 / 大小 / 按目标方言切分后的语句数。 */
+export interface SqlFilePreview { fileName: string; sizeBytes: number; statementCount: number }
+
+/** 读 SQL 文件并按目标连接方言切分，返回预览（文件名/大小/语句数）。 */
+export async function sqlFilePreview(connId: string, filePath: string): Promise<SqlFilePreview> {
+  if (!isTauri()) throw new Error('sqlFilePreview requires the Tauri runtime')
+  return tauriInvoke<SqlFilePreview>('db_sql_file_preview', { connId, filePath })
+}
+
+/**
+ * 执行整个 SQL 文件。进度经 `db://sql-file-progress` 事件推送（见 onSqlFileProgress）。
+ * continueOnError=true 时单句失败继续，否则中止。executionId 由调用方生成，用于取消。
+ */
+export async function runSqlFile(args: {
+  executionId: string; connId: string; filePath: string; continueOnError: boolean
+}): Promise<void> {
+  if (!isTauri()) throw new Error('runSqlFile requires the Tauri runtime')
+  return tauriInvoke<void>('db_run_sql_file', { req: args })
+}
+
+/** 取消正在执行的 SQL 文件批量任务。 */
+export async function cancelSqlFile(executionId: string): Promise<void> {
+  return tauriInvoke<void>('db_cancel_sql_file', { executionId })
+}
+
+/** 监听 SQL 文件执行进度事件（返回 unlisten；非 Tauri 下 no-op）。 */
+export async function onSqlFileProgress(cb: (p: SqlFileProgress) => void): Promise<() => void> {
+  if (!isTauri()) return () => { /* no-op outside Tauri */ }
+  const { listen } = await import('@tauri-apps/api/event')
+  return listen<SqlFileProgress>('db://sql-file-progress', e => cb(e.payload))
+}
+
 // ---- History & saved snippets ----
 
 /** Execution history for a connection (most-recent first). Falls back to mock outside Tauri. */

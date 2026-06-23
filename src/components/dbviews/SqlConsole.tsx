@@ -15,6 +15,7 @@ import { formatSql } from './sqlFormatter'
 import type { SQLNamespace } from '@codemirror/lang-sql'
 import { DataGrid } from './DataGrid'
 import { ExplainPlanViewer } from './ExplainPlanViewer'
+import { SqlFileDialog } from './SqlFileDialog'
 import { parseExplainResult, supportsExplainPlan, type ParsedExplainPlan } from './explainPlan'
 import type { DbType } from '../../services/db'
 
@@ -110,6 +111,8 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
   const splitContainerRef = useRef<HTMLDivElement>(null)
   // 分隔条 hover/拖动高亮(不依赖外部 CSS 文件,内联实现,保证主题切换正常)。
   const [splitHot, setSplitHot] = useState(false)
+  // T16 SQL 文件批量执行对话框开关。仅已连接(connId)时可用。
+  const [sqlFileOpen, setSqlFileOpen] = useState(false)
 
   // 上报最大化态给父级(功能#6 父子契约):非 split 即视为占满,父级据此联动收起侧栏。
   useEffect(() => { onFullscreenChange?.(paneMode !== 'split') }, [paneMode, onFullscreenChange])
@@ -462,6 +465,10 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
           <button className="icon-btn bare" title={t('dbviews.format')} disabled={plain || !code.trim()}
             onClick={() => setCode(prev => formatSql(prev, engine))}><Icon name="wrench" size={15} /></button>
           <button className="icon-btn bare" title={t('dbviews.clear')} onClick={() => setCode('')}><Icon name="eraser" size={15} /></button>
+          {/* T16 SQL 文件批量执行:选 .sql 文件 → 按方言切分 → 逐句执行 + 进度/错误恢复。仅已连接可用。 */}
+          {connId && (
+            <button className="icon-btn bare" title={t('dbviews.sqlFileRunFile')} data-testid="sql-run-file" onClick={() => setSqlFileOpen(true)}><Icon name="file-code" size={15} /></button>
+          )}
         </div>
         <div className="row gap6" style={{ minWidth: 0 }}>
           {supportsDefaultNamespace && schemaOptions.length > 1 && (
@@ -551,6 +558,10 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
                     statusTones={D.statusTones} density={density} />)}
           </div>
         </div>
+      )}
+      {/* T16 SQL 文件批量执行对话框。 */}
+      {sqlFileOpen && connId && (
+        <SqlFileDialog connId={connId} connName={connName} onClose={() => setSqlFileOpen(false)} />
       )}
     </div>
   )

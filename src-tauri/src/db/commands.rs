@@ -1010,6 +1010,180 @@ pub async fn jdbc_open_drivers_dir(app: tauri::AppHandle) -> Result<(), DbError>
     Ok(())
 }
 
+// ── SQL 文件批量执行（选文件 → 按方言切分 → 逐句执行 + 进度/错误恢复 + 取消）─────────
+//
+// 语句切分为纯函数（sql_file.rs,已单测）；本处为 I/O 编排（照搬 scan 的
+// CancellationToken + app.emit 进度、db_import_table 的逐句驱动执行）,需真机验证落库。
+
+/// SQL 文件预览（选文件后展示文件名/大小/语句数,执行前确认）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SqlFilePreview {
+    pub file_name: String,
+    pub size_bytes: u64,
+    pub statement_count: usize,
+}
+
+/// 读 SQL 文件并按目标连接的方言切分,返回预览（文件名/大小/语句数）。
+#[tauri::command]
+pub async fn db_sql_file_preview(
+    conn_id: String,
+    file_path: String,
+    mgr: tauri::State<'_, ConnManager>,
+) -> Result<SqlFilePreview, DbError> {
+    use crate::db::sql_file as sf;
+    let drv = mgr.get(&conn_id).await.ok_or_else(|| DbError::NotFound(conn_id.clone()))?;
+    let db = drv.db_type();
+    let meta = tokio::fs::metadata(&file_path).await.map_err(|e| DbError::Io(e.to_string()))?;
+    // 读盘前先按元数据校验大小,超限直接拒绝（避免把整个 dump 文件读入内存导致 OOM）。
+    sf::check_sql_file_size(meta.len() as usize).map_err(DbError::Io)?;
+    let bytes = tokio::fs::read(&file_path).await.map_err(|e| DbError::Io(e.to_string()))?;
+    let content = decode_sql_file_bytes(&bytes)?;
+    let statements = sf::split_sql_statements_for_database(&content, db);
+    let file_name = std::path::Path::new(&file_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&file_path)
+        .to_string();
+    Ok(SqlFilePreview { file_name, size_bytes: meta.len(), statement_count: statements.len() })
+}
+
+/// 解码 SQL 文件字节为 UTF-8 文本（处理 UTF-8 BOM；其余按 UTF-8 解释）。
+fn decode_sql_file_bytes(bytes: &[u8]) -> Result<String, DbError> {
+    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        return std::str::from_utf8(&bytes[3..])
+            .map(|t| t.to_string())
+            .map_err(|_| DbError::Io("SQL 文件不是有效的 UTF-8 编码".into()));
+    }
+    std::str::from_utf8(bytes)
+        .map(|t| t.strip_prefix('\u{feff}').unwrap_or(t).to_string())
+        .map_err(|_| DbError::Io("SQL 文件不是有效的 UTF-8 编码,请另存为 UTF-8".into()))
+}
+
+/// 取消正在执行的 SQL 文件批量任务（按 executionId）。
+#[tauri::command]
+pub async fn db_cancel_sql_file(execution_id: String, state: tauri::State<'_, crate::db::SqlFileState>)
+    -> Result<(), DbError> {
+    state.cancel(&execution_id).await;
+    Ok(())
+}
+
+/// 执行整个 SQL 文件：按方言切分 → 逐句走驱动执行 → 每句开始/完成/失败、整体完成/出错/取消
+/// 各 emit 一次 `db://sql-file-progress`。`continue_on_error=true` 时单句失败继续,否则中止。
+/// 取消由 `SqlFileState` 的令牌驱动（在每句执行前检查）。
+#[tauri::command]
+pub async fn db_run_sql_file(
+    req: crate::db::sql_file::SqlFileRequest,
+    mgr: tauri::State<'_, ConnManager>,
+    state: tauri::State<'_, crate::db::SqlFileState>,
+    app: tauri::AppHandle,
+) -> Result<(), DbError> {
+    use crate::db::sql_file as sf;
+    use tauri::Emitter;
+
+    let drv = mgr.get(&req.conn_id).await.ok_or_else(|| DbError::NotFound(req.conn_id.clone()))?;
+    let db = drv.db_type();
+
+    // 读盘前先按元数据校验大小,超限直接拒绝（避免把整个 dump 文件读入内存导致 OOM）。
+    let meta = tokio::fs::metadata(&req.file_path).await.map_err(|e| DbError::Io(e.to_string()))?;
+    sf::check_sql_file_size(meta.len() as usize).map_err(DbError::Io)?;
+    let bytes = tokio::fs::read(&req.file_path).await.map_err(|e| DbError::Io(e.to_string()))?;
+    let content = decode_sql_file_bytes(&bytes)?;
+    let statements = sf::split_sql_statements_for_database(&content, db);
+    let total = statements.len();
+
+    let token = state.register(req.execution_id.clone()).await;
+    let started = Instant::now();
+
+    let mut success_count = 0usize;
+    let mut failure_count = 0usize;
+    let mut affected_rows = 0u64;
+
+    let emit = |status: sf::SqlFileStatus,
+                statement_index: usize,
+                success_count: usize,
+                failure_count: usize,
+                affected_rows: u64,
+                summary: &str,
+                error: Option<String>| {
+        let _ = app.emit(
+            "db://sql-file-progress",
+            sf::SqlFileProgress {
+                execution_id: req.execution_id.clone(),
+                status,
+                statement_index,
+                total,
+                success_count,
+                failure_count,
+                affected_rows,
+                elapsed_ms: started.elapsed().as_millis(),
+                statement_summary: summary.to_string(),
+                error,
+            },
+        );
+    };
+
+    emit(sf::SqlFileStatus::Started, 0, 0, 0, 0, "", None);
+
+    for (idx, statement) in statements.iter().enumerate() {
+        let statement_index = idx + 1;
+        if token.is_cancelled() {
+            emit(sf::SqlFileStatus::Cancelled, statement_index, success_count, failure_count, affected_rows, "", None);
+            state.remove(&req.execution_id).await;
+            return Ok(());
+        }
+        let summary = sf::statement_summary(statement);
+        emit(sf::SqlFileStatus::Running, statement_index, success_count, failure_count, affected_rows, &summary, None);
+
+        match drv.query(statement, 0).await {
+            Ok(result) => {
+                success_count += 1;
+                affected_rows += result.rows_affected.unwrap_or(0);
+                emit(
+                    sf::SqlFileStatus::StatementDone,
+                    statement_index,
+                    success_count,
+                    failure_count,
+                    affected_rows,
+                    &summary,
+                    None,
+                );
+            }
+            Err(err) => {
+                let message = err.to_string();
+                let decision = sf::decide_statement_error(failure_count, req.continue_on_error);
+                failure_count = decision.failure_count;
+                emit(
+                    sf::SqlFileStatus::StatementFailed,
+                    statement_index,
+                    success_count,
+                    failure_count,
+                    affected_rows,
+                    &summary,
+                    Some(message.clone()),
+                );
+                if decision.abort {
+                    emit(
+                        sf::SqlFileStatus::Error,
+                        statement_index,
+                        success_count,
+                        failure_count,
+                        affected_rows,
+                        &summary,
+                        Some(message),
+                    );
+                    state.remove(&req.execution_id).await;
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    emit(sf::SqlFileStatus::Done, total, success_count, failure_count, affected_rows, "", None);
+    state.remove(&req.execution_id).await;
+    Ok(())
+}
+
 // qualified-table tests moved to dialect.rs (`qualified_table`).
 
 #[cfg(test)]

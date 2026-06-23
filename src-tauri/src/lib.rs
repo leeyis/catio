@@ -15,6 +15,7 @@ pub fn run() {
         .manage(ConnManager::default())
         .manage(mcp::McpState::default())
         .manage(scan::ScanState::default())
+        .manage(db::SqlFileState::default())
         .invoke_handler(tauri::generate_handler![
             ssh::conn::ssh_connect,
             ssh::conn::ssh_disconnect,
@@ -75,6 +76,9 @@ pub fn run() {
             db::commands::db_import_preview,
             db::commands::db_import_table,
             db::commands::db_transfer_table,
+            db::commands::db_sql_file_preview,
+            db::commands::db_run_sql_file,
+            db::commands::db_cancel_sql_file,
             db::commands::jdbc_driver_status,
             db::commands::jdbc_download_driver,
             db::commands::jdbc_import_driver,
