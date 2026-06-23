@@ -10,7 +10,7 @@ use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
 use crate::db::{DatabaseType, DbError};
 use crate::db::driver::{
-    ColumnDef, ConnectArgs, Driver, ErRelation, ForeignKeyDef, IndexDef, TableInfo, TableStructure,
+    ColumnDef, ConnectArgs, Driver, ErRelation, ForeignKeyDef, IndexDef, TableInfo, TableStructure, TriggerDef,
 };
 use crate::db::result::{binary_to_json, safe_i64_to_json, ColumnInfo, QueryResult};
 
@@ -576,9 +576,27 @@ impl Driver for SqlServerDriver {
                         .flatten()
                         .unwrap_or("NO_ACTION")
                         .to_string(),
+                    constraint_name: r.try_get::<&str, _>(0).ok().flatten().map(|s| s.to_string()),
                 }
             })
             .collect();
+
+        // ---- triggers (sys.triggers attached to this table) ----
+        let trg_sql = format!(
+            "SELECT tr.name FROM sys.triggers tr \
+             WHERE tr.parent_id = OBJECT_ID('{s}.{t}') AND tr.is_ms_shipped = 0 \
+             ORDER BY tr.name"
+        );
+        let triggers: Vec<TriggerDef> = match client.query(&*trg_sql, &[]).await {
+            Ok(stream) => stream.into_first_result().await
+                .map(|rows| rows.iter().map(|r| TriggerDef {
+                    name: r.try_get::<&str, _>(0).ok().flatten().unwrap_or("").to_string(),
+                    timing: None,
+                    event: None,
+                }).collect())
+                .unwrap_or_default(),
+            Err(_) => Vec::new(),
+        };
 
         // ---- table comment (sys.extended_properties, minor_id = 0) ----
         let comment_sql = sqlserver_table_comment_sql(&s, &t);
@@ -601,6 +619,7 @@ impl Driver for SqlServerDriver {
             columns,
             indexes,
             fks,
+            triggers,
         })
     }
 

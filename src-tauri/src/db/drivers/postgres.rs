@@ -360,9 +360,58 @@ fn pg_table_comment_sql() -> &'static str {
        (quote_ident($1) || '.' || quote_ident($2))::regclass, 'pg_class')"
 }
 
+/// Foreign-key introspection SQL for PostgreSQL. Params: $1 = schema, $2 = table.
+/// Columns: 0=fk column, 1=ref schema, 2=ref table, 3=ref column, 4=delete rule,
+/// 5=update rule, 6=constraint name (needed for DROP CONSTRAINT).
+/// adapted from dbx list_foreign_keys L1646 + referential_constraints for on_delete/on_update
+fn pg_fk_sql() -> &'static str {
+    "SELECT fk.column_name, \
+     pk.table_schema AS ref_schema, pk.table_name AS ref_table, pk.column_name AS ref_column, \
+     rc.delete_rule, rc.update_rule, tc.constraint_name \
+     FROM information_schema.table_constraints tc \
+     JOIN information_schema.key_column_usage fk \
+       ON fk.constraint_name   = tc.constraint_name \
+       AND fk.constraint_schema = tc.constraint_schema \
+       AND fk.table_schema      = tc.table_schema \
+       AND fk.table_name        = tc.table_name \
+     JOIN information_schema.referential_constraints rc \
+       ON rc.constraint_name   = tc.constraint_name \
+       AND rc.constraint_schema = tc.constraint_schema \
+     JOIN information_schema.key_column_usage pk \
+       ON pk.constraint_name   = rc.unique_constraint_name \
+       AND pk.constraint_schema = rc.unique_constraint_schema \
+       AND pk.ordinal_position  = fk.position_in_unique_constraint \
+     WHERE tc.constraint_type = 'FOREIGN KEY' \
+       AND fk.table_schema = $1 AND fk.table_name = $2 \
+     ORDER BY fk.constraint_name, fk.ordinal_position"
+}
+
+/// Trigger-list SQL for PostgreSQL. Params: $1 = schema, $2 = table.
+/// Columns: 0=trigger name, 1=timing (BEFORE/AFTER/INSTEAD OF), 2=events (comma list).
+/// Excludes internal constraint-enforcement triggers (tgisinternal); groups by name
+/// because pg_trigger has one row per event and we surface one entry per trigger.
+fn pg_triggers_sql() -> &'static str {
+    "SELECT t.tgname, \
+     CASE \
+       WHEN (t.tgtype & 64) <> 0 THEN 'INSTEAD OF' \
+       WHEN (t.tgtype & 2) <> 0 THEN 'BEFORE' \
+       ELSE 'AFTER' \
+     END AS timing, \
+     array_to_string(ARRAY[ \
+       CASE WHEN (t.tgtype & 4)  <> 0 THEN 'INSERT' END, \
+       CASE WHEN (t.tgtype & 8)  <> 0 THEN 'DELETE' END, \
+       CASE WHEN (t.tgtype & 16) <> 0 THEN 'UPDATE' END \
+     ]::text[], ' OR ') AS events \
+     FROM pg_trigger t \
+     JOIN pg_class c ON c.oid = t.tgrelid \
+     JOIN pg_namespace n ON n.oid = c.relnamespace \
+     WHERE n.nspname = $1 AND c.relname = $2 AND NOT t.tgisinternal \
+     ORDER BY t.tgname"
+}
+
 #[cfg(test)]
 mod comment_sql_tests {
-    use super::{pg_columns_sql, pg_table_comment_sql};
+    use super::{pg_columns_sql, pg_table_comment_sql, pg_fk_sql, pg_triggers_sql};
 
     #[test]
     fn columns_sql_selects_col_description() {
@@ -376,6 +425,22 @@ mod comment_sql_tests {
         let sql = pg_table_comment_sql();
         assert!(sql.contains("obj_description"), "表注释 SQL 必须用 obj_description");
         assert!(sql.contains("pg_class"));
+    }
+
+    #[test]
+    fn fk_sql_selects_constraint_name() {
+        // D1: FK 内省必须带出约束名,前端删除外键要用它。
+        let sql = pg_fk_sql();
+        assert!(sql.contains("tc.constraint_name"), "FK SQL 必须选出 constraint_name 以支持删除");
+        assert!(sql.contains("referential_constraints"), "仍保留 on_delete/on_update 来源");
+    }
+
+    #[test]
+    fn triggers_sql_uses_pg_trigger() {
+        // D1: 触发器列表来自 pg_trigger,排除内部约束触发器(tgisinternal)。
+        let sql = pg_triggers_sql();
+        assert!(sql.contains("pg_trigger"), "触发器 SQL 必须查 pg_trigger");
+        assert!(sql.contains("tgisinternal"), "应排除内部约束触发器");
     }
 }
 
@@ -709,7 +774,7 @@ impl Driver for PostgresDriver {
     }
 
     async fn table_structure(&self, schema: &str, table: &str) -> Result<TableStructure, DbError> {
-        use crate::db::driver::{ColumnDef, IndexDef, ForeignKeyDef};
+        use crate::db::driver::{ColumnDef, IndexDef, ForeignKeyDef, TriggerDef};
         let client = self.pool.get().await
             .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
 
@@ -768,29 +833,8 @@ impl Driver for PostgresDriver {
         }).collect();
 
         // ---- foreign keys ----
-        // adapted from dbx list_foreign_keys L1646 + referential_constraints for on_delete/on_update
-        let fk_rows = client.query(
-            "SELECT fk.column_name, \
-             pk.table_schema AS ref_schema, pk.table_name AS ref_table, pk.column_name AS ref_column, \
-             rc.delete_rule, rc.update_rule \
-             FROM information_schema.table_constraints tc \
-             JOIN information_schema.key_column_usage fk \
-               ON fk.constraint_name   = tc.constraint_name \
-               AND fk.constraint_schema = tc.constraint_schema \
-               AND fk.table_schema      = tc.table_schema \
-               AND fk.table_name        = tc.table_name \
-             JOIN information_schema.referential_constraints rc \
-               ON rc.constraint_name   = tc.constraint_name \
-               AND rc.constraint_schema = tc.constraint_schema \
-             JOIN information_schema.key_column_usage pk \
-               ON pk.constraint_name   = rc.unique_constraint_name \
-               AND pk.constraint_schema = rc.unique_constraint_schema \
-               AND pk.ordinal_position  = fk.position_in_unique_constraint \
-             WHERE tc.constraint_type = 'FOREIGN KEY' \
-               AND fk.table_schema = $1 AND fk.table_name = $2 \
-             ORDER BY fk.constraint_name, fk.ordinal_position",
-            &[&schema, &table],
-        ).await.map_err(|e| pg_query_err(&e))?;
+        let fk_rows = client.query(pg_fk_sql(), &[&schema, &table])
+            .await.map_err(|e| pg_query_err(&e))?;
 
         let fks: Vec<ForeignKeyDef> = fk_rows.iter().map(|r| {
             let ref_schema: String = r.get::<_, String>(1);
@@ -801,7 +845,17 @@ impl Driver for PostgresDriver {
                 references: format!("{}.{}.{}", ref_schema, ref_table, ref_col),
                 on_delete: r.try_get::<_, String>(4).unwrap_or_else(|_| "NO ACTION".into()),
                 on_update: r.try_get::<_, String>(5).unwrap_or_else(|_| "NO ACTION".into()),
+                constraint_name: r.try_get::<_, Option<String>>(6).ok().flatten(),
             }
+        }).collect();
+
+        // ---- triggers ----
+        let trg_rows = client.query(pg_triggers_sql(), &[&schema, &table])
+            .await.map_err(|e| pg_query_err(&e))?;
+        let triggers: Vec<TriggerDef> = trg_rows.iter().map(|r| TriggerDef {
+            name: r.get::<_, String>(0),
+            timing: r.try_get::<_, Option<String>>(1).ok().flatten(),
+            event: r.try_get::<_, Option<String>>(2).ok().flatten().filter(|s| !s.is_empty()),
         }).collect();
 
         // ---- table comment ----
@@ -812,7 +866,7 @@ impl Driver for PostgresDriver {
             .and_then(|r| r.try_get::<_, Option<String>>(0).ok().flatten())
             .unwrap_or_default();
 
-        Ok(TableStructure { comment, columns, indexes, fks })
+        Ok(TableStructure { comment, columns, indexes, fks, triggers })
     }
 
     async fn er_relations(&self, schema: &str) -> Result<Vec<ErRelation>, DbError> {

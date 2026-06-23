@@ -491,7 +491,8 @@ export async function tableStructure(connId: string, schema: string, table: stri
     comment?: string
     columns: { name: string; typeName: string; nullable: boolean; default: string | null; key: string; comment?: string }[]
     indexes: { name: string; columns: string; unique: boolean; method: string }[]
-    fks: { column: string; references: string; onDelete: string; onUpdate: string }[]
+    fks: { column: string; references: string; onDelete: string; onUpdate: string; constraintName?: string | null }[]
+    triggers?: { name: string; timing?: string | null; event?: string | null }[]
   }>('db_table_structure', { connId, schema, table })
   return {
     comment: raw.comment ?? '',
@@ -500,7 +501,11 @@ export async function tableStructure(connId: string, schema: string, table: stri
       key: (c.key === 'PK' || c.key === 'FK' || c.key === 'UNI' ? c.key : ''), extra: '', comment: c.comment ?? '',
     })),
     indexes: (raw.indexes ?? []).map(i => ({ name: i.name, cols: i.columns, unique: i.unique, method: i.method })),
-    fks: (raw.fks ?? []).map(f => ({ col: f.column, ref: f.references, onDelete: f.onDelete, onUpdate: f.onUpdate })),
+    fks: (raw.fks ?? []).map(f => ({
+      col: f.column, ref: f.references, onDelete: f.onDelete, onUpdate: f.onUpdate,
+      name: f.constraintName ?? undefined,
+    })),
+    triggers: (raw.triggers ?? []).map(t => ({ name: t.name, timing: t.timing ?? undefined, event: t.event ?? undefined })),
   }
 }
 

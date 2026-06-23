@@ -213,12 +213,13 @@ impl Driver for ClickhouseDriver {
             .and_then(|v| v.as_str().map(|s| s.to_string()))
             .unwrap_or_default();
 
-        // ClickHouse has no foreign keys
+        // ClickHouse has no foreign keys or triggers
         Ok(TableStructure {
             comment,
             columns,
             indexes: Vec::<IndexDef>::new(),
             fks: Vec::<ForeignKeyDef>::new(),
+            triggers: Vec::new(),
         })
     }
 

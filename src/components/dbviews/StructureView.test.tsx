@@ -117,6 +117,56 @@ describe('StructureView 索引删除安全门控', () => {
   })
 })
 
+describe('StructureView 外键删除安全门控', () => {
+  beforeAll(async () => { await i18n.changeLanguage('en') })
+
+  const withFk: TableStructure = {
+    ...struct,
+    fks: [{ name: 'fk_orders_user', col: 'user_id', ref: 'public.users.id', onDelete: 'CASCADE', onUpdate: 'NO ACTION' }],
+  }
+
+  it('外键删除按约束名走 dropTableChildObject(FOREIGN_KEY),需输入约束名原文', async () => {
+    tableStructure.mockResolvedValue(withFk)
+    dropTableChildObject.mockResolvedValue(0)
+    wrap(<StructureView table="orders" connId="c1" schema="public" engine="postgres" />)
+    await screen.findByText('主键编号')
+    fireEvent.click(screen.getByText(/^Foreign keys/))
+    fireEvent.click(await screen.findByTitle('Drop foreign key'))
+    const confirm = await screen.findByTestId('child-drop-confirm')
+    expect(confirm).toBeDisabled()
+    const input = screen.getByTestId('child-drop-input')
+    fireEvent.change(input, { target: { value: 'fk_orders_user' } })
+    expect(confirm).not.toBeDisabled()
+    fireEvent.click(confirm)
+    await waitFor(() => expect(dropTableChildObject).toHaveBeenCalledWith('c1', 'FOREIGN_KEY', 'public', 'orders', 'fk_orders_user'))
+  })
+})
+
+describe('StructureView 触发器展示与删除', () => {
+  beforeAll(async () => { await i18n.changeLanguage('en') })
+
+  const withTrigger: TableStructure = {
+    ...struct,
+    triggers: [{ name: 'orders_audit', timing: 'AFTER', event: 'INSERT' }],
+  }
+
+  it('触发器 tab 列出触发器,删除按名门控并调用 dropTableChildObject(TRIGGER)', async () => {
+    tableStructure.mockResolvedValue(withTrigger)
+    dropTableChildObject.mockResolvedValue(0)
+    wrap(<StructureView table="orders" connId="c1" schema="public" engine="postgres" />)
+    await screen.findByText('主键编号')
+    fireEvent.click(screen.getByText(/^Triggers/))
+    expect(await screen.findByText('orders_audit')).toBeInTheDocument()
+    fireEvent.click(screen.getByTitle('Drop trigger'))
+    const confirm = await screen.findByTestId('child-drop-confirm')
+    expect(confirm).toBeDisabled()
+    const input = screen.getByTestId('child-drop-input')
+    fireEvent.change(input, { target: { value: 'orders_audit' } })
+    fireEvent.click(confirm)
+    await waitFor(() => expect(dropTableChildObject).toHaveBeenCalledWith('c1', 'TRIGGER', 'public', 'orders', 'orders_audit'))
+  })
+})
+
 describe('StructureView DDL 复制', () => {
   beforeAll(async () => { await i18n.changeLanguage('en') })
 

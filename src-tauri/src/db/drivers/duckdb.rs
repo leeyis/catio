@@ -374,7 +374,8 @@ impl Driver for DuckDbDriver {
             })
             .collect();
 
-        Ok(TableStructure { comment: table_comment, columns, indexes, fks })
+        // DuckDB 暂无表级触发器概念(本驱动不内省触发器)。
+        Ok(TableStructure { comment: table_comment, columns, indexes, fks, triggers: Vec::new() })
     }
 
     async fn er_relations(&self, schema: &str) -> Result<Vec<ErRelation>, DbError> {
@@ -482,6 +483,8 @@ fn query_fks(
             references: format!("{}.{}.{}", ref_schema, ref_table, ref_col),
             on_delete: "NO ACTION".into(),
             on_update: "NO ACTION".into(),
+            // DuckDB 当前内省查询未带出约束名;留空,前端不提供删除外键入口。
+            constraint_name: None,
         });
     }
 

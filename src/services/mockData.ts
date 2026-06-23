@@ -177,6 +177,7 @@ const tableStructures: Record<string, TableStructure> = {
     fks: [
       { col: 'customer_id', ref: 'customers.id', onDelete: 'restrict', onUpdate: 'cascade' },
     ],
+    triggers: [],
   },
   customers: {
     comment: '客户表',
@@ -194,6 +195,7 @@ const tableStructures: Record<string, TableStructure> = {
       { name: 'uq_customers_email', cols: 'email', unique: true, method: 'btree' },
     ],
     fks: [],
+    triggers: [],
   },
   line_items: {
     comment: '订单明细行',
@@ -213,6 +215,7 @@ const tableStructures: Record<string, TableStructure> = {
       { col: 'order_id', ref: 'orders.id', onDelete: 'cascade', onUpdate: 'cascade' },
       { col: 'product_id', ref: 'products.id', onDelete: 'restrict', onUpdate: 'cascade' },
     ],
+    triggers: [],
   },
   payments: {
     comment: '支付记录',
@@ -229,6 +232,7 @@ const tableStructures: Record<string, TableStructure> = {
       { name: 'idx_pay_order', cols: 'order_id', unique: false, method: 'btree' },
     ],
     fks: [ { col: 'order_id', ref: 'orders.id', onDelete: 'cascade', onUpdate: 'cascade' } ],
+    triggers: [],
   },
   products: {
     comment: '商品目录',
@@ -244,6 +248,7 @@ const tableStructures: Record<string, TableStructure> = {
       { name: 'uq_products_sku', cols: 'sku', unique: true, method: 'btree' },
     ],
     fks: [],
+    triggers: [],
   },
   refunds: {
     comment: '退款记录',
@@ -256,6 +261,7 @@ const tableStructures: Record<string, TableStructure> = {
     ] as StructColumn[],
     indexes: [ { name: 'refunds_pkey', cols: 'id', unique: true, method: 'btree' } ],
     fks: [ { col: 'payment_id', ref: 'payments.id', onDelete: 'restrict', onUpdate: 'cascade' } ],
+    triggers: [],
   },
   shipments: {
     comment: '物流发货',
@@ -268,6 +274,7 @@ const tableStructures: Record<string, TableStructure> = {
     ] as StructColumn[],
     indexes: [ { name: 'shipments_pkey', cols: 'id', unique: true, method: 'btree' } ],
     fks: [ { col: 'order_id', ref: 'orders.id', onDelete: 'cascade', onUpdate: 'cascade' } ],
+    triggers: [],
   },
 }
 

@@ -150,6 +150,17 @@ export interface StructFk {
   ref: string
   onDelete: string
   onUpdate: string
+  /** Constraint name — drives the「删除外键」entry. Absent on engines with no named
+   *  FK constraint (SQLite/rqlite/DuckDB), in which case no delete entry is shown. */
+  name?: string
+}
+
+export interface StructTrigger {
+  name: string
+  /** BEFORE | AFTER | INSTEAD OF (display only; absent on engines that don't report it). */
+  timing?: string
+  /** INSERT | UPDATE | DELETE (display only; may be a combined string). */
+  event?: string
 }
 
 export interface TableStructure {
@@ -157,6 +168,9 @@ export interface TableStructure {
   columns: StructColumn[]
   indexes: StructIndex[]
   fks: StructFk[]
+  /** Trigger list. Optional so older fixtures/callers that predate D1 still type-check;
+   *  the live `tableStructure` service always populates it (empty for engines w/o triggers). */
+  triggers?: StructTrigger[]
 }
 
 // ---- ER model ----

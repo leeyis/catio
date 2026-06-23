@@ -113,6 +113,18 @@ pub struct ForeignKeyDef {
     pub references: String, // "schema.table.col"
     pub on_delete: String,
     pub on_update: String,
+    /// 约束名（DROP FOREIGN KEY / DROP CONSTRAINT 所需）。SQLite/rqlite 等无命名约束的
+    /// 引擎留 None；前端据此决定是否提供「删除外键」入口。
+    pub constraint_name: Option<String>,
+}
+
+/// 表上的一个触发器（结构内省）。`timing`/`event` 仅用于展示，可空（部分引擎/查询取不到）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerDef {
+    pub name: String,
+    pub timing: Option<String>, // BEFORE | AFTER | INSTEAD OF
+    pub event: Option<String>,  // INSERT | UPDATE | DELETE（可为组合串）
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -122,6 +134,8 @@ pub struct TableStructure {
     pub columns: Vec<ColumnDef>,
     pub indexes: Vec<IndexDef>,
     pub fks: Vec<ForeignKeyDef>,
+    /// 该表的触发器列表。不支持触发器的引擎留空。
+    pub triggers: Vec<TriggerDef>,
 }
 
 /// ER 关系（表布局坐标由前端算，后端只给关系）。

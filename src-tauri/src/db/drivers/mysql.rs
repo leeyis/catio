@@ -613,6 +613,19 @@ fn mysql_table_comment_sql(schema: &str, table: &str) -> String {
     )
 }
 
+/// Build the trigger-list SQL for standard MySQL (information_schema.TRIGGERS).
+/// 列:TRIGGER_NAME / ACTION_TIMING(BEFORE|AFTER) / EVENT_MANIPULATION(INSERT|UPDATE|DELETE)。
+fn mysql_triggers_sql(schema: &str, table: &str) -> String {
+    format!(
+        "SELECT TRIGGER_NAME, ACTION_TIMING, EVENT_MANIPULATION \
+         FROM information_schema.TRIGGERS \
+         WHERE TRIGGER_SCHEMA = {s} AND EVENT_OBJECT_TABLE = {t} \
+         ORDER BY TRIGGER_NAME",
+        s = quote_value(schema),
+        t = quote_value(table),
+    )
+}
+
 impl MySqlDriver {
     /// table_structure for standard MySQL.
     /// Adapted from dbx list_columns/list_indexes/list_foreign_keys, Apache-2.0.
@@ -621,7 +634,7 @@ impl MySqlDriver {
         schema: &str,
         table: &str,
     ) -> Result<TableStructure, DbError> {
-        use crate::db::driver::{ColumnDef, IndexDef, ForeignKeyDef};
+        use crate::db::driver::{ColumnDef, IndexDef, ForeignKeyDef, TriggerDef};
 
         let mut conn = self.pool.get_conn().await
             .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
@@ -720,7 +733,21 @@ impl MySqlDriver {
                     .unwrap_or_else(|| "NO ACTION".into()),
                 on_update: get_opt_str_by_name(r, "UPDATE_RULE")
                     .unwrap_or_else(|| "NO ACTION".into()),
+                constraint_name: get_opt_str_by_name(r, "CONSTRAINT_NAME"),
             }
+        }).collect();
+
+        // ---- triggers ----
+        // information_schema.TRIGGERS：按表过滤,带触发时机/事件用于展示。
+        let trg_sql = mysql_triggers_sql(schema, table);
+        let trg_rows: Vec<mysql_async::Row> = conn.query_iter(&trg_sql).await
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?
+            .collect_and_drop().await
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        let triggers: Vec<TriggerDef> = trg_rows.iter().map(|r| TriggerDef {
+            name: get_str_by_name(r, "TRIGGER_NAME"),
+            timing: get_opt_str_by_name(r, "ACTION_TIMING"),
+            event: get_opt_str_by_name(r, "EVENT_MANIPULATION"),
         }).collect();
 
         // ---- table comment ----
@@ -731,7 +758,7 @@ impl MySqlDriver {
             .map(|r| get_str(&r, 0))
             .unwrap_or_default();
 
-        Ok(TableStructure { comment, columns, indexes, fks })
+        Ok(TableStructure { comment, columns, indexes, fks, triggers })
     }
 
     /// er_relations for standard MySQL.
@@ -837,12 +864,13 @@ impl MySqlDriver {
         schema: &str,
         table: &str,
     ) -> Result<TableStructure, DbError> {
-        use crate::db::driver::{ColumnDef, IndexDef, ForeignKeyDef};
+        use crate::db::driver::{ColumnDef, IndexDef, ForeignKeyDef, TriggerDef};
 
         let mut conn = self.pool.get_conn().await
             .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
 
         // ---- columns (ALL_TAB_COLUMNS + PK join) ----
+        // (OceanBase-Oracle path)
         let col_sql = ob_columns_sql(schema, table);
         let result = conn.query_iter(&col_sql).await
             .map_err(|e| DbError::QueryFailed(e.to_string()))?;
@@ -925,13 +953,33 @@ impl MySqlDriver {
             .map_err(|e| DbError::QueryFailed(e.to_string()))?;
 
         let fks: Vec<ForeignKeyDef> = fk_rows.iter().map(|r| {
+            let cn = get_str(r, 0);
             ForeignKeyDef {
                 column: get_str(r, 1),
                 references: format!("{}.{}.{}", get_str(r, 2), get_str(r, 3), get_str(r, 4)),
                 on_delete: "NO ACTION".into(),
                 on_update: "NO ACTION".into(),
+                constraint_name: if cn.is_empty() { None } else { Some(cn) },
             }
         }).collect();
+
+        // ---- triggers (ALL_TRIGGERS) ----
+        let trg_sql = format!(
+            "SELECT TRIGGER_NAME, TRIGGERING_EVENT, TRIGGER_TYPE FROM ALL_TRIGGERS \
+             WHERE TABLE_OWNER = {s} AND TABLE_NAME = {t} ORDER BY TRIGGER_NAME",
+            s = quote_value(schema),
+            t = quote_value(table),
+        );
+        let triggers: Vec<TriggerDef> = match conn.query_iter(&trg_sql).await {
+            Ok(res) => res.collect_and_drop::<mysql_async::Row>().await
+                .map(|rows| rows.iter().map(|r| TriggerDef {
+                    name: get_str(r, 0),
+                    timing: { let s = get_str(r, 2); if s.is_empty() { None } else { Some(s) } },
+                    event: { let s = get_str(r, 1); if s.is_empty() { None } else { Some(s) } },
+                }).collect())
+                .unwrap_or_default(),
+            Err(_) => Vec::new(), // best-effort: ALL_TRIGGERS 不可用时留空
+        };
 
         // ---- table comment ----
         let comment_sql = ob_table_comment_sql(schema, table);
@@ -941,7 +989,7 @@ impl MySqlDriver {
             .map(|r| get_str(&r, 0))
             .unwrap_or_default();
 
-        Ok(TableStructure { comment, columns, indexes, fks })
+        Ok(TableStructure { comment, columns, indexes, fks, triggers })
     }
 
     async fn ob_er_relations(&self, schema: &str) -> Result<Vec<ErRelation>, DbError> {

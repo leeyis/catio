@@ -483,6 +483,7 @@ impl Driver for MongoDriver {
             columns,
             indexes,
             fks: vec![],
+            triggers: vec![],
         })
     }
 

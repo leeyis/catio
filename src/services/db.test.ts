@@ -197,6 +197,34 @@ describe('services/db', () => {
     delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
   })
 
+  it('tableStructure threads fk constraint name and the triggers list from the backend', async () => {
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+    invokeMock.mockResolvedValue({
+      comment: '',
+      columns: [],
+      indexes: [],
+      fks: [{ constraintName: 'fk_orders_user', column: 'user_id', references: 'public.users.id', onDelete: 'CASCADE', onUpdate: 'NO ACTION' }],
+      triggers: [{ name: 'orders_audit', timing: 'AFTER', event: 'INSERT' }],
+    })
+    const { tableStructure } = await import('./db')
+    const st = await tableStructure('conn-1', 'public', 'orders')
+    expect(st.fks[0].name).toBe('fk_orders_user')
+    expect(st.fks[0].col).toBe('user_id')
+    expect(st.triggers![0].name).toBe('orders_audit')
+    expect(st.triggers![0].timing).toBe('AFTER')
+    expect(st.triggers![0].event).toBe('INSERT')
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
+
+  it('tableStructure defaults a missing triggers list to empty (engines without triggers)', async () => {
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+    invokeMock.mockResolvedValue({ columns: [], indexes: [], fks: [] })
+    const { tableStructure } = await import('./db')
+    const st = await tableStructure('conn-1', 'main', 't')
+    expect(st.triggers).toEqual([])
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
+
   it('dropObject forwards to db_drop_object under Tauri', async () => {
     ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
     invokeMock.mockResolvedValue(0)
