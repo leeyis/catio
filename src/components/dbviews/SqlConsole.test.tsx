@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest'
 import { forwardRef, useImperativeHandle } from 'react'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, within, waitFor } from '@testing-library/react'
 import { LanguageProvider } from '../../state/LanguageContext'
 import { DataProvider } from '../../state/DataContext'
 import i18n from '../../i18n'
 import { SqlConsole } from './SqlConsole'
+import { writeHiddenSchemas } from '../../state/schemaFilter'
 
 // CodeMirror 在 jsdom 下难以稳定挂载,且本测试只关心 SqlConsole 自身的分屏/最大化布局,
 // 故把 SqlEditor 替换成一个轻量桩件。
@@ -29,11 +30,14 @@ const runExplainMock = vi.fn(() =>
     rows: [[JSON.stringify([{ Plan: { 'Node Type': 'Seq Scan', 'Relation Name': 'orders' } }])]],
   }),
 )
+// 可按用例覆盖的 getSchema(用于「库/Schema 下拉联动漏斗筛选」测试)。
+type StubNs = { name: string; tables: unknown[]; views: unknown[]; functions: unknown[] }
+const getSchemaMock = vi.fn(() => Promise.resolve({ schemas: [] as StubNs[] }))
 
 vi.mock('../../services/db', () => ({
   runQuery: vi.fn(),
   runExplain: (...args: unknown[]) => runExplainMock(...(args as [])),
-  getSchema: vi.fn(() => Promise.resolve({ schemas: [] })),
+  getSchema: (...args: unknown[]) => getSchemaMock(...(args as [])),
   schemaColumns: vi.fn(() => Promise.resolve([])),
   tablePreview: vi.fn(() => Promise.resolve({ columns: [], rows: [] })),
   dbErrMsg: (e: unknown) => (e instanceof Error ? e.message : String(e)),
@@ -171,5 +175,36 @@ describe('SqlConsole 执行计划(EXPLAIN)入口', () => {
     // 第三参为选中的默认库/Schema:EXPLAIN 必须沿用它(此处 mock 自动选中首个库 public),
     // 否则后端落连接默认库,对未限定库名的查询报「默认库.表 不存在」(真机缺陷)。
     expect(runExplainMock).toHaveBeenCalledWith('c1', 'select * from orders', 'public')
+  })
+})
+
+describe('SqlConsole 库/Schema 下拉联动漏斗筛选', () => {
+  beforeAll(async () => { await i18n.changeLanguage('en') })
+  beforeEach(() => {
+    localStorage.clear()
+    getSchemaMock.mockReset()
+  })
+
+  it('被漏斗隐藏的 schema 不出现在默认库/Schema 下拉中', async () => {
+    // 真机反馈:结构面板漏斗筛掉的库,SQL 控制台的「默认库/Schema」下拉也只应保留筛选后的。
+    getSchemaMock.mockResolvedValue({
+      schemas: [
+        { name: 'public', tables: [], views: [], functions: [] },
+        { name: 'esales', tables: [], views: [], functions: [] },
+        { name: 'eastmoney', tables: [], views: [], functions: [] },
+      ],
+    })
+    // 与 SchemaBrowser 同一 key(conn.id 即 SqlConsole 的 profileId)隐藏 esales。
+    writeHiddenSchemas('prof-1', ['esales'])
+
+    wrap(<SqlConsole connId="c1" profileId="prof-1" engine="postgres" fresh />)
+
+    const select = await screen.findByTestId('sql-default-schema')
+    await waitFor(() => {
+      const values = within(select as HTMLElement).getAllByRole('option').map(o => (o as HTMLOptionElement).value)
+      expect(values).toContain('public')
+      expect(values).toContain('eastmoney')
+      expect(values).not.toContain('esales')
+    })
   })
 })

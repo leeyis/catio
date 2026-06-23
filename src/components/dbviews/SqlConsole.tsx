@@ -17,6 +17,7 @@ import { DataGrid } from './DataGrid'
 import { ExplainPlanViewer } from './ExplainPlanViewer'
 import { SqlFileDialog } from './SqlFileDialog'
 import { parseExplainResult, supportsExplainPlan, type ParsedExplainPlan } from './explainPlan'
+import { readHiddenSchemas, HIDDEN_SCHEMAS_EVENT } from '../../state/schemaFilter'
 import type { DbType } from '../../services/db'
 
 export interface SqlConsoleProps {
@@ -216,9 +217,23 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
     [liveSchema],
   )
   const namespaceKey = namespaceNames.join(',')
+
+  // 结构面板漏斗筛掉的库/Schema,这里也只保留筛选后的(联动)。key 与 SchemaBrowser 一致
+  // (conn.id 即此处的 profileId);监听变更事件,做到切换漏斗时库下拉实时刷新。
+  const [hiddenSchemas, setHiddenSchemas] = useState<Set<string>>(
+    () => new Set(profileId ? readHiddenSchemas(profileId) : []),
+  )
+  useEffect(() => {
+    const refresh = () => setHiddenSchemas(new Set(profileId ? readHiddenSchemas(profileId) : []))
+    refresh()
+    if (typeof window === 'undefined') return
+    window.addEventListener(HIDDEN_SCHEMAS_EVENT, refresh)
+    return () => window.removeEventListener(HIDDEN_SCHEMAS_EVENT, refresh)
+  }, [profileId])
+
   const schemaOptions = useMemo(
-    () => (liveSchema ?? D.schema).schemas.map(ns => ns.name).filter(Boolean),
-    [liveSchema, D.schema],
+    () => (liveSchema ?? D.schema).schemas.map(ns => ns.name).filter(Boolean).filter(name => !hiddenSchemas.has(name)),
+    [liveSchema, D.schema, hiddenSchemas],
   )
   const schemaOptionsKey = schemaOptions.join('\u0000')
 
