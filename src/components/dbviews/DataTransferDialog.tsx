@@ -376,7 +376,7 @@ export function DataTransferDialog({
         {/* footer */}
         <div className="row gap8" style={{ justifyContent: 'flex-end', padding: '14px 20px 18px', borderTop: '1px solid var(--border-hairline)', flex: 'none' }}>
           <Btn variant="ghost" onClick={onClose}>{summary != null ? t('dbviews.close') : t('dbviews.cancel')}</Btn>
-          <Btn variant="primary" icon="arrow-right-to-line"
+          <Btn variant="primary" icon="arrow-up-down"
             onClick={runTransfer}
             disabled={busy || !ready}>
             {busy ? t('dbviews.transferring') : t('dbviews.transferApply', { count: mappedCount })}

@@ -361,7 +361,7 @@ function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery,
                   fontSize: 12.5, color: 'var(--text-primary)', cursor: 'pointer', alignItems: 'center' }}
                 onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = 'var(--accent-soft)' }}
                 onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}>
-                <Icon name="arrow-right-to-line" size={13} style={{ color: 'var(--text-tertiary)', flex: 'none' }} />
+                <Icon name="arrow-up-down" size={13} style={{ color: 'var(--text-tertiary)', flex: 'none' }} />
                 <span className="ell">{t('workbench.objAdmin.transferData')}</span>
               </button>
             )}
