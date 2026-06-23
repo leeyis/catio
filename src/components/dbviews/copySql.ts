@@ -47,24 +47,40 @@ export function buildInsertSql(
 }
 
 /**
+ * 无真实主键时(PK-less 表,如 Postgres ctid 路径)的伪主键定位:`column` 是伪主键
+ * 列名,`values` 与 rows 等长一一对应每行的 key 值(该值不在行数据里,由调用方从
+ * activeRowKeys 取得)。
+ */
+export type KeyOverride = { column: string; values: unknown[] }
+
+/**
  * 生成 UPDATE:每行一条。`pk` 给出主键列名;SET 写非主键列,WHERE 用主键列定位。
- * 当 pk 为空时退化为 SET 全列、无 WHERE(语义上更新整表,复制后由用户自行补 WHERE)。
+ * 当 pk 为空时:
+ *   - 若提供 `keyOverride` 且当前行有可用 key 值,SET 全列、WHERE 用伪主键 (ctid) 定位;
+ *   - 否则退化为 SET 全列、无 WHERE(复制后由用户自行补 WHERE)。
+ * 真实 PK 始终优先于 keyOverride。
  */
 export function buildUpdateSql(
   rows: unknown[][], table: string, columns: string[], dialect: StructDialect,
-  schema: string | undefined, pk: string[],
+  schema: string | undefined, pk: string[], keyOverride?: KeyOverride,
 ): string {
   const tbl = qualifiedTable(dialect, schema, table)
   const pkSet = new Set(pk)
-  return rows.map(row => {
+  return rows.map((row, i) => {
     const setCols = pk.length > 0 ? columns.filter(c => !pkSet.has(c)) : columns
     const set = setCols
       .map(c => `${quoteIdent(dialect, c)} = ${sqlValue(row[columns.indexOf(c)])}`)
       .join(', ')
-    if (pk.length === 0) return `UPDATE ${tbl} SET ${set};`
-    const where = pk
-      .map(c => `${quoteIdent(dialect, c)} = ${sqlValue(row[columns.indexOf(c)])}`)
-      .join(' AND ')
-    return `UPDATE ${tbl} SET ${set} WHERE ${where};`
+    if (pk.length > 0) {
+      const where = pk
+        .map(c => `${quoteIdent(dialect, c)} = ${sqlValue(row[columns.indexOf(c)])}`)
+        .join(' AND ')
+      return `UPDATE ${tbl} SET ${set} WHERE ${where};`
+    }
+    const keyVal = keyOverride?.values[i]
+    if (keyOverride && keyVal != null) {
+      return `UPDATE ${tbl} SET ${set} WHERE ${quoteIdent(dialect, keyOverride.column)} = ${sqlValue(keyVal)};`
+    }
+    return `UPDATE ${tbl} SET ${set};`
   }).join('\n')
 }

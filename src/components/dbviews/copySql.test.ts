@@ -76,4 +76,28 @@ describe('buildUpdateSql', () => {
     const sql = buildUpdateSql([[1, 'a', 2]], 'orders', cols, 'postgres', 'public', ['id', 'name'])
     expect(sql).toBe(`UPDATE "public"."orders" SET "price" = 2 WHERE "id" = 1 AND "name" = 'a';`)
   })
+  it('无主键但提供 keyColumn(ctid 路径)→ WHERE 用伪主键定位,SET 全列,逐行取 key 值', () => {
+    const sql = buildUpdateSql(
+      [[1, 'a', 2], [3, 'b', 4]], 'orders', cols, 'postgres', undefined, [],
+      { column: 'ctid', values: ['(0,1)', '(0,2)'] },
+    )
+    expect(sql).toBe(
+      `UPDATE "orders" SET "id" = 1, "name" = 'a', "price" = 2 WHERE "ctid" = '(0,1)';\n` +
+      `UPDATE "orders" SET "id" = 3, "name" = 'b', "price" = 4 WHERE "ctid" = '(0,2)';`,
+    )
+  })
+  it('keyColumn 提供但某行 key 值缺失 → 该行回落为无 WHERE(不静默漏定位)', () => {
+    const sql = buildUpdateSql(
+      [[1, 'a', 2]], 'orders', cols, 'postgres', undefined, [],
+      { column: 'ctid', values: [null] },
+    )
+    expect(sql).toBe(`UPDATE "orders" SET "id" = 1, "name" = 'a', "price" = 2;`)
+  })
+  it('真实主键存在时忽略 keyColumn(优先 PK)', () => {
+    const sql = buildUpdateSql(
+      [[7, 'shipped', 2]], 'orders', cols, 'postgres', undefined, ['id'],
+      { column: 'ctid', values: ['(0,1)'] },
+    )
+    expect(sql).toBe(`UPDATE "orders" SET "name" = 'shipped', "price" = 2 WHERE "id" = 7;`)
+  })
 })

@@ -714,9 +714,14 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
     if (data.length === 0) return
     const dialect = dialectFor(engine)
     const colNames = columns.map(c => c.name)
+    // PK-less 表(ctid 路径):pkCols 为空,需用 keyColumn + 逐行 activeRowKeys 作伪主键定位,
+    // 否则 UPDATE 退化为无 WHERE 的全表更新。key 值与 selectedRowValues() 同序(都来自 selectedOrigIdxs)。
+    const keyOverride = pkCols.length === 0 && keyColumn && activeRowKeys
+      ? { column: keyColumn, values: selectedOrigIdxs().map(origIdx => activeRowKeys[origIdx]) }
+      : undefined
     const text = kind === 'insert'
       ? buildInsertSql(data, table, colNames, dialect, schema)
-      : buildUpdateSql(data, table, colNames, dialect, schema, pkCols)
+      : buildUpdateSql(data, table, colNames, dialect, schema, pkCols, keyOverride)
     navigator.clipboard?.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500) }).catch(() => {})
   }
   // 当前选中单元格数（用于菜单/对话框文案 + 决定批量编辑可用性）。
@@ -1394,8 +1399,8 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
             style={{ position: 'fixed', top: ctxMenu.y, left: ctxMenu.x, minWidth: 180, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', borderRadius: 10, boxShadow: 'var(--shadow-window)', padding: 4 }}>
             {([
               { key: 'copy', icon: 'copy', label: t('dbviews.ctxCopy'), onClick: ctxCopy, show: true, danger: false },
-              { key: 'copy-insert', icon: 'file-code', label: t('dbviews.ctxCopyInsert', { count: selectedOrigIdxs().length }), onClick: () => ctxCopySql('insert'), show: selectedOrigIdxs().length > 0, danger: false },
-              { key: 'copy-update', icon: 'file-code', label: t('dbviews.ctxCopyUpdate', { count: selectedOrigIdxs().length }), onClick: () => ctxCopySql('update'), show: selectedOrigIdxs().length > 0, danger: false },
+              { key: 'copy-insert', icon: 'file-code', label: t('dbviews.ctxCopyInsert', { count: selectedOrigIdxs().length }), onClick: () => ctxCopySql('insert'), show: !resultLabel && selectedOrigIdxs().length > 0, danger: false },
+              { key: 'copy-update', icon: 'file-code', label: t('dbviews.ctxCopyUpdate', { count: selectedOrigIdxs().length }), onClick: () => ctxCopySql('update'), show: !resultLabel && selectedOrigIdxs().length > 0, danger: false },
               { key: 'delete', icon: 'trash-2', label: t('dbviews.ctxDeleteRows', { count: selectedOrigIdxs().length }), onClick: ctxDeleteRows, show: canEdit && selectedOrigIdxs().length > 0, danger: true },
               { key: 'bulk', icon: 'pencil', label: t('dbviews.ctxBulkEdit', { count: selectedCellCount }), onClick: ctxBulkEdit, show: canEdit && selectedCellCount > 0, danger: false },
             ] as const).filter(it => it.show).map(it => (
