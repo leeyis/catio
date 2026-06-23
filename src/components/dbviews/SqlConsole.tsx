@@ -472,13 +472,13 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
               {t('dbviews.run')} <span style={{ opacity: .6, fontSize: 10, marginLeft: 2 }}>Alt↵</span>
             </Btn>
           )}
-          {/* T12 执行计划入口:仅 PG/MySQL 且已连接时出现,空 SQL 时禁用。 */}
+          {/* T12 执行计划入口:仅 PG/MySQL 且已连接时出现,空 SQL 时禁用。纯 icon + 悬浮提示
+              「查看执行计划」(与右侧格式化/清除等工具按钮一致;\"解释\"二字易误解,去掉文字)。 */}
           {canExplain && (
-            <Btn size="sm" variant="secondary" testId="sql-explain" disabled={!code.trim()}
-              style={{ height: 26, padding: '0 10px', fontSize: 11.5 }} icon="git-branch"
+            <button className="icon-btn bare" data-testid="sql-explain" disabled={!code.trim()}
               title={t('dbviews.explainTitle')} onClick={runExplainPlan}>
-              {t('dbviews.explain')}
-            </Btn>
+              <Icon name="git-branch" size={15} />
+            </button>
           )}
           <div style={{ width: 1, height: 18, background: 'var(--border-hairline)' }} />
           <button className="icon-btn bare" title={t('dbviews.format')} disabled={plain || !code.trim()}
