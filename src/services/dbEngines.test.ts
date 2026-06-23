@@ -31,6 +31,10 @@ describe('DB_ENGINES catalog', () => {
     expect(findEngine('tidb')).toMatchObject({ dbType: 'mysql', driverProfile: 'tidb', defaultPort: 4000 })
     expect(findEngine('oceanbase-oracle')).toMatchObject({ dbType: 'mysql', driverProfile: 'oceanbase-oracle' })
     expect(findEngine('kingbase')).toMatchObject({ dbType: 'postgres', driverProfile: 'kingbase' })
+    // 对齐 DBX 引擎覆盖:补齐 MySQL 协议兼容的国产/云数据库(此前缺失)。
+    expect(findEngine('greatsql')).toMatchObject({ dbType: 'mysql', driverProfile: 'greatsql' })
+    expect(findEngine('polardb')).toMatchObject({ dbType: 'mysql', driverProfile: 'polardb' })
+    expect(findEngine('tdsql')).toMatchObject({ dbType: 'mysql', driverProfile: 'tdsql' })
   })
 
   it('plain family engines carry no driverProfile', () => {

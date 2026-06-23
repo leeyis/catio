@@ -42,6 +42,9 @@ const DB_LOGO: Record<string, string> = {
   kwdb: 'kwdb.svg',
   goldendb: 'goldendb.png',
   gbase: 'gbase.webp',
+  greatsql: 'greatsql.webp',
+  polardb: 'polardb.webp',
+  tdsql: 'tdsql.webp',
   // ── document / KV / search ──
   mongodb: 'mongodb.svg',
   mongo: 'mongodb.svg', // mock alias

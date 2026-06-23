@@ -71,6 +71,9 @@ export const DB_ENGINES: DbEngine[] = [
   { id: 'kwdb',      dbType: 'postgres', driverProfile: 'kwdb',      label: 'KWDB',      short: 'KW',    defaultPort: 26257, group: 'domestic' },
   { id: 'goldendb',  dbType: 'mysql',    driverProfile: 'goldendb',  label: 'GoldenDB',  short: 'GD',    defaultPort: 3306,  group: 'domestic' },
   { id: 'gbase',     dbType: 'mysql',    driverProfile: 'gbase',     label: 'GBase 8a',  short: 'GB',    defaultPort: 5258,  group: 'domestic' },
+  { id: 'greatsql',  dbType: 'mysql',    driverProfile: 'greatsql',  label: 'GreatSQL',  short: 'GSQL',  defaultPort: 3306,  group: 'domestic' },
+  { id: 'polardb',   dbType: 'mysql',    driverProfile: 'polardb',   label: 'PolarDB (MySQL)', short: 'POL', defaultPort: 3306, group: 'domestic' },
+  { id: 'tdsql',     dbType: 'mysql',    driverProfile: 'tdsql',     label: 'TDSQL',     short: 'TDS',   defaultPort: 3306,  group: 'domestic' },
 
   // ── Document / KV / Search / other ─────────────────────────────────
   { id: 'mongodb',       dbType: 'mongodb',       label: 'MongoDB',       short: 'MGO', defaultPort: 27017, group: 'document' },
