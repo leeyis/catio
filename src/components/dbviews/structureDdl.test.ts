@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   buildAddColumn, buildModifyColumn, buildCreateTableDDL, qualifiedTable, dialectFor,
+  supportsDdlExport,
   type ColumnDraft,
 } from './structureDdl'
 import type { TableStructure } from '../../services/types'
@@ -131,5 +132,26 @@ describe('structureDdl — qualifiedTable qualifies with schema for BOTH dialect
   it('falls back to the bare table when no schema is given', () => {
     expect(qualifiedTable('mysql', undefined, 't')).toBe('`t`')
     expect(qualifiedTable('postgres', '', 't')).toBe('"t"')
+  })
+})
+
+describe('structureDdl — supportsDdlExport gates SQL/DDL export to relational engines', () => {
+  it('relational engines support DDL/INSERT export', () => {
+    expect(supportsDdlExport('postgres')).toBe(true)
+    expect(supportsDdlExport('mysql')).toBe(true)
+    expect(supportsDdlExport('mariadb')).toBe(true)
+    expect(supportsDdlExport('sqlite')).toBe(true)
+    expect(supportsDdlExport('clickhouse')).toBe(true)
+    expect(supportsDdlExport('oracle')).toBe(true)
+    expect(supportsDdlExport('dameng')).toBe(true)
+    expect(supportsDdlExport(undefined)).toBe(true) // mock/demo path defaults to relational
+  })
+  it('non-relational engines (no SQL/DDL semantics) do NOT support export', () => {
+    // Redis/MongoDB/Elasticsearch consoles lack SQL/DDL — a .sql export would be misleading.
+    expect(supportsDdlExport('redis')).toBe(false)
+    expect(supportsDdlExport('mongodb')).toBe(false)
+    expect(supportsDdlExport('mongo')).toBe(false)
+    expect(supportsDdlExport('elasticsearch')).toBe(false)
+    expect(supportsDdlExport('Elasticsearch')).toBe(false) // case-insensitive
   })
 })

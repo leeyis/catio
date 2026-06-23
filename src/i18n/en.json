@@ -326,6 +326,28 @@
     "transferDone": "Migrated {{count}} row(s).",
     "transferError": "Migration failed: {{message}}"
   },
+  "dbexport": {
+    "title": "Export Database",
+    "tableSelection": "Select Tables",
+    "selectedCount": "{{selected}} / {{total}} selected",
+    "filterTables": "Filter tables…",
+    "selectAll": "Select all",
+    "clear": "Clear",
+    "noTables": "No tables to export",
+    "options": "Options",
+    "includeStructure": "Include structure (DDL)",
+    "includeData": "Include data (INSERT)",
+    "batchSize": "Batch size",
+    "batchSizePlaceholder": "default",
+    "rowLimit": "Row limit per table",
+    "rowLimitPlaceholder": "no limit",
+    "export": "Export",
+    "exporting": "Exporting…",
+    "cancel": "Cancel",
+    "exported": "Exported to {{path}}",
+    "error": "Export failed: {{message}}",
+    "ddlFailed": "Failed to read structure of table {{table}}: {{message}}"
+  },
   "explain": {
     "title": "Execution plan",
     "tree": "Tree",

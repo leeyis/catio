@@ -6,12 +6,14 @@ import { Icon } from '../Icon'
 import { SqlConsole, ERDiagram } from '../dbviews'
 import { CreateObjectModal } from '../dbviews/CreateObjectModal'
 import { ObjectAdminModal } from '../dbviews/ObjectAdminModal'
+import { DatabaseExportDialog, type DatabaseExportRequest } from '../dbviews/DatabaseExportDialog'
+import { buildCreateTableDDL, dialectFor, qualifiedTable, supportsDdlExport } from '../dbviews/structureDdl'
 import { SchemaBrowser } from './SchemaBrowser'
 import { TablePane } from './TablePane'
 import { ObjectPane } from './ObjectPane'
 import { useData } from '../../state/DataContext'
 import { listActiveDbConnections } from '../../state/dbConnections'
-import { getSchema, runQuery, dropObject, renameObject, truncateTable, duplicateTableStructure, dbErrMsg, type DbCapabilities } from '../../services/db'
+import { getSchema, runQuery, dropObject, renameObject, truncateTable, duplicateTableStructure, tableStructure, exportDatabaseSql, exportFile, dbErrMsg, type DbCapabilities } from '../../services/db'
 import type { Connection, Schema, SchemaNamespace } from '../../services/types'
 
 export interface DbWorkbenchProps {
@@ -98,6 +100,8 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
   const [adminObj, setAdminObj] = useState<{ op: 'drop' | 'rename' | 'truncate' | 'duplicate'; objectType: 'TABLE' | 'VIEW'; schema: string; name: string } | null>(null)
   // 对象管理操作的结果提示(成功 toast / 失败错误)。
   const [adminMsg, setAdminMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
+  // 整库导出对话框的目标 schema(null → 关闭)。
+  const [exportSchema, setExportSchema] = useState<string | null>(null)
   // Error surfaced when a CREATE statement fails to run.
   const [createErr, setCreateErr] = useState<string | null>(null)
   // 标签右键菜单(需求1):{tabId,x,y} 定位;全局 click / Escape 关闭。
@@ -183,6 +187,49 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
     if (!connId) return
     setCreateErr(null)
     setCreateObj({ schema, kind })
+  }
+  /**
+   * 执行整库导出:对选中表逐表取结构 → 用 structureDdl 拼 CREATE TABLE(approximation,
+   * 与结构面板 DDL 同源)→ 调 T13 service exportDatabaseSql 让后端分页取数 + 组装脚本 →
+   * 通过 save 对话框选目标 .sql,后端 exportFile 落盘。落盘真机验证见 notes。
+   */
+  async function runDatabaseExport(schema: string, req: DatabaseExportRequest) {
+    if (!connId) return
+    const dialect = dialectFor(conn.engine)
+    // 要导出的表名:undefined 表示「全部」→ 取该 schema 当前树里的全部表名。
+    const ns = namespaces.find(n => n.name === schema)
+    const tableNames = req.selectedTables ?? (ns?.tables.map(t => t.name) ?? [])
+    // 逐表取结构 → 拼 DDL(仅在需要结构时)。某表取结构失败必须中止整次导出并上报:
+    // 静默跳过会让该表 DDL 悄悄从输出消失,后端仍写文件并弹成功 toast(误导)。抛出由
+    // dialog 的 catch 捕获,展示到内联错误区,且不会走到后续落盘。
+    const tableDdls: Record<string, string> = {}
+    if (req.includeStructure) {
+      for (const name of tableNames) {
+        try {
+          const st = await tableStructure(connId, schema, name)
+          tableDdls[name] = buildCreateTableDDL(dialect, qualifiedTable(dialect, schema, name), st)
+        } catch (e) {
+          throw new Error(t('dbexport.ddlFailed', { table: name, message: dbErrMsg(e) }))
+        }
+      }
+    }
+    const script = await exportDatabaseSql({
+      connId, database: schema, schema,
+      selectedTables: req.selectedTables ?? [],
+      tableDdls,
+      includeStructure: req.includeStructure,
+      includeData: req.includeData,
+      batchSize: req.batchSize,
+      rowLimit: req.rowLimit,
+    })
+    // 选目标文件并落盘(webview <a download> 在 Tauri 内为 no-op,走后端 exportFile)。
+    const { save } = await import('@tauri-apps/plugin-dialog')
+    const safeName = (schema || 'database').replace(/[\\/:*?"<>|]+/g, '_').trim() || 'database'
+    const path = await save({ defaultPath: `${safeName}.sql`, filters: [{ name: 'SQL', extensions: ['sql'] }] })
+    if (!path) return // 用户取消保存
+    await exportFile(path, script)
+    setExportSchema(null)
+    setAdminMsg({ kind: 'ok', text: t('dbexport.exported', { path }) })
   }
   function openER(schema?: string) {
     if (!caps.er) return
@@ -298,6 +345,7 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
         active={activeTab?.kind === 'table' ? { schema: activeTab.schema, table: activeTab.table } : null}
         onNewQuery={(schema) => newQuery(undefined, schema ?? namespace?.name)} onOpenER={openER} onNewObjectTemplate={onNewObjectTemplate} onRefresh={refreshSchema}
         onObjectAdmin={connId ? (op, objectType, schema, name) => setAdminObj({ op, objectType, schema, name }) : undefined}
+        onExportDatabase={connId && supportsDdlExport(conn.engine) ? (schema) => setExportSchema(schema) : undefined}
         refreshing={refreshing}
         erActive={activeTab?.kind === 'er'} sqlActive={activeTab?.kind === 'sql'}
         disabledSql={!caps.sqlConsole} disabledEr={!caps.er}
@@ -437,6 +485,15 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
                 setAdminMsg({ kind: 'err', text: t('workbench.objAdmin.failed', { msg: dbErrMsg(e) }) })
               }
             }}
+          />
+        )}
+        {/* 整库导出对话框 — 仅 live + 支持 SQL(DDL/INSERT)的连接。 */}
+        {exportSchema != null && connId && (
+          <DatabaseExportDialog
+            schema={exportSchema}
+            allTables={(namespaces.find(n => n.name === exportSchema)?.tables ?? []).map(t => t.name)}
+            onClose={() => setExportSchema(null)}
+            onExport={req => runDatabaseExport(exportSchema, req)}
           />
         )}
         {adminMsg && (

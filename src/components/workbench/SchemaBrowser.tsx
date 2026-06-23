@@ -22,6 +22,12 @@ export interface SchemaBrowserProps {
   /** Re-introspect the schema tree (drives both the header refresh button and the per-schema 刷新). */
   onRefresh?: () => void
   /**
+   * Whole-database SQL export — invoked from a schema node's "..." menu. The parent
+   * (DbWorkbench) opens the export dialog scoped to this schema. Omitted on the
+   * mock/demo path and for engines without a DDL/INSERT concept (menu item hidden).
+   */
+  onExportDatabase?: (schema: string) => void
+  /**
    * Object administration entry — invoked from a table/view leaf's "..." menu. The
    * parent (DbWorkbench) opens the confirmation modal and runs the operation
    * against the live connection. Omitted on the mock/demo path (menu hidden).
@@ -60,7 +66,7 @@ export interface SchemaBrowserProps {
   onToggleCollapse?: () => void
 }
 
-export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, onObjectAdmin, schemas, conn, live, refreshing, loading, collapsed, onToggleCollapse, sqlActive, canSqlConsole = true, canEr = true, canStructureEdit = true, canViews = true, canFunctions = true }: SchemaBrowserProps) {
+export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, onObjectAdmin, onExportDatabase, schemas, conn, live, refreshing, loading, collapsed, onToggleCollapse, sqlActive, canSqlConsole = true, canEr = true, canStructureEdit = true, canViews = true, canFunctions = true }: SchemaBrowserProps) {
   const { t } = useTranslation()
   const D = useData()
   // Live path: render every supplied namespace; mock path: the single seeded schema (pixel-identical).
@@ -204,7 +210,7 @@ export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpen
           </div>
         ) : visibleNamespaces.map(ns => (
           <SchemaNode key={ns.name} ns={ns} query={query} active={active} onPick={onPick} onPickObject={onPickObject} live={!!live}
-            onNewQuery={onNewQuery} onOpenER={onOpenER} onNewObjectTemplate={onNewObjectTemplate} onRefresh={onRefresh} onObjectAdmin={onObjectAdmin}
+            onNewQuery={onNewQuery} onOpenER={onOpenER} onNewObjectTemplate={onNewObjectTemplate} onRefresh={onRefresh} onObjectAdmin={onObjectAdmin} onExportDatabase={onExportDatabase}
             sqlActive={sqlActive} canSqlConsole={canSqlConsole} canEr={canEr} canStructureEdit={canStructureEdit}
             canViews={canViews} canFunctions={canFunctions} />
         ))}
@@ -230,6 +236,7 @@ interface SchemaNodeProps {
   onNewObjectTemplate?: (schema: string, kind: 'table' | 'view') => void
   onRefresh?: () => void
   onObjectAdmin?: (op: 'drop' | 'rename' | 'truncate' | 'duplicate', objectType: 'TABLE' | 'VIEW', schema: string, name: string) => void
+  onExportDatabase?: (schema: string) => void
   sqlActive: boolean
   canSqlConsole: boolean
   canEr: boolean
@@ -239,7 +246,7 @@ interface SchemaNodeProps {
 }
 
 /** One schema namespace rendered as a collapsible DB tree node (Tables / Views / Functions). */
-function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, onObjectAdmin, sqlActive, canSqlConsole, canEr, canStructureEdit, canViews, canFunctions }: SchemaNodeProps) {
+function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, onObjectAdmin, onExportDatabase, sqlActive, canSqlConsole, canEr, canStructureEdit, canViews, canFunctions }: SchemaNodeProps) {
   const { t } = useTranslation()
   const D = useData()
   // Schemas start COLLAPSED — a freshly-connected DB shows nothing expanded until the
@@ -282,6 +289,7 @@ function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery,
       { icon: 'table-2', label: t('workbench.newTable'), action: () => onNewObjectTemplate(ns.name, 'table') },
       { icon: 'eye', label: t('workbench.newView'), action: () => onNewObjectTemplate(ns.name, 'view') },
     ] : []),
+    ...(onExportDatabase ? [{ icon: 'download', label: t('dbexport.title'), action: () => onExportDatabase(ns.name) }] : []),
     ...(onRefresh ? [{ icon: 'refresh-cw', label: t('workbench.refresh'), action: () => onRefresh() }] : []),
   ]
 

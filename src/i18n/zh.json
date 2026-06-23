@@ -326,6 +326,28 @@
     "transferDone": "已迁移 {{count}} 行。",
     "transferError": "迁移失败：{{message}}"
   },
+  "dbexport": {
+    "title": "整库导出",
+    "tableSelection": "选择表",
+    "selectedCount": "已选 {{selected}} / {{total}}",
+    "filterTables": "筛选表…",
+    "selectAll": "全选",
+    "clear": "清空",
+    "noTables": "没有可导出的表",
+    "options": "选项",
+    "includeStructure": "包含结构（DDL）",
+    "includeData": "包含数据（INSERT）",
+    "batchSize": "批大小",
+    "batchSizePlaceholder": "默认",
+    "rowLimit": "每表行上限",
+    "rowLimitPlaceholder": "无上限",
+    "export": "导出",
+    "exporting": "导出中…",
+    "cancel": "取消",
+    "exported": "已导出到 {{path}}",
+    "error": "导出失败：{{message}}",
+    "ddlFailed": "读取表 {{table}} 的结构失败：{{message}}"
+  },
   "explain": {
     "title": "执行计划",
     "tree": "树形",
