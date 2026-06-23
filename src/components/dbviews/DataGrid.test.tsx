@@ -387,6 +387,60 @@ describe('DataGrid generic rows', () => {
     expect(screen.getByTitle('3 edited')).toBeInTheDocument()
   })
 
+  it('range Copy skips a hidden column sitting between two visible columns', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+    const columns: ResultColumn[] = [
+      { name: 'id', type: 'int', pk: true },
+      { name: 'name', type: 'text' },
+      { name: 'email', type: 'text' },
+    ]
+    const rows: unknown[][] = [[10, 'alice', 'a@x.io'], [20, 'bob', 'b@x.io']]
+    wrap(<DataGrid columns={columns} rows={rows} writable connId="c1" table="orders" />)
+    // 隐藏中间的 name 列:点眼睛图标 → 点 name 复选项
+    fireEvent.click(screen.getByTitle('Column visibility'))
+    fireEvent.click(within(screen.getByRole('menuitemcheckbox', { name: /name/i })).getByText('name'))
+    fireEvent.click(screen.getByTitle('Column visibility')) // 关闭菜单
+    // 在网格体内做矩形选择:点 id 单元格 '10' → shift+点 email 单元格 'a@x.io'
+    const grid = document.querySelector('.scrollon') as HTMLElement
+    fireEvent.click(within(grid).getByText('10'))
+    fireEvent.click(within(grid).getByText('a@x.io'), { shiftKey: true })
+    fireEvent.contextMenu(within(grid).getByText('a@x.io'))
+    fireEvent.click(within(screen.getByRole('menu')).getByText('Copy'))
+    // 隐藏的 name 列('alice')不应混入复制内容 —— 只拼接可见的 id + email
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('10\ta@x.io'))
+  })
+
+  it('Bulk edit skips a hidden column sitting between two visible columns', () => {
+    const columns: ResultColumn[] = [
+      { name: 'id', type: 'int', pk: true },
+      { name: 'name', type: 'text' },
+      { name: 'email', type: 'text' },
+    ]
+    const rows: unknown[][] = [[10, 'alice', 'a@x.io'], [20, 'bob', 'b@x.io']]
+    wrap(<DataGrid columns={columns} rows={rows} writable connId="c1" table="orders" />)
+    // 隐藏中间的 name 列
+    fireEvent.click(screen.getByTitle('Column visibility'))
+    fireEvent.click(within(screen.getByRole('menuitemcheckbox', { name: /name/i })).getByText('name'))
+    fireEvent.click(screen.getByTitle('Column visibility'))
+    // 选中跨越隐藏列的矩形:row0 的 id → row0 的 email
+    const grid = document.querySelector('.scrollon') as HTMLElement
+    fireEvent.click(within(grid).getByText('10'))
+    fireEvent.click(within(grid).getByText('a@x.io'), { shiftKey: true })
+    fireEvent.contextMenu(within(grid).getByText('a@x.io'))
+    fireEvent.click(within(screen.getByRole('menu')).getByText(/Bulk edit/i))
+    const input = screen.getByPlaceholderText(/value/i)
+    fireEvent.change(input, { target: { value: 'ZZZ' } })
+    fireEvent.click(screen.getByText(/^Apply$/i))
+    // 重新显示全部列,核对隐藏的 name 列('alice')未被批量编辑波及。
+    fireEvent.click(screen.getByTitle('Column visibility'))
+    fireEvent.click(screen.getByText('Show all columns'))
+    const body = document.querySelector('.scrollon') as HTMLElement
+    // 可见的 id + email 被改为 ZZZ(2 处);隐藏期间被跨越的 name 仍是 'alice'。
+    expect(within(body).getAllByText('ZZZ').length).toBe(2)
+    expect(within(body).getByText('alice')).toBeInTheDocument()
+  })
+
   it('column filter builder filters the grid by a structured rule', () => {
     const columns: ResultColumn[] = [
       { name: 'id', type: 'int', pk: true },
@@ -451,5 +505,47 @@ describe('DataGrid generic rows', () => {
     // 单引号转义为加倍单引号(对齐 dml.rs)
     expect(contents).toContain("(2, 'O''Hara')")
     delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
+
+  it('列显隐:勾选切换可隐藏单列,头部不再渲染该列名', () => {
+    const columns: ResultColumn[] = [
+      { name: 'id', type: 'int', pk: true },
+      { name: 'name', type: 'text' },
+      { name: 'note', type: 'text' },
+    ]
+    const rows: unknown[][] = [[1, 'alice', 'x'], [2, 'bob', 'y']]
+    wrap(<DataGrid columns={columns} rows={rows} statusTones={{}} density="comfortable" />)
+
+    const header = document.querySelector('[data-grid-header]') as HTMLElement
+    expect(within(header).getByText('note')).toBeInTheDocument()
+
+    // 打开列显隐菜单 → 在菜单内点击 note 隐藏它
+    fireEvent.click(screen.getByTitle('Column visibility'))
+    const menuNote = screen.getAllByText('note').find(el => el.closest('[role="menuitemcheckbox"]'))!
+    fireEvent.click(menuNote)
+
+    // 头部不再有 note 列(其余列仍在)
+    expect(within(header).queryByText('note')).toBeNull()
+    expect(within(header).getByText('name')).toBeInTheDocument()
+  })
+
+  it('列显隐:一键隐藏空列只隐藏整列为 NULL 的列', () => {
+    const columns: ResultColumn[] = [
+      { name: 'id', type: 'int', pk: true },
+      { name: 'name', type: 'text' },
+      { name: 'empty', type: 'text' },
+    ]
+    const rows: unknown[][] = [[1, 'alice', null], [2, 'bob', null]]
+    wrap(<DataGrid columns={columns} rows={rows} statusTones={{}} density="comfortable" />)
+
+    const header = document.querySelector('[data-grid-header]') as HTMLElement
+    expect(within(header).getByText('empty')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByTitle('Column visibility'))
+    fireEvent.click(screen.getByText('Hide empty columns'))
+
+    expect(within(header).queryByText('empty')).toBeNull()
+    expect(within(header).getByText('name')).toBeInTheDocument()
+    expect(within(header).getByText('id')).toBeInTheDocument()
   })
 })

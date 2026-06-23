@@ -8,6 +8,7 @@ import type { ResultColumn } from '../../services/types'
 import { reduceCellSelection, reduceRowSelection, isCellInRange, normalizeRange, cellsInRange, type GridSelection } from './gridSelection'
 import { filterRows, filterModeNeedsValue, type FilterRule, type FilterMode } from './gridFilter'
 import { buildInsertSql, buildUpdateSql } from './copySql'
+import { visibleColumnNames, allNullColumnNames, toggleColumnVisibility, showAllColumns } from './columnVisibility'
 import { dialectFor } from './structureDdl'
 import { TableImportDialog } from './TableImportDialog'
 
@@ -155,6 +156,11 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   const [exportMenuOpen, setExportMenuOpen] = useState(false)
   const sortMenuRef = useRef<HTMLDivElement>(null)
   const exportMenuRef = useRef<HTMLDivElement>(null)
+  // 列显隐：隐藏的列名集合(仅影响网格渲染,排序/筛选/导出仍按完整列集)。
+  // 与 colWidths 同理,DataGrid 带 key 重挂载即重置,满足「每表 tab 独立」。
+  const [hiddenCols, setHiddenCols] = useState<Set<string>>(new Set())
+  const [colMenuOpen, setColMenuOpen] = useState(false)
+  const colMenuRef = useRef<HTMLDivElement>(null)
   // preview gate
   const [preview, setPreview] = useState<{ reqs: EditRequest[]; sql: string } | null>(null)
   const [applying, setApplying] = useState(false)
@@ -197,6 +203,13 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   const pkCols = useMemo(() => columns.filter(c => c.pk).map(c => c.name), [columns])
   // 是否存在任一非空注释 → 决定切换按钮显隐。仅表预览会填 comment,故 SQL 查询结果无此按钮。
   const hasComments = useMemo(() => columns.some(c => !!c.comment), [columns])
+  // 列显隐计算:全部列名 → 可见列名(剔除 hiddenCols,且至少留一列)→ 渲染用的可见列对象。
+  const colNames = useMemo(() => columns.map(c => c.name), [columns])
+  const visibleNames = useMemo(() => visibleColumnNames(colNames, hiddenCols), [colNames, hiddenCols])
+  const visibleColumns = useMemo(() => {
+    const set = new Set(visibleNames)
+    return columns.filter(c => set.has(c.name))
+  }, [columns, visibleNames])
   // 表头展示文案:注释模式优先显示该列注释,无注释的列回退到英文名;否则始终英文名。
   function headLabel(col: ResultColumn): string { return commentMode && col.comment ? col.comment : col.name }
   // Active per-row keys for the no-PK (ctid) path: server page keys take precedence
@@ -340,6 +353,24 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
     if (sortCol === name) { setSortDir(d => d === 'asc' ? 'desc' : 'asc') }
     else { setSortCol(name); setSortDir('asc') }
   }
+
+  // --- 列显隐 -------------------------------------------------------------
+  // 当前已加载行中整列为空(null/undefined)的列名,供「隐藏空列」一键操作。
+  const nullColNames = useMemo(() => allNullColumnNames(colNames, baseRows), [colNames, baseRows])
+  function toggleColumn(name: string) {
+    setHiddenCols(prev => toggleColumnVisibility(colNames, prev, name))
+  }
+  // 一键隐藏全部空列:逐列切换以复用「至少留一列可见」的防御。
+  function hideNullColumns() {
+    setHiddenCols(prev => {
+      let next = prev
+      for (const name of nullColNames) {
+        if (!next.has(name)) next = toggleColumnVisibility(colNames, next, name)
+      }
+      return next
+    })
+  }
+  function resetColumns() { setHiddenCols(showAllColumns()) }
 
   // --- 列级结构化筛选规则管理 ----------------------------------------------
   function addFilterRule() {
@@ -629,7 +660,12 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
         const entry = pageRows[r]
         if (!entry) continue
         const parts: string[] = []
-        for (let c = c0; c <= c1; c++) parts.push(displayCellText(entry.origIdx, c, entry.row[c]))
+        // 矩形按完整列下标记录,跨越的隐藏列不应混入复制内容(与网格显示一致)。
+        for (let c = c0; c <= c1; c++) {
+          const col = columns[c]
+          if (col && hiddenCols.has(col.name)) continue
+          parts.push(displayCellText(entry.origIdx, c, entry.row[c]))
+        }
         lines.push(parts.join('\t'))
       }
       text = lines.join('\n')
@@ -697,6 +733,8 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
         for (let c = c0; c <= c1; c++) {
           const col = columns[c]
           if (!col) continue
+          // 矩形跨越的隐藏列不应被批量编辑(与网格显示一致)。
+          if (hiddenCols.has(col.name)) continue
           const k = cellKey(entry.origIdx, col.name)
           const orig = entry.row[c]
           if (bulkVal === String(orig ?? '')) { delete next[k] }
@@ -817,15 +855,16 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
 
   // Close the sort/export dropdowns on an outside click.
   useEffect(() => {
-    if (!sortMenuOpen && !exportMenuOpen) return
+    if (!sortMenuOpen && !exportMenuOpen && !colMenuOpen) return
     function onDocClick(e: MouseEvent) {
       const tgt = e.target as Node
       if (sortMenuOpen && sortMenuRef.current && !sortMenuRef.current.contains(tgt)) setSortMenuOpen(false)
       if (exportMenuOpen && exportMenuRef.current && !exportMenuRef.current.contains(tgt)) setExportMenuOpen(false)
+      if (colMenuOpen && colMenuRef.current && !colMenuRef.current.contains(tgt)) setColMenuOpen(false)
     }
     document.addEventListener('mousedown', onDocClick)
     return () => document.removeEventListener('mousedown', onDocClick)
-  }, [sortMenuOpen, exportMenuOpen])
+  }, [sortMenuOpen, exportMenuOpen, colMenuOpen])
 
   // Footer counters. "edited" = existing rows with at least one changed cell that
   // are NOT also marked for deletion; "new" = pending insert rows; "deleted" =
@@ -855,7 +894,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   // Fixed per-column widths so the row is exactly as wide as the sum of its
   // columns and the grid scrolls horizontally — no flex/1fr stretch that would
   // blow up a couple of columns to fill the viewport and hide the rest.
-  const gridTemplate = '46px ' + columns.map(c => (colWidths[c.name] ?? heuristicWidth(c.name)) + 'px').join(' ') + (showActionCol ? ' 44px' : '')
+  const gridTemplate = '46px ' + visibleColumns.map(c => (colWidths[c.name] ?? heuristicWidth(c.name)) + 'px').join(' ') + (showActionCol ? ' 44px' : '')
 
   // 列宽拖动：在 document 上挂 mousemove/mouseup，避免鼠标移出表头丢事件；
   // 拖动期间根据 clientX 位移动态更新该列宽度，最小 60px。
@@ -947,6 +986,40 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
                     </button>
                   )
                 })}
+              </div>
+            )}
+          </div>
+          {/* 列显隐：眼睛图标下拉,逐列勾选 + 隐藏空列 + 显示全部列 */}
+          <div ref={colMenuRef} style={{ position: 'relative' }}>
+            <button className="icon-btn bare" title={t('dbviews.columnVisibility')} data-active={colMenuOpen || hiddenCols.size > 0 ? '1' : undefined}
+              onClick={() => { setColMenuOpen(o => !o); setSortMenuOpen(false); setExportMenuOpen(false) }}><Icon name="eye" size={15} /></button>
+            {colMenuOpen && (
+              <div className="pop-in" style={{ position: 'absolute', top: 'calc(100% + 6px)', right: 0, zIndex: 60, minWidth: 200, maxHeight: 360, overflow: 'auto', background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', borderRadius: 10, boxShadow: 'var(--shadow-window)', padding: 4 }}>
+                {columns.map(col => {
+                  const isVisible = !hiddenCols.has(col.name)
+                  return (
+                    <button key={col.name} role="menuitemcheckbox" aria-checked={isVisible} className="row"
+                      onClick={() => toggleColumn(col.name)}
+                      style={{ width: '100%', justifyContent: 'flex-start', gap: 8, padding: '6px 10px', borderRadius: 7, border: 'none', background: 'transparent', color: isVisible ? 'var(--text-secondary)' : 'var(--text-faint)', cursor: 'pointer', fontSize: 12.5, textAlign: 'left' }}>
+                      <Icon name={isVisible ? 'eye' : 'eye-off'} size={13} style={{ flex: 'none', color: isVisible ? 'var(--accent-primary)' : 'var(--text-faint)' }} />
+                      <span className="ell">{col.name}</span>
+                    </button>
+                  )
+                })}
+                <div style={{ height: 1, background: 'var(--border-hairline)', margin: '4px 0' }} />
+                <button className="row" disabled={nullColNames.length === 0}
+                  onClick={() => { hideNullColumns() }}
+                  style={{ width: '100%', justifyContent: 'flex-start', gap: 8, padding: '6px 10px', borderRadius: 7, border: 'none', background: 'transparent', color: nullColNames.length === 0 ? 'var(--text-faint)' : 'var(--text-secondary)', cursor: nullColNames.length === 0 ? 'default' : 'pointer', fontSize: 12.5, textAlign: 'left' }}>
+                  <Icon name="eye-off" size={13} style={{ flex: 'none' }} />
+                  {nullColNames.length === 0 ? t('dbviews.noNullColumns') : t('dbviews.hideNullColumns')}
+                </button>
+                {hiddenCols.size > 0 && (
+                  <button className="row" onClick={() => { resetColumns(); setColMenuOpen(false) }}
+                    style={{ width: '100%', justifyContent: 'flex-start', gap: 8, padding: '6px 10px', borderRadius: 7, border: 'none', background: 'transparent', color: 'var(--accent-primary)', cursor: 'pointer', fontSize: 12.5, textAlign: 'left' }}>
+                    <Icon name="eye" size={13} style={{ flex: 'none' }} />
+                    {t('dbviews.showAllColumns')}
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -1054,7 +1127,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
           {/* header */}
           <div data-grid-header style={{ display: 'grid', gridTemplateColumns: gridTemplate, position: 'sticky', top: 0, zIndex: 2, background: 'var(--surface-subtle)', borderBottom: '1px solid var(--border-hairline-alt)' }}>
             <div style={{ ...thStyle, justifyContent: 'center', color: 'var(--text-faint)', position: 'sticky', left: 0, zIndex: 3, background: 'var(--surface-subtle)' }}>#</div>
-            {columns.map((col) => (
+            {visibleColumns.map((col) => (
               <div key={col.name} style={{ ...thStyle, position: 'relative' }} onClick={() => toggleSort(col.name)} className="gridhead">
                 <Icon name={col.icon ?? colIcon(col)} size={12} style={{ color: col.pk ? 'var(--signal-amber)' : col.fk ? 'var(--signal-blue)' : 'var(--text-faint)' }} />
                 <span className="ell" style={{ color: 'var(--text-secondary)', fontWeight: 600 }} title={commentMode && col.comment ? col.comment : undefined}>{headLabel(col)}</span>
@@ -1087,7 +1160,10 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
                     <Icon name="maximize-2" size={13} style={{ color: 'var(--accent-primary)' }} />
                   </button>
                 </div>
-                {columns.map((col, ci) => {
+                {visibleColumns.map((col) => {
+                  // ci 取「原始列下标」(进 row/selection 坐标系),不随列显隐改变,
+                  // 与右键复制/批量编辑/复制为 SQL 使用的 columns 下标保持一致。
+                  const ci = colIndexOf(col.name)
                   const k = cellKey(origIdx, col.name)
                   const isEdited = edits[k] !== undefined
                   const val = isEdited ? edits[k] : row[ci]
@@ -1148,7 +1224,8 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
               <div key={`new-${nr.id}`} style={{ display: 'grid', gridTemplateColumns: gridTemplate, height: rowH, background: 'color-mix(in srgb, var(--signal-green) 12%, transparent)' }}
                 className="gridrow">
                 <div style={{ ...tdStyle, justifyContent: 'center', color: 'var(--signal-green)', fontSize: 11, background: 'var(--surface-sunken)', borderRight: '1px solid var(--border-hairline)', position: 'sticky', left: 0, zIndex: 1 }}>+</div>
-                {columns.map((col, ci) => {
+                {visibleColumns.map((col) => {
+                  const ci = colIndexOf(col.name)
                   const val = nr.cells[col.name] ?? ''
                   const isEditing = editing && editing.r === r && editing.c === ci
                   return (
