@@ -74,6 +74,7 @@ pub fn run() {
             db::commands::db_export_database,
             db::commands::db_import_preview,
             db::commands::db_import_table,
+            db::commands::db_transfer_table,
             db::commands::jdbc_driver_status,
             db::commands::jdbc_download_driver,
             db::commands::jdbc_import_driver,

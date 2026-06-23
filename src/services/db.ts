@@ -343,6 +343,32 @@ export async function importTable(args: {
   return tauriInvoke<ImportSummary>('db_import_table', args)
 }
 
+// ---- 跨库/跨表数据迁移（源表 → 列映射 → 按模式写目标表）----
+
+/** 迁移写入模式：追加 / 先清空再写 / 按键 upsert。与后端 TransferMode 一致（camelCase）。 */
+export type TransferMode = 'append' | 'overwrite' | 'upsert'
+
+/** 一对源列→目标列映射（目标为空串=跳过该列，不迁移）。 */
+export interface TransferColumnMapping { sourceColumn: string; targetColumn: string }
+
+export interface TransferSummary { rowsTransferred: number }
+
+/**
+ * 把源连接的一张表按列映射迁移到目标连接的目标表。
+ * 映射 / 模式 / 写 SQL 生成在后端纯函数（transfer.rs，已单测）；编排逐批读写走驱动 I/O。
+ */
+export async function transferTable(args: {
+  sourceConnId: string; sourceSchema?: string; sourceTable: string
+  targetConnId: string; targetSchema?: string; targetTable: string
+  mappings: TransferColumnMapping[]; mode: TransferMode
+  upsertKeys?: string[]; batchSize?: number
+  /** Overwrite（破坏性，会清空目标表）须显式确认后置 true，否则后端拒绝执行。 */
+  allowDestructive?: boolean
+}): Promise<TransferSummary> {
+  if (!isTauri()) throw new Error('transferTable requires the Tauri runtime')
+  return tauriInvoke<TransferSummary>('db_transfer_table', args)
+}
+
 // ---- History & saved snippets ----
 
 /** Execution history for a connection (most-recent first). Falls back to mock outside Tauri. */

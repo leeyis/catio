@@ -697,6 +697,151 @@ pub async fn db_import_table(
     Ok(ImportSummary { rows_imported, total_rows })
 }
 
+// ── 跨库/跨表数据迁移（源表 → 列映射 → 按模式写目标表）──────────────────────────
+
+/// 迁移执行结果。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferSummary {
+    pub rows_transferred: usize,
+}
+
+/// 把源连接的一张表按列映射迁移到目标连接的目标表。
+///
+/// 编排：分页从源表取数（照搬 db_export_database 的 table_data 分页 + 去 __ctid）→ 用源列名
+/// 解析映射（transfer.rs 纯函数,已单测）→ 按模式生成目标写 SQL（Append/Overwrite/Upsert）→
+/// 逐批在目标驱动执行。Overwrite 先清空目标表;支持事务的目标引擎把整个写过程包进事务。
+///
+/// 语句生成 + 映射 + 模式均为纯函数（transfer.rs,已单测）；真实双库执行走驱动 I/O,
+/// 需真机验证（不同源/目标引擎的类型与字面量兼容性）。
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn db_transfer_table(
+    source_conn_id: String,
+    source_schema: Option<String>,
+    source_table: String,
+    target_conn_id: String,
+    target_schema: Option<String>,
+    target_table: String,
+    mappings: Vec<crate::db::transfer::TransferColumnMapping>,
+    mode: crate::db::transfer::TransferMode,
+    upsert_keys: Option<Vec<String>>,
+    batch_size: Option<usize>,
+    allow_destructive: Option<bool>,
+    mgr: tauri::State<'_, ConnManager>,
+) -> Result<TransferSummary, DbError> {
+    use crate::db::transfer as tr;
+    use crate::db::table_import as ti;
+
+    let src = mgr.get(&source_conn_id).await.ok_or_else(|| DbError::NotFound(source_conn_id.clone()))?;
+    let dst = mgr.get(&target_conn_id).await.ok_or_else(|| DbError::NotFound(target_conn_id.clone()))?;
+
+    let src_has_schemas = src.capabilities().schemas;
+    let dst_db = dst.db_type();
+    let dst_has_schemas = dst.capabilities().schemas;
+    let src_schema_opt = source_schema.as_deref().filter(|s| src_has_schemas && !s.is_empty());
+    let dst_schema_opt = target_schema.as_deref().filter(|s| dst_has_schemas && !s.is_empty());
+    let batch = batch_size.unwrap_or(tr::DEFAULT_TRANSFER_BATCH_SIZE).max(1);
+    let upsert_keys = upsert_keys.unwrap_or_default();
+    let allow_destructive = allow_destructive.unwrap_or(false);
+
+    // ── 前置校验（在任何写入/清表之前）─────────────────────────────────────────
+    // Upsert: 引擎须原生支持 + 键合法;Overwrite: 必须已显式确认破坏性操作（codex 阻断项）。
+    let mapped_targets =
+        mappings.iter().map(|m| m.target_column.clone()).filter(|c| !c.trim().is_empty()).collect::<Vec<_>>();
+    tr::check_transfer_preconditions(mode, dst_db, &mapped_targets, &upsert_keys, allow_destructive)
+        .map_err(DbError::QueryFailed)?;
+
+    // 先读源表首批,拿到真实列名解析+校验映射（在 Overwrite 清表之前!）——若映射解析失败,
+    // 此时目标表尚未被动过,不会造成不可恢复的数据丢失（codex 阻断项: 清表早于映射解析）。
+    let strip_ctid = |columns: &[crate::db::result::ColumnInfo], rows: Vec<Vec<serde_json::Value>>| {
+        let ctid_idx = columns.iter().position(|c| c.name == "__ctid");
+        rows.into_iter()
+            .map(|row| match ctid_idx {
+                Some(i) => row.into_iter().enumerate().filter(|(j, _)| *j != i).map(|(_, v)| v).collect(),
+                None => row,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let first = src.table_data(src_schema_opt, &source_table, batch as u32, 0).await?;
+    let source_columns =
+        first.columns.iter().map(|c| c.name.clone()).filter(|c| c != "__ctid").collect::<Vec<_>>();
+    let mapped = tr::resolve_transfer_mapping(&source_columns, &mappings).map_err(DbError::QueryFailed)?;
+
+    let first_got = first.rows.len();
+    let first_rows = strip_ctid(&first.columns, first.rows);
+
+    // ── 一个「逐批写目标」的闭包：从首批开始,继续分页拉取并逐批生成写 SQL 执行 ───────────
+    // Overwrite 的清表与所有写入要么都在同一事务内（支持事务的引擎,任一步失败 ROLLBACK）,
+    // 要么在非事务引擎上按顺序执行（无回滚,前端已二次确认 + 告警）。
+    // 用 Arc 克隆供闭包按值持有,原始 src/dst 仍可用于事务控制（BEGIN/COMMIT/ROLLBACK）。
+    let src_w = src.clone();
+    let dst_w = dst.clone();
+    let mapped_w = mapped.clone();
+    let upsert_keys_w = upsert_keys.clone();
+    let target_table_w = target_table.clone();
+    let do_writes = move |this_first_rows: Vec<Vec<serde_json::Value>>, this_first_got: usize| async move {
+        let mut rows_transferred = 0usize;
+        let mut pending = this_first_rows;
+        let mut got = this_first_got;
+        let mut offset = this_first_got as u32;
+
+        loop {
+            if !pending.is_empty() {
+                let sql = tr::build_transfer_write_sql(
+                    mode, dst_db, dst_has_schemas, dst_schema_opt, &target_table_w, &mapped_w, &pending, &upsert_keys_w,
+                );
+                if !sql.is_empty() {
+                    dst_w.query(&sql, 0).await?;
+                    rows_transferred += pending.len();
+                }
+            }
+            if (got as u32) < batch as u32 {
+                break;
+            }
+            let res = src_w.table_data(src_schema_opt, &source_table, batch as u32, offset).await?;
+            got = res.rows.len();
+            offset += got as u32;
+            pending = strip_ctid(&res.columns, res.rows);
+        }
+        Ok::<usize, DbError>(rows_transferred)
+    };
+
+    // Overwrite 走「清表 + 写入」原子化路径;Append/Upsert 直接写。
+    if mode == tr::TransferMode::Overwrite {
+        let truncate_sql = tr::build_overwrite_pre_sql(dst_db, dst_has_schemas, dst_schema_opt, &target_table);
+        if ti::import_supports_transaction(dst_db) {
+            // 支持事务: 清表 + 全部写入包进同一事务,任一步失败即 ROLLBACK,目标表保持原状,
+            // 杜绝「已清表但写入失败」的不可恢复数据丢失（codex 阻断项）。
+            let (begin, commit, rollback) = ti::transaction_keywords(dst_db);
+            dst.query(begin, 0).await?;
+            let run = async {
+                dst.query(&truncate_sql, 0).await?;
+                do_writes(first_rows, first_got).await
+            };
+            match run.await {
+                Ok(rows_transferred) => {
+                    dst.query(commit, 0).await?;
+                    Ok(TransferSummary { rows_transferred })
+                }
+                Err(e) => {
+                    let _ = dst.query(rollback, 0).await; // best-effort 回滚,保留原错误
+                    Err(e)
+                }
+            }
+        } else {
+            // 不支持事务的引擎: 无回滚,前端已二次确认 + 展示告警。
+            dst.query(&truncate_sql, 0).await?;
+            let rows_transferred = do_writes(first_rows, first_got).await?;
+            Ok(TransferSummary { rows_transferred })
+        }
+    } else {
+        let rows_transferred = do_writes(first_rows, first_got).await?;
+        Ok(TransferSummary { rows_transferred })
+    }
+}
+
 // ── JDBC driver management (DBeaver-style one-click download) ─────────────────
 
 /// Resolve the directory where JDBC driver JARs live: `CATIO_JDBC_DRIVERS_DIR`
