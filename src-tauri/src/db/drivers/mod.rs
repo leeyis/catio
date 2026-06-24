@@ -12,5 +12,6 @@ pub mod mongo;
 pub mod mongo_shell;
 pub mod redis;
 pub mod redis_command;
+pub mod redis_connect;
 pub mod jdbc;
 pub mod jdbc_config;

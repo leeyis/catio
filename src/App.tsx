@@ -30,7 +30,7 @@ import { usePrefs, uiFontStack, monoFontStack } from './state/preferences'
 import { readTermBufferTail } from './services/termBuffers'
 import { buildAgentSystemPrompt } from './services/agentPrompt'
 import { useData } from './state/DataContext'
-import { dbConnect, dbDisconnect, getHistory as getDbHistory, clearDbHistory, deleteDbHistory, deleteDbHistoryForProfile, dbErrMsg } from './services/db'
+import { dbConnect, dbConnectArgsFromProfile, dbDisconnect, getHistory as getDbHistory, clearDbHistory, deleteDbHistory, deleteDbHistoryForProfile, dbErrMsg } from './services/db'
 import {
   useDbConnections, dbProfileToConnection, listActiveDbConnections,
   setActiveDbConnection, removeDbConnection, removeActiveDbConnection, saveDbConnection,
@@ -898,19 +898,12 @@ export default function App() {
       return
     }
     // Real connect (Tauri). Throws outside Tauri / on failure — DetailsPanel surfaces it.
-    // IMPORTANT: thread driverProfile + options (advanced params) — without them a
-    // reconnect loses e.g. MongoDB's directConnection/authSource and hangs on
-    // replica-set discovery, or a protocol-family variant connects as the base.
-    const result = await dbConnect({
-      dbType: profile.dbType,
-      ...(profile.driverProfile ? { driverProfile: profile.driverProfile } : {}),
-      ...(profile.options ? { options: profile.options } : {}),
-      host: profile.host,
-      port: profile.port,
-      user: profile.user,
-      ...(profile.database ? { database: profile.database } : {}),
-      secret: secret || undefined,
-    })
+    // IMPORTANT: thread the FULL non-secret arg set via dbConnectArgsFromProfile —
+    // driverProfile + options (else a reconnect loses MongoDB's
+    // directConnection/authSource or a protocol-family variant connects as the base),
+    // AND the SSL/TLS config (ssl/sslMode/caCertPath/sslRejectUnauthorized) — without
+    // it the sidebar/home direct-connect path silently dropped TLS.
+    const result = await dbConnect(dbConnectArgsFromProfile(profile, secret || undefined))
     setActiveDbConnection(result, profile)
     // Auth succeeded → cache the secret (when auth + vault allow).
     rememberConnSecret(profile.id, secret)

@@ -26,6 +26,10 @@ fn pg_args(profile: Option<&str>) -> Option<ConnectArgs> {
         database: Some(parts[4].into()),
         driver_profile: profile.map(str::to_string),
         options: None,
+        ssl: false,
+        ssl_mode: None,
+        ca_cert_path: None,
+        ssl_reject_unauthorized: None,
     })
 }
 
@@ -111,6 +115,10 @@ fn mysql_args(profile: Option<&str>) -> Option<ConnectArgs> {
         database: Some(parts[4].into()),
         driver_profile: profile.map(str::to_string),
         options: None,
+        ssl: false,
+        ssl_mode: None,
+        ca_cert_path: None,
+        ssl_reject_unauthorized: None,
     })
 }
 

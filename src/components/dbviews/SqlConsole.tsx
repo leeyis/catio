@@ -4,14 +4,21 @@ import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn } from '../atoms'
 import { useData } from '../../state/DataContext'
-import { runQuery, getSchema, schemaColumns, tablePreview, dbErrMsg } from '../../services/db'
+import { runQuery, runExplain, getSchema, schemaColumns, tablePreview, dbErrMsg } from '../../services/db'
 import type { ResultColumn, Schema } from '../../services/types'
 import { SqlEditor, type SqlEditorHandle } from './SqlEditor'
 import { mongoCompletion } from './mongoCompletion'
 import { redisCompletion } from './redisCompletion'
 import { redisLinter } from './redisDiagnostics'
+import { sqlLinter, linterTableNames } from './sqlDiagnostics'
+import { formatSql } from './sqlFormatter'
 import type { SQLNamespace } from '@codemirror/lang-sql'
 import { DataGrid } from './DataGrid'
+import { ExplainPlanViewer } from './ExplainPlanViewer'
+import { SqlFileDialog } from './SqlFileDialog'
+import { parseExplainResult, supportsExplainPlan, type ParsedExplainPlan } from './explainPlan'
+import { readHiddenSchemas, HIDDEN_SCHEMAS_EVENT } from '../../state/schemaFilter'
+import type { DbType } from '../../services/db'
 
 export interface SqlConsoleProps {
   density?: 'comfortable' | 'compact'
@@ -81,6 +88,12 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
     defaultNamespace?: string
   } | null>(null)
   const [runErr, setRunErr] = useState<string | null>(null)
+  // T12 执行计划(EXPLAIN):非空时结果区显示 ExplainPlanViewer(树/表/JSON),关闭后回到普通结果。
+  // 仅 PG/MySQL 且已连接(connId)支持(supportsExplainPlan + connId 门控)。
+  const [explain, setExplain] = useState<{ plan?: ParsedExplainPlan; loading: boolean; error?: string } | null>(null)
+  const canExplain = !!connId && supportsExplainPlan(engine as DbType | undefined)
+  // 编辑区是否需要让出空间给下方结果区:普通运行(phase!=='idle')或正在/已展示执行计划。
+  const hasResults = phase !== 'idle' || !!explain
   // 每次出结果(成功或失败)自增,用作 DataGrid 的 key:换 key → 重新挂载 →
   // 清掉上一次查询残留的分页(serverRows)/编辑/排序状态。
   const [runSeq, setRunSeq] = useState(0)
@@ -99,6 +112,8 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
   const splitContainerRef = useRef<HTMLDivElement>(null)
   // 分隔条 hover/拖动高亮(不依赖外部 CSS 文件,内联实现,保证主题切换正常)。
   const [splitHot, setSplitHot] = useState(false)
+  // T16 SQL 文件批量执行对话框开关。仅已连接(connId)时可用。
+  const [sqlFileOpen, setSqlFileOpen] = useState(false)
 
   // 上报最大化态给父级(功能#6 父子契约):非 split 即视为占满,父级据此联动收起侧栏。
   useEffect(() => { onFullscreenChange?.(paneMode !== 'split') }, [paneMode, onFullscreenChange])
@@ -183,8 +198,17 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
       : undefined),
     [engine],
   )
-  // Syntax diagnostics source (redis only) — arity / unknown / blocked / quotes.
-  const lintSource = useMemo(() => (engine === 'redis' ? redisLinter : undefined), [engine])
+  // Known table/view names for the SQL linter's "unknown table" check. Held in a
+  // ref so the (stable-identity) linter reads the latest list without rebuilding
+  // the editor extension as the schema/columns load.
+  const sqlTablesRef = useRef<string[]>([])
+  // Syntax diagnostics source:
+  //  - redis → command arity / unknown / blocked / quotes
+  //  - SQL (non-plain) → unbalanced parens / unclosed strings / unknown tables
+  const lintSource = useMemo(
+    () => (engine === 'redis' ? redisLinter : plain ? undefined : sqlLinter(() => sqlTablesRef.current)),
+    [engine, plain],
+  )
 
   // Stable identity of the schema namespaces (names only) so the column fetch
   // re-runs when connId or the schema list changes, but NOT on every keystroke.
@@ -193,9 +217,23 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
     [liveSchema],
   )
   const namespaceKey = namespaceNames.join(',')
+
+  // 结构面板漏斗筛掉的库/Schema,这里也只保留筛选后的(联动)。key 与 SchemaBrowser 一致
+  // (conn.id 即此处的 profileId);监听变更事件,做到切换漏斗时库下拉实时刷新。
+  const [hiddenSchemas, setHiddenSchemas] = useState<Set<string>>(
+    () => new Set(profileId ? readHiddenSchemas(profileId) : []),
+  )
+  useEffect(() => {
+    const refresh = () => setHiddenSchemas(new Set(profileId ? readHiddenSchemas(profileId) : []))
+    refresh()
+    if (typeof window === 'undefined') return
+    window.addEventListener(HIDDEN_SCHEMAS_EVENT, refresh)
+    return () => window.removeEventListener(HIDDEN_SCHEMAS_EVENT, refresh)
+  }, [profileId])
+
   const schemaOptions = useMemo(
-    () => (liveSchema ?? D.schema).schemas.map(ns => ns.name).filter(Boolean),
-    [liveSchema, D.schema],
+    () => (liveSchema ?? D.schema).schemas.map(ns => ns.name).filter(Boolean).filter(name => !hiddenSchemas.has(name)),
+    [liveSchema, D.schema, hiddenSchemas],
   )
   const schemaOptionsKey = schemaOptions.join('\u0000')
 
@@ -276,6 +314,10 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
       // Schema name itself: a `class`-typed completion whose children are tables.
       top[ns.name] = { self: { label: ns.name, type: 'class' }, children: tables }
     }
+    // Feed the SQL linter's "unknown table" check (read lazily via sqlTablesRef).
+    // 已连接但 liveSchema 未加载完成时,linterTableNames 会返回 []，避免拿 demo 表名
+    // 对真实库里的表误报"未知的表"。autocomplete 的 editorSchema 仍可用 demo 表名兜底。
+    sqlTablesRef.current = linterTableNames(connId, liveSchema, D.schema)
     return top
   }, [connId, liveSchema, liveColumns, D.schema, D.tableStructures])
 
@@ -287,6 +329,8 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
     // 运行中不重复触发（避免 Alt↵ 在执行中再起一次）。
     if (phase === 'running') return
     setRunErr(null)
+    // 普通运行接管结果区:清掉可能正在展示的执行计划,回到数据网格。
+    setExplain(null)
     // A selection-run passes just the highlighted SQL; otherwise run the whole editor.
     const sql = sqlOverride && sqlOverride.trim() ? sqlOverride : code
     // 空 / 纯空白 SQL 不执行：拦在所有入口（按钮 / Alt+Enter / 片段运行）之前，
@@ -327,6 +371,36 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
     runToken.current++
     setPhase('idle')
     setRunErr(null)
+  }
+
+  // T12「解释」:对当前(或选中)SQL 取执行计划。复用 runToken 令牌,使其与
+  // 普通运行/停止互斥(在途的 explain 被新运行/停止取代时丢弃),并切到 split 态
+  // 让结果区可见。失败时把后端报错原样展示在查看器里(不污染普通结果)。
+  function runExplainPlan() {
+    if (!canExplain) return
+    // 选中优先:与普通 run() 一致 —— 编辑区选中片段时只对选中文本取计划,
+    // 避免在多语句编辑区里对整段 code 运行 EXPLAIN(多语句会拼出非法 EXPLAIN)。
+    const selected = editorRef.current?.getSelectedText()
+    const sql = selected && selected.trim() ? selected : code
+    if (!sql.trim()) return
+    const myToken = ++runToken.current
+    setPaneMode('split')
+    setExplain({ loading: true })
+    // 与普通 run() 一致:把选中的默认库/Schema 传给 EXPLAIN,否则后端落连接默认库报表不存在。
+    const explainNamespace = supportsDefaultNamespace && defaultNamespace && schemaOptions.includes(defaultNamespace)
+      ? defaultNamespace
+      : undefined
+    runExplain(connId!, sql, explainNamespace)
+      .then(res => {
+        if (myToken !== runToken.current) return
+        // engine 已被 canExplain 收窄为 PG/MySQL 之一。
+        const plan = parseExplainResult(engine as 'postgres' | 'mysql', res)
+        setExplain({ loading: false, plan })
+      })
+      .catch(e => {
+        if (myToken !== runToken.current) return
+        setExplain({ loading: false, error: dbErrMsg(e) })
+      })
   }
 
   // Keep the latest run() in a ref so the (active-gated) event listener always
@@ -398,9 +472,22 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
               {t('dbviews.run')} <span style={{ opacity: .6, fontSize: 10, marginLeft: 2 }}>Alt↵</span>
             </Btn>
           )}
+          {/* T12 执行计划入口:仅 PG/MySQL 且已连接时出现,空 SQL 时禁用。纯 icon + 悬浮提示
+              「查看执行计划」(与右侧格式化/清除等工具按钮一致;\"解释\"二字易误解,去掉文字)。 */}
+          {canExplain && (
+            <button className="icon-btn bare" data-testid="sql-explain" disabled={!code.trim()}
+              title={t('dbviews.explainTitle')} onClick={runExplainPlan}>
+              <Icon name="git-branch" size={15} />
+            </button>
+          )}
           <div style={{ width: 1, height: 18, background: 'var(--border-hairline)' }} />
-          <button className="icon-btn bare" title={t('dbviews.format')}><Icon name="wrench" size={15} /></button>
+          <button className="icon-btn bare" title={t('dbviews.format')} disabled={plain || !code.trim()}
+            onClick={() => setCode(prev => formatSql(prev, engine))}><Icon name="wrench" size={15} /></button>
           <button className="icon-btn bare" title={t('dbviews.clear')} onClick={() => setCode('')}><Icon name="eraser" size={15} /></button>
+          {/* T16 SQL 文件批量执行:选 .sql 文件 → 按方言切分 → 逐句执行 + 进度/错误恢复。仅已连接可用。 */}
+          {connId && (
+            <button className="icon-btn bare" title={t('dbviews.sqlFileRunFile')} data-testid="sql-run-file" onClick={() => setSqlFileOpen(true)}><Icon name="file-code" size={15} /></button>
+          )}
         </div>
         <div className="row gap6" style={{ minWidth: 0 }}>
           {supportsDefaultNamespace && schemaOptions.length > 1 && (
@@ -418,8 +505,8 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
               </select>
             </label>
           )}
-          {/* 功能#6:编辑区最大化/恢复。仅在有结果区(phase!=='idle')时显示——idle 时编辑区本就占满。 */}
-          {phase !== 'idle' && (
+          {/* 功能#6:编辑区最大化/恢复。仅在有结果区时显示——idle 时编辑区本就占满。 */}
+          {hasResults && (
             paneMode === 'maxEditor'
               ? <button className="icon-btn bare" title={t('dbviews.restorePane')} onClick={() => setPaneMode('split')}><Icon name="minimize-2" size={15} /></button>
               : <button className="icon-btn bare" title={t('dbviews.maximizeEditor')} onClick={() => setPaneMode('maxEditor')}><Icon name="maximize-2" size={15} /></button>
@@ -432,17 +519,17 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
           功能#5/#6:split 态按 splitRatio 分配高度;maxEditor 占满;maxResults 时隐藏。 */}
       {paneMode !== 'maxResults' && (
         <div style={{
-          flexGrow: phase === 'idle' || paneMode === 'maxEditor' ? 1 : splitRatio,
+          flexGrow: !hasResults || paneMode === 'maxEditor' ? 1 : splitRatio,
           flexBasis: 0,
           minHeight: 140,
           width: '100%',
-          borderBottom: phase === 'idle' ? 'none' : '1px solid var(--border-hairline)',
+          borderBottom: !hasResults ? 'none' : '1px solid var(--border-hairline)',
         }}>
           <SqlEditor ref={editorRef} code={code} onChange={setCode} schema={editorSchema} onRun={run} onRunSelection={connId ? (sql => run(sql)) : undefined} placeholder={editorPlaceholder} plain={plain} completion={completion} lintSource={lintSource} />
         </div>
       )}
       {/* 功能#5:编辑区与结果区之间的水平拖动分隔条。仅在 split 态且有结果区时显示。 */}
-      {phase !== 'idle' && paneMode === 'split' && (
+      {hasResults && paneMode === 'split' && (
         <div
           role="separator"
           aria-orientation="horizontal"
@@ -456,7 +543,7 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
       {/* results — only rendered once a run has started (running/done). While
           idle (fresh query) the editor above fills everything.
           功能#6:maxEditor 时隐藏;maxResults 占满;split 按 1-ratio 分配。 */}
-      {phase !== 'idle' && paneMode !== 'maxEditor' && (
+      {hasResults && paneMode !== 'maxEditor' && (
         <div className="col" style={{ flexGrow: paneMode === 'maxResults' ? 1 : 1 - splitRatio, flexBasis: 0, minHeight: 0, width: '100%' }}>
           {/* 功能#6:结果区极简工具条,仅放最大化/恢复入口(控制 maxResults<->split)。视觉克制,右对齐。 */}
           <div className="row" style={{ justifyContent: 'flex-end', flex: 'none', padding: '3px 8px', borderBottom: '1px solid var(--border-hairline)' }}>
@@ -465,7 +552,9 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
               : <button className="icon-btn bare" title={t('dbviews.maximizeResults')} onClick={() => setPaneMode('maxResults')}><Icon name="maximize-2" size={15} /></button>}
           </div>
           <div style={{ flex: 1, minHeight: 0, width: '100%' }}>
-          {phase === 'running'
+          {explain
+            ? <ExplainPlanViewer plan={explain.plan} loading={explain.loading} error={explain.error} onClose={() => setExplain(null)} />
+            : phase === 'running'
             ? <div className="col" style={{ alignItems: 'center', justifyContent: 'center', height: '100%', gap: 10, color: 'var(--text-tertiary)' }}>
                 <Icon name="loader" size={26} style={{ animation: 'spin 1s linear infinite' }} />
                 <span style={{ fontSize: 13 }}>{t('dbviews.executingOn', { target: connName || defaultNamespace || '—' })}</span>
@@ -488,6 +577,10 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
                     statusTones={D.statusTones} density={density} />)}
           </div>
         </div>
+      )}
+      {/* T16 SQL 文件批量执行对话框。 */}
+      {sqlFileOpen && connId && (
+        <SqlFileDialog connId={connId} connName={connName} onClose={() => setSqlFileOpen(false)} />
       )}
     </div>
   )

@@ -15,6 +15,7 @@ pub fn run() {
         .manage(ConnManager::default())
         .manage(mcp::McpState::default())
         .manage(scan::ScanState::default())
+        .manage(db::SqlFileState::default())
         .invoke_handler(tauri::generate_handler![
             ssh::conn::ssh_connect,
             ssh::conn::ssh_disconnect,
@@ -53,10 +54,18 @@ pub fn run() {
             db::commands::db_object_source,
             db::commands::db_er_model,
             db::commands::db_keyspace_info,
+            db::commands::db_redis_edit,
             db::commands::db_preview_dml,
             db::commands::db_apply_edits,
+            db::commands::db_drop_object,
+            db::commands::db_drop_table_child_object,
+            db::commands::db_rename_object,
+            db::commands::db_truncate_table,
+            db::commands::db_duplicate_table_structure,
+            db::commands::db_save_object_source,
             db::commands::db_query_page,
             db::commands::db_table_preview,
+            db::commands::db_explain,
             db::commands::db_history,
             db::commands::db_clear_history,
             db::commands::db_delete_history,
@@ -64,6 +73,13 @@ pub fn run() {
             db::commands::db_snippets,
             db::commands::db_save_snippet,
             db::commands::export_file,
+            db::commands::db_export_database,
+            db::commands::db_import_preview,
+            db::commands::db_import_table,
+            db::commands::db_transfer_table,
+            db::commands::db_sql_file_preview,
+            db::commands::db_run_sql_file,
+            db::commands::db_cancel_sql_file,
             db::commands::jdbc_driver_status,
             db::commands::jdbc_download_driver,
             db::commands::jdbc_import_driver,

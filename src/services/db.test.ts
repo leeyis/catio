@@ -34,6 +34,39 @@ describe('services/db', () => {
     expect(invokeMock).not.toHaveBeenCalled()
   })
 
+  it('dbConnectArgsFromProfile threads SSL/TLS fields (the broken direct-connect path)', async () => {
+    const { dbConnectArgsFromProfile } = await import('./db')
+    const args = dbConnectArgsFromProfile({
+      dbType: 'postgres', host: 'db.example.com', port: 5432, user: 'app',
+      database: 'orders', driverProfile: 'cockroachdb', options: 'a=1',
+      ssl: true, sslMode: 'verify-full', caCertPath: '/etc/ssl/ca.pem',
+      sslRejectUnauthorized: false,
+    }, 'secret-pw')
+    expect(args).toMatchObject({
+      dbType: 'postgres', host: 'db.example.com', port: 5432, user: 'app',
+      database: 'orders', driverProfile: 'cockroachdb', options: 'a=1',
+      ssl: true, sslMode: 'verify-full', caCertPath: '/etc/ssl/ca.pem',
+      sslRejectUnauthorized: false, secret: 'secret-pw',
+    })
+  })
+
+  it('dbConnectArgsFromProfile omits SSL fields entirely when SSL is off', async () => {
+    const { dbConnectArgsFromProfile } = await import('./db')
+    const args = dbConnectArgsFromProfile({
+      dbType: 'mysql', host: 'h', port: 3306, user: 'u',
+    }, 'pw')
+    expect('ssl' in args).toBe(false)
+    expect('sslMode' in args).toBe(false)
+    expect('caCertPath' in args).toBe(false)
+    expect('sslRejectUnauthorized' in args).toBe(false)
+  })
+
+  it('dbConnectArgsFromProfile omits secret when none is given', async () => {
+    const { dbConnectArgsFromProfile } = await import('./db')
+    const args = dbConnectArgsFromProfile({ dbType: 'redis', host: 'h', port: 6379, user: '' })
+    expect('secret' in args).toBe(false)
+  })
+
   it('runQuery falls back to mock outside Tauri', async () => {
     const { runQuery } = await import('./db')
     const r = await runQuery('any', 'SELECT 1')
@@ -50,6 +83,20 @@ describe('services/db', () => {
       connId: 'conn-1',
       sql: 'SELECT * FROM orders',
       defaultNamespace: 'dwd',
+    })
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
+
+  it('runExplain forwards default namespace so EXPLAIN runs against the selected schema', async () => {
+    // 真机缺陷:不传选中库时 EXPLAIN 落连接默认库,对未限定库名的查询报「默认库.表 不存在」。
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+    invokeMock.mockResolvedValue({ columns: [], rows: [] })
+    const { runExplain } = await import('./db')
+    await runExplain('conn-1', 'SELECT * FROM ods_org_issueinfo', 'eastmoney')
+    expect(invokeMock).toHaveBeenCalledWith('db_explain', {
+      connId: 'conn-1',
+      sql: 'SELECT * FROM ods_org_issueinfo',
+      defaultNamespace: 'eastmoney',
     })
     delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
   })
@@ -162,6 +209,101 @@ describe('services/db', () => {
     expect(st.comment).toBe('')
     expect(st.columns[0].comment).toBe('')
     delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
+
+  it('tableStructure threads fk constraint name and the triggers list from the backend', async () => {
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+    invokeMock.mockResolvedValue({
+      comment: '',
+      columns: [],
+      indexes: [],
+      fks: [{ constraintName: 'fk_orders_user', column: 'user_id', references: 'public.users.id', onDelete: 'CASCADE', onUpdate: 'NO ACTION' }],
+      triggers: [{ name: 'orders_audit', timing: 'AFTER', event: 'INSERT' }],
+    })
+    const { tableStructure } = await import('./db')
+    const st = await tableStructure('conn-1', 'public', 'orders')
+    expect(st.fks[0].name).toBe('fk_orders_user')
+    expect(st.fks[0].col).toBe('user_id')
+    expect(st.triggers![0].name).toBe('orders_audit')
+    expect(st.triggers![0].timing).toBe('AFTER')
+    expect(st.triggers![0].event).toBe('INSERT')
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
+
+  it('tableStructure defaults a missing triggers list to empty (engines without triggers)', async () => {
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+    invokeMock.mockResolvedValue({ columns: [], indexes: [], fks: [] })
+    const { tableStructure } = await import('./db')
+    const st = await tableStructure('conn-1', 'main', 't')
+    expect(st.triggers).toEqual([])
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
+
+  it('dropObject forwards to db_drop_object under Tauri', async () => {
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+    invokeMock.mockResolvedValue(0)
+    const { dropObject } = await import('./db')
+    await dropObject('conn-1', 'TABLE', 'public', 'events')
+    expect(invokeMock).toHaveBeenCalledWith('db_drop_object', {
+      connId: 'conn-1', objectType: 'TABLE', schema: 'public', name: 'events',
+    })
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
+
+  it('dropObject throws outside Tauri (no silent no-op for destructive ops)', async () => {
+    const { dropObject } = await import('./db')
+    await expect(dropObject('c', 'TABLE', undefined, 't')).rejects.toThrow('Tauri')
+    expect(invokeMock).not.toHaveBeenCalled()
+  })
+
+  it('renameObject forwards old/new names to db_rename_object under Tauri', async () => {
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+    invokeMock.mockResolvedValue(0)
+    const { renameObject } = await import('./db')
+    await renameObject('conn-1', 'VIEW', 'public', 'active_users', 'enabled_users')
+    expect(invokeMock).toHaveBeenCalledWith('db_rename_object', {
+      connId: 'conn-1', objectType: 'VIEW', schema: 'public', oldName: 'active_users', newName: 'enabled_users',
+    })
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
+
+  it('truncateTable forwards to db_truncate_table under Tauri', async () => {
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+    invokeMock.mockResolvedValue(0)
+    const { truncateTable } = await import('./db')
+    await truncateTable('conn-1', undefined, 'events')
+    expect(invokeMock).toHaveBeenCalledWith('db_truncate_table', {
+      connId: 'conn-1', schema: undefined, table: 'events',
+    })
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
+
+  it('duplicateTableStructure forwards source/target to db_duplicate_table_structure under Tauri', async () => {
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+    invokeMock.mockResolvedValue(0)
+    const { duplicateTableStructure } = await import('./db')
+    await duplicateTableStructure('conn-1', 'public', 'users', 'users_copy')
+    expect(invokeMock).toHaveBeenCalledWith('db_duplicate_table_structure', {
+      connId: 'conn-1', schema: 'public', source: 'users', target: 'users_copy',
+    })
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
+
+  it('dropTableChildObject forwards index/FK/trigger to db_drop_table_child_object under Tauri', async () => {
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+    invokeMock.mockResolvedValue(0)
+    const { dropTableChildObject } = await import('./db')
+    await dropTableChildObject('conn-1', 'INDEX', 'public', 'orders', 'idx_status')
+    expect(invokeMock).toHaveBeenCalledWith('db_drop_table_child_object', {
+      connId: 'conn-1', objectType: 'INDEX', schema: 'public', table: 'orders', name: 'idx_status',
+    })
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
+
+  it('dropTableChildObject throws outside Tauri (no silent no-op for destructive ops)', async () => {
+    const { dropTableChildObject } = await import('./db')
+    await expect(dropTableChildObject('c', 'TRIGGER', undefined, 't', 'trg')).rejects.toThrow('Tauri')
+    expect(invokeMock).not.toHaveBeenCalled()
   })
 
   it('getHistory forwards to db_history under Tauri', async () => {

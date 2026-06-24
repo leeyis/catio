@@ -271,6 +271,7 @@ impl Driver for ElasticsearchDriver {
             columns,
             indexes: Vec::<IndexDef>::new(),
             fks: Vec::<ForeignKeyDef>::new(),
+            triggers: Vec::new(),
         })
     }
 

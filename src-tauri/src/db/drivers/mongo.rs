@@ -483,6 +483,7 @@ impl Driver for MongoDriver {
             columns,
             indexes,
             fks: vec![],
+            triggers: vec![],
         })
     }
 
@@ -507,6 +508,10 @@ mod uri_tests {
             database: db.map(str::to_string),
             driver_profile: None,
             options: opts.map(str::to_string),
+            ssl: false,
+            ssl_mode: None,
+            ca_cert_path: None,
+            ssl_reject_unauthorized: None,
         }
     }
 

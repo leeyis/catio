@@ -6,6 +6,9 @@
 const STORAGE_KEY = 'catio-hidden-schemas'
 type Store = Record<string, string[]>
 
+/** 隐藏 schema 集合变更时派发的事件名,供 SQL 控制台等其它视图响应式刷新其库下拉。 */
+export const HIDDEN_SCHEMAS_EVENT = 'catio:hidden-schemas-changed'
+
 function read(): Store {
   if (typeof localStorage === 'undefined') return {}
   try {
@@ -30,5 +33,9 @@ export function writeHiddenSchemas(connKey: string, hidden: string[]): void {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(store))
   } catch {
     /* ignore quota */
+  }
+  // 通知同窗口内其它视图(如 SQL 控制台的库下拉)筛选已变更,实现联动刷新。
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(HIDDEN_SCHEMAS_EVENT, { detail: { connKey } }))
   }
 }

@@ -1,4 +1,4 @@
-import { render, screen, waitFor, fireEvent } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent, act, within } from '@testing-library/react'
 import { vi, describe, it, expect, beforeEach } from 'vitest'
 import { LanguageProvider } from '../../state/LanguageContext'
 import { DataProvider } from '../../state/DataContext'
@@ -11,7 +11,17 @@ const h = vi.hoisted(() => ({
   getSchema: vi.fn(),
   runQuery: vi.fn(),
   objectSource: vi.fn(),
+  // 默认给安全的 resolved 值,避免别的 describe(渲染 Structure tab / 不导出)在
+  // 未显式设置时拿到 undefined 触发 `.then` 崩溃。各导出测试会按需覆盖。
+  tableStructure: vi.fn(() => Promise.resolve({ comment: '', columns: [], indexes: [], fks: [], triggers: [] })),
+  exportDatabaseSql: vi.fn(() => Promise.resolve('-- sql --')),
+  exportFile: vi.fn(() => Promise.resolve(undefined)),
+  save: vi.fn((..._a: unknown[]) => Promise.resolve('/tmp/out.sql')),
+  // D3 跨库迁移:DataTransferDialog 提交时调用,默认 resolve 一个行数。
+  transferTable: vi.fn(() => Promise.resolve({ rowsTransferred: 5 })),
 }))
+
+vi.mock('@tauri-apps/plugin-dialog', () => ({ save: (...a: unknown[]) => h.save(...a) }))
 
 vi.mock('../../state/dbConnections', async (importOriginal) => {
   const mod = await importOriginal<typeof import('../../state/dbConnections')>()
@@ -21,10 +31,36 @@ vi.mock('../../state/dbConnections', async (importOriginal) => {
 // ---- mock the db service so the live-connection data path can be driven without Tauri ----
 vi.mock('../../services/db', async (importOriginal) => {
   const mod = await importOriginal<typeof import('../../services/db')>()
-  return { ...mod, tablePreview: h.tablePreview, getSchema: h.getSchema, runQuery: h.runQuery, objectSource: h.objectSource }
+  return {
+    ...mod, tablePreview: h.tablePreview, getSchema: h.getSchema, runQuery: h.runQuery, objectSource: h.objectSource,
+    tableStructure: h.tableStructure, exportDatabaseSql: h.exportDatabaseSql, exportFile: h.exportFile,
+    transferTable: h.transferTable,
+  }
 })
 
 import { DbWorkbench } from './DbWorkbench'
+// 跨库迁移候选改为响应式 useActiveDbConnections,读取「真实」active store(不走 h.list 这个mock)。
+// 这些测试因此既要喂 h.list(caps/connId 解析路径),又要把同样的连接灌进真实 store。
+import {
+  setActiveDbConnection, removeActiveDbConnection,
+  type ActiveDbConnection,
+} from '../../state/dbConnections'
+
+// listActiveDbConnections 被全局 mock 成 h.list,无法用它读真实 store 来清理。
+// 因此自行记录已灌入的 connId,清理时按记录移除真实 store 条目。
+let _seededConnIds: string[] = []
+
+/** 把一组 ActiveDbConnection 灌进真实的 in-memory store(并先清空上次灌入的)。 */
+function seedActiveStore(conns: ActiveDbConnection[]) {
+  for (const id of _seededConnIds) removeActiveDbConnection(id)
+  _seededConnIds = conns.map(c => c.connId)
+  for (const c of conns) {
+    setActiveDbConnection(
+      { connId: c.connId, version: '', capabilities: c.capabilities },
+      { id: c.profileId, name: c.name, dbType: c.dbType },
+    )
+  }
+}
 
 const wrap = (ui: React.ReactNode) =>
   render(<LanguageProvider><DataProvider>{ui}</DataProvider></LanguageProvider>)
@@ -566,5 +602,180 @@ describe('DbWorkbench 历史记录无窗口执行 (功能#3)', () => {
     // 仅 SqlConsole 执行一次,DbWorkbench 不介入(不重复执行、不新建 tab)。
     await waitFor(() => expect(h.runQuery).toHaveBeenCalledTimes(1))
     expect(screen.queryByTestId('wbtab-sql:2')).not.toBeInTheDocument()
+  })
+})
+
+describe('DbWorkbench 整库导出 — 引擎门控 + DDL 失败上报', () => {
+  // 关系型 schema(public.orders),getSchema/tablePreview 都能返回。
+  const SCHEMA = {
+    db: 'conn',
+    schemas: [{ name: 'public', open: false, tables: [{ name: 'orders', rows: '', cols: 0 }], views: [], functions: [] }],
+  }
+  const ACTIVE = (dbType: import('../../services/db').DbType) => ({
+    connId: 'conn-x', profileId: 'd-orders', dbType, name: 'test',
+    capabilities: {
+      writable: true, transactions: true, schemas: true,
+      sqlConsole: true, er: false, structureEdit: false, views: false, functions: false,
+    },
+  })
+
+  beforeEach(() => {
+    h.list.mockReset(); h.tablePreview.mockReset(); h.getSchema.mockReset(); h.runQuery.mockReset(); h.objectSource.mockReset()
+    h.tableStructure.mockReset(); h.exportDatabaseSql.mockReset(); h.exportFile.mockReset(); h.save.mockReset()
+    h.getSchema.mockResolvedValue(SCHEMA)
+    h.tablePreview.mockResolvedValue({ columns: [], rows: [] })
+    h.runQuery.mockResolvedValue({ columns: [], rows: [] })
+    h.objectSource.mockResolvedValue('')
+    h.exportDatabaseSql.mockResolvedValue('-- sql --')
+    h.exportFile.mockResolvedValue(undefined)
+    h.save.mockResolvedValue('/tmp/out.sql')
+  })
+
+  // 打开 schema 节点的操作菜单。
+  async function openSchemaMenu() {
+    fireEvent.click(await screen.findByTestId('schema-node:public'))
+    fireEvent.click(screen.getAllByTitle('Schema 操作')[0])
+  }
+
+  it('关系型引擎(postgres)显示「整库导出」菜单项', async () => {
+    // DATA.byId['d-orders'] 的 engine 是 postgres。
+    h.list.mockReturnValue([ACTIVE('postgres')])
+    wrap(<DbWorkbench conn={DATA.byId['d-orders']} />)
+    await openSchemaMenu()
+    expect(screen.getByText('整库导出')).toBeInTheDocument()
+  })
+
+  it('非关系型引擎(redis)隐藏「整库导出」菜单项(.sql DDL 无意义)', async () => {
+    // DATA.byId['d-cache'] 的 engine 是 redis;caps.sqlConsole 仍为 true,但不应出现导出项。
+    h.list.mockReturnValue([{ ...ACTIVE('redis'), profileId: 'd-cache' }])
+    wrap(<DbWorkbench conn={DATA.byId['d-cache']} />)
+    await openSchemaMenu()
+    expect(screen.queryByText('整库导出')).not.toBeInTheDocument()
+  })
+
+  it('非关系型引擎(mongodb)隐藏「整库导出」菜单项', async () => {
+    h.list.mockReturnValue([{ ...ACTIVE('mongodb'), profileId: 'd-events' }])
+    wrap(<DbWorkbench conn={DATA.byId['d-events']} />)
+    await openSchemaMenu()
+    expect(screen.queryByText('整库导出')).not.toBeInTheDocument()
+  })
+
+  it('结构导出时某表 tableStructure 失败 → 中止导出并上报,不落盘、不报成功', async () => {
+    // 回归:此前 catch 静默丢弃该表 DDL,后端仍写文件并弹成功 toast,选中表悄悄消失。
+    h.list.mockReturnValue([ACTIVE('postgres')])
+    h.tableStructure.mockRejectedValue({ kind: 'Driver', message: '权限不足:无法读取表结构' })
+    wrap(<DbWorkbench conn={DATA.byId['d-orders']} />)
+    await openSchemaMenu()
+    fireEvent.click(screen.getByText('整库导出'))
+    // 仅勾选「结构」以触发逐表取结构(默认结构+数据都勾选,这里直接点导出即可)。
+    fireEvent.click(await screen.findByTestId('dbexport-run'))
+    // 失败应被上报到 dialog 内联错误区,且不调用落盘/不弹成功。
+    await waitFor(() => expect(screen.getByText(/权限不足:无法读取表结构/)).toBeInTheDocument())
+    expect(h.exportFile).not.toHaveBeenCalled()
+  })
+})
+
+describe('DbWorkbench D3 跨库迁移 UI 接入', () => {
+  const SCHEMA = {
+    db: 'conn',
+    schemas: [{ name: 'public', open: false, tables: [{ name: 'orders', rows: '', cols: 0 }], views: [], functions: [] }],
+  }
+  const ACTIVE = {
+    connId: 'conn-src', profileId: 'd-orders', dbType: 'postgres' as const, name: 'prod-orders',
+    capabilities: {
+      writable: true, transactions: true, schemas: true,
+      sqlConsole: true, er: true, structureEdit: true, views: true, functions: true,
+    },
+  }
+  // 第二个活动连接作为迁移目标候选(同为 postgres,支持 upsert)。
+  const TARGET = {
+    connId: 'conn-dst', profileId: 'd-other', dbType: 'postgres' as const, name: 'staging-pg',
+    capabilities: ACTIVE.capabilities,
+  }
+
+  beforeEach(() => {
+    h.list.mockReset(); h.tablePreview.mockReset(); h.getSchema.mockReset(); h.runQuery.mockReset(); h.objectSource.mockReset()
+    h.tableStructure.mockReset(); h.transferTable.mockReset()
+    h.list.mockReturnValue([ACTIVE, TARGET])
+    // 候选列表读真实 store → 同步灌入,使迁移对话框能看到目标连接。
+    seedActiveStore([ACTIVE, TARGET])
+    h.getSchema.mockResolvedValue(SCHEMA)
+    h.tablePreview.mockResolvedValue({ columns: [{ name: 'id', type: 'int', pk: true }], rows: [[1]] })
+    h.runQuery.mockResolvedValue({ columns: [], rows: [] })
+    h.objectSource.mockResolvedValue('')
+    h.tableStructure.mockResolvedValue({
+      comment: '', indexes: [], fks: [], triggers: [],
+      columns: [{ name: 'id', type: 'int', nullable: false, default: null, key: 'PK', extra: '', comment: '' }],
+    } as unknown as Awaited<ReturnType<typeof h.tableStructure>>)
+    h.transferTable.mockResolvedValue({ rowsTransferred: 5 })
+  })
+
+  it('表叶节点「迁移数据」入口打开对话框,带入源连接/表,提交调用 transferTable', async () => {
+    wrap(<DbWorkbench conn={DATA.byId['d-orders']} />)
+    // 展开 schema 露出 orders 表叶。
+    fireEvent.click(await screen.findByTestId('schema-node:public'))
+    await screen.findByTestId('schema-tbl:public.orders')
+    // 打开该表的「...」对象管理菜单。
+    fireEvent.click(screen.getByTestId('leaf-admin-btn:TABLE:orders'))
+    // 点击「迁移数据」入口 → 打开 DataTransferDialog。
+    fireEvent.click(await screen.findByTestId('leaf-transfer:TABLE:orders'))
+    // 对话框出现(标题 = "迁移数据" / "Migrate data")+ 源连接显示。
+    expect(await screen.findByText(/迁移数据|Migrate data/)).toBeInTheDocument()
+
+    // 选目标连接 → 目标表下拉从 getSchema(目标) 异步填充(public.orders),选中后自动映射 id→id。
+    fireEvent.change(screen.getByLabelText('transfer-target-conn'), { target: { value: 'conn-dst' } })
+    const tableSel = screen.getByLabelText('transfer-target-table')
+    await waitFor(() => expect(within(tableSel as HTMLElement).queryByRole('option', { name: 'orders' })).toBeInTheDocument())
+    fireEvent.change(tableSel, { target: { value: 'orders' } })
+    const apply = await screen.findByRole('button', { name: /迁移 \d+ 列|Migrate \d+ column/i })
+    await waitFor(() => expect(apply).not.toBeDisabled())
+    fireEvent.click(apply)
+
+    await waitFor(() => expect(h.transferTable).toHaveBeenCalledTimes(1))
+    const arg = (h.transferTable.mock.calls[0] as unknown[])[0] as {
+      sourceConnId: string; sourceSchema?: string; sourceTable: string; targetConnId: string; targetTable: string
+    }
+    // 源连接来自当前 live connId,源表来自被右键的表叶。
+    expect(arg.sourceConnId).toBe('conn-src')
+    expect(arg.sourceSchema).toBe('public')
+    expect(arg.sourceTable).toBe('orders')
+    expect(arg.targetConnId).toBe('conn-dst')
+    expect(arg.targetTable).toBe('orders')
+  })
+
+  it('无 live 连接(mock 路径)不渲染迁移入口', async () => {
+    h.list.mockReturnValue([])
+    seedActiveStore([])
+    wrap(<DbWorkbench conn={DATA.byId['d-orders']} />)
+    fireEvent.click(await screen.findByTestId('schema-node:public'))
+    await screen.findByTestId('schema-tbl:public.orders')
+    // mock 路径无 onTransferData → 连「...」对象管理菜单都不出现。
+    expect(screen.queryByTestId('leaf-admin-btn:TABLE:orders')).not.toBeInTheDocument()
+  })
+
+  // 回归(codex P2):源 workbench 已挂载后,用户「之后」才连上目标库时,目标必须
+  // 出现在迁移对话框的连接选择器里(此前 transferConnections memo 只依赖 connId,
+  // 新连接不会触发重算 → 跨库迁移核心场景静默失效)。
+  it('源 workbench 挂载后才连上的目标库,出现在迁移对话框的连接选择器中', async () => {
+    // 起始:仅源连接 ACTIVE 是活动的(目标尚未连接)。
+    h.list.mockReturnValue([ACTIVE])
+    seedActiveStore([ACTIVE])
+    wrap(<DbWorkbench conn={DATA.byId['d-orders']} />)
+    fireEvent.click(await screen.findByTestId('schema-node:public'))
+    await screen.findByTestId('schema-tbl:public.orders')
+    fireEvent.click(screen.getByTestId('leaf-admin-btn:TABLE:orders'))
+    fireEvent.click(await screen.findByTestId('leaf-transfer:TABLE:orders'))
+    await screen.findByText(/迁移数据|Migrate data/)
+
+    // 此刻目标连接还不存在于选择器(只有占位 + 源)。
+    const targetSelect = screen.getByLabelText('transfer-target-conn') as HTMLSelectElement
+    expect(Array.from(targetSelect.options).map(o => o.value)).not.toContain('conn-dst')
+
+    // workbench 挂载之后,用户才连上目标库 → 触发真实 store 通知,候选列表应刷新。
+    act(() => { seedActiveStore([ACTIVE, TARGET]) })
+
+    await waitFor(() =>
+      expect(Array.from((screen.getByLabelText('transfer-target-conn') as HTMLSelectElement).options).map(o => o.value)).toContain('conn-dst'),
+    )
   })
 })

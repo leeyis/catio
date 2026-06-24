@@ -665,6 +665,10 @@ async fn scan_db_target(
             driver_profile: engine.driver_profile.clone(),
             options: None,
             secret: Some(cred.password.clone()),
+            ssl: false,
+            ssl_mode: None,
+            ca_cert_path: None,
+            ssl_reject_unauthorized: None,
         };
         let attempt = timeout(AUTH_ATTEMPT_TIMEOUT, crate::db::commands::db_test_connection(args)).await;
         if let Ok(Ok(res)) = attempt {

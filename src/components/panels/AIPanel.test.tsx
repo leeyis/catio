@@ -167,6 +167,70 @@ describe('AIPanel controlled conversation view', () => {
     expect(screen.queryByText('orders')).toBeNull()
   })
 
+  it('运行只读 SQL → 直接派发 catio-run,不弹确认框', () => {
+    const onRun = vi.fn()
+    window.addEventListener('catio-run', onRun)
+    wrap(<AIPanel onClose={() => {}} mode="sql" conn={dbConn} connId="d1" engine="postgres"
+      attachment={null} onClearAttachment={() => {}}
+      conversation={conv([{ role: 'assistant', content: '```sql\nSELECT * FROM orders\n```' }])} />)
+    fireEvent.click(screen.getByTitle('执行'))
+    expect(onRun).toHaveBeenCalledTimes(1)
+    expect((onRun.mock.calls[0][0] as CustomEvent).detail.text).toBe('SELECT * FROM orders')
+    window.removeEventListener('catio-run', onRun)
+  })
+
+  it('运行危险 SQL(DELETE)→ 先弹确认框,确认后才派发 catio-run', () => {
+    const onRun = vi.fn()
+    window.addEventListener('catio-run', onRun)
+    wrap(<AIPanel onClose={() => {}} mode="sql" conn={dbConn} connId="d1" engine="postgres"
+      attachment={null} onClearAttachment={() => {}}
+      conversation={conv([{ role: 'assistant', content: '```sql\nDELETE FROM orders WHERE id = 1\n```' }])} />)
+    fireEvent.click(screen.getByTitle('执行'))
+    // 未确认前不派发
+    expect(onRun).not.toHaveBeenCalled()
+    expect(screen.getByText('确认执行 SQL')).toBeTruthy()
+    fireEvent.click(screen.getByText('确认执行'))
+    expect(onRun).toHaveBeenCalledTimes(1)
+    window.removeEventListener('catio-run', onRun)
+  })
+
+  it('运行危险 SQL 后取消 → 不派发 catio-run', () => {
+    const onRun = vi.fn()
+    window.addEventListener('catio-run', onRun)
+    wrap(<AIPanel onClose={() => {}} mode="sql" conn={dbConn} connId="d1" engine="postgres"
+      attachment={null} onClearAttachment={() => {}}
+      conversation={conv([{ role: 'assistant', content: '```sql\nDELETE FROM orders WHERE id = 1\n```' }])} />)
+    fireEvent.click(screen.getByTitle('执行'))
+    fireEvent.click(screen.getByText('取消'))
+    expect(onRun).not.toHaveBeenCalled()
+    window.removeEventListener('catio-run', onRun)
+  })
+
+  it('运行被阻断的 SQL(DROP)→ 不派发 catio-run,展示阻断提示', () => {
+    const onRun = vi.fn()
+    window.addEventListener('catio-run', onRun)
+    wrap(<AIPanel onClose={() => {}} mode="sql" conn={dbConn} connId="d1" engine="postgres"
+      attachment={null} onClearAttachment={() => {}}
+      conversation={conv([{ role: 'assistant', content: '```sql\nDROP TABLE orders\n```' }])} />)
+    fireEvent.click(screen.getByTitle('执行'))
+    expect(onRun).not.toHaveBeenCalled()
+    expect(screen.getByText(/已阻断/)).toBeTruthy()
+    // 阻断弹窗没有「确认执行」按钮,只有关闭/知道了
+    expect(screen.queryByText('确认执行')).toBeNull()
+    window.removeEventListener('catio-run', onRun)
+  })
+
+  it('shell 模式运行命令 → 直接派发 catio-run(不经 SQL 分级)', () => {
+    const onRun = vi.fn()
+    window.addEventListener('catio-run', onRun)
+    wrap(<AIPanel onClose={() => {}} mode="shell" conn={hostConn}
+      attachment={null} onClearAttachment={() => {}}
+      conversation={conv([{ role: 'assistant', content: '```sh\nrm -rf /tmp/x\n```' }])} />)
+    fireEvent.click(screen.getByTitle('运行'))
+    expect(onRun).toHaveBeenCalledTimes(1)
+    window.removeEventListener('catio-run', onRun)
+  })
+
   it('shows the no-model hint and wires the configure button', () => {
     mockConfig = { provider: 'ollama', ollamaBaseUrl: 'http://h', openaiBaseUrl: '', openaiKey: '', model: '' }
     const onOpenSettings = vi.fn()

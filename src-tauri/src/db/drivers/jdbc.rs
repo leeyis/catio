@@ -405,8 +405,8 @@ impl Driver for JdbcDriver {
             Ok(tables) => table_comment_for(&tables, table),
             Err(_) => String::new(),
         };
-        // The simple plugin protocol exposes columns only (no index/FK introspection).
-        Ok(TableStructure { comment, columns, indexes: vec![], fks: vec![] })
+        // The simple plugin protocol exposes columns only (no index/FK/trigger introspection).
+        Ok(TableStructure { comment, columns, indexes: vec![], fks: vec![], triggers: vec![] })
     }
 
     async fn er_relations(&self, _schema: &str) -> Result<Vec<ErRelation>, DbError> {

@@ -1,7 +1,7 @@
 // adapted from dbx crates/dbx-core/src/db/mysql.rs (+ ob_oracle.rs for oceanbase-oracle), Apache-2.0
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use mysql_async::{Pool, prelude::*};
+use mysql_async::{Opts, OptsBuilder, Pool, prelude::*};
 use mysql_async::consts::ColumnType;
 use crate::db::{DbError, DatabaseType};
 use crate::db::driver::{ConnectArgs, Driver, TableInfo, TableStructure, ErRelation};
@@ -17,22 +17,8 @@ pub struct MySqlDriver {
 impl MySqlDriver {
     pub async fn connect(args: &ConnectArgs) -> Result<Self, DbError> {
         let db = args.database.clone().unwrap_or_default();
-        // Advanced params (e.g. charset/pool/SSL options) ride as the URL query
-        // string when provided.
-        let query = args.options.as_deref().map(str::trim).filter(|s| !s.is_empty())
-            .map(|o| format!("?{}", o.trim_start_matches(['?', '&'])))
-            .unwrap_or_default();
-        let url = format!(
-            "mysql://{}:{}@{}:{}/{}{}",
-            args.user,
-            args.secret.clone().unwrap_or_default(),
-            args.host,
-            args.port,
-            db,
-            query,
-        );
-        let pool = Pool::from_url(&url)
-            .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
+        let opts = build_mysql_opts(args)?;
+        let pool = Pool::new(opts);
         // Validate by acquiring a connection
         let _conn = pool.get_conn().await.map_err(|e| {
             let s = e.to_string();
@@ -44,6 +30,81 @@ impl MySqlDriver {
         })?;
         Ok(Self { pool, profile: args.driver_profile.clone(), database: db })
     }
+}
+
+/// 构建 mysql_async 连接 URL 的查询串(含前导 `?`,空则返回空串)。
+/// 把用户的 options 与 SSL/TLS 开关合并:ssl=true 注入 `require_ssl=true`;
+/// insecure 时再加 `verify_ca=false&verify_identity=false` 跳过证书/主机名校验。
+fn build_mysql_query(options: Option<&str>, ssl: bool, insecure: bool) -> String {
+    let mut parts: Vec<String> = options
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|o| {
+            o.trim_start_matches(['?', '&'])
+                .split('&')
+                .filter(|p| !p.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    fn has_key(parts: &[String], key: &str) -> bool {
+        parts.iter().any(|p| {
+            p.split_once('=').map(|(k, _)| k.trim()).unwrap_or(p.trim()).eq_ignore_ascii_case(key)
+        })
+    }
+
+    if ssl {
+        if !has_key(&parts, "require_ssl") && !has_key(&parts, "ssl-mode") && !has_key(&parts, "sslmode") {
+            parts.push("require_ssl=true".to_string());
+        }
+        if insecure {
+            if !has_key(&parts, "verify_ca") {
+                parts.push("verify_ca=false".to_string());
+            }
+            if !has_key(&parts, "verify_identity") {
+                parts.push("verify_identity=false".to_string());
+            }
+        }
+    }
+
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", parts.join("&"))
+    }
+}
+
+/// 构建 mysql_async 的 `Opts`:先用 URL 携带 require_ssl/verify_ca 等开关解析出
+/// 基础 Opts;若开启 SSL 且提供了自定义 CA 证书路径,则在解析出的 `SslOpts` 上注入
+/// 该根证书(URL 查询串无法表达自定义 CA,只能经 `SslOpts::with_root_certs`)。
+/// 对齐 dbx 的 ssl + ca_cert_path 能力;无 CA / 无 TLS 时行为与原 URL 路径一致。
+fn build_mysql_opts(args: &ConnectArgs) -> Result<Opts, DbError> {
+    let db = args.database.clone().unwrap_or_default();
+    let insecure = args.ssl_reject_unauthorized == Some(false);
+    let query = build_mysql_query(args.options.as_deref(), args.ssl, insecure);
+    let url = format!(
+        "mysql://{}:{}@{}:{}/{}{}",
+        args.user,
+        args.secret.clone().unwrap_or_default(),
+        args.host,
+        args.port,
+        db,
+        query,
+    );
+    let opts = Opts::from_url(&url).map_err(|e| DbError::ConnectFailed(e.to_string()))?;
+
+    // 自定义 CA 仅在 TLS 开启时有意义。require_ssl=true 时 from_url 已产出 SslOpts,
+    // 在其基础上追加根证书路径(保留 verify_ca/verify_identity 等已解析的开关)。
+    let ca = args.ca_cert_path.as_deref().map(str::trim).filter(|p| !p.is_empty());
+    if args.ssl {
+        if let Some(path) = ca {
+            let base_ssl = opts.ssl_opts().cloned().unwrap_or_default();
+            let ssl = base_ssl.with_root_certs(vec![std::path::PathBuf::from(path).into()]);
+            return Ok(OptsBuilder::from_opts(opts).ssl_opts(ssl).into());
+        }
+    }
+    Ok(opts)
 }
 
 // ── value extraction helpers (adapted from dbx db/mysql.rs) ──────────────────
@@ -552,6 +613,19 @@ fn mysql_table_comment_sql(schema: &str, table: &str) -> String {
     )
 }
 
+/// Build the trigger-list SQL for standard MySQL (information_schema.TRIGGERS).
+/// 列:TRIGGER_NAME / ACTION_TIMING(BEFORE|AFTER) / EVENT_MANIPULATION(INSERT|UPDATE|DELETE)。
+fn mysql_triggers_sql(schema: &str, table: &str) -> String {
+    format!(
+        "SELECT TRIGGER_NAME, ACTION_TIMING, EVENT_MANIPULATION \
+         FROM information_schema.TRIGGERS \
+         WHERE TRIGGER_SCHEMA = {s} AND EVENT_OBJECT_TABLE = {t} \
+         ORDER BY TRIGGER_NAME",
+        s = quote_value(schema),
+        t = quote_value(table),
+    )
+}
+
 impl MySqlDriver {
     /// table_structure for standard MySQL.
     /// Adapted from dbx list_columns/list_indexes/list_foreign_keys, Apache-2.0.
@@ -560,7 +634,7 @@ impl MySqlDriver {
         schema: &str,
         table: &str,
     ) -> Result<TableStructure, DbError> {
-        use crate::db::driver::{ColumnDef, IndexDef, ForeignKeyDef};
+        use crate::db::driver::{ColumnDef, IndexDef, ForeignKeyDef, TriggerDef};
 
         let mut conn = self.pool.get_conn().await
             .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
@@ -659,7 +733,21 @@ impl MySqlDriver {
                     .unwrap_or_else(|| "NO ACTION".into()),
                 on_update: get_opt_str_by_name(r, "UPDATE_RULE")
                     .unwrap_or_else(|| "NO ACTION".into()),
+                constraint_name: get_opt_str_by_name(r, "CONSTRAINT_NAME"),
             }
+        }).collect();
+
+        // ---- triggers ----
+        // information_schema.TRIGGERS：按表过滤,带触发时机/事件用于展示。
+        let trg_sql = mysql_triggers_sql(schema, table);
+        let trg_rows: Vec<mysql_async::Row> = conn.query_iter(&trg_sql).await
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?
+            .collect_and_drop().await
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        let triggers: Vec<TriggerDef> = trg_rows.iter().map(|r| TriggerDef {
+            name: get_str_by_name(r, "TRIGGER_NAME"),
+            timing: get_opt_str_by_name(r, "ACTION_TIMING"),
+            event: get_opt_str_by_name(r, "EVENT_MANIPULATION"),
         }).collect();
 
         // ---- table comment ----
@@ -670,7 +758,7 @@ impl MySqlDriver {
             .map(|r| get_str(&r, 0))
             .unwrap_or_default();
 
-        Ok(TableStructure { comment, columns, indexes, fks })
+        Ok(TableStructure { comment, columns, indexes, fks, triggers })
     }
 
     /// er_relations for standard MySQL.
@@ -776,12 +864,13 @@ impl MySqlDriver {
         schema: &str,
         table: &str,
     ) -> Result<TableStructure, DbError> {
-        use crate::db::driver::{ColumnDef, IndexDef, ForeignKeyDef};
+        use crate::db::driver::{ColumnDef, IndexDef, ForeignKeyDef, TriggerDef};
 
         let mut conn = self.pool.get_conn().await
             .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
 
         // ---- columns (ALL_TAB_COLUMNS + PK join) ----
+        // (OceanBase-Oracle path)
         let col_sql = ob_columns_sql(schema, table);
         let result = conn.query_iter(&col_sql).await
             .map_err(|e| DbError::QueryFailed(e.to_string()))?;
@@ -864,13 +953,33 @@ impl MySqlDriver {
             .map_err(|e| DbError::QueryFailed(e.to_string()))?;
 
         let fks: Vec<ForeignKeyDef> = fk_rows.iter().map(|r| {
+            let cn = get_str(r, 0);
             ForeignKeyDef {
                 column: get_str(r, 1),
                 references: format!("{}.{}.{}", get_str(r, 2), get_str(r, 3), get_str(r, 4)),
                 on_delete: "NO ACTION".into(),
                 on_update: "NO ACTION".into(),
+                constraint_name: if cn.is_empty() { None } else { Some(cn) },
             }
         }).collect();
+
+        // ---- triggers (ALL_TRIGGERS) ----
+        let trg_sql = format!(
+            "SELECT TRIGGER_NAME, TRIGGERING_EVENT, TRIGGER_TYPE FROM ALL_TRIGGERS \
+             WHERE TABLE_OWNER = {s} AND TABLE_NAME = {t} ORDER BY TRIGGER_NAME",
+            s = quote_value(schema),
+            t = quote_value(table),
+        );
+        let triggers: Vec<TriggerDef> = match conn.query_iter(&trg_sql).await {
+            Ok(res) => res.collect_and_drop::<mysql_async::Row>().await
+                .map(|rows| rows.iter().map(|r| TriggerDef {
+                    name: get_str(r, 0),
+                    timing: { let s = get_str(r, 2); if s.is_empty() { None } else { Some(s) } },
+                    event: { let s = get_str(r, 1); if s.is_empty() { None } else { Some(s) } },
+                }).collect())
+                .unwrap_or_default(),
+            Err(_) => Vec::new(), // best-effort: ALL_TRIGGERS 不可用时留空
+        };
 
         // ---- table comment ----
         let comment_sql = ob_table_comment_sql(schema, table);
@@ -880,7 +989,7 @@ impl MySqlDriver {
             .map(|r| get_str(&r, 0))
             .unwrap_or_default();
 
-        Ok(TableStructure { comment, columns, indexes, fks })
+        Ok(TableStructure { comment, columns, indexes, fks, triggers })
     }
 
     async fn ob_er_relations(&self, schema: &str) -> Result<Vec<ErRelation>, DbError> {
@@ -913,6 +1022,97 @@ impl MySqlDriver {
             to: get_str(r, 2),
             to_col: get_str(r, 3),
         }).collect())
+    }
+}
+
+#[cfg(test)]
+mod tls_query_tests {
+    use super::build_mysql_query;
+
+    #[test]
+    fn no_tls_no_options_is_empty() {
+        assert_eq!(build_mysql_query(None, false, false), "");
+        assert_eq!(build_mysql_query(Some(""), false, false), "");
+    }
+
+    #[test]
+    fn options_only_pass_through() {
+        assert_eq!(build_mysql_query(Some("pool_max=4"), false, false), "?pool_max=4");
+        // 去掉前导 ? / & 后再拼。
+        assert_eq!(build_mysql_query(Some("?pool_max=4"), false, false), "?pool_max=4");
+    }
+
+    #[test]
+    fn tls_injects_require_ssl() {
+        assert_eq!(build_mysql_query(None, true, false), "?require_ssl=true");
+        assert_eq!(build_mysql_query(Some("pool_max=4"), true, false), "?pool_max=4&require_ssl=true");
+    }
+
+    #[test]
+    fn tls_insecure_disables_ca_verify() {
+        assert_eq!(
+            build_mysql_query(None, true, true),
+            "?require_ssl=true&verify_ca=false&verify_identity=false"
+        );
+    }
+}
+
+#[cfg(test)]
+mod opts_ca_tests {
+    use super::build_mysql_opts;
+    use crate::db::driver::ConnectArgs;
+    use crate::db::DatabaseType;
+
+    fn args() -> ConnectArgs {
+        ConnectArgs {
+            db_type: DatabaseType::Mysql,
+            host: "h".into(),
+            port: 3306,
+            user: "u".into(),
+            database: Some("d".into()),
+            driver_profile: None,
+            options: None,
+            secret: Some("pw".into()),
+            ssl: false,
+            ssl_mode: None,
+            ca_cert_path: None,
+            ssl_reject_unauthorized: None,
+        }
+    }
+
+    #[test]
+    fn no_ssl_has_no_ssl_opts() {
+        let opts = build_mysql_opts(&args()).expect("opts build");
+        assert!(opts.ssl_opts().is_none(), "未开 TLS 不应带 ssl_opts");
+    }
+
+    #[test]
+    fn ssl_without_ca_has_ssl_opts_but_no_root_certs() {
+        let mut a = args();
+        a.ssl = true;
+        let opts = build_mysql_opts(&a).expect("opts build");
+        let ssl = opts.ssl_opts().expect("require_ssl 应产生 ssl_opts");
+        assert!(ssl.root_certs().is_empty(), "未提供 CA 时不应注入根证书");
+    }
+
+    #[test]
+    fn ssl_with_ca_path_injects_root_cert() {
+        let mut a = args();
+        a.ssl = true;
+        a.ca_cert_path = Some("/etc/ssl/myca.pem".into());
+        let opts = build_mysql_opts(&a).expect("opts build");
+        let ssl = opts.ssl_opts().expect("ssl_opts 应存在");
+        let roots = ssl.root_certs();
+        assert_eq!(roots.len(), 1, "应注入一个自定义 CA 证书路径");
+    }
+
+    #[test]
+    fn ca_path_ignored_when_ssl_off() {
+        let mut a = args();
+        a.ssl = false;
+        a.ca_cert_path = Some("/etc/ssl/myca.pem".into());
+        let opts = build_mysql_opts(&a).expect("opts build");
+        assert!(opts.ssl_opts().is_none(), "TLS 关闭时 CA 路径无效,不应产生 ssl_opts");
     }
 }
 

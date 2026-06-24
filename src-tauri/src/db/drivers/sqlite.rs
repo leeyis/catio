@@ -15,7 +15,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::db::{DbError, DatabaseType};
-use crate::db::driver::{ConnectArgs, Driver, TableInfo, TableStructure, ColumnDef, IndexDef, ForeignKeyDef, ErRelation};
+use crate::db::driver::{ConnectArgs, Driver, TableInfo, TableStructure, ColumnDef, IndexDef, ForeignKeyDef, TriggerDef, ErRelation};
 use crate::db::result::{QueryResult, ColumnInfo, safe_i64_to_json, binary_to_json};
 
 pub struct SqliteDriver {
@@ -259,16 +259,32 @@ impl Driver for SqliteDriver {
             .collect();
 
         // ---- foreign keys ----
+        // SQLite FK 没有可用于 ALTER TABLE DROP 的命名约束(只能整表重建),故 constraint_name 留空;
+        // 前端据此不提供「删除外键」入口(与 T02 拒绝 SQLite DROP FOREIGN KEY 一致)。
         let fks: Vec<ForeignKeyDef> = fk_rows.into_iter().map(|(col, ref_table, ref_col, on_delete, on_update)| {
             ForeignKeyDef {
                 column: col,
                 references: format!("main.{}.{}", ref_table, ref_col),
                 on_delete,
                 on_update,
+                constraint_name: None,
             }
         }).collect();
 
-        Ok(TableStructure { comment: String::new(), columns, indexes, fks })
+        // ---- triggers via sqlite_master ----
+        let trg_sql = "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?1 ORDER BY name";
+        let mut trg_stmt = conn.prepare(trg_sql)
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        let triggers: Vec<TriggerDef> = trg_stmt
+            .query_map([table], |row| row.get::<_, String>(0))
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?
+            .into_iter()
+            .map(|name| TriggerDef { name, timing: None, event: None })
+            .collect();
+
+        Ok(TableStructure { comment: String::new(), columns, indexes, fks, triggers })
     }
 
     async fn er_relations(&self, _schema: &str) -> Result<Vec<ErRelation>, DbError> {

@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 
 use crate::db::{DbError, DatabaseType};
-use crate::db::driver::{ConnectArgs, Driver, TableInfo, TableStructure, ColumnDef, IndexDef, ForeignKeyDef, ErRelation};
+use crate::db::driver::{ConnectArgs, Driver, TableInfo, TableStructure, ColumnDef, IndexDef, ForeignKeyDef, TriggerDef, ErRelation};
 use crate::db::result::{ColumnInfo, QueryResult};
 use crate::db::drivers::http::{HttpClient, check_response_query};
 
@@ -246,10 +246,28 @@ impl Driver for RqliteDriver {
                     .unwrap_or_else(|| "NO ACTION".into()),
                 on_update: value_by_column(&fk_list.columns, row, "on_update")
                     .unwrap_or_else(|| "NO ACTION".into()),
+                // rqlite=SQLite over HTTP:FK 无可 ALTER DROP 的命名约束,留空。
+                constraint_name: None,
             }
         }).collect();
 
-        Ok(TableStructure { comment: String::new(), columns, indexes, fks })
+        // triggers via sqlite_master（按表过滤）
+        let trg = rqlite_query(
+            &self.http,
+            &format!(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = '{}' ORDER BY name",
+                table.replace('\'', "''"),
+            ),
+        ).await.unwrap_or_else(|_| RqliteResult {
+            columns: vec![], values: vec![], rows_affected: None, error: None
+        });
+        let triggers: Vec<TriggerDef> = trg.values.iter()
+            .filter_map(|row| value_by_column(&trg.columns, row, "name"))
+            .filter(|n| !n.is_empty())
+            .map(|name| TriggerDef { name, timing: None, event: None })
+            .collect();
+
+        Ok(TableStructure { comment: String::new(), columns, indexes, fks, triggers })
     }
 
     async fn er_relations(&self, _schema: &str) -> Result<Vec<ErRelation>, DbError> {

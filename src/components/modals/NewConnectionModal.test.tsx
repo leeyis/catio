@@ -154,6 +154,42 @@ describe('NewConnectionModal — multi-engine catalog', () => {
     })
   })
 
+  it('threads SSL/TLS options (ssl + caCertPath + sslRejectUnauthorized) through testConnection', async () => {
+    h.testConnection.mockResolvedValue({ version: 'PostgreSQL 16.2', latencyMs: 6 })
+    const { container } = wrap(<NewConnectionModal onClose={() => {}} />)
+    const inputs = () => Array.from(container.querySelectorAll('input')) as HTMLInputElement[]
+    const host = inputs().find(i => i.getAttribute('placeholder') === '127.0.0.1')!
+    fireEvent.change(host, { target: { value: '127.0.0.1' } })
+    // enable SSL
+    fireEvent.click(screen.getByLabelText('启用 SSL/TLS'))
+    // fill CA cert path (revealed only after SSL is on)
+    const ca = inputs().find(i => i.getAttribute('placeholder') === '/path/to/ca.pem')!
+    fireEvent.change(ca, { target: { value: '/etc/ssl/ca.pem' } })
+    // opt out of verification
+    fireEvent.click(screen.getByLabelText('不校验服务器证书'))
+    fireEvent.click(screen.getByText('测试连接'))
+    await waitFor(() => expect(h.testConnection).toHaveBeenCalledTimes(1))
+    expect(h.testConnection.mock.calls[0][0]).toMatchObject({
+      ssl: true,
+      caCertPath: '/etc/ssl/ca.pem',
+      sslRejectUnauthorized: false,
+    })
+  })
+
+  it('omits SSL fields entirely when SSL is left off', async () => {
+    h.testConnection.mockResolvedValue({ version: 'PostgreSQL 16.2', latencyMs: 6 })
+    const { container } = wrap(<NewConnectionModal onClose={() => {}} />)
+    const host = (Array.from(container.querySelectorAll('input')) as HTMLInputElement[])
+      .find(i => i.getAttribute('placeholder') === '127.0.0.1')!
+    fireEvent.change(host, { target: { value: '127.0.0.1' } })
+    fireEvent.click(screen.getByText('测试连接'))
+    await waitFor(() => expect(h.testConnection).toHaveBeenCalledTimes(1))
+    const args = h.testConnection.mock.calls[0][0]
+    expect('ssl' in args).toBe(false)
+    expect('caCertPath' in args).toBe(false)
+    expect('sslRejectUnauthorized' in args).toBe(false)
+  })
+
   it('shows the JDBC driver row with a download button for a downloadable engine', async () => {
     wrap(<NewConnectionModal onClose={() => {}} />)
     fireEvent.click(screen.getByText('PostgreSQL'))

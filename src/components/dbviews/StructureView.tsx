@@ -4,8 +4,8 @@ import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn, IconBtn, Segmented, Toggle } from '../atoms'
 import { useData } from '../../state/DataContext'
-import { tableStructure, runQuery, dbErrMsg } from '../../services/db'
-import type { StructColumn, TableStructure } from '../../services/types'
+import { tableStructure, runQuery, dropTableChildObject, dbErrMsg } from '../../services/db'
+import type { StructColumn, StructIndex, StructFk, StructTrigger, TableStructure } from '../../services/types'
 import { highlightSQL } from './highlightSQL'
 import { dialectFor, qualifiedTable, buildAddColumn, buildModifyColumn, buildDropColumn, buildCreateTableDDL, type ColumnDraft } from './structureDdl'
 
@@ -72,7 +72,10 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
     return () => { cancelled = true }
   }, [connId, schema, table, refreshTick])
   // When connected, render real data once loaded; otherwise the mock structure.
-  const st: TableStructure = connId ? (liveSt ?? { comment: '', columns: [], indexes: [], fks: [] }) : mockSt
+  const stRaw: TableStructure = connId ? (liveSt ?? { comment: '', columns: [], indexes: [], fks: [], triggers: [] }) : mockSt
+  // Normalize: older mock fixtures may omit `triggers`; default it so the tab count
+  // and the triggers section never read `.length` off undefined.
+  const st: TableStructure & { triggers: StructTrigger[] } = { ...stRaw, triggers: stRaw.triggers ?? [] }
   const ddlQualified = connId ? (schema ? `${schema}.${table}` : table) : `public.${table}`
   const [tab, setTab] = useState('columns')
   const keyTone: Record<string, string> = { PK: 'var(--signal-amber)', FK: 'var(--signal-blue)', UNI: 'var(--signal-violet)' }
@@ -99,7 +102,7 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
   const hasDdl = !['mongodb', 'elasticsearch', 'redis'].includes(eng)
   // If the engine lacks DDL but the active tab is one of the hidden ones, fall back.
   useEffect(() => {
-    if (!hasDdl && (tab === 'ddl' || tab === 'fks')) setTab('columns')
+    if (!hasDdl && (tab === 'ddl' || tab === 'fks' || tab === 'triggers')) setTab('columns')
   }, [hasDdl, tab])
   const sqlQualified = qualifiedTable(dialect, schema, table)
   // Open add/modify form (null = closed).
@@ -138,6 +141,49 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
     setPreview(buildDropColumn(dialect, sqlQualified, c.name))
   }
 
+  // ---- Drop a table child object (index/FK/trigger) via the backend command. ----
+  // Unlike column drop (TS-generated DDL), child-object DROP/ALTER differs sharply by
+  // dialect (DROP INDEX i ON t vs DROP INDEX schema.i vs DROP CONSTRAINT …), so we
+  // delegate SQL generation to the backend's build_drop_table_child_object_sql and
+  // confirm here. `childDrop` holds the pending deletion until the user confirms.
+  // `kind` selects the backend TableChildObjectType and the modal's title/labels.
+  type ChildDropKind = 'INDEX' | 'FOREIGN_KEY' | 'TRIGGER'
+  const [childDrop, setChildDrop] = useState<{ kind: ChildDropKind; name: string; label: string } | null>(null)
+  const [childDropping, setChildDropping] = useState(false)
+  const [childDropErr, setChildDropErr] = useState<string | null>(null)
+  // Typed-name confirmation gate — matches the safety standard ObjectAdminModal sets for
+  // destructive ops (user must type the object name; the confirm stays danger-styled).
+  const [childDropText, setChildDropText] = useState('')
+  function startChildDrop(kind: ChildDropKind, name: string) {
+    setChildDropErr(null)
+    setChildDropText('')
+    setChildDrop({ kind, name, label: name })
+  }
+  function startDropIndex(ix: StructIndex) { startChildDrop('INDEX', ix.name) }
+  function startDropFk(fk: StructFk) { if (fk.name) startChildDrop('FOREIGN_KEY', fk.name) }
+  function startDropTrigger(tr: StructTrigger) { startChildDrop('TRIGGER', tr.name) }
+  // Per-kind copy for the destructive confirm modal (title + confirm-button + verb).
+  const childDropCopy = {
+    INDEX: { title: t('dbviews.dropIndexTitle'), action: t('dbviews.dropIndex'), confirm: t('dbviews.dropIndexConfirm', { name: childDrop?.label ?? '' }) },
+    FOREIGN_KEY: { title: t('dbviews.dropFkTitle'), action: t('dbviews.dropFk'), confirm: t('dbviews.dropFkConfirm', { name: childDrop?.label ?? '' }) },
+    TRIGGER: { title: t('dbviews.dropTriggerTitle'), action: t('dbviews.dropTrigger'), confirm: t('dbviews.dropTriggerConfirm', { name: childDrop?.label ?? '' }) },
+  }
+  const childDropArmed = !!childDrop && childDropText.trim() === childDrop.name
+  async function confirmChildDrop() {
+    if (!childDrop || !connId || !childDropArmed) return
+    setChildDropping(true)
+    setChildDropErr(null)
+    try {
+      await dropTableChildObject(connId, childDrop.kind, schema, table, childDrop.name)
+      setChildDrop(null)
+      setRefreshTick(n => n + 1)
+    } catch (e) {
+      setChildDropErr(t('dbviews.applyError', { message: dbErrMsg(e) }))
+    } finally {
+      setChildDropping(false)
+    }
+  }
+
   // Run each statement sequentially; stop + surface on the first error; refresh on success.
   async function confirmApply() {
     if (!preview || !connId) return
@@ -164,6 +210,7 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
           { value: 'indexes', label: `${t('dbviews.tabIndexes')} (${st.indexes.length})` },
           ...(hasDdl ? [
             { value: 'fks', label: `${t('dbviews.tabFks')} (${st.fks.length})` },
+            { value: 'triggers', label: `${t('dbviews.tabTriggers')} (${st.triggers.length})` },
             { value: 'ddl', label: 'DDL' },
           ] : []),
         ]} />
@@ -218,15 +265,25 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
         )}
         {!structErr && tab === 'indexes' && (
           <table style={tblStyle}>
-            <thead><tr>{['', t('dbviews.idxName'), t('dbviews.idxCols'), t('dbviews.idxUnique'), t('dbviews.idxMethod')].map((h, i) => <th key={i} style={{ ...thCell, width: i === 0 ? 36 : undefined }}>{h}</th>)}</tr></thead>
+            <thead><tr>
+              {['', t('dbviews.idxName'), t('dbviews.idxCols'), t('dbviews.idxUnique'), t('dbviews.idxMethod')].map((h, i) => <th key={i} style={{ ...thCell, width: i === 0 ? 36 : undefined }}>{h}</th>)}
+              {editable && <th style={{ ...thCell, width: 56, textAlign: 'right' }} />}
+            </tr></thead>
             <tbody>
               {st.indexes.map((ix, i) => (
-                <tr key={ix.name} style={{ background: i % 2 ? 'var(--surface-subtle)' : 'transparent' }}>
+                <tr key={ix.name} className="structrow" style={{ background: i % 2 ? 'var(--surface-subtle)' : 'transparent' }}>
                   <td style={{ ...tdCell, width: 30, textAlign: 'center', color: 'var(--text-disabled)' }}>{i + 1}</td>
                   <td style={tdCell}><span className="row gap6"><Icon name="gauge" size={12} style={{ color: ix.unique ? 'var(--signal-amber)' : 'var(--text-faint)' }} /><span className="mono" style={{ fontWeight: 600 }}>{ix.name}</span></span></td>
                   <td style={tdCell}><span className="mono" style={{ color: 'var(--signal-blue)' }}>{ix.cols}</span></td>
                   <td style={tdCell}>{ix.unique ? <span className="badge-accent" style={{ background: 'color-mix(in srgb, var(--signal-amber) 16%, transparent)', color: 'var(--signal-amber)' }}>UNIQUE</span> : <span style={{ color: 'var(--text-faint)' }}>—</span>}</td>
                   <td style={tdCell}><span className="chip mono" style={{ height: 20 }}>{ix.method}</span></td>
+                  {editable && (
+                    <td style={{ ...tdCell, textAlign: 'right', whiteSpace: 'nowrap' }}>
+                      <span className="structrow-actions">
+                        <IconBtn name="trash-2" size={13} variant="bare" title={t('dbviews.dropIndex')} style={{ color: 'var(--danger-fg)' }} onClick={() => startDropIndex(ix)} />
+                      </span>
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>
@@ -235,20 +292,60 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
         {!structErr && tab === 'fks' && (
           st.fks.length ? (
             <table style={tblStyle}>
-              <thead><tr>{['', t('dbviews.fkCol'), t('dbviews.fkRef'), 'ON DELETE', 'ON UPDATE'].map((h, i) => <th key={i} style={{ ...thCell, width: i === 0 ? 36 : undefined }}>{h}</th>)}</tr></thead>
+              <thead><tr>
+                {['', t('dbviews.fkCol'), t('dbviews.fkRef'), 'ON DELETE', 'ON UPDATE'].map((h, i) => <th key={i} style={{ ...thCell, width: i === 0 ? 36 : undefined }}>{h}</th>)}
+                {editable && <th style={{ ...thCell, width: 56, textAlign: 'right' }} />}
+              </tr></thead>
               <tbody>
                 {st.fks.map((fk, i) => (
-                  <tr key={i} style={{ background: i % 2 ? 'var(--surface-subtle)' : 'transparent' }}>
+                  <tr key={i} className="structrow" style={{ background: i % 2 ? 'var(--surface-subtle)' : 'transparent' }}>
                     <td style={{ ...tdCell, width: 30, textAlign: 'center', color: 'var(--text-disabled)' }}>{i + 1}</td>
                     <td style={tdCell}><span className="row gap6"><Icon name="link" size={12} style={{ color: 'var(--signal-blue)' }} /><span className="mono" style={{ fontWeight: 600 }}>{fk.col}</span></span></td>
                     <td style={tdCell}><span className="mono" style={{ color: 'var(--signal-blue)' }}>{fk.ref}</span></td>
                     <td style={tdCell}><span className="chip mono" style={{ height: 20 }}>{fk.onDelete}</span></td>
                     <td style={tdCell}><span className="chip mono" style={{ height: 20 }}>{fk.onUpdate}</span></td>
+                    {editable && (
+                      <td style={{ ...tdCell, textAlign: 'right', whiteSpace: 'nowrap' }}>
+                        {/* Only engines that surface a named FK constraint (constraintName) can DROP it. */}
+                        {fk.name && (
+                          <span className="structrow-actions">
+                            <IconBtn name="trash-2" size={13} variant="bare" title={t('dbviews.dropFk')} style={{ color: 'var(--danger-fg)' }} onClick={() => startDropFk(fk)} />
+                          </span>
+                        )}
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>
             </table>
           ) : <Empty icon="link" text={t('dbviews.noFks')} />
+        )}
+        {!structErr && tab === 'triggers' && (
+          st.triggers.length ? (
+            <table style={tblStyle}>
+              <thead><tr>
+                {['', t('dbviews.trgName'), t('dbviews.trgTiming'), t('dbviews.trgEvent')].map((h, i) => <th key={i} style={{ ...thCell, width: i === 0 ? 36 : undefined }}>{h}</th>)}
+                {editable && <th style={{ ...thCell, width: 56, textAlign: 'right' }} />}
+              </tr></thead>
+              <tbody>
+                {st.triggers.map((tr, i) => (
+                  <tr key={tr.name} className="structrow" style={{ background: i % 2 ? 'var(--surface-subtle)' : 'transparent' }}>
+                    <td style={{ ...tdCell, width: 30, textAlign: 'center', color: 'var(--text-disabled)' }}>{i + 1}</td>
+                    <td style={tdCell}><span className="row gap6"><Icon name="zap" size={12} style={{ color: 'var(--signal-violet)' }} /><span className="mono" style={{ fontWeight: 600 }}>{tr.name}</span></span></td>
+                    <td style={tdCell}>{tr.timing ? <span className="chip mono" style={{ height: 20 }}>{tr.timing}</span> : <span style={{ color: 'var(--text-faint)' }}>—</span>}</td>
+                    <td style={tdCell}>{tr.event ? <span className="chip mono" style={{ height: 20 }}>{tr.event}</span> : <span style={{ color: 'var(--text-faint)' }}>—</span>}</td>
+                    {editable && (
+                      <td style={{ ...tdCell, textAlign: 'right', whiteSpace: 'nowrap' }}>
+                        <span className="structrow-actions">
+                          <IconBtn name="trash-2" size={13} variant="bare" title={t('dbviews.dropTrigger')} style={{ color: 'var(--danger-fg)' }} onClick={() => startDropTrigger(tr)} />
+                        </span>
+                      </td>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : <Empty icon="zap" text={t('dbviews.noTriggers')} />
         )}
         {!structErr && tab === 'ddl' && (
           <pre className="mono" style={{ margin: 0, padding: 16, fontSize: 12.5, lineHeight: 1.7, color: 'var(--text-secondary)', whiteSpace: 'pre-wrap' }}
@@ -329,6 +426,49 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
               <div className="row gap8" style={{ justifyContent: 'flex-end', marginTop: 2 }}>
                 <Btn variant="ghost" onClick={() => setPreview(null)} disabled={applying}>{t('dbviews.cancel')}</Btn>
                 <Btn variant="primary" icon="check" onClick={confirmApply} disabled={applying}>{applying ? t('dbviews.applying') : t('dbviews.applyChanges')}</Btn>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Child-object (index/FK/trigger) drop confirmation — reuses the gate's visual language */}
+      {childDrop && (
+        <div onClick={() => !childDropping && setChildDrop(null)}
+          style={{ position: 'absolute', inset: 0, zIndex: 70, background: 'color-mix(in srgb, var(--cta-bg) 42%, transparent)', backdropFilter: 'blur(3px)', display: 'grid', placeItems: 'center' }}>
+          <div onClick={e => e.stopPropagation()} className="pop-in"
+            style={{ width: 460, maxWidth: '90%', background: 'var(--surface-card)', borderRadius: 18, border: '1px solid var(--border-hairline)', boxShadow: 'var(--shadow-window)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+            <div className="row" style={{ justifyContent: 'space-between', padding: '18px 20px 14px', borderBottom: '1px solid var(--border-hairline)' }}>
+              <span className="row gap8" style={{ fontSize: 15, fontWeight: 700, letterSpacing: '-0.2px', color: 'var(--danger-fg)' }}>
+                <Icon name="alert-triangle" size={16} />
+                {childDropCopy[childDrop.kind].title}
+              </span>
+              <IconBtn name="x" size={16} variant="bare" onClick={() => !childDropping && setChildDrop(null)} />
+            </div>
+            <div className="col" style={{ gap: 12, padding: '16px 20px 20px' }}>
+              <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
+                {childDropCopy[childDrop.kind].confirm}
+              </span>
+              <label className="col" style={{ gap: 6 }}>
+                <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('dbviews.typeToConfirm', { name: childDrop.name })}</span>
+                <input data-testid="child-drop-input" value={childDropText} autoFocus
+                  onChange={e => setChildDropText(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') confirmChildDrop() }}
+                  style={{ ...inputStyle, border: `1px solid ${childDropArmed ? 'var(--danger-border)' : 'var(--border-hairline)'}` }} />
+              </label>
+              {childDropErr && (
+                <div className="row gap6" style={{ padding: '9px 12px', borderRadius: 10, border: '1px solid var(--danger-border)', background: 'var(--danger-soft)', color: 'var(--danger-fg)', fontSize: 12 }}>
+                  <Icon name="alert-triangle" size={14} style={{ flex: 'none' }} />
+                  <span>{childDropErr}</span>
+                </div>
+              )}
+              <div className="row gap8" style={{ justifyContent: 'flex-end', marginTop: 2 }}>
+                <Btn variant="ghost" onClick={() => setChildDrop(null)} disabled={childDropping}>{t('dbviews.cancel')}</Btn>
+                <Btn testId="child-drop-confirm" variant="danger" icon="trash-2" onClick={confirmChildDrop}
+                  disabled={childDropping || !childDropArmed}
+                  style={!childDropArmed ? { opacity: 0.5, cursor: 'not-allowed' } : undefined}>
+                  {childDropping ? t('dbviews.applying') : childDropCopy[childDrop.kind].action}
+                </Btn>
               </div>
             </div>
           </div>

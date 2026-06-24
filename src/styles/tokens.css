@@ -674,8 +674,11 @@ select option { background: var(--surface-elevated); color: var(--text-primary);
 .scrollon::-webkit-scrollbar-corner { background: transparent; }
 
 /* 结果网格行号上的"查看明细"按钮：默认隐藏，悬浮该行时浮出 */
-.row-detail-btn { opacity: 0; transition: opacity .12s; }
-.gridrow:hover .row-detail-btn { opacity: 1; }
+/* 默认 pointer-events:none，让点击穿透到行号单元格触发「行多选」；悬浮该行时才可点开明细。
+   按钮本身已缩到 22x22 居中定位（见 DataGrid 行号单元格），悬浮态只在图标范围内拦截点击，
+   行号单元格的其余区域始终可点触发「行多选」（codex P2-1）。 */
+.row-detail-btn { opacity: 0; pointer-events: none; transition: opacity .12s; }
+.gridrow:hover .row-detail-btn { opacity: 1; pointer-events: auto; }
 
 /* ============================================================
    Desktop stage — letterbox the fixed-size window

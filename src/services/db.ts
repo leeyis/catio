@@ -1,5 +1,6 @@
 import { DATA } from './mockData'
 import type { ErRelation, HistoryItem, QueryResult, ResultColumn, Schema, Snippet, TableStructure } from './types'
+import type { RedisEdit } from '../components/dbviews/redisEdit'
 
 // ---- Tauri guard — function so tests can set window.__TAURI_INTERNALS__ dynamically ----
 const isTauri = (): boolean =>
@@ -46,6 +47,14 @@ export interface DbConnectArgs {
    *  "authSource=admin&directConnection=true"). Appended by the driver to its
    *  connection URL. Non-secret; persisted in the profile. */
   options?: string
+  /** 启用 SSL/TLS。默认关闭(保留无 TLS 路径)。 */
+  ssl?: boolean
+  /** SSL 模式细化:require / prefer / verify-ca / verify-full / disable。 */
+  sslMode?: string
+  /** 自定义 CA 证书 PEM 文件路径(校验私有/自签 CA 颁发的服务器证书)。非敏感,可入档案。 */
+  caCertPath?: string
+  /** 是否校验服务器证书。缺省/true=校验;false=接受无效证书(内网/测试)。 */
+  sslRejectUnauthorized?: boolean
   secret?: string
 }
 
@@ -73,6 +82,33 @@ export interface DbConnectResult {
 export async function dbConnect(args: DbConnectArgs): Promise<DbConnectResult> {
   if (!isTauri()) throw new Error('dbConnect requires the Tauri runtime')
   return tauriInvoke<DbConnectResult>('db_connect', { args })
+}
+
+/** The non-secret subset of DbConnectArgs a saved profile carries (id/name etc. omitted). */
+export type DbConnectProfileLike = Omit<DbConnectArgs, 'secret'>
+
+/**
+ * Build the `dbConnect` args from a saved profile + an in-memory secret. Centralises
+ * the field threading so EVERY connect path (sidebar/home direct-connect AND the
+ * modal) carries the SAME fields — notably driverProfile/options AND the SSL/TLS
+ * config (ssl/sslMode/caCertPath/sslRejectUnauthorized). Optional fields are omitted
+ * when unset so the backend sees a clean payload (no `ssl: false` noise).
+ */
+export function dbConnectArgsFromProfile(profile: DbConnectProfileLike, secret?: string): DbConnectArgs {
+  return {
+    dbType: profile.dbType,
+    ...(profile.driverProfile ? { driverProfile: profile.driverProfile } : {}),
+    ...(profile.options ? { options: profile.options } : {}),
+    host: profile.host,
+    port: profile.port,
+    user: profile.user,
+    ...(profile.database ? { database: profile.database } : {}),
+    ...(profile.ssl ? { ssl: true } : {}),
+    ...(profile.sslMode ? { sslMode: profile.sslMode } : {}),
+    ...(profile.caCertPath ? { caCertPath: profile.caCertPath } : {}),
+    ...(profile.sslRejectUnauthorized === false ? { sslRejectUnauthorized: false } : {}),
+    ...(secret ? { secret } : {}),
+  }
 }
 
 /** Result of an ephemeral connectivity test — mirrors Rust `TestConnResult` (camelCase). */
@@ -128,6 +164,21 @@ export async function runQuery(connId: string, sql: string, defaultNamespace?: s
   return tauriInvoke<QueryResult>('db_query', args)
 }
 
+/**
+ * Run EXPLAIN against the live backend and return the raw plan result (a single
+ * JSON cell). The backend builds the dialect-correct `EXPLAIN (FORMAT JSON)` /
+ * `EXPLAIN FORMAT=JSON`, gates to read-only statements, executes, and returns the
+ * result; the frontend parses it via `parseExplainResult`. Only PG/MySQL support
+ * this. Throws outside Tauri (no meaningful mock for a real plan).
+ */
+export async function runExplain(connId: string, sql: string, defaultNamespace?: string): Promise<QueryResult> {
+  if (!isTauri()) throw new Error('执行计划需要 Tauri 运行时')
+  const args: Record<string, unknown> = { connId, sql }
+  // 沿用选中的 schema/库执行 EXPLAIN,否则后端落连接默认库,对未限定库名的查询报表不存在。
+  if (defaultNamespace) args.defaultNamespace = defaultNamespace
+  return tauriInvoke<QueryResult>('db_explain', args)
+}
+
 // ---- Edits (DML preview / apply) ----
 
 /** A single row mutation. Mirrors the Rust `EditRequest` (camelCase via serde). */
@@ -161,6 +212,62 @@ export async function applyEdits(connId: string, reqs: EditRequest[]): Promise<n
   return tauriInvoke<number>('db_apply_edits', { connId, reqs })
 }
 
+// ---- Object administration (drop / rename / truncate / duplicate) ----
+
+/** Top-level database object kinds that can be dropped/renamed (mirrors Rust `DatabaseObjectType`). */
+export type DbObjectType = 'TABLE' | 'VIEW' | 'PROCEDURE' | 'FUNCTION'
+
+/**
+ * Drop a database object (table/view/procedure/function). The backend generates
+ * dialect-correct `DROP <kind>` SQL and executes it, returning rows affected.
+ * Destructive — the UI gates this behind a typed confirmation. Throws outside Tauri.
+ */
+export async function dropObject(connId: string, objectType: DbObjectType, schema: string | undefined, name: string): Promise<number> {
+  if (!isTauri()) throw new Error('删除对象需要 Tauri 运行时')
+  return tauriInvoke<number>('db_drop_object', { connId, objectType, schema, name })
+}
+
+/** Table child-object kinds that can be dropped (mirrors Rust `TableChildObjectType`). */
+export type TableChildObjectKind = 'COLUMN' | 'INDEX' | 'FOREIGN_KEY' | 'TRIGGER'
+
+/**
+ * Drop a table's child object (index/foreign key/trigger; columns go through the
+ * structure-tab DDL flow). The backend generates dialect-correct DROP/ALTER SQL and
+ * executes it, returning rows affected. Destructive — the UI gates this behind a
+ * typed confirmation. Throws outside Tauri.
+ */
+export async function dropTableChildObject(connId: string, objectType: TableChildObjectKind, schema: string | undefined, table: string, name: string): Promise<number> {
+  if (!isTauri()) throw new Error('删除子对象需要 Tauri 运行时')
+  return tauriInvoke<number>('db_drop_table_child_object', { connId, objectType, schema, table, name })
+}
+
+/**
+ * Rename a database object (table/view; procedures/functions only on engines that
+ * support it). The backend rejects unsupported engine/kind combinations. Throws
+ * outside Tauri.
+ */
+export async function renameObject(connId: string, objectType: DbObjectType, schema: string | undefined, oldName: string, newName: string): Promise<number> {
+  if (!isTauri()) throw new Error('重命名对象需要 Tauri 运行时')
+  return tauriInvoke<number>('db_rename_object', { connId, objectType, schema, oldName, newName })
+}
+
+/**
+ * Truncate a table (delete all rows). SQLite/Rqlite/DuckDB degrade to DELETE FROM.
+ * Destructive — gated behind a typed confirmation in the UI. Throws outside Tauri.
+ */
+export async function truncateTable(connId: string, schema: string | undefined, table: string): Promise<number> {
+  if (!isTauri()) throw new Error('清空表需要 Tauri 运行时')
+  return tauriInvoke<number>('db_truncate_table', { connId, schema, table })
+}
+
+/**
+ * Duplicate a table's structure (no data) into a new empty table. Throws outside Tauri.
+ */
+export async function duplicateTableStructure(connId: string, schema: string | undefined, source: string, target: string): Promise<number> {
+  if (!isTauri()) throw new Error('复制表结构需要 Tauri 运行时')
+  return tauriInvoke<number>('db_duplicate_table_structure', { connId, schema, source, target })
+}
+
 /** Paginated query — same shape as runQuery but with limit/offset windowing. */
 export async function queryPage(connId: string, sql: string, limit: number, offset: number, defaultNamespace?: string): Promise<QueryResult> {
   if (!isTauri()) return mockQueryResult()
@@ -191,6 +298,115 @@ export async function tablePreview(
 export async function exportFile(path: string, contents: string): Promise<void> {
   if (!isTauri()) return
   return tauriInvoke('export_file', { path, contents })
+}
+
+/**
+ * Whole-database SQL export: DDL (supplied per table) + data INSERT batches.
+ * The frontend gathers the per-table DDL (its structure-panel logic) and passes
+ * it as `tableDdls`; the backend pages through rows and assembles the script.
+ */
+export async function exportDatabaseSql(args: {
+  connId: string; database: string; schema: string; selectedTables: string[];
+  tableDdls: Record<string, string>; includeStructure: boolean; includeData: boolean;
+  batchSize?: number; rowLimit?: number;
+}): Promise<string> {
+  if (!isTauri()) throw new Error('exportDatabaseSql requires the Tauri runtime')
+  return tauriInvoke<string>('db_export_database', args)
+}
+
+// ---- 表数据导入（CSV/TSV/JSON → 批量 INSERT）----
+
+/** 一对源列→目标列映射（目标为空串=跳过该列）。 */
+export interface ImportColumnMapping { sourceColumn: string; targetColumn: string }
+
+/** 导入文件预览：列 + 样本行（后端按 50 行截断）+ 总行数。 */
+export interface ImportPreview {
+  fileName: string
+  fileType: string
+  sizeBytes: number
+  columns: string[]
+  rows: unknown[][]
+  totalRows: number
+  truncated: boolean
+}
+
+export interface ImportSummary { rowsImported: number; totalRows: number }
+
+/** 读取并预览导入文件（解析在后端 table_import，纯函数已单测）。 */
+export async function importPreview(filePath: string): Promise<ImportPreview> {
+  if (!isTauri()) throw new Error('importPreview requires the Tauri runtime')
+  return tauriInvoke<ImportPreview>('db_import_preview', { filePath })
+}
+
+/** 按列映射把文件导入目标表。mode: 'append' | 'truncate'。 */
+export async function importTable(args: {
+  connId: string; schema?: string; table: string; filePath: string;
+  mappings: ImportColumnMapping[]; mode: 'append' | 'truncate'; batchSize?: number;
+}): Promise<ImportSummary> {
+  if (!isTauri()) throw new Error('importTable requires the Tauri runtime')
+  return tauriInvoke<ImportSummary>('db_import_table', args)
+}
+
+// ---- 跨库/跨表数据迁移（源表 → 列映射 → 按模式写目标表）----
+
+/** 迁移写入模式：追加 / 先清空再写 / 按键 upsert。与后端 TransferMode 一致（camelCase）。 */
+export type TransferMode = 'append' | 'overwrite' | 'upsert'
+
+/** 一对源列→目标列映射（目标为空串=跳过该列，不迁移）。 */
+export interface TransferColumnMapping { sourceColumn: string; targetColumn: string }
+
+export interface TransferSummary { rowsTransferred: number }
+
+/**
+ * 把源连接的一张表按列映射迁移到目标连接的目标表。
+ * 映射 / 模式 / 写 SQL 生成在后端纯函数（transfer.rs，已单测）；编排逐批读写走驱动 I/O。
+ */
+export async function transferTable(args: {
+  sourceConnId: string; sourceSchema?: string; sourceTable: string
+  targetConnId: string; targetSchema?: string; targetTable: string
+  mappings: TransferColumnMapping[]; mode: TransferMode
+  upsertKeys?: string[]; batchSize?: number
+  /** Overwrite（破坏性，会清空目标表）须显式确认后置 true，否则后端拒绝执行。 */
+  allowDestructive?: boolean
+}): Promise<TransferSummary> {
+  if (!isTauri()) throw new Error('transferTable requires the Tauri runtime')
+  return tauriInvoke<TransferSummary>('db_transfer_table', args)
+}
+
+// ---- SQL 文件批量执行（选文件 → 后端按方言切分 → 逐句执行 + 进度/错误恢复 + 取消）----
+
+import type { SqlFileProgress } from '../components/dbviews/sqlFileRun'
+
+/** SQL 文件预览：文件名 / 大小 / 按目标方言切分后的语句数。 */
+export interface SqlFilePreview { fileName: string; sizeBytes: number; statementCount: number }
+
+/** 读 SQL 文件并按目标连接方言切分，返回预览（文件名/大小/语句数）。 */
+export async function sqlFilePreview(connId: string, filePath: string): Promise<SqlFilePreview> {
+  if (!isTauri()) throw new Error('sqlFilePreview requires the Tauri runtime')
+  return tauriInvoke<SqlFilePreview>('db_sql_file_preview', { connId, filePath })
+}
+
+/**
+ * 执行整个 SQL 文件。进度经 `db://sql-file-progress` 事件推送（见 onSqlFileProgress）。
+ * continueOnError=true 时单句失败继续，否则中止。executionId 由调用方生成，用于取消。
+ */
+export async function runSqlFile(args: {
+  executionId: string; connId: string; filePath: string; continueOnError: boolean
+}): Promise<void> {
+  if (!isTauri()) throw new Error('runSqlFile requires the Tauri runtime')
+  return tauriInvoke<void>('db_run_sql_file', { req: args })
+}
+
+/** 取消正在执行的 SQL 文件批量任务。 */
+export async function cancelSqlFile(executionId: string): Promise<void> {
+  return tauriInvoke<void>('db_cancel_sql_file', { executionId })
+}
+
+/** 监听 SQL 文件执行进度事件（返回 unlisten；非 Tauri 下 no-op）。 */
+export async function onSqlFileProgress(cb: (p: SqlFileProgress) => void): Promise<() => void> {
+  if (!isTauri()) return () => { /* no-op outside Tauri */ }
+  const { listen } = await import('@tauri-apps/api/event')
+  return listen<SqlFileProgress>('db://sql-file-progress', e => cb(e.payload))
 }
 
 // ---- History & saved snippets ----
@@ -278,7 +494,8 @@ export async function tableStructure(connId: string, schema: string, table: stri
     comment?: string
     columns: { name: string; typeName: string; nullable: boolean; default: string | null; key: string; comment?: string }[]
     indexes: { name: string; columns: string; unique: boolean; method: string }[]
-    fks: { column: string; references: string; onDelete: string; onUpdate: string }[]
+    fks: { column: string; references: string; onDelete: string; onUpdate: string; constraintName?: string | null }[]
+    triggers?: { name: string; timing?: string | null; event?: string | null }[]
   }>('db_table_structure', { connId, schema, table })
   return {
     comment: raw.comment ?? '',
@@ -287,7 +504,11 @@ export async function tableStructure(connId: string, schema: string, table: stri
       key: (c.key === 'PK' || c.key === 'FK' || c.key === 'UNI' ? c.key : ''), extra: '', comment: c.comment ?? '',
     })),
     indexes: (raw.indexes ?? []).map(i => ({ name: i.name, cols: i.columns, unique: i.unique, method: i.method })),
-    fks: (raw.fks ?? []).map(f => ({ col: f.column, ref: f.references, onDelete: f.onDelete, onUpdate: f.onUpdate })),
+    fks: (raw.fks ?? []).map(f => ({
+      col: f.column, ref: f.references, onDelete: f.onDelete, onUpdate: f.onUpdate,
+      name: f.constraintName ?? undefined,
+    })),
+    triggers: (raw.triggers ?? []).map(t => ({ name: t.name, timing: t.timing ?? undefined, event: t.event ?? undefined })),
   }
 }
 
@@ -326,6 +547,18 @@ export async function keyspaceInfo(connId: string, schema: string): Promise<Keys
 }
 
 /**
+ * 对 Redis key 执行一次原生类型编辑(string/hash/list/set/zset 增删改 + TTL)。
+ * `edit` 与后端 RedisEdit(tag=kind, camelCase)对齐。返回受影响计数(尽力)。
+ * `confirm` 是不可逆操作(DEL 整个 key)的确认门禁:删 key 时必须传 true,
+ * 后端未确认会拒绝执行(与 dbx 的 Confirm 档对齐)。非 Tauri(mock/demo)环境下
+ * 抛错——编辑需要真实连接。
+ */
+export async function redisEdit(connId: string, edit: RedisEdit, confirm = false): Promise<number> {
+  if (!isTauri()) throw new Error('Redis 编辑仅在桌面应用内可用')
+  return tauriInvoke<number>('db_redis_edit', { connId, edit, confirm })
+}
+
+/**
  * Source/DDL of a view, function, or procedure — used by the definition viewer.
  * `kind` is one of 'view' | 'function' | 'procedure'. Outside Tauri returns ''
  * (the viewer shows a "no definition" state on the mock/demo path).
@@ -333,6 +566,17 @@ export async function keyspaceInfo(connId: string, schema: string): Promise<Keys
 export async function objectSource(connId: string, schema: string, name: string, kind: 'view' | 'function' | 'procedure'): Promise<string> {
   if (!isTauri()) return ''
   return tauriInvoke<string>('db_object_source', { connId, schema, name, kind })
+}
+
+/**
+ * Save an edited object (view/function/procedure) source. The backend builds the
+ * dialect-correct CREATE OR REPLACE / CREATE OR ALTER statement and executes it.
+ * `kind` is one of 'view' | 'function' | 'procedure'. Returns rows affected (0 for
+ * most DDL). Throws outside Tauri (save needs a live connection).
+ */
+export async function saveObjectSource(connId: string, schema: string, name: string, kind: 'view' | 'function' | 'procedure', source: string): Promise<number> {
+  if (!isTauri()) throw new Error('保存对象源码需要 Tauri 运行时')
+  return tauriInvoke<number>('db_save_object_source', { connId, schema, name, kind, source })
 }
 
 /**

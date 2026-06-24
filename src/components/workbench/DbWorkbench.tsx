@@ -5,12 +5,16 @@ import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { SqlConsole, ERDiagram } from '../dbviews'
 import { CreateObjectModal } from '../dbviews/CreateObjectModal'
+import { ObjectAdminModal } from '../dbviews/ObjectAdminModal'
+import { DatabaseExportDialog, type DatabaseExportRequest } from '../dbviews/DatabaseExportDialog'
+import { DataTransferDialog, type TransferConnectionOption } from '../dbviews/DataTransferDialog'
+import { buildCreateTableDDL, dialectFor, qualifiedTable, supportsDdlExport } from '../dbviews/structureDdl'
 import { SchemaBrowser } from './SchemaBrowser'
 import { TablePane } from './TablePane'
 import { ObjectPane } from './ObjectPane'
 import { useData } from '../../state/DataContext'
-import { listActiveDbConnections } from '../../state/dbConnections'
-import { getSchema, runQuery, dbErrMsg, type DbCapabilities } from '../../services/db'
+import { listActiveDbConnections, useActiveDbConnections } from '../../state/dbConnections'
+import { getSchema, runQuery, dropObject, renameObject, truncateTable, duplicateTableStructure, tableStructure, exportDatabaseSql, exportFile, dbErrMsg, type DbCapabilities } from '../../services/db'
 import type { Connection, Schema, SchemaNamespace } from '../../services/types'
 
 export interface DbWorkbenchProps {
@@ -66,6 +70,17 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
   const caps: DbCapabilities = active ? active.capabilities : ALL_ENABLED
   const connId = active?.connId ?? null
 
+  // 跨库迁移的连接候选(源+目标都从这里选):全部当前活动连接,以 connId 为标识。
+  // engine=dbType 用于判定目标是否支持原生 upsert(DataTransferDialog 内部用)。
+  // 用响应式 useActiveDbConnections 订阅活动连接store:用户在本 workbench 挂载之后
+  // 才连上目标库时,候选列表会随之刷新(否则目标会从迁移对话框的连接选择器里消失,
+  // 让跨库迁移这个核心场景静默失效)。
+  const activeConns = useActiveDbConnections()
+  const transferConnections: TransferConnectionOption[] = useMemo(
+    () => activeConns.map(c => ({ id: c.connId, name: c.name, engine: c.dbType })),
+    [activeConns],
+  )
+
   // ---- Unified tab state ----
   // No live connection → seed the pixel-identical mock demo tab (public.orders).
   // A LIVE connection starts with NO table tab: the real first table is opened once
@@ -93,6 +108,14 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
 
   // Open CREATE TABLE/VIEW form modal (null → closed). Carries the target schema + kind.
   const [createObj, setCreateObj] = useState<{ schema: string; kind: 'table' | 'view' } | null>(null)
+  // 对象管理(删除/重命名/清空表/复制表结构)的目标 + 操作,驱动 ObjectAdminModal。
+  const [adminObj, setAdminObj] = useState<{ op: 'drop' | 'rename' | 'truncate' | 'duplicate'; objectType: 'TABLE' | 'VIEW'; schema: string; name: string } | null>(null)
+  // 对象管理操作的结果提示(成功 toast / 失败错误)。
+  const [adminMsg, setAdminMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
+  // 整库导出对话框的目标 schema(null → 关闭)。
+  const [exportSchema, setExportSchema] = useState<string | null>(null)
+  // D3 跨库迁移对话框的迁移源(schema.table;null → 关闭)。源连接固定为当前 live connId。
+  const [transferSource, setTransferSource] = useState<{ schema: string; table: string } | null>(null)
   // Error surfaced when a CREATE statement fails to run.
   const [createErr, setCreateErr] = useState<string | null>(null)
   // 标签右键菜单(需求1):{tabId,x,y} 定位;全局 click / Escape 关闭。
@@ -178,6 +201,49 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
     if (!connId) return
     setCreateErr(null)
     setCreateObj({ schema, kind })
+  }
+  /**
+   * 执行整库导出:对选中表逐表取结构 → 用 structureDdl 拼 CREATE TABLE(approximation,
+   * 与结构面板 DDL 同源)→ 调 T13 service exportDatabaseSql 让后端分页取数 + 组装脚本 →
+   * 通过 save 对话框选目标 .sql,后端 exportFile 落盘。落盘真机验证见 notes。
+   */
+  async function runDatabaseExport(schema: string, req: DatabaseExportRequest) {
+    if (!connId) return
+    const dialect = dialectFor(conn.engine)
+    // 要导出的表名:undefined 表示「全部」→ 取该 schema 当前树里的全部表名。
+    const ns = namespaces.find(n => n.name === schema)
+    const tableNames = req.selectedTables ?? (ns?.tables.map(t => t.name) ?? [])
+    // 逐表取结构 → 拼 DDL(仅在需要结构时)。某表取结构失败必须中止整次导出并上报:
+    // 静默跳过会让该表 DDL 悄悄从输出消失,后端仍写文件并弹成功 toast(误导)。抛出由
+    // dialog 的 catch 捕获,展示到内联错误区,且不会走到后续落盘。
+    const tableDdls: Record<string, string> = {}
+    if (req.includeStructure) {
+      for (const name of tableNames) {
+        try {
+          const st = await tableStructure(connId, schema, name)
+          tableDdls[name] = buildCreateTableDDL(dialect, qualifiedTable(dialect, schema, name), st)
+        } catch (e) {
+          throw new Error(t('dbexport.ddlFailed', { table: name, message: dbErrMsg(e) }))
+        }
+      }
+    }
+    const script = await exportDatabaseSql({
+      connId, database: schema, schema,
+      selectedTables: req.selectedTables ?? [],
+      tableDdls,
+      includeStructure: req.includeStructure,
+      includeData: req.includeData,
+      batchSize: req.batchSize,
+      rowLimit: req.rowLimit,
+    })
+    // 选目标文件并落盘(webview <a download> 在 Tauri 内为 no-op,走后端 exportFile)。
+    const { save } = await import('@tauri-apps/plugin-dialog')
+    const safeName = (schema || 'database').replace(/[\\/:*?"<>|]+/g, '_').trim() || 'database'
+    const path = await save({ defaultPath: `${safeName}.sql`, filters: [{ name: 'SQL', extensions: ['sql'] }] })
+    if (!path) return // 用户取消保存
+    await exportFile(path, script)
+    setExportSchema(null)
+    setAdminMsg({ kind: 'ok', text: t('dbexport.exported', { path }) })
   }
   function openER(schema?: string) {
     if (!caps.er) return
@@ -292,6 +358,9 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
       <SchemaBrowser onPick={pickTable} onPickObject={pickObject}
         active={activeTab?.kind === 'table' ? { schema: activeTab.schema, table: activeTab.table } : null}
         onNewQuery={(schema) => newQuery(undefined, schema ?? namespace?.name)} onOpenER={openER} onNewObjectTemplate={onNewObjectTemplate} onRefresh={refreshSchema}
+        onObjectAdmin={connId ? (op, objectType, schema, name) => setAdminObj({ op, objectType, schema, name }) : undefined}
+        onTransferData={connId ? (schema, table) => setTransferSource({ schema, table }) : undefined}
+        onExportDatabase={connId && supportsDdlExport(conn.engine) ? (schema) => setExportSchema(schema) : undefined}
         refreshing={refreshing}
         erActive={activeTab?.kind === 'er'} sqlActive={activeTab?.kind === 'sql'}
         disabledSql={!caps.sqlConsole} disabledEr={!caps.er}
@@ -406,6 +475,62 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
               }
             }}
           />
+        )}
+        {/* 对象管理(删除/重命名/清空表/复制表结构)确认弹窗 — 仅 live 连接。 */}
+        {adminObj && connId && (
+          <ObjectAdminModal
+            op={adminObj.op}
+            objectType={adminObj.objectType}
+            schema={adminObj.schema}
+            name={adminObj.name}
+            onCancel={() => setAdminObj(null)}
+            onConfirm={async payload => {
+              const { op, objectType, schema, name } = adminObj
+              try {
+                if (op === 'drop') await dropObject(connId, objectType, schema, name)
+                else if (op === 'truncate') await truncateTable(connId, schema, name)
+                else if (op === 'rename') await renameObject(connId, objectType, schema, name, payload ?? '')
+                else await duplicateTableStructure(connId, schema, name, payload ?? '')
+                setAdminObj(null)
+                const okKey = op === 'drop' ? 'okDrop' : op === 'truncate' ? 'okTruncate' : op === 'rename' ? 'okRename' : 'okDuplicate'
+                setAdminMsg({ kind: 'ok', text: t('workbench.objAdmin.' + okKey) })
+                refreshSchema()
+              } catch (e) {
+                setAdminObj(null)
+                setAdminMsg({ kind: 'err', text: t('workbench.objAdmin.failed', { msg: dbErrMsg(e) }) })
+              }
+            }}
+          />
+        )}
+        {/* 整库导出对话框 — 仅 live + 支持 SQL(DDL/INSERT)的连接。 */}
+        {exportSchema != null && connId && (
+          <DatabaseExportDialog
+            schema={exportSchema}
+            allTables={(namespaces.find(n => n.name === exportSchema)?.tables ?? []).map(t => t.name)}
+            onClose={() => setExportSchema(null)}
+            onExport={req => runDatabaseExport(exportSchema, req)}
+          />
+        )}
+        {/* D3 跨库/跨表数据迁移对话框 — 仅 live 连接;源固定为当前连接的被选表。 */}
+        {transferSource && connId && (
+          <DataTransferDialog
+            connections={transferConnections}
+            initialSourceConnId={connId}
+            initialSourceSchema={transferSource.schema || undefined}
+            initialSourceTable={transferSource.table}
+            onClose={() => setTransferSource(null)}
+            onTransferred={count => setAdminMsg({ kind: 'ok', text: t('dbviews.transferDone', { count }) })}
+          />
+        )}
+        {adminMsg && (
+          <div className="row gap6" style={{ position: 'absolute', left: 12, bottom: 12, zIndex: 80, maxWidth: 420, padding: '9px 12px', borderRadius: 10,
+            border: `1px solid ${adminMsg.kind === 'ok' ? 'var(--border-hairline)' : 'var(--danger-border)'}`,
+            background: adminMsg.kind === 'ok' ? 'var(--surface-card)' : 'var(--danger-soft)',
+            color: adminMsg.kind === 'ok' ? 'var(--text-primary)' : 'var(--danger-fg)', fontSize: 12, boxShadow: 'var(--shadow-window)' }}>
+            <Icon name={adminMsg.kind === 'ok' ? 'check' : 'alert-triangle'} size={14} style={{ flex: 'none' }} />
+            <span>{adminMsg.text}</span>
+            <button className="icon-btn bare" style={{ width: 20, height: 20, marginLeft: 'auto' }} onClick={() => setAdminMsg(null)}><Icon name="x" size={12} /></button>
+          </div>
         )}
         {createErr && (
           <div className="row gap6" style={{ position: 'absolute', left: 12, bottom: 12, zIndex: 80, maxWidth: 420, padding: '9px 12px', borderRadius: 10, border: '1px solid var(--danger-border)', background: 'var(--danger-soft)', color: 'var(--danger-fg)', fontSize: 12, boxShadow: 'var(--shadow-window)' }}>

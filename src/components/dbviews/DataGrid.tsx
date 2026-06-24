@@ -5,6 +5,12 @@ import { Icon } from '../Icon'
 import { Btn, IconBtn } from '../atoms'
 import { previewDml, applyEdits, queryPage, tablePreview, exportFile, dbErrMsg, type EditRequest } from '../../services/db'
 import type { ResultColumn } from '../../services/types'
+import { reduceCellSelection, reduceRowSelection, isCellInRange, normalizeRange, cellsInRange, type GridSelection } from './gridSelection'
+import { filterRows, filterModeNeedsValue, type FilterRule, type FilterMode } from './gridFilter'
+import { buildInsertSql, buildUpdateSql } from './copySql'
+import { visibleColumnNames, allNullColumnNames, toggleColumnVisibility, showAllColumns } from './columnVisibility'
+import { dialectFor } from './structureDdl'
+import { TableImportDialog } from './TableImportDialog'
 
 export interface DataGridProps {
   columns: ResultColumn[]
@@ -22,6 +28,8 @@ export interface DataGridProps {
   resultLabel?: string
   /** Optional schema qualifier for generated DML. */
   schema?: string
+  /** Connection engine string → drives identifier quoting dialect for "复制为 SQL". */
+  engine?: string
   /** Base SQL re-run for server-side pagination (when connId is set, legacy raw-SQL path). */
   sql?: string
   /** Default database/schema namespace to reuse when paginating an ad-hoc query. */
@@ -103,9 +111,18 @@ function colIcon(col: ResultColumn): string {
   return 'type'
 }
 
-export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortable', writable = true, connId, table = 'orders', schema, sql, defaultNamespace, livePreview, onRefresh, truncated, loadError, resultLabel, rowKeys, keyColumn }: DataGridProps) {
+export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortable', writable = true, connId, table = 'orders', schema, engine, sql, defaultNamespace, livePreview, onRefresh, truncated, loadError, resultLabel, rowKeys, keyColumn }: DataGridProps) {
   const { t } = useTranslation()
   const [sel, setSel] = useState({ r: 2, c: 3 })
+  // 多选状态（叠加在单选之上）：单元格矩形 anchor/focus + 行多选集合（origIdx）。
+  // 纯函数 reduce* 负责把点击事件归约为新选择，组件只持有状态。
+  const [gridSel, setGridSel] = useState<GridSelection>({ anchor: null, focus: null, rows: new Set() })
+  const lastRowRef = useRef<number | null>(null)
+  // 右键上下文菜单：屏幕坐标 + 触发处的列下标（用于批量编辑写哪一列）。null=关闭。
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; col: number } | null>(null)
+  // 批量编辑对话框：开关 + 输入值。
+  const [bulkOpen, setBulkOpen] = useState(false)
+  const [bulkVal, setBulkVal] = useState('')
   const [sortCol, setSortCol] = useState<string | null>(null)
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
   const [edits, setEdits] = useState<Record<string, string | number>>({})
@@ -118,6 +135,8 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   // Original indexes (into baseRows) of existing rows marked for deletion.
   const [deleted, setDeleted] = useState<Set<number>>(new Set())
   const [exportErr, setExportErr] = useState<string | null>(null)
+  // 表数据导入对话框开关。仅在「真实可写单表」(livePreview + writable + connId + table) 时可用。
+  const [importOpen, setImportOpen] = useState(false)
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(100)
   // server-side page rows (when connId set); null → use client-side slice of `rows`
@@ -130,10 +149,18 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   const [refreshing, setRefreshing] = useState(false)
   const [filterOpen, setFilterOpen] = useState(false)
   const [filterText, setFilterText] = useState('')
+  // 列级结构化筛选规则(8 种操作符 + AND/OR)。叠加在全局文本搜索之上,二者同时生效。
+  const [filterRules, setFilterRules] = useState<FilterRule[]>([])
+  const filterRuleSeq = useRef(0)
   const [sortMenuOpen, setSortMenuOpen] = useState(false)
   const [exportMenuOpen, setExportMenuOpen] = useState(false)
   const sortMenuRef = useRef<HTMLDivElement>(null)
   const exportMenuRef = useRef<HTMLDivElement>(null)
+  // 列显隐：隐藏的列名集合(仅影响网格渲染,排序/筛选/导出仍按完整列集)。
+  // 与 colWidths 同理,DataGrid 带 key 重挂载即重置,满足「每表 tab 独立」。
+  const [hiddenCols, setHiddenCols] = useState<Set<string>>(new Set())
+  const [colMenuOpen, setColMenuOpen] = useState(false)
+  const colMenuRef = useRef<HTMLDivElement>(null)
   // preview gate
   const [preview, setPreview] = useState<{ reqs: EditRequest[]; sql: string } | null>(null)
   const [applying, setApplying] = useState(false)
@@ -176,6 +203,13 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   const pkCols = useMemo(() => columns.filter(c => c.pk).map(c => c.name), [columns])
   // 是否存在任一非空注释 → 决定切换按钮显隐。仅表预览会填 comment,故 SQL 查询结果无此按钮。
   const hasComments = useMemo(() => columns.some(c => !!c.comment), [columns])
+  // 列显隐计算:全部列名 → 可见列名(剔除 hiddenCols,且至少留一列)→ 渲染用的可见列对象。
+  const colNames = useMemo(() => columns.map(c => c.name), [columns])
+  const visibleNames = useMemo(() => visibleColumnNames(colNames, hiddenCols), [colNames, hiddenCols])
+  const visibleColumns = useMemo(() => {
+    const set = new Set(visibleNames)
+    return columns.filter(c => set.has(c.name))
+  }, [columns, visibleNames])
   // 表头展示文案:注释模式优先显示该列注释,无注释的列回退到英文名;否则始终英文名。
   function headLabel(col: ResultColumn): string { return commentMode && col.comment ? col.comment : col.name }
   // Active per-row keys for the no-PK (ctid) path: server page keys take precedence
@@ -196,15 +230,30 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   // Tag each row with its original (unsorted) index so keys and edits are stable under sort.
   const tagged = useMemo(() => baseRows.map((row, i) => ({ row, origIdx: i })), [baseRows])
 
+  // 列名 → 列下标(供结构化筛选求值)。
+  const colIndexOf = useMemo(() => {
+    const map = new Map(columns.map((c, i) => [c.name, i]))
+    return (name: string) => (map.has(name) ? map.get(name)! : -1)
+  }, [columns])
+
   // Client-side text filter: keep rows where ANY cell's string value contains the
-  // (case-insensitive) filter text. Empty / closed filter → all rows.
+  // (case-insensitive) filter text. Then apply the column-level structured rules
+  // (8 operators + AND/OR) on top. Empty / closed filter + no rules → all rows.
   const filtered = useMemo(() => {
     const q = filterOpen ? filterText.trim().toLowerCase() : ''
-    if (!q) return tagged
-    return tagged.filter(({ row }) =>
-      row.some(v => v != null && String(v).toLowerCase().includes(q)),
-    )
-  }, [tagged, filterOpen, filterText])
+    let out = tagged
+    if (q) {
+      out = out.filter(({ row }) =>
+        row.some(v => v != null && String(v).toLowerCase().includes(q)),
+      )
+    }
+    if (filterOpen && filterRules.length > 0) {
+      // filterRows 作用在裸行上;用 origIdx 映射回 tagged 条目以保留稳定 key。
+      const kept = new Set(filterRows(out.map(e => e.row), filterRules, colIndexOf))
+      out = out.filter(e => kept.has(e.row))
+    }
+    return out
+  }, [tagged, filterOpen, filterText, filterRules, colIndexOf])
 
   const sorted = useMemo(() => {
     if (!sortCol || sortColIdx < 0) return filtered
@@ -220,7 +269,12 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   // When serverRows is set, the rows are already the current page → no client slice.
   // Filtering applies to the displayed rows; with a filter active we render the
   // filtered set directly (no client paging math on a partial page).
-  const filterActive = filterOpen && filterText.trim().length > 0
+  // 有完整的结构化规则(列名 + 需值则有值)时也算筛选生效。
+  const hasActiveRules = useMemo(
+    () => filterRules.some(r => r.columnName && (!filterModeNeedsValue(r.mode) || r.rawValue.trim().length > 0)),
+    [filterRules],
+  )
+  const filterActive = filterOpen && (filterText.trim().length > 0 || hasActiveRules)
   const pageRows = (serverRows || filterActive) ? sorted : sorted.slice((page - 1) * PAGE, page * PAGE)
   const pages = serverRows ? page + (serverTruncated ? 1 : 0) : Math.max(1, Math.ceil(filtered.length / PAGE))
   const showTruncated = serverRows ? serverTruncated : !!truncated
@@ -300,6 +354,57 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
     else { setSortCol(name); setSortDir('asc') }
   }
 
+  // --- 列显隐 -------------------------------------------------------------
+  // 当前已加载行中整列为空(null/undefined)的列名,供「隐藏空列」一键操作。
+  const nullColNames = useMemo(() => allNullColumnNames(colNames, baseRows), [colNames, baseRows])
+  function toggleColumn(name: string) {
+    setHiddenCols(prev => toggleColumnVisibility(colNames, prev, name))
+  }
+  // 一键隐藏全部空列:逐列切换以复用「至少留一列可见」的防御。
+  function hideNullColumns() {
+    setHiddenCols(prev => {
+      let next = prev
+      for (const name of nullColNames) {
+        if (!next.has(name)) next = toggleColumnVisibility(colNames, next, name)
+      }
+      return next
+    })
+  }
+  function resetColumns() { setHiddenCols(showAllColumns()) }
+
+  // --- 列级结构化筛选规则管理 ----------------------------------------------
+  function addFilterRule() {
+    const id = `r${filterRuleSeq.current++}`
+    setFilterRules(rs => [
+      ...rs,
+      { id, columnName: columns[0]?.name ?? '', mode: 'equals', rawValue: '', conjunction: 'AND' },
+    ])
+  }
+  function updateFilterRule(id: string, patch: Partial<FilterRule>) {
+    setFilterRules(rs => rs.map(r => {
+      if (r.id !== id) return r
+      const next = { ...r, ...patch }
+      // 切到无需值的操作符(is-null/is-not-null)时清空已填的值。
+      if (patch.mode && !filterModeNeedsValue(next.mode)) next.rawValue = ''
+      return next
+    }))
+  }
+  function removeFilterRule(id: string) {
+    setFilterRules(rs => rs.filter(r => r.id !== id))
+  }
+  function clearFilterRules() { setFilterRules([]) }
+  // 操作符下拉项:值 → i18n key。
+  const filterModeOptions: { value: FilterMode; labelKey: string }[] = [
+    { value: 'equals', labelKey: 'dbviews.filterModeEquals' },
+    { value: 'not-equals', labelKey: 'dbviews.filterModeNotEquals' },
+    { value: 'like', labelKey: 'dbviews.filterModeContains' },
+    { value: 'not-like', labelKey: 'dbviews.filterModeNotContains' },
+    { value: 'greater-than', labelKey: 'dbviews.filterModeGreaterThan' },
+    { value: 'less-than', labelKey: 'dbviews.filterModeLessThan' },
+    { value: 'is-null', labelKey: 'dbviews.filterModeIsNull' },
+    { value: 'is-not-null', labelKey: 'dbviews.filterModeIsNotNull' },
+  ]
+
   // Refresh: re-fetch the current page from the server when possible, else ask the
   // parent to refresh. Brief spinner while the fetch is in flight.
   async function refresh() {
@@ -338,10 +443,17 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   const isTauri = () =>
     typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window)
 
-  // Build the export text (CSV or JSON) from the CURRENTLY displayed rows
-  // (after filter + sort) and columns.
-  function buildExport(format: 'csv' | 'json'): { text: string; type: string } {
+  // Build the export text (CSV / JSON / SQL) from the CURRENTLY displayed rows
+  // (after filter + sort) and columns. SQL reuses the same INSERT builder as the
+  // grid's "copy as SQL" path (copySql.buildInsertSql), so escaping/quoting stays
+  // consistent with single-row edits (dml.rs::build_insert).
+  function buildExport(format: 'csv' | 'json' | 'sql'): { text: string; type: string } {
     const displayRows = pageRows.map(({ row }) => row)
+    if (format === 'sql') {
+      const colNames = columns.map(c => c.name)
+      const sql = buildInsertSql(displayRows, table, colNames, dialectFor(engine), schema)
+      return { text: sql, type: 'text/plain' }
+    }
     if (format === 'csv') {
       const header = columns.map(c => csvEscape(c.name)).join(',')
       const lines = displayRows.map(row => columns.map((_, ci) => csvEscape(row[ci])).join(','))
@@ -358,7 +470,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   // Export the displayed rows. Inside Tauri the webview `<a download>` is a no-op,
   // so pick a destination via the dialog plugin and write the file through the
   // backend. Outside Tauri keep the Blob download so the demo still works.
-  async function exportAs(format: 'csv' | 'json') {
+  async function exportAs(format: 'csv' | 'json' | 'sql') {
     setExportMenuOpen(false)
     setExportErr(null)
     const { text, type } = buildExport(format)
@@ -488,6 +600,157 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
     setNewRows(rs => rs.filter(r => r.id !== id))
     if (editing && editing.r === -(id + 1)) setEditing(null)
   }
+  // --- 多选 + 右键菜单 + 批量编辑 -------------------------------------------
+  // 行号单元格点击：用 reduceRowSelection 归约（按显示下标 ri 计算范围/集合），
+  // 记录 lastRow 供 shift 范围使用。普通左键单格选择仍由各单元格的 onClick 处理。
+  function onRowSelect(ri: number, e: React.MouseEvent) {
+    e.stopPropagation()
+    // lastRow 必须在 setGridSel 之前快照：updater 闭包是延迟执行的，若在其内部读 ref，
+    // 会读到本函数末尾刚被改写的新值（=ri），导致 shift 范围塌缩成单格。
+    const lastRow = lastRowRef.current
+    setGridSel(prev => reduceRowSelection(prev, ri, { lastRow }, { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey }))
+    lastRowRef.current = ri
+  }
+  // 单元格左键：在保留原单选（setSel by origIdx）之外，更新矩形选择（按显示下标 ri）。
+  function onCellSelect(ri: number, ci: number, origIdx: number, e: React.MouseEvent) {
+    setSel({ r: origIdx, c: ci })
+    setGridSel(prev => reduceCellSelection(prev, ri, ci, { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey }))
+    lastRowRef.current = ri
+  }
+  // 右键单元格：若该单元格不在当前选择内，则先把它选为单格，再弹菜单。
+  function onCellContext(ri: number, ci: number, origIdx: number, e: React.MouseEvent) {
+    e.preventDefault()
+    const range = gridSel.anchor && gridSel.focus ? normalizeRange(gridSel.anchor, gridSel.focus) : null
+    const inCellSel = isCellInRange(ri, ci, range)
+    const inRowSel = gridSel.rows.has(ri)
+    if (!inCellSel && !inRowSel) {
+      setSel({ r: origIdx, c: ci })
+      setGridSel({ anchor: { r: ri, c: ci }, focus: { r: ri, c: ci }, rows: new Set() })
+    }
+    setCtxMenu({ x: e.clientX, y: e.clientY, col: ci })
+  }
+  // 单元格的「显示值」文本：有 pending edit 则取 edits，否则取原始 row 值。
+  // codex P2-2：复制必须反映用户改动后的值，与网格显示一致。
+  function displayCellText(origIdx: number, ci: number, raw: unknown): string {
+    const col = columns[ci]
+    if (!col) return cellText(raw)
+    const k = cellKey(origIdx, col.name)
+    return cellText(edits[k] !== undefined ? edits[k] : raw)
+  }
+  // 菜单「复制」：行多选 > 单元格矩形 > 单格回显，依次取值并按 TSV 拼接。
+  function ctxCopy() {
+    setCtxMenu(null)
+    let text: string
+    if (gridSel.rows.size > 0) {
+      // codex P2-3：行多选场景，按选中行（显示顺序）拼接整行所有列的 TSV，
+      // 而非 fallback 到与选择无关的上一次单格回显。
+      const sortedRows = [...gridSel.rows].sort((a, b) => a - b)
+      const lines: string[] = []
+      for (const r of sortedRows) {
+        const entry = pageRows[r]
+        if (!entry) continue
+        const parts = columns.map((_, c) => displayCellText(entry.origIdx, c, entry.row[c]))
+        lines.push(parts.join('\t'))
+      }
+      text = lines.join('\n')
+    } else if (cellsInRange(gridSel).length > 1) {
+      const { r0, r1, c0, c1 } = normalizeRange(gridSel.anchor!, gridSel.focus!)
+      const lines: string[] = []
+      for (let r = r0; r <= r1; r++) {
+        const entry = pageRows[r]
+        if (!entry) continue
+        const parts: string[] = []
+        // 矩形按完整列下标记录,跨越的隐藏列不应混入复制内容(与网格显示一致)。
+        for (let c = c0; c <= c1; c++) {
+          const col = columns[c]
+          if (col && hiddenCols.has(col.name)) continue
+          parts.push(displayCellText(entry.origIdx, c, entry.row[c]))
+        }
+        lines.push(parts.join('\t'))
+      }
+      text = lines.join('\n')
+    } else {
+      text = selCell?.full ?? ''
+    }
+    navigator.clipboard?.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500) }).catch(() => {})
+  }
+  // 选中的行集合（按 origIdx）：行多选优先；否则取单元格矩形覆盖的各行。
+  function selectedOrigIdxs(): number[] {
+    const out = new Set<number>()
+    if (gridSel.rows.size > 0) {
+      for (const ri of gridSel.rows) { const e = pageRows[ri]; if (e) out.add(e.origIdx) }
+    } else if (gridSel.anchor && gridSel.focus) {
+      const { r0, r1 } = normalizeRange(gridSel.anchor, gridSel.focus)
+      for (let r = r0; r <= r1; r++) { const e = pageRows[r]; if (e) out.add(e.origIdx) }
+    }
+    return [...out]
+  }
+  // 菜单「删除选中行」：把选中行（origIdx）并入 pending-delete 集合。
+  function ctxDeleteRows() {
+    setCtxMenu(null)
+    const idxs = selectedOrigIdxs()
+    if (idxs.length === 0) return
+    setDeleted(d => { const next = new Set(d); for (const i of idxs) next.add(i); return next })
+  }
+  // 菜单「批量编辑」打开对话框。
+  function ctxBulkEdit() { setCtxMenu(null); setBulkVal(''); setBulkOpen(true) }
+
+  // 收集选中行的「显示值」矩阵(行多选 > 单元格矩形覆盖到的整行),按 columns 顺序对齐,
+  // 取用户改动后的值(与网格显示一致)。供「复制为 SQL」生成 INSERT/UPDATE。
+  function selectedRowValues(): unknown[][] {
+    return selectedOrigIdxs().map(origIdx => {
+      const entry = tagged.find(e => e.origIdx === origIdx)
+      return columns.map((col, ci) => {
+        if (!entry) return null
+        const k = cellKey(origIdx, col.name)
+        return edits[k] !== undefined ? edits[k] : entry.row[ci]
+      })
+    })
+  }
+  // 菜单「复制为 SQL INSERT / UPDATE」:把选中行渲染成 SQL 写入剪贴板。
+  function ctxCopySql(kind: 'insert' | 'update') {
+    setCtxMenu(null)
+    const data = selectedRowValues()
+    if (data.length === 0) return
+    const dialect = dialectFor(engine)
+    const colNames = columns.map(c => c.name)
+    // PK-less 表(ctid 路径):pkCols 为空,需用 keyColumn + 逐行 activeRowKeys 作伪主键定位,
+    // 否则 UPDATE 退化为无 WHERE 的全表更新。key 值与 selectedRowValues() 同序(都来自 selectedOrigIdxs)。
+    const keyOverride = pkCols.length === 0 && keyColumn && activeRowKeys
+      ? { column: keyColumn, values: selectedOrigIdxs().map(origIdx => activeRowKeys[origIdx]) }
+      : undefined
+    const text = kind === 'insert'
+      ? buildInsertSql(data, table, colNames, dialect, schema)
+      : buildUpdateSql(data, table, colNames, dialect, schema, pkCols, keyOverride)
+    navigator.clipboard?.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500) }).catch(() => {})
+  }
+  // 当前选中单元格数（用于菜单/对话框文案 + 决定批量编辑可用性）。
+  const selectedCellCount = useMemo(() => cellsInRange(gridSel).length, [gridSel])
+  // 把同一个值写入选中矩形的每个单元格（仅现有行；走 edits 的变更检测，与单格编辑一致）。
+  function applyBulkEdit() {
+    if (!gridSel.anchor || !gridSel.focus) { setBulkOpen(false); return }
+    const { r0, r1, c0, c1 } = normalizeRange(gridSel.anchor, gridSel.focus)
+    setEdits(prev => {
+      const next = { ...prev }
+      for (let r = r0; r <= r1; r++) {
+        const entry = pageRows[r]
+        if (!entry || entry.origIdx < 0) continue
+        for (let c = c0; c <= c1; c++) {
+          const col = columns[c]
+          if (!col) continue
+          // 矩形跨越的隐藏列不应被批量编辑(与网格显示一致)。
+          if (hiddenCols.has(col.name)) continue
+          const k = cellKey(entry.origIdx, col.name)
+          const orig = entry.row[c]
+          if (bulkVal === String(orig ?? '')) { delete next[k] }
+          else next[k] = bulkVal
+        }
+      }
+      return next
+    })
+    setBulkOpen(false)
+  }
+
   // Toggle an existing row (by its origIdx) in/out of the pending-delete set.
   function toggleDelete(origIdx: number) {
     if (!canEdit) return
@@ -597,15 +860,16 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
 
   // Close the sort/export dropdowns on an outside click.
   useEffect(() => {
-    if (!sortMenuOpen && !exportMenuOpen) return
+    if (!sortMenuOpen && !exportMenuOpen && !colMenuOpen) return
     function onDocClick(e: MouseEvent) {
       const tgt = e.target as Node
       if (sortMenuOpen && sortMenuRef.current && !sortMenuRef.current.contains(tgt)) setSortMenuOpen(false)
       if (exportMenuOpen && exportMenuRef.current && !exportMenuRef.current.contains(tgt)) setExportMenuOpen(false)
+      if (colMenuOpen && colMenuRef.current && !colMenuRef.current.contains(tgt)) setColMenuOpen(false)
     }
     document.addEventListener('mousedown', onDocClick)
     return () => document.removeEventListener('mousedown', onDocClick)
-  }, [sortMenuOpen, exportMenuOpen])
+  }, [sortMenuOpen, exportMenuOpen, colMenuOpen])
 
   // Footer counters. "edited" = existing rows with at least one changed cell that
   // are NOT also marked for deletion; "new" = pending insert rows; "deleted" =
@@ -635,7 +899,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   // Fixed per-column widths so the row is exactly as wide as the sum of its
   // columns and the grid scrolls horizontally — no flex/1fr stretch that would
   // blow up a couple of columns to fill the viewport and hide the rest.
-  const gridTemplate = '46px ' + columns.map(c => (colWidths[c.name] ?? heuristicWidth(c.name)) + 'px').join(' ') + (showActionCol ? ' 44px' : '')
+  const gridTemplate = '46px ' + visibleColumns.map(c => (colWidths[c.name] ?? heuristicWidth(c.name)) + 'px').join(' ') + (showActionCol ? ' 44px' : '')
 
   // 列宽拖动：在 document 上挂 mousemove/mouseup，避免鼠标移出表头丢事件；
   // 拖动期间根据 clientX 位移动态更新该列宽度，最小 60px。
@@ -730,19 +994,56 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
               </div>
             )}
           </div>
+          {/* 列显隐：眼睛图标下拉,逐列勾选 + 隐藏空列 + 显示全部列 */}
+          <div ref={colMenuRef} style={{ position: 'relative' }}>
+            <button className="icon-btn bare" title={t('dbviews.columnVisibility')} data-active={colMenuOpen || hiddenCols.size > 0 ? '1' : undefined}
+              onClick={() => { setColMenuOpen(o => !o); setSortMenuOpen(false); setExportMenuOpen(false) }}><Icon name="eye" size={15} /></button>
+            {colMenuOpen && (
+              <div className="pop-in" style={{ position: 'absolute', top: 'calc(100% + 6px)', right: 0, zIndex: 60, minWidth: 200, maxHeight: 360, overflow: 'auto', background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', borderRadius: 10, boxShadow: 'var(--shadow-window)', padding: 4 }}>
+                {columns.map(col => {
+                  const isVisible = !hiddenCols.has(col.name)
+                  return (
+                    <button key={col.name} role="menuitemcheckbox" aria-checked={isVisible} className="row"
+                      onClick={() => toggleColumn(col.name)}
+                      style={{ width: '100%', justifyContent: 'flex-start', gap: 8, padding: '6px 10px', borderRadius: 7, border: 'none', background: 'transparent', color: isVisible ? 'var(--text-secondary)' : 'var(--text-faint)', cursor: 'pointer', fontSize: 12.5, textAlign: 'left' }}>
+                      <Icon name={isVisible ? 'eye' : 'eye-off'} size={13} style={{ flex: 'none', color: isVisible ? 'var(--accent-primary)' : 'var(--text-faint)' }} />
+                      <span className="ell">{col.name}</span>
+                    </button>
+                  )
+                })}
+                <div style={{ height: 1, background: 'var(--border-hairline)', margin: '4px 0' }} />
+                <button className="row" disabled={nullColNames.length === 0}
+                  onClick={() => { hideNullColumns() }}
+                  style={{ width: '100%', justifyContent: 'flex-start', gap: 8, padding: '6px 10px', borderRadius: 7, border: 'none', background: 'transparent', color: nullColNames.length === 0 ? 'var(--text-faint)' : 'var(--text-secondary)', cursor: nullColNames.length === 0 ? 'default' : 'pointer', fontSize: 12.5, textAlign: 'left' }}>
+                  <Icon name="eye-off" size={13} style={{ flex: 'none' }} />
+                  {nullColNames.length === 0 ? t('dbviews.noNullColumns') : t('dbviews.hideNullColumns')}
+                </button>
+                {hiddenCols.size > 0 && (
+                  <button className="row" onClick={() => { resetColumns(); setColMenuOpen(false) }}
+                    style={{ width: '100%', justifyContent: 'flex-start', gap: 8, padding: '6px 10px', borderRadius: 7, border: 'none', background: 'transparent', color: 'var(--accent-primary)', cursor: 'pointer', fontSize: 12.5, textAlign: 'left' }}>
+                    <Icon name="eye" size={13} style={{ flex: 'none' }} />
+                    {t('dbviews.showAllColumns')}
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
           <button className="icon-btn bare" title={t('dbviews.refresh')} disabled={refreshing} onClick={refresh}>
             <Icon name="refresh-cw" size={15} style={refreshing ? { animation: 'spin 0.8s linear infinite' } : undefined} />
           </button>
           <div style={{ width: 1, height: 18, background: 'var(--border-hairline)' }} />
+          {livePreview && writable && connId && table && (
+            <Btn size="sm" variant="secondary" icon="upload" onClick={() => setImportOpen(true)}>{t('dbviews.import')}</Btn>
+          )}
           <div ref={exportMenuRef} style={{ position: 'relative' }}>
             <Btn size="sm" variant="secondary" icon="download" iconR="chevron-down"
               onClick={() => { setExportMenuOpen(o => !o); setSortMenuOpen(false) }}>{t('dbviews.export')}</Btn>
             {exportMenuOpen && (
               <div className="pop-in" style={{ position: 'absolute', top: 'calc(100% + 6px)', right: 0, zIndex: 60, minWidth: 120, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', borderRadius: 10, boxShadow: 'var(--shadow-window)', padding: 4 }}>
-                {(['csv', 'json'] as const).map(fmt => (
+                {(['csv', 'json', 'sql'] as const).map(fmt => (
                   <button key={fmt} className="row" onClick={() => exportAs(fmt)}
                     style={{ width: '100%', gap: 8, padding: '6px 10px', borderRadius: 7, border: 'none', background: 'transparent', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 12.5, textAlign: 'left' }}>
-                    <Icon name={fmt === 'csv' ? 'table-2' : 'file-code'} size={13} />
+                    <Icon name={fmt === 'csv' ? 'table-2' : fmt === 'sql' ? 'database' : 'file-code'} size={13} />
                     {fmt.toUpperCase()}
                   </button>
                 ))}
@@ -752,23 +1053,76 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
         </div>
       </div>
 
-      {/* client-side filter row (toggled by the funnel button) */}
+      {/* client-side filter row (toggled by the funnel button): global text search
+          + column-level structured rule builder (8 operators + AND/OR) stacked under it. */}
       {filterOpen && (
-        <div className="row gap8" style={{ padding: '7px 12px', borderBottom: '1px solid var(--border-hairline)', background: 'var(--surface-subtle)' }}>
-          <Icon name="filter" size={13} style={{ color: 'var(--text-faint)' }} />
-          <input autoFocus value={filterText} onChange={e => setFilterText(e.target.value)}
-            placeholder={t('dbviews.filter')}
-            onKeyDown={e => { if (e.key === 'Escape') { setFilterText(''); setFilterOpen(false) } }}
-            style={{ flex: 1, border: '1px solid var(--border-hairline)', borderRadius: 7, padding: '4px 8px', background: 'var(--surface-card)', color: 'var(--text-primary)', font: 'inherit', fontSize: 12.5, outline: 'none' }} />
-          {filterActive && (
-            <span style={{ fontSize: 11.5, color: 'var(--text-tertiary)' }}>
-              <b className="mono" style={{ color: 'var(--text-secondary)' }}>{filtered.length}</b> {t('dbviews.rows')}
-            </span>
-          )}
-          <button className="icon-btn bare" style={{ width: 22, height: 22 }}
-            title={t('dbviews.cancel')} onClick={() => { setFilterText(''); setFilterOpen(false) }}>
-            <Icon name="x" size={14} />
-          </button>
+        <div className="col" style={{ padding: '7px 12px', borderBottom: '1px solid var(--border-hairline)', background: 'var(--surface-subtle)', gap: 7 }}>
+          <div className="row gap8">
+            <Icon name="filter" size={13} style={{ color: 'var(--text-faint)' }} />
+            <input autoFocus value={filterText} onChange={e => setFilterText(e.target.value)}
+              placeholder={t('dbviews.filter')}
+              onKeyDown={e => { if (e.key === 'Escape') { setFilterText(''); setFilterOpen(false) } }}
+              style={{ flex: 1, border: '1px solid var(--border-hairline)', borderRadius: 7, padding: '4px 8px', background: 'var(--surface-card)', color: 'var(--text-primary)', font: 'inherit', fontSize: 12.5, outline: 'none' }} />
+            {filterActive && (
+              <span style={{ fontSize: 11.5, color: 'var(--text-tertiary)' }}>
+                <b className="mono" style={{ color: 'var(--text-secondary)' }}>{filtered.length}</b> {t('dbviews.rows')}
+              </span>
+            )}
+            <button className="icon-btn bare" style={{ width: 22, height: 22 }}
+              title={t('dbviews.cancel')} onClick={() => { setFilterText(''); setFilterRules([]); setFilterOpen(false) }}>
+              <Icon name="x" size={14} />
+            </button>
+          </div>
+          {/* 列级条件构建器 */}
+          <div className="col" style={{ gap: 6 }}>
+            {filterRules.map((rule, idx) => (
+              <div key={rule.id} className="row gap6" data-filter-rule style={{ alignItems: 'center' }}>
+                {/* 第一条规则不显示逻辑连接;其后显示 AND/OR 切换 */}
+                {idx === 0 ? (
+                  <span style={{ width: 58, fontSize: 11.5, color: 'var(--text-faint)' }}>{t('dbviews.filterColumns')}</span>
+                ) : (
+                  <select aria-label="conjunction" value={rule.conjunction}
+                    onChange={e => updateFilterRule(rule.id, { conjunction: e.target.value as 'AND' | 'OR' })}
+                    style={{ width: 58, border: '1px solid var(--border-hairline)', borderRadius: 7, padding: '4px 6px', background: 'var(--surface-card)', color: 'var(--text-primary)', font: 'inherit', fontSize: 12, outline: 'none' }}>
+                    <option value="AND">AND</option>
+                    <option value="OR">OR</option>
+                  </select>
+                )}
+                <select aria-label="filter-column" value={rule.columnName}
+                  onChange={e => updateFilterRule(rule.id, { columnName: e.target.value })}
+                  style={{ flex: '0 0 130px', border: '1px solid var(--border-hairline)', borderRadius: 7, padding: '4px 6px', background: 'var(--surface-card)', color: 'var(--text-primary)', font: 'inherit', fontSize: 12, outline: 'none' }}>
+                  {columns.map(c => <option key={c.name} value={c.name}>{c.name}</option>)}
+                </select>
+                <select aria-label="filter-mode" value={rule.mode}
+                  onChange={e => updateFilterRule(rule.id, { mode: e.target.value as FilterMode })}
+                  style={{ flex: '0 0 120px', border: '1px solid var(--border-hairline)', borderRadius: 7, padding: '4px 6px', background: 'var(--surface-card)', color: 'var(--text-primary)', font: 'inherit', fontSize: 12, outline: 'none' }}>
+                  {filterModeOptions.map(o => <option key={o.value} value={o.value}>{t(o.labelKey)}</option>)}
+                </select>
+                {filterModeNeedsValue(rule.mode) && (
+                  <input aria-label="filter-value" value={rule.rawValue}
+                    onChange={e => updateFilterRule(rule.id, { rawValue: e.target.value })}
+                    placeholder={t('dbviews.filterValuePlaceholder')}
+                    style={{ flex: 1, minWidth: 80, border: '1px solid var(--border-hairline)', borderRadius: 7, padding: '4px 8px', background: 'var(--surface-card)', color: 'var(--text-primary)', font: 'inherit', fontSize: 12, outline: 'none' }} />
+                )}
+                <button className="icon-btn bare" style={{ width: 22, height: 22 }}
+                  title={t('dbviews.filterRemoveRule')} onClick={() => removeFilterRule(rule.id)}>
+                  <Icon name="x" size={13} />
+                </button>
+              </div>
+            ))}
+            <div className="row gap6">
+              <button className="icon-btn bare" data-add-filter-rule onClick={addFilterRule}
+                style={{ width: 'auto', padding: '3px 8px', gap: 5, fontSize: 12, color: 'var(--accent-primary)' }}>
+                <Icon name="plus" size={13} /> {t('dbviews.filterAddRule')}
+              </button>
+              {filterRules.length > 0 && (
+                <button className="icon-btn bare" onClick={clearFilterRules}
+                  style={{ width: 'auto', padding: '3px 8px', gap: 5, fontSize: 12, color: 'var(--text-tertiary)' }}>
+                  {t('dbviews.filterClearRules')}
+                </button>
+              )}
+            </div>
+          </div>
         </div>
       )}
 
@@ -778,7 +1132,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
           {/* header */}
           <div data-grid-header style={{ display: 'grid', gridTemplateColumns: gridTemplate, position: 'sticky', top: 0, zIndex: 2, background: 'var(--surface-subtle)', borderBottom: '1px solid var(--border-hairline-alt)' }}>
             <div style={{ ...thStyle, justifyContent: 'center', color: 'var(--text-faint)', position: 'sticky', left: 0, zIndex: 3, background: 'var(--surface-subtle)' }}>#</div>
-            {columns.map((col) => (
+            {visibleColumns.map((col) => (
               <div key={col.name} style={{ ...thStyle, position: 'relative' }} onClick={() => toggleSort(col.name)} className="gridhead">
                 <Icon name={col.icon ?? colIcon(col)} size={12} style={{ color: col.pk ? 'var(--signal-amber)' : col.fk ? 'var(--signal-blue)' : 'var(--text-faint)' }} />
                 <span className="ell" style={{ color: 'var(--text-secondary)', fontWeight: 600 }} title={commentMode && col.comment ? col.comment : undefined}>{headLabel(col)}</span>
@@ -798,29 +1152,39 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
             return (
               <div key={origIdx} style={{ display: 'grid', gridTemplateColumns: gridTemplate, height: rowH, background: isDel ? 'color-mix(in srgb, var(--danger-fg) 12%, transparent)' : ri % 2 ? 'var(--surface-subtle)' : 'transparent', opacity: isDel ? 0.6 : 1, textDecoration: isDel ? 'line-through' : 'none' }}
                 className="gridrow">
-                <div style={{ ...tdStyle, justifyContent: 'center', color: 'var(--text-faint)', fontSize: 11, background: 'var(--surface-sunken)', borderRight: '1px solid var(--border-hairline)', position: 'sticky', left: 0, zIndex: 1 }}>
+                <div data-row-select onClick={e => onRowSelect(ri, e)}
+                  onContextMenu={e => { e.preventDefault(); if (!gridSel.rows.has(ri)) setGridSel(reduceRowSelection({ ...gridSel }, ri, { lastRow: lastRowRef.current }, {})); setCtxMenu({ x: e.clientX, y: e.clientY, col: 0 }) }}
+                  style={{ ...tdStyle, justifyContent: 'center', color: 'var(--text-faint)', fontSize: 11, background: gridSel.rows.has(ri) ? 'var(--accent-soft)' : 'var(--surface-sunken)', borderRight: '1px solid var(--border-hairline)', position: 'sticky', left: 0, zIndex: 1, cursor: 'pointer' }}>
                   {globalIdx + 1}
-                  {/* 悬浮行时浮出"查看明细"按钮，覆盖行号并上下左右居中；点击打开该行的纵向明细弹窗。
-                      不用 .icon-btn（其固定 30px 宽会与 inset:0 冲突，使图标偏左），改为显式撑满单元格 + flex 居中。 */}
+                  {/* 悬浮行时浮出"查看明细"按钮，居中悬浮于行号上方；点击打开该行的纵向明细弹窗。
+                      codex P2-1：按钮只占图标大小（22x22）并居中定位，不再 inset:0/100% 铺满整格，
+                      否则悬浮态 pointer-events:auto 会拦截「点行号选行」。剩余区域仍可点行号触发多选。 */}
                   <button className="row-detail-btn" title={t('dbviews.viewRowDetail')}
                     onClick={e => { e.stopPropagation(); setDetailIdx(ri) }}
-                    style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', border: 'none', padding: 0, background: 'var(--surface-sunken)', cursor: 'pointer' }}>
+                    style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', width: 22, height: 22, display: 'flex', alignItems: 'center', justifyContent: 'center', border: 'none', borderRadius: 6, padding: 0, background: 'var(--surface-sunken)', cursor: 'pointer' }}>
                     <Icon name="maximize-2" size={13} style={{ color: 'var(--accent-primary)' }} />
                   </button>
                 </div>
-                {columns.map((col, ci) => {
+                {visibleColumns.map((col) => {
+                  // ci 取「原始列下标」(进 row/selection 坐标系),不随列显隐改变,
+                  // 与右键复制/批量编辑/复制为 SQL 使用的 columns 下标保持一致。
+                  const ci = colIndexOf(col.name)
                   const k = cellKey(origIdx, col.name)
                   const isEdited = edits[k] !== undefined
                   const val = isEdited ? edits[k] : row[ci]
                   const isSel = sel.r === origIdx && sel.c === ci
+                  // 多选高亮：单元格落在矩形内，或该行被行多选选中。
+                  const inRange = isCellInRange(ri, ci, gridSel.anchor && gridSel.focus ? normalizeRange(gridSel.anchor, gridSel.focus) : null)
+                  const inMultiSel = inRange || gridSel.rows.has(ri)
                   const isEditing = editing && editing.r === origIdx && editing.c === ci
                   return (
-                    <div key={col.name} onClick={() => setSel({ r: origIdx, c: ci })}
+                    <div key={col.name} onClick={e => onCellSelect(ri, ci, origIdx, e)}
+                      onContextMenu={e => onCellContext(ri, ci, origIdx, e)}
                       onDoubleClick={() => startEdit(origIdx, ci, origIdx, col.name, val)}
                       style={{
                         ...tdStyle,
                         cursor: canEdit ? 'cell' : 'default',
-                        background: isEditing ? 'var(--surface-card)' : isEdited ? 'color-mix(in srgb, var(--signal-amber) 14%, transparent)' : isSel ? 'var(--accent-soft-alt)' : 'transparent',
+                        background: isEditing ? 'var(--surface-card)' : isEdited ? 'color-mix(in srgb, var(--signal-amber) 14%, transparent)' : isSel ? 'var(--accent-soft-alt)' : inMultiSel ? 'var(--accent-soft)' : 'transparent',
                         boxShadow: isSel && !isEditing ? 'inset 0 0 0 1.5px var(--accent-primary)' : isEdited ? 'inset 0 0 0 1px color-mix(in srgb, var(--signal-amber) 40%, transparent)' : 'none',
                         color: 'var(--text-secondary)',
                       }}>
@@ -865,7 +1229,8 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
               <div key={`new-${nr.id}`} style={{ display: 'grid', gridTemplateColumns: gridTemplate, height: rowH, background: 'color-mix(in srgb, var(--signal-green) 12%, transparent)' }}
                 className="gridrow">
                 <div style={{ ...tdStyle, justifyContent: 'center', color: 'var(--signal-green)', fontSize: 11, background: 'var(--surface-sunken)', borderRight: '1px solid var(--border-hairline)', position: 'sticky', left: 0, zIndex: 1 }}>+</div>
-                {columns.map((col, ci) => {
+                {visibleColumns.map((col) => {
+                  const ci = colIndexOf(col.name)
                   const val = nr.cells[col.name] ?? ''
                   const isEditing = editing && editing.r === r && editing.c === ci
                   return (
@@ -1024,6 +1389,67 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
             </div>
           </div>
         </div>
+      )}
+
+      {/* 右键上下文菜单：复制 / 删除选中行 / 批量编辑。点击空白处或选项后关闭。 */}
+      {ctxMenu && (
+        <div onClick={() => setCtxMenu(null)} onContextMenu={e => { e.preventDefault(); setCtxMenu(null) }}
+          style={{ position: 'fixed', inset: 0, zIndex: 80 }}>
+          <div role="menu" onClick={e => e.stopPropagation()} className="pop-in"
+            style={{ position: 'fixed', top: ctxMenu.y, left: ctxMenu.x, minWidth: 180, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', borderRadius: 10, boxShadow: 'var(--shadow-window)', padding: 4 }}>
+            {([
+              { key: 'copy', icon: 'copy', label: t('dbviews.ctxCopy'), onClick: ctxCopy, show: true, danger: false },
+              { key: 'copy-insert', icon: 'file-code', label: t('dbviews.ctxCopyInsert', { count: selectedOrigIdxs().length }), onClick: () => ctxCopySql('insert'), show: !resultLabel && selectedOrigIdxs().length > 0, danger: false },
+              { key: 'copy-update', icon: 'file-code', label: t('dbviews.ctxCopyUpdate', { count: selectedOrigIdxs().length }), onClick: () => ctxCopySql('update'), show: !resultLabel && selectedOrigIdxs().length > 0, danger: false },
+              { key: 'delete', icon: 'trash-2', label: t('dbviews.ctxDeleteRows', { count: selectedOrigIdxs().length }), onClick: ctxDeleteRows, show: canEdit && selectedOrigIdxs().length > 0, danger: true },
+              { key: 'bulk', icon: 'pencil', label: t('dbviews.ctxBulkEdit', { count: selectedCellCount }), onClick: ctxBulkEdit, show: canEdit && selectedCellCount > 0, danger: false },
+            ] as const).filter(it => it.show).map(it => (
+              <button key={it.key} role="menuitem" className="row" onClick={it.onClick}
+                style={{ width: '100%', gap: 8, padding: '6px 10px', borderRadius: 7, border: 'none', background: 'transparent', color: it.danger ? 'var(--danger-fg)' : 'var(--text-secondary)', cursor: 'pointer', fontSize: 12.5, textAlign: 'left' }}>
+                <Icon name={it.icon} size={13} />
+                {it.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* 批量编辑对话框：把同一个值写入选中的所有单元格（作为 pending edits）。 */}
+      {bulkOpen && (
+        <div onClick={() => setBulkOpen(false)}
+          style={{ position: 'fixed', inset: 0, zIndex: 80, background: 'color-mix(in srgb, var(--cta-bg) 42%, transparent)', backdropFilter: 'blur(3px)', display: 'grid', placeItems: 'center' }}>
+          <div onClick={e => e.stopPropagation()} className="pop-in"
+            style={{ width: 460, maxWidth: '90%', background: 'var(--surface-card)', borderRadius: 18, border: '1px solid var(--border-hairline)', boxShadow: 'var(--shadow-window)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+            <div className="row" style={{ justifyContent: 'space-between', padding: '18px 20px 14px', borderBottom: '1px solid var(--border-hairline)' }}>
+              <div className="col" style={{ gap: 2 }}>
+                <span style={{ fontSize: 15, fontWeight: 700, letterSpacing: '-0.2px' }}>{t('dbviews.bulkEditTitle')}</span>
+                <span style={{ fontSize: 11.5, color: 'var(--text-tertiary)' }}>{t('dbviews.bulkEditDesc', { count: selectedCellCount })}</span>
+              </div>
+              <IconBtn name="x" size={16} variant="bare" onClick={() => setBulkOpen(false)} />
+            </div>
+            <div className="col" style={{ gap: 12, padding: '16px 20px 20px' }}>
+              <input autoFocus value={bulkVal} onChange={e => setBulkVal(e.target.value)}
+                placeholder={t('dbviews.bulkEditPlaceholder')}
+                onKeyDown={e => { if (e.key === 'Enter') applyBulkEdit(); if (e.key === 'Escape') setBulkOpen(false) }}
+                style={{ border: '1px solid var(--border-hairline)', borderRadius: 8, padding: '8px 10px', background: 'var(--surface-sunken)', color: 'var(--text-primary)', font: 'inherit', fontSize: 13, outline: 'none' }} />
+              <div className="row gap8" style={{ justifyContent: 'flex-end' }}>
+                <Btn variant="ghost" onClick={() => setBulkOpen(false)}>{t('dbviews.cancel')}</Btn>
+                <Btn variant="primary" icon="check" onClick={applyBulkEdit}>{t('dbviews.bulkEditApply')}</Btn>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {importOpen && connId && table && (
+        <TableImportDialog
+          connId={connId}
+          schema={schema}
+          table={table}
+          engine={engine}
+          onClose={() => setImportOpen(false)}
+          onImported={() => { setImportOpen(false); refresh() }}
+        />
       )}
     </div>
   )

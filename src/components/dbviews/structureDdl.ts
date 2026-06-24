@@ -18,6 +18,20 @@ export function dialectFor(engine?: string): StructDialect {
   return 'postgres'
 }
 
+/**
+ * 引擎是否支持 SQL/DDL 整库导出(生成 CREATE TABLE + INSERT 的 .sql)。
+ *
+ * 非关系型引擎(Redis / MongoDB / Elasticsearch)虽然 caps.sqlConsole=true(其控制台
+ * 走 key glob / 命令 / DSL),但没有 SQL/DDL 语义 — 对它们生成 DDL/INSERT 的 .sql 会
+ * 产生误导性内容。用显式 denylist 排除它们;其余关系型引擎(含 Oracle/达梦/TiDB 等开放集)
+ * 默认放行。engine 缺省(mock/demo 路径)按关系型处理。
+ */
+export function supportsDdlExport(engine?: string): boolean {
+  const e = (engine ?? '').toLowerCase()
+  if (e.includes('redis') || e.includes('mongo') || e.includes('elastic')) return false
+  return true
+}
+
 /** Quote an identifier for the dialect, escaping the quote char by doubling it. */
 export function quoteIdent(dialect: StructDialect, name: string): string {
   if (dialect === 'mysql') return '`' + name.replace(/`/g, '``') + '`'

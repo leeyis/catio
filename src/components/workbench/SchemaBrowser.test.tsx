@@ -99,6 +99,34 @@ describe('SchemaBrowser', () => {
     expect(screen.getByText('刷新')).toBeInTheDocument()
   })
 
+  it('shows 整库导出 menu item only when onExportDatabase is provided', () => {
+    const onExport = vi.fn()
+    render(
+      <LanguageProvider><DataProvider>
+        <SchemaBrowser onPick={noop} active={null} onNewQuery={noop} onOpenER={noop}
+          onNewObjectTemplate={noop} onRefresh={noop} onExportDatabase={onExport}
+          erActive={false} sqlActive={false} schemas={NS} conn={CONN} live
+          canSqlConsole canEr canStructureEdit />
+      </DataProvider></LanguageProvider>,
+    )
+    fireEvent.click(screen.getAllByTitle('Schema 操作')[0])
+    fireEvent.click(screen.getByText('整库导出'))
+    expect(onExport).toHaveBeenCalledWith('eastmoney')
+  })
+
+  it('hides 整库导出 menu item when onExportDatabase is absent', () => {
+    render(
+      <LanguageProvider><DataProvider>
+        <SchemaBrowser onPick={noop} active={null} onNewQuery={noop} onOpenER={noop}
+          onNewObjectTemplate={noop} onRefresh={noop}
+          erActive={false} sqlActive={false} schemas={NS} conn={CONN} live
+          canSqlConsole canEr canStructureEdit />
+      </DataProvider></LanguageProvider>,
+    )
+    fireEvent.click(screen.getAllByTitle('Schema 操作')[0])
+    expect(screen.queryByText('整库导出')).not.toBeInTheDocument()
+  })
+
   it('hides Views/Functions tree nodes when the engine lacks those concepts (e.g. Redis)', () => {
     render(
       <LanguageProvider><DataProvider>
