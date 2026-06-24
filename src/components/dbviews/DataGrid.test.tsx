@@ -628,6 +628,18 @@ describe('DataGrid generic rows', () => {
       expect(screen.queryByPlaceholderText('ORDER BY')).toBeNull()
     })
 
+    it('非 SQL 引擎(mongodb/redis/es)即使 livePreview 也不显示 WHERE / ORDER BY 输入框', () => {
+      // 这类引擎不支持 SQL WHERE/ORDER BY,后端会拒绝;前端按 engine 直接隐藏,避免误导。
+      for (const engine of ['mongodb', 'redis', 'elasticsearch']) {
+        const { unmount } = wrap(
+          <DataGrid columns={columns} rows={rows} connId="c1" table="orders" schema="db" engine={engine} livePreview />,
+        )
+        expect(screen.queryByPlaceholderText('WHERE')).toBeNull()
+        expect(screen.queryByPlaceholderText('ORDER BY')).toBeNull()
+        unmount()
+      }
+    })
+
     it('提交 WHERE / ORDER BY 经服务端 tableQuery 重查并渲染返回行', async () => {
       tableQuery.mockResolvedValue({
         columns: [{ name: 'id', type: 'int' }, { name: 'name', type: 'text' }],
