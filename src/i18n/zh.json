@@ -768,7 +768,27 @@
     "connectErrorAuth": "认证失败 —— 用户名、密码或密钥不正确，请检查后重试。",
     "connectFailedTitle": "连接失败",
     "connectingTo": "正在连接 {{name}}…",
-    "ok": "确定"
+    "ok": "确定",
+    "importConnections": "导入"
+  },
+  "importConn": {
+    "title": "导入连接",
+    "sub": "从 DBeaver / Navicat 导出文件导入",
+    "chooseFile": "选择文件…",
+    "hint": "支持 DBeaver 的 data-sources.json 与 Navicat 的 .ncx 导出。这些文件不含明文密码,导入的连接将存为标记「需要认证」的草稿——首次连接时再输入密码。",
+    "source": {
+      "dbeaver": "DBeaver",
+      "navicat": "Navicat"
+    },
+    "selectAll": "全选",
+    "group": "分组",
+    "groupNone": "未分组",
+    "needsAuth": "需要认证",
+    "emptyResult": "该文件中未发现可导入的连接。",
+    "parseError": "无法解析该文件。请选择 DBeaver 的 data-sources.json 或 Navicat 的 .ncx 导出文件。",
+    "readError": "读取文件失败。",
+    "cancel": "取消",
+    "import": "导入 {{n}} 条"
   },
   "auth": {
     "initTitle": "初始化工作区",

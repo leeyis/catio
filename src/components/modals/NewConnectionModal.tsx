@@ -16,6 +16,7 @@ import { saveDbConnection, setActiveDbConnection, generateProfileId } from '../.
 import type { DbProfile } from '../../state/dbConnections'
 import { useGroups } from '../../state/groups'
 import { ConnectingOverlay } from './ConnectingOverlay'
+import { ImportConnectionsModal } from './ImportConnectionsModal'
 
 // ---- Prop types ----
 
@@ -210,6 +211,8 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
   const [dbTestResult, setDbTestResult] = useState<{ version: string; latencyMs: number } | null>(null)
   const [dbTesting, setDbTesting] = useState(false)
   const [dbTestError, setDbTestError] = useState<string | null>(null)
+  // 「从 DBeaver / Navicat 导入连接」子对话框开关（仅新建模式、DB kind 提供入口）。
+  const [showImport, setShowImport] = useState(false)
 
   // Reset port to the new engine's default whenever the engine changes, so the
   // port field always reflects the selected engine (never a stale value from a
@@ -481,7 +484,15 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
             <span style={{ fontSize: 17, fontWeight: 700, letterSpacing: '-0.3px' }}>{isEdit ? t('modals.editTitle') : t('modals.newConnection')}</span>
             <span style={{ fontSize: 12, color: 'var(--text-faint)' }}>{isEdit ? t('modals.editSub') : t('modals.newConnectionSub')}</span>
           </div>
-          <IconBtn name="x" size={16} variant="bare" onClick={onClose} />
+          <div className="row gap8" style={{ alignItems: 'center' }}>
+            {/* 从 DBeaver / Navicat 导入连接 — 仅新建模式提供 */}
+            {!isEdit && (
+              <button className="btn btn-ghost" onClick={() => setShowImport(true)} title={t('importConn.title')}>
+                <Icon name="download" size={14} /> {t('modals.importConnections')}
+              </button>
+            )}
+            <IconBtn name="x" size={16} variant="bare" onClick={onClose} />
+          </div>
         </div>
 
         {/* kind toggle */}
@@ -923,6 +934,13 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
       </div>
       {/* Connecting feedback — same overlay as the SSH host flow. */}
       {dbConnecting && <ConnectingOverlay name={dbName || dbHost} />}
+      {/* 导入连接子对话框：解析 → 勾选 → 写库后关闭本模态（列表已响应式刷新）。 */}
+      {showImport && (
+        <ImportConnectionsModal
+          onClose={() => setShowImport(false)}
+          onImported={() => { setShowImport(false); onClose() }}
+        />
+      )}
     </div>
   )
 }
