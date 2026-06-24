@@ -65,6 +65,7 @@ pub fn run() {
             db::commands::db_save_object_source,
             db::commands::db_query_page,
             db::commands::db_table_preview,
+            db::commands::db_table_query,
             db::commands::db_explain,
             db::commands::db_history,
             db::commands::db_clear_history,

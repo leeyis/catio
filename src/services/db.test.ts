@@ -34,6 +34,18 @@ describe('services/db', () => {
     expect(invokeMock).not.toHaveBeenCalled()
   })
 
+  it('tableQuery forwards WHERE/ORDER BY + paging to db_table_query under Tauri', async () => {
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+    invokeMock.mockResolvedValue({ columns: [], rows: [] })
+    const { tableQuery } = await import('./db')
+    await tableQuery('conn-1', 'public', 'orders', "status = 'paid'", 'created_at DESC', 100, 0)
+    expect(invokeMock).toHaveBeenCalledWith('db_table_query', {
+      connId: 'conn-1', schema: 'public', table: 'orders',
+      whereClause: "status = 'paid'", orderBy: 'created_at DESC', limit: 100, offset: 0,
+    })
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
+
   it('dbConnectArgsFromProfile threads SSL/TLS fields (the broken direct-connect path)', async () => {
     const { dbConnectArgsFromProfile } = await import('./db')
     const args = dbConnectArgsFromProfile({

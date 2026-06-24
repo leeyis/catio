@@ -488,6 +488,39 @@ pub async fn db_table_preview(conn_id: String, schema: Option<String>, table: St
     drv.table_data(schema.as_deref(), &table, limit, offset).await
 }
 
+/// 服务端 WHERE / ORDER BY 的表数据查询(对齐 dbx 网格的 whereFilterInput/orderByInput)。
+///
+/// 用 `dialect::build_table_query_sql` 拼出方言正确的 `SELECT * FROM <qualified>
+/// [WHERE <where>] [ORDER BY <order>]` + 分页后,经 `drv.query` 执行 —— 不改 7 个 driver
+/// 的 `table_data` trait。`where_clause`/`order_by` 为用户输入的 SQL 片段(与 SQL 控制台同
+/// 信任级别),空白片段不拼对应子句。Postgres 沿用 `ctid AS __ctid` 以支持无主键行编辑/删除。
+///
+/// 仅关系型 SQL 引擎可用;非 SQL 引擎(MongoDB/Redis/Elasticsearch)无此入口 —— 它们不能
+/// 执行任意 SQL 片段,前端对这些引擎不暴露 WHERE/ORDER BY 输入框。
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn db_table_query(conn_id: String, schema: Option<String>, table: String,
+    where_clause: Option<String>, order_by: Option<String>, limit: u32, offset: u32,
+    mgr: tauri::State<'_, ConnManager>) -> Result<QueryResult, DbError> {
+    let drv = mgr.get(&conn_id).await.ok_or_else(|| DbError::NotFound(conn_id.clone()))?;
+    let db = drv.db_type();
+    if matches!(db, crate::db::DatabaseType::Mongodb
+        | crate::db::DatabaseType::Redis
+        | crate::db::DatabaseType::Elasticsearch) {
+        return Err(DbError::Unsupported(
+            "服务端 WHERE/ORDER BY 仅支持 SQL 引擎".into()));
+    }
+    // 是否限定库前缀以「是否选了非空 schema」为准,而非引擎能力位(capabilities().schemas)
+    // —— MySQL schemas=false 但选了非默认库时仍须生成 `db`.`table`,否则落默认库报表不存在。
+    let has_schemas = table_query_should_qualify(schema.as_deref());
+    let with_ctid = db == crate::db::DatabaseType::Postgres;
+    let sql = crate::db::dialect::build_table_query_sql(
+        db, has_schemas, schema.as_deref(), &table,
+        where_clause.as_deref(), order_by.as_deref(), limit, offset, with_ctid,
+    );
+    drv.query(&sql, limit).await
+}
+
 /// Write `contents` to `path` on disk. Used by the grid's CSV/JSON export, which
 /// picks a destination via the dialog plugin and then asks the backend to write
 /// the file (the webview `<a download>` trick is a no-op inside Tauri).
@@ -515,6 +548,16 @@ fn resolve_export_row_cap(row_limit: Option<u32>) -> Option<u32> {
 fn resolve_schema_qualifier(schema: &str) -> Option<&str> {
     let s = schema.trim();
     if s.is_empty() { None } else { Some(s) }
+}
+
+/// 服务端 WHERE/ORDER BY 取数(db_table_query)是否用选中的 schema/库限定表名。
+///
+/// codex 阻断项[P1]修复:此前用 `capabilities().schemas` 作 has_schemas,但 MySQL 的
+/// schemas=false(MySQL 库即 schema、无独立命名空间),导致用户选中的非默认库被丢弃,
+/// `qualified_table` 生成裸表名 → 落连接默认库报「默认库.表 不存在」。正确语义与
+/// `MysqlDriver::table_data` / 整库导出一致:只要选了非空 schema 就限定,空才回落默认库。
+fn table_query_should_qualify(schema: Option<&str>) -> bool {
+    schema.is_some_and(|s| !s.trim().is_empty())
 }
 
 /// 整库导出为 SQL 脚本（DDL + 数据 INSERT 批 + 头注释）。枚举所选 schema 下的表,
@@ -1382,5 +1425,26 @@ mod export_schema_tests {
     fn blank_schema_falls_back_to_default_namespace() {
         assert_eq!(resolve_schema_qualifier(""), None);
         assert_eq!(resolve_schema_qualifier("   "), None);
+    }
+}
+
+#[cfg(test)]
+mod table_query_qualify_tests {
+    use super::table_query_should_qualify;
+
+    #[test]
+    fn nonempty_schema_qualifies_regardless_of_engine_schema_capability() {
+        // codex 阻断项[P1]:db_table_query 此前用 capabilities().schemas 作 has_schemas,
+        // MySQL=false 会丢弃用户选中的库,生成裸表名(落连接默认库)。正确语义:只要选了
+        // 非空 schema 就限定(`db`.`table`),与 MysqlDriver::table_data / 整库导出一致。
+        assert!(table_query_should_qualify(Some("eastmoney")));
+    }
+
+    #[test]
+    fn blank_or_absent_schema_does_not_qualify() {
+        // 未选库 / 空白库名 → 不加库前缀,回落连接默认库。
+        assert!(!table_query_should_qualify(None));
+        assert!(!table_query_should_qualify(Some("")));
+        assert!(!table_query_should_qualify(Some("   ")));
     }
 }

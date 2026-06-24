@@ -10,12 +10,14 @@ const previewDml = vi.fn()
 const applyEdits = vi.fn()
 const queryPage = vi.fn()
 const tablePreview = vi.fn()
+const tableQuery = vi.fn()
 const exportFile = vi.fn()
 vi.mock('../../services/db', () => ({
   previewDml: (...a: unknown[]) => previewDml(...a),
   applyEdits: (...a: unknown[]) => applyEdits(...a),
   queryPage: (...a: unknown[]) => queryPage(...a),
   tablePreview: (...a: unknown[]) => tablePreview(...a),
+  tableQuery: (...a: unknown[]) => tableQuery(...a),
   exportFile: (...a: unknown[]) => exportFile(...a),
   dbErrMsg: (e: unknown) => (e instanceof Error ? e.message : String(e)),
 }))
@@ -27,7 +29,7 @@ const wrap = (ui: React.ReactNode) => render(<LanguageProvider>{ui}</LanguagePro
 
 describe('DataGrid generic rows', () => {
   beforeAll(async () => { await i18n.changeLanguage('en') })
-  beforeEach(() => { previewDml.mockReset(); applyEdits.mockReset(); queryPage.mockReset(); tablePreview.mockReset(); exportFile.mockReset() })
+  beforeEach(() => { previewDml.mockReset(); applyEdits.mockReset(); queryPage.mockReset(); tablePreview.mockReset(); tableQuery.mockReset(); exportFile.mockReset() })
 
   it('renders columns and indexed row values', () => {
     const columns: ResultColumn[] = [
@@ -547,5 +549,67 @@ describe('DataGrid generic rows', () => {
     expect(within(header).queryByText('empty')).toBeNull()
     expect(within(header).getByText('name')).toBeInTheDocument()
     expect(within(header).getByText('id')).toBeInTheDocument()
+  })
+
+  // ── 服务端 WHERE / ORDER BY ────────────────────────────────────────────────
+  describe('服务端 WHERE / ORDER BY', () => {
+    const columns: ResultColumn[] = [
+      { name: 'id', type: 'int', pk: true },
+      { name: 'name', type: 'text' },
+    ]
+    const rows: unknown[][] = [[1, 'alice'], [2, 'bob']]
+
+    it('livePreview 下显示 WHERE / ORDER BY 输入框', () => {
+      wrap(<DataGrid columns={columns} rows={rows} connId="c1" table="orders" schema="public" livePreview />)
+      expect(screen.getByPlaceholderText('WHERE')).toBeInTheDocument()
+      expect(screen.getByPlaceholderText('ORDER BY')).toBeInTheDocument()
+    })
+
+    it('非 livePreview(SQL 结果或 mock)不显示 WHERE / ORDER BY 输入框', () => {
+      wrap(<DataGrid columns={columns} rows={rows} statusTones={{}} />)
+      expect(screen.queryByPlaceholderText('WHERE')).toBeNull()
+      expect(screen.queryByPlaceholderText('ORDER BY')).toBeNull()
+    })
+
+    it('提交 WHERE / ORDER BY 经服务端 tableQuery 重查并渲染返回行', async () => {
+      tableQuery.mockResolvedValue({
+        columns: [{ name: 'id', type: 'int' }, { name: 'name', type: 'text' }],
+        rows: [[2, 'bob']],
+      })
+      wrap(<DataGrid columns={columns} rows={rows} connId="c1" table="orders" schema="public" livePreview />)
+
+      const where = screen.getByPlaceholderText('WHERE')
+      fireEvent.change(where, { target: { value: "name = 'bob'" } })
+      const order = screen.getByPlaceholderText('ORDER BY')
+      fireEvent.change(order, { target: { value: 'id DESC' } })
+      // Enter 触发服务端重查(从首页 offset=0 开始)。
+      fireEvent.keyDown(where, { key: 'Enter' })
+
+      await waitFor(() => expect(tableQuery).toHaveBeenCalled())
+      const call = tableQuery.mock.calls[0]
+      // (connId, schema, table, whereClause, orderBy, limit, offset)
+      expect(call[0]).toBe('c1')
+      expect(call[1]).toBe('public')
+      expect(call[2]).toBe('orders')
+      expect(call[3]).toBe("name = 'bob'")
+      expect(call[4]).toBe('id DESC')
+      expect(call[6]).toBe(0)
+      // 返回的服务端行替换网格内容
+      expect(await screen.findByText('bob')).toBeInTheDocument()
+      expect(screen.queryByText('alice')).toBeNull()
+    })
+
+    it('清空 WHERE/ORDER BY 提交回落 tablePreview(无条件全量)', async () => {
+      tablePreview.mockResolvedValue({
+        columns: [{ name: 'id', type: 'int' }, { name: 'name', type: 'text' }],
+        rows: [[1, 'alice'], [2, 'bob']],
+      })
+      wrap(<DataGrid columns={columns} rows={rows} connId="c1" table="orders" schema="public" livePreview />)
+      const where = screen.getByPlaceholderText('WHERE')
+      // 提交空 WHERE(无条件):走 tablePreview,不走 tableQuery。
+      fireEvent.keyDown(where, { key: 'Enter' })
+      await waitFor(() => expect(tablePreview).toHaveBeenCalled())
+      expect(tableQuery).not.toHaveBeenCalled()
+    })
   })
 })
