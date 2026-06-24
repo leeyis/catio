@@ -36,8 +36,11 @@ export function clauseSuggest(value: string, cursor: number, columns: string[], 
   const kws: ClauseItem[] = (mode === 'where' ? WHERE_KEYWORDS : ORDER_KEYWORDS)
     .map(k => ({ label: k, insert: k, kind: 'keyword' as const }))
   const all = [...cols, ...kws]
-  // 空 token → 全部候选(列在前);否则按前缀(大小写不敏感)过滤。
-  const items = lower === '' ? all : all.filter(i => i.label.toLowerCase().startsWith(lower))
+  // 空 token → 全部候选(列在前);否则按前缀(大小写不敏感)过滤,并剔除与 token 完全相等的项
+  // ——已打全/刚选中的候选不再重复弹出(真机反馈:选中后候选一直显示);以其为前缀的更长候选仍保留。
+  const items = lower === ''
+    ? all
+    : all.filter(i => { const l = i.label.toLowerCase(); return l.startsWith(lower) && l !== lower })
   return { start, end: pos, items }
 }
 

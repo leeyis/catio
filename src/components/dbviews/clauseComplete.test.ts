@@ -27,6 +27,18 @@ describe('clauseSuggest', () => {
     expect(s.items.map(i => i.label)).toEqual(['secucode', 'security_code'])
   })
 
+  it('token 恰好等于某候选时不再列出它(已选中/已打全 → 关闭该候选)', () => {
+    const s = clauseSuggest('secucode', 8, ['secucode', 'security_code'], 'where')
+    expect(s.items.some(i => i.label === 'secucode')).toBe(false)
+    // security_code 不以 secucode 为前缀,故列表为空 → UI 不再弹候选。
+    expect(s.items.filter(i => i.kind === 'column')).toEqual([])
+  })
+
+  it('完全匹配被剔除,但以其为前缀的更长候选仍保留', () => {
+    const s = clauseSuggest('code', 4, ['code', 'code_x'], 'where')
+    expect(s.items.map(i => i.label)).toEqual(['code_x'])
+  })
+
   it('WHERE 模式给 AND/OR 等关键字,ORDER 模式给 ASC/DESC', () => {
     const w = clauseSuggest('', 0, COLS, 'where').items.filter(i => i.kind === 'keyword').map(i => i.label)
     expect(w).toContain('AND')
