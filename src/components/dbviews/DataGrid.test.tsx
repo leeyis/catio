@@ -10,13 +10,17 @@ const previewDml = vi.fn()
 const applyEdits = vi.fn()
 const queryPage = vi.fn()
 const tablePreview = vi.fn()
+const tableQuery = vi.fn()
 const exportFile = vi.fn()
+const exportXlsx = vi.fn()
 vi.mock('../../services/db', () => ({
   previewDml: (...a: unknown[]) => previewDml(...a),
   applyEdits: (...a: unknown[]) => applyEdits(...a),
   queryPage: (...a: unknown[]) => queryPage(...a),
   tablePreview: (...a: unknown[]) => tablePreview(...a),
+  tableQuery: (...a: unknown[]) => tableQuery(...a),
   exportFile: (...a: unknown[]) => exportFile(...a),
+  exportXlsx: (...a: unknown[]) => exportXlsx(...a),
   dbErrMsg: (e: unknown) => (e instanceof Error ? e.message : String(e)),
 }))
 
@@ -27,7 +31,7 @@ const wrap = (ui: React.ReactNode) => render(<LanguageProvider>{ui}</LanguagePro
 
 describe('DataGrid generic rows', () => {
   beforeAll(async () => { await i18n.changeLanguage('en') })
-  beforeEach(() => { previewDml.mockReset(); applyEdits.mockReset(); queryPage.mockReset(); tablePreview.mockReset(); exportFile.mockReset() })
+  beforeEach(() => { previewDml.mockReset(); applyEdits.mockReset(); queryPage.mockReset(); tablePreview.mockReset(); tableQuery.mockReset(); exportFile.mockReset() })
 
   it('renders columns and indexed row values', () => {
     const columns: ResultColumn[] = [
@@ -507,6 +511,61 @@ describe('DataGrid generic rows', () => {
     delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
   })
 
+  it('S2: Markdown 导出 —— 当前显示行渲染成管道表格,经 exportFile 落盘', async () => {
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: {}, configurable: true })
+    dialogSave.mockReset()
+    dialogSave.mockResolvedValue('/tmp/export.md')
+    exportFile.mockReset()
+    const columns: ResultColumn[] = [
+      { name: 'id', type: 'int', pk: true },
+      { name: 'name', type: 'text' },
+    ]
+    const rows: unknown[][] = [[1, 'a|b'], [2, 'x']]
+    wrap(<DataGrid columns={columns} rows={rows} connId="c1" table="orders" engine="postgres" />)
+
+    fireEvent.click(screen.getByText('Export'))
+    const mdBtn = screen.getByText('Markdown (.md)')
+    expect(mdBtn).toBeInTheDocument()
+    fireEvent.click(mdBtn)
+
+    await waitFor(() => expect(exportFile).toHaveBeenCalledTimes(1))
+    const [path, contents] = exportFile.mock.calls[0] as [string, string]
+    expect(path).toBe('/tmp/export.md')
+    expect(contents).toContain('| id  | name')
+    expect(contents).toContain('| --- |')
+    // 管道符转义为 \|
+    expect(contents).toContain('a\\|b')
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
+
+  it('S2: Excel 导出 —— 二进制走后端 exportXlsx(列/行/sheetName/path)而非 exportFile', async () => {
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: {}, configurable: true })
+    dialogSave.mockReset()
+    dialogSave.mockResolvedValue('/tmp/export.xlsx')
+    exportFile.mockReset()
+    exportXlsx.mockReset()
+    const columns: ResultColumn[] = [
+      { name: 'id', type: 'int', pk: true },
+      { name: 'name', type: 'text' },
+    ]
+    const rows: unknown[][] = [[1, 'alice'], [2, 'bob']]
+    wrap(<DataGrid columns={columns} rows={rows} connId="c1" table="orders" engine="postgres" />)
+
+    fireEvent.click(screen.getByText('Export'))
+    const xlsxBtn = screen.getByText('Excel (.xlsx)')
+    expect(xlsxBtn).toBeInTheDocument()
+    fireEvent.click(xlsxBtn)
+
+    await waitFor(() => expect(exportXlsx).toHaveBeenCalledTimes(1))
+    expect(exportFile).not.toHaveBeenCalled()
+    const [arg] = exportXlsx.mock.calls[0] as [{ columns: string[]; rows: unknown[][]; sheetName?: string; path: string }]
+    expect(arg.path).toBe('/tmp/export.xlsx')
+    expect(arg.columns).toEqual(['id', 'name'])
+    expect(arg.rows).toEqual([[1, 'alice'], [2, 'bob']])
+    expect(arg.sheetName).toBe('orders')
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
+
   it('列显隐:勾选切换可隐藏单列,头部不再渲染该列名', () => {
     const columns: ResultColumn[] = [
       { name: 'id', type: 'int', pk: true },
@@ -547,5 +606,79 @@ describe('DataGrid generic rows', () => {
     expect(within(header).queryByText('empty')).toBeNull()
     expect(within(header).getByText('name')).toBeInTheDocument()
     expect(within(header).getByText('id')).toBeInTheDocument()
+  })
+
+  // ── 服务端 WHERE / ORDER BY ────────────────────────────────────────────────
+  describe('服务端 WHERE / ORDER BY', () => {
+    const columns: ResultColumn[] = [
+      { name: 'id', type: 'int', pk: true },
+      { name: 'name', type: 'text' },
+    ]
+    const rows: unknown[][] = [[1, 'alice'], [2, 'bob']]
+
+    it('livePreview 下显示 WHERE / ORDER BY 输入框', () => {
+      wrap(<DataGrid columns={columns} rows={rows} connId="c1" table="orders" schema="public" livePreview />)
+      expect(screen.getByPlaceholderText('WHERE')).toBeInTheDocument()
+      expect(screen.getByPlaceholderText('ORDER BY')).toBeInTheDocument()
+    })
+
+    it('非 livePreview(SQL 结果或 mock)不显示 WHERE / ORDER BY 输入框', () => {
+      wrap(<DataGrid columns={columns} rows={rows} statusTones={{}} />)
+      expect(screen.queryByPlaceholderText('WHERE')).toBeNull()
+      expect(screen.queryByPlaceholderText('ORDER BY')).toBeNull()
+    })
+
+    it('非 SQL 引擎(mongodb/redis/es)即使 livePreview 也不显示 WHERE / ORDER BY 输入框', () => {
+      // 这类引擎不支持 SQL WHERE/ORDER BY,后端会拒绝;前端按 engine 直接隐藏,避免误导。
+      for (const engine of ['mongodb', 'redis', 'elasticsearch']) {
+        const { unmount } = wrap(
+          <DataGrid columns={columns} rows={rows} connId="c1" table="orders" schema="db" engine={engine} livePreview />,
+        )
+        expect(screen.queryByPlaceholderText('WHERE')).toBeNull()
+        expect(screen.queryByPlaceholderText('ORDER BY')).toBeNull()
+        unmount()
+      }
+    })
+
+    it('提交 WHERE / ORDER BY 经服务端 tableQuery 重查并渲染返回行', async () => {
+      tableQuery.mockResolvedValue({
+        columns: [{ name: 'id', type: 'int' }, { name: 'name', type: 'text' }],
+        rows: [[2, 'bob']],
+      })
+      wrap(<DataGrid columns={columns} rows={rows} connId="c1" table="orders" schema="public" livePreview />)
+
+      const where = screen.getByPlaceholderText('WHERE')
+      fireEvent.change(where, { target: { value: "name = 'bob'" } })
+      const order = screen.getByPlaceholderText('ORDER BY')
+      fireEvent.change(order, { target: { value: 'id DESC' } })
+      // Enter 触发服务端重查(从首页 offset=0 开始)。
+      fireEvent.keyDown(where, { key: 'Enter' })
+
+      await waitFor(() => expect(tableQuery).toHaveBeenCalled())
+      const call = tableQuery.mock.calls[0]
+      // (connId, schema, table, whereClause, orderBy, limit, offset)
+      expect(call[0]).toBe('c1')
+      expect(call[1]).toBe('public')
+      expect(call[2]).toBe('orders')
+      expect(call[3]).toBe("name = 'bob'")
+      expect(call[4]).toBe('id DESC')
+      expect(call[6]).toBe(0)
+      // 返回的服务端行替换网格内容
+      expect(await screen.findByText('bob')).toBeInTheDocument()
+      expect(screen.queryByText('alice')).toBeNull()
+    })
+
+    it('清空 WHERE/ORDER BY 提交回落 tablePreview(无条件全量)', async () => {
+      tablePreview.mockResolvedValue({
+        columns: [{ name: 'id', type: 'int' }, { name: 'name', type: 'text' }],
+        rows: [[1, 'alice'], [2, 'bob']],
+      })
+      wrap(<DataGrid columns={columns} rows={rows} connId="c1" table="orders" schema="public" livePreview />)
+      const where = screen.getByPlaceholderText('WHERE')
+      // 提交空 WHERE(无条件):走 tablePreview,不走 tableQuery。
+      fireEvent.keyDown(where, { key: 'Enter' })
+      await waitFor(() => expect(tablePreview).toHaveBeenCalled())
+      expect(tableQuery).not.toHaveBeenCalled()
+    })
   })
 })

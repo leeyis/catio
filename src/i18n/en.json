@@ -184,6 +184,9 @@
     "discardChanges": "Discard changes",
     "revertCell": "Revert to original",
     "filter": "Filter",
+    "whereClause": "WHERE clause",
+    "orderByClause": "ORDER BY clause",
+    "applyServerFilter": "Apply",
     "filterColumns": "Column filters",
     "filterAddRule": "Add condition",
     "filterClearRules": "Clear all",
@@ -765,7 +768,27 @@
     "connectErrorAuth": "Authentication failed — the username, password, or key is incorrect. Check and try again.",
     "connectFailedTitle": "Connection failed",
     "connectingTo": "Connecting to {{name}}…",
-    "ok": "OK"
+    "ok": "OK",
+    "importConnections": "Import"
+  },
+  "importConn": {
+    "title": "Import connections",
+    "sub": "From DBeaver / Navicat export files",
+    "chooseFile": "Choose file…",
+    "hint": "Supports DBeaver data-sources.json and Navicat .ncx exports. Passwords are not included in these files, so imported connections are saved as drafts marked \"Needs auth\" — enter the password on first connect.",
+    "source": {
+      "dbeaver": "DBeaver",
+      "navicat": "Navicat"
+    },
+    "selectAll": "Select all",
+    "group": "Group",
+    "groupNone": "Ungrouped",
+    "needsAuth": "Needs auth",
+    "emptyResult": "No importable connections found in this file.",
+    "parseError": "Could not parse this file. Pick a DBeaver data-sources.json or a Navicat .ncx export.",
+    "readError": "Could not read the file.",
+    "cancel": "Cancel",
+    "import": "Import {{n}}"
   },
   "auth": {
     "initTitle": "Initialize workspace",

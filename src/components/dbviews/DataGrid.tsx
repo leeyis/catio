@@ -3,13 +3,15 @@ import { useState, useMemo, useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn, IconBtn } from '../atoms'
-import { previewDml, applyEdits, queryPage, tablePreview, exportFile, dbErrMsg, type EditRequest } from '../../services/db'
+import { previewDml, applyEdits, queryPage, tablePreview, tableQuery, exportFile, exportXlsx, dbErrMsg, type EditRequest } from '../../services/db'
 import type { ResultColumn } from '../../services/types'
 import { reduceCellSelection, reduceRowSelection, isCellInRange, normalizeRange, cellsInRange, type GridSelection } from './gridSelection'
 import { filterRows, filterModeNeedsValue, type FilterRule, type FilterMode } from './gridFilter'
 import { buildInsertSql, buildUpdateSql } from './copySql'
+import { buildMarkdownTable } from './markdownTable'
 import { visibleColumnNames, allNullColumnNames, toggleColumnVisibility, showAllColumns } from './columnVisibility'
 import { dialectFor } from './structureDdl'
+import { supportsServerFilter } from './serverFilter'
 import { TableImportDialog } from './TableImportDialog'
 
 export interface DataGridProps {
@@ -152,6 +154,12 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   // 列级结构化筛选规则(8 种操作符 + AND/OR)。叠加在全局文本搜索之上,二者同时生效。
   const [filterRules, setFilterRules] = useState<FilterRule[]>([])
   const filterRuleSeq = useRef(0)
+  // 服务端 WHERE / ORDER BY(对齐 dbx 的 whereFilterInput/orderByInput):输入框文本 +
+  // 已提交生效的片段。提交后经 tableQuery 重新取数;客户端文本搜索/列筛选仍叠加在其上。
+  const [whereInput, setWhereInput] = useState('')
+  const [orderInput, setOrderInput] = useState('')
+  const [serverWhere, setServerWhere] = useState('')
+  const [serverOrder, setServerOrder] = useState('')
   const [sortMenuOpen, setSortMenuOpen] = useState(false)
   const [exportMenuOpen, setExportMenuOpen] = useState(false)
   const sortMenuRef = useRef<HTMLDivElement>(null)
@@ -301,13 +309,20 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   // when the parent opts in via `livePreview`; else fall back to the raw-SQL queryPage.
   const fetchPage = useMemo(() => {
     if (connId && livePreview) {
+      // 服务端 WHERE/ORDER BY 任一非空 → 走 tableQuery 按条件+排序重新取数;否则回落
+      // tablePreview(无条件全量,且覆盖 mongo/redis/es 等非 SQL 引擎)。
+      const hasServerFilter = serverWhere.trim().length > 0 || serverOrder.trim().length > 0
+      if (hasServerFilter) {
+        return (limit: number, offset: number) =>
+          tableQuery(connId, schema, table, serverWhere.trim() || undefined, serverOrder.trim() || undefined, limit, offset)
+      }
       return (limit: number, offset: number) => tablePreview(connId, schema, table, limit, offset)
     }
     if (connId && sql) {
       return (limit: number, offset: number) => queryPage(connId, sql, limit, offset, defaultNamespace)
     }
     return null
-  }, [connId, livePreview, sql, schema, table, defaultNamespace])
+  }, [connId, livePreview, sql, schema, table, defaultNamespace, serverWhere, serverOrder])
 
   // Apply a freshly-fetched server page. The Postgres live preview ALWAYS returns a
   // leading `__ctid` system column (for EVERY table, PK or not) — the parent strips
@@ -337,6 +352,24 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
     } else {
       setPage(Math.min(pages, Math.max(1, next)))
     }
+  }
+
+  // 提交服务端 WHERE / ORDER BY:固化当前输入框文本为生效片段,从首页(offset=0)按
+  // 条件+排序重新取数。任一片段非空 → tableQuery;两者皆空 → 回落 tablePreview(全量)。
+  // 直接用提交值构造取数闭包,避免 setState 后 fetchPage memo 尚未刷新导致读到旧片段。
+  async function submitServerFilter() {
+    if (!(connId && livePreview)) return
+    const w = whereInput.trim()
+    const o = orderInput.trim()
+    setServerWhere(w)
+    setServerOrder(o)
+    setDetailIdx(null)
+    setPage(1)
+    const fetcher = (w || o)
+      ? (limit: number, offset: number) => tableQuery(connId, schema, table, w || undefined, o || undefined, limit, offset)
+      : (limit: number, offset: number) => tablePreview(connId, schema, table, limit, offset)
+    const res = await fetcher(PAGE, 0)
+    applyServerPage(res)
   }
 
   function changePageSize(v: string) {
@@ -447,12 +480,16 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   // (after filter + sort) and columns. SQL reuses the same INSERT builder as the
   // grid's "copy as SQL" path (copySql.buildInsertSql), so escaping/quoting stays
   // consistent with single-row edits (dml.rs::build_insert).
-  function buildExport(format: 'csv' | 'json' | 'sql'): { text: string; type: string } {
+  function buildExport(format: 'csv' | 'json' | 'sql' | 'md'): { text: string; type: string } {
     const displayRows = pageRows.map(({ row }) => row)
     if (format === 'sql') {
       const colNames = columns.map(c => c.name)
       const sql = buildInsertSql(displayRows, table, colNames, dialectFor(engine), schema)
       return { text: sql, type: 'text/plain' }
+    }
+    if (format === 'md') {
+      const md = buildMarkdownTable(columns.map(c => c.name), displayRows)
+      return { text: md, type: 'text/markdown' }
     }
     if (format === 'csv') {
       const header = columns.map(c => csvEscape(c.name)).join(',')
@@ -470,9 +507,30 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   // Export the displayed rows. Inside Tauri the webview `<a download>` is a no-op,
   // so pick a destination via the dialog plugin and write the file through the
   // backend. Outside Tauri keep the Blob download so the demo still works.
-  async function exportAs(format: 'csv' | 'json' | 'sql') {
+  async function exportAs(format: 'csv' | 'json' | 'sql' | 'md' | 'xlsx') {
     setExportMenuOpen(false)
     setExportErr(null)
+    // XLSX 是二进制:由后端构建字节并写盘,不把字节当字符串过 IPC。
+    if (format === 'xlsx') {
+      if (!isTauri()) {
+        setExportErr(t('dbviews.applyError', { message: 'XLSX export requires the desktop app' }))
+        return
+      }
+      try {
+        const { save } = await import('@tauri-apps/plugin-dialog')
+        const path = await save({
+          defaultPath: 'export.xlsx',
+          filters: [{ name: 'Excel', extensions: ['xlsx'] }],
+        })
+        if (path) {
+          const displayRows = pageRows.map(({ row }) => row)
+          await exportXlsx({ columns: columns.map(c => c.name), rows: displayRows, sheetName: table, path })
+        }
+      } catch (e) {
+        setExportErr(t('dbviews.applyError', { message: dbErrMsg(e) }))
+      }
+      return
+    }
     const { text, type } = buildExport(format)
     if (!isTauri()) {
       triggerDownload(text, type, `export.${format}`)
@@ -1040,11 +1098,17 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
               onClick={() => { setExportMenuOpen(o => !o); setSortMenuOpen(false) }}>{t('dbviews.export')}</Btn>
             {exportMenuOpen && (
               <div className="pop-in" style={{ position: 'absolute', top: 'calc(100% + 6px)', right: 0, zIndex: 60, minWidth: 120, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', borderRadius: 10, boxShadow: 'var(--shadow-window)', padding: 4 }}>
-                {(['csv', 'json', 'sql'] as const).map(fmt => (
+                {([
+                  { fmt: 'csv', icon: 'table-2', label: 'CSV' },
+                  { fmt: 'json', icon: 'file-code', label: 'JSON' },
+                  { fmt: 'sql', icon: 'database', label: 'SQL' },
+                  { fmt: 'xlsx', icon: 'layout-grid', label: 'Excel (.xlsx)' },
+                  { fmt: 'md', icon: 'file-code', label: 'Markdown (.md)' },
+                ] as const).map(({ fmt, icon, label }) => (
                   <button key={fmt} className="row" onClick={() => exportAs(fmt)}
                     style={{ width: '100%', gap: 8, padding: '6px 10px', borderRadius: 7, border: 'none', background: 'transparent', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 12.5, textAlign: 'left' }}>
-                    <Icon name={fmt === 'csv' ? 'table-2' : fmt === 'sql' ? 'database' : 'file-code'} size={13} />
-                    {fmt.toUpperCase()}
+                    <Icon name={icon} size={13} />
+                    {label}
                   </button>
                 ))}
               </div>
@@ -1052,6 +1116,32 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
           </div>
         </div>
       </div>
+
+      {/* 服务端 WHERE / ORDER BY(仅真实表预览):输入 SQL 片段,提交后按条件+排序重新
+          取数(大表也能筛全表,而非仅当前页)。客户端文本搜索/列筛选仍叠加在结果之上。
+          非 SQL 引擎(MongoDB/Redis/Elasticsearch)隐藏此条 —— 后端 db_table_query 对它们
+          返回 Unsupported,暴露输入框只会让用户提交后撞上误导性报错(codex 阻断项[P2])。 */}
+      {livePreview && connId && supportsServerFilter(engine) && (
+        <div className="row" style={{ padding: '7px 12px', borderBottom: '1px solid var(--border-hairline)', background: 'var(--surface-subtle)', gap: 8 }}>
+          <div className="row gap6" style={{ flex: 1, minWidth: 0 }}>
+            <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-faint)', flex: 'none' }}>WHERE</span>
+            <input value={whereInput} onChange={e => setWhereInput(e.target.value)}
+              placeholder="WHERE" aria-label={t('dbviews.whereClause')}
+              onKeyDown={e => { if (e.key === 'Enter') submitServerFilter() }}
+              className="mono"
+              style={{ flex: 1, minWidth: 0, border: '1px solid var(--border-hairline)', borderRadius: 7, padding: '4px 8px', background: 'var(--surface-card)', color: 'var(--text-primary)', font: 'inherit', fontSize: 12, outline: 'none' }} />
+          </div>
+          <div className="row gap6" style={{ flex: 1, minWidth: 0 }}>
+            <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-faint)', flex: 'none' }}>ORDER BY</span>
+            <input value={orderInput} onChange={e => setOrderInput(e.target.value)}
+              placeholder="ORDER BY" aria-label={t('dbviews.orderByClause')}
+              onKeyDown={e => { if (e.key === 'Enter') submitServerFilter() }}
+              className="mono"
+              style={{ flex: 1, minWidth: 0, border: '1px solid var(--border-hairline)', borderRadius: 7, padding: '4px 8px', background: 'var(--surface-card)', color: 'var(--text-primary)', font: 'inherit', fontSize: 12, outline: 'none' }} />
+          </div>
+          <Btn size="sm" variant="secondary" icon="search" onClick={submitServerFilter}>{t('dbviews.applyServerFilter')}</Btn>
+        </div>
+      )}
 
       {/* client-side filter row (toggled by the funnel button): global text search
           + column-level structured rule builder (8 operators + AND/OR) stacked under it. */}
