@@ -100,16 +100,18 @@ export function ExplainPlanViewer({ plan, error, loading, onClose }: ExplainPlan
         flex: 'none', height: 34, padding: '0 10px', gap: 8, alignItems: 'center',
         borderBottom: '1px solid var(--border-hairline)', fontSize: 12,
       }}>
-        <span className="row gap6" style={{ alignItems: 'center', fontWeight: 600, color: 'var(--text-primary)' }}>
-          <Icon name="git-branch" size={13} style={{ color: 'var(--accent-primary)' }} />
-          {t('explain.title')}
-        </span>
-        {plan && (
-          <span style={{ color: 'var(--text-tertiary)' }}>
-            {plan.databaseType.toUpperCase()} · {t('explain.nodeCount', { count: nodeCount })}
+        {/* 左侧标题 + 引擎信息:整体可收缩,引擎信息 ellipsis,窄宽时不挤压右侧切换/关闭 */}
+        <div className="row gap8" style={{ flex: 1, minWidth: 0, alignItems: 'center', overflow: 'hidden' }}>
+          <span className="row gap6" style={{ alignItems: 'center', fontWeight: 600, color: 'var(--text-primary)', flex: 'none' }}>
+            <Icon name="git-branch" size={13} style={{ color: 'var(--accent-primary)' }} />
+            {t('explain.title')}
           </span>
-        )}
-        <span style={{ flex: 1 }} />
+          {plan && (
+            <span style={{ color: 'var(--text-tertiary)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {plan.databaseType.toUpperCase()} · {t('explain.nodeCount', { count: nodeCount })}
+            </span>
+          )}
+        </div>
         {plan && (
           <div className="row" style={{ gap: 2, padding: 2, borderRadius: 9, background: 'var(--surface-sunken)', flex: 'none' }}>
             {tabBtn('tree', t('explain.tree'), 'git-branch', 'explain-view-tree')}
@@ -118,7 +120,7 @@ export function ExplainPlanViewer({ plan, error, loading, onClose }: ExplainPlan
           </div>
         )}
         {onClose && (
-          <button className="icon-btn bare" title={t('explain.close')} onClick={onClose}>
+          <button className="icon-btn bare" title={t('explain.close')} onClick={onClose} style={{ flex: 'none' }}>
             <Icon name="x" size={14} />
           </button>
         )}
