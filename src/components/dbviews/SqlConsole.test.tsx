@@ -39,6 +39,7 @@ vi.mock('../../services/db', () => ({
   runExplain: (...args: unknown[]) => runExplainMock(...(args as [])),
   getSchema: (...args: unknown[]) => getSchemaMock(...(args as [])),
   schemaColumns: vi.fn(() => Promise.resolve([])),
+  erRelations: vi.fn(() => Promise.resolve([])),
   tablePreview: vi.fn(() => Promise.resolve({ columns: [], rows: [] })),
   dbErrMsg: (e: unknown) => (e instanceof Error ? e.message : String(e)),
 }))

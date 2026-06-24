@@ -4,8 +4,9 @@ import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn } from '../atoms'
 import { useData } from '../../state/DataContext'
-import { runQuery, runExplain, getSchema, schemaColumns, tablePreview, dbErrMsg } from '../../services/db'
-import type { ResultColumn, Schema } from '../../services/types'
+import { runQuery, runExplain, getSchema, schemaColumns, tablePreview, erRelations, dbErrMsg } from '../../services/db'
+import type { ResultColumn, Schema, ErRelation } from '../../services/types'
+import { sqlAdvancedCompletion, type JoinTable } from './sqlAdvancedCompletion'
 import { SqlEditor, type SqlEditorHandle } from './SqlEditor'
 import { mongoCompletion } from './mongoCompletion'
 import { redisCompletion } from './redisCompletion'
@@ -102,6 +103,9 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
   const [defaultNamespace, setDefaultNamespace] = useState(initialDefaultSchema ?? '')
   // Live columns per schema namespace: { [schemaName]: { [table]: columns } }.
   const [liveColumns, setLiveColumns] = useState<Record<string, Record<string, string[]>>>({})
+  // Live foreign-key relations per schema namespace (S3 外键 JOIN 建议的数据源)。
+  // 形如 { [schemaName]: ErRelation[] }(from.fromCol → to.toCol)。
+  const [liveRelations, setLiveRelations] = useState<Record<string, ErRelation[]>>({})
   // Imperative handle to the CodeMirror editor for cursor-aware insertion.
   const editorRef = useRef<SqlEditorHandle>(null)
   // 编辑区/结果区上下分隔(功能#5):编辑区占比,仅会话内存。
@@ -269,6 +273,24 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connId, plain, namespaceKey])
 
+  // S3:每个库/Schema 的外键关系(JOIN 建议数据源)。复用 ER 图的 erRelations
+  // (每库一次调用,廉价)。best-effort:失败的库留空,JOIN 建议对其降级为无候选。
+  useEffect(() => {
+    if (!connId || plain || namespaceNames.length === 0) { setLiveRelations({}); return }
+    let alive = true
+    Promise.all(
+      namespaceNames.map(name =>
+        erRelations(connId, name)
+          .then(rels => [name, rels] as const)
+          .catch(() => [name, [] as ErRelation[]] as const),
+      ),
+    )
+      .then(entries => { if (alive) setLiveRelations(Object.fromEntries(entries)) })
+      .catch(() => { if (alive) setLiveRelations({}) })
+    return () => { alive = false }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connId, plain, namespaceKey])
+
   /**
    * Nested completion schema for the SQL editor, in @codemirror/lang-sql's
    * `SQLNamespace` shape so schemas, tables, and columns render with DISTINCT
@@ -320,6 +342,49 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
     sqlTablesRef.current = linterTableNames(connId, liveSchema, D.schema)
     return top
   }, [connId, liveSchema, liveColumns, D.schema, D.tableStructures])
+
+  // S3:JOIN 建议用的 JoinTable[]（表名 + 列 + 外键)。跨所有库聚合;外键来自
+  // liveRelations(已连接) / D.erModel(mock)。外键以 from.fromCol → to.toCol 表示。
+  // 持有于 ref,使补全源标识稳定(schema/列/外键加载不重建编辑器)。
+  const joinTablesRef = useRef<JoinTable[]>([])
+  useEffect(() => {
+    const namespaces = (liveSchema ?? D.schema).schemas
+    const byName = new Map<string, JoinTable>()
+    const ensure = (name: string): JoinTable => {
+      const key = name.toLowerCase()
+      let jt = byName.get(key)
+      if (!jt) { jt = { name, columns: [], foreignKeys: [] }; byName.set(key, jt) }
+      return jt
+    }
+    for (const ns of namespaces) {
+      const realCols = connId ? liveColumns[ns.name] : undefined
+      for (const tbl of [...ns.tables, ...ns.views]) {
+        const cols = connId ? (realCols?.[tbl.name] ?? []) : (D.tableStructures[tbl.name]?.columns.map(c => c.name) ?? [])
+        const jt = ensure(tbl.name)
+        if (cols.length && jt.columns.length === 0) jt.columns = cols
+      }
+      // 外键关系:from.fromCol(持有 FK 的表/列) → to.toCol(被引用表/列)。
+      const rels = connId ? (liveRelations[ns.name] ?? []) : D.erModel.relations
+      for (const r of rels) {
+        const owner = ensure(r.from)
+        ensure(r.to)
+        if (!owner.foreignKeys.some(fk => fk.column === r.fromCol && fk.refTable === r.to && fk.refColumn === r.toCol)) {
+          owner.foreignKeys.push({ column: r.fromCol, refTable: r.to, refColumn: r.toCol })
+        }
+      }
+    }
+    joinTablesRef.current = [...byName.values()]
+  }, [connId, liveSchema, liveColumns, liveRelations, D.schema, D.tableStructures, D.erModel])
+
+  // 引擎也以 ref 暴露给补全源,避免方言变化重建编辑器扩展。
+  const engineRef = useRef(engine)
+  engineRef.current = engine
+  // 高级 SQL 补全源(函数签名补全 + 外键 JOIN 建议)。plain 引擎不挂(无 SQL 语义)。
+  // 标识稳定:惰性读取 engine/joinTables,故 schema/外键加载不触发编辑器重建。
+  const advancedCompletion = useMemo(
+    () => (plain ? undefined : sqlAdvancedCompletion(() => engineRef.current, () => joinTablesRef.current)),
+    [plain],
+  )
 
   // 自增运行令牌：每次运行/停止都 +1，在途的 then/catch 只有令牌仍匹配时才落地。
   // 这样"停止"或被新一次运行取代时，旧结果会被丢弃,UI 立即交还控制权。
@@ -525,7 +590,7 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
           width: '100%',
           borderBottom: !hasResults ? 'none' : '1px solid var(--border-hairline)',
         }}>
-          <SqlEditor ref={editorRef} code={code} onChange={setCode} schema={editorSchema} onRun={run} onRunSelection={connId ? (sql => run(sql)) : undefined} placeholder={editorPlaceholder} plain={plain} completion={completion} lintSource={lintSource} />
+          <SqlEditor ref={editorRef} code={code} onChange={setCode} schema={editorSchema} onRun={run} onRunSelection={connId ? (sql => run(sql)) : undefined} placeholder={editorPlaceholder} plain={plain} completion={completion} lintSource={lintSource} extraCompletion={advancedCompletion} />
         </div>
       )}
       {/* 功能#5:编辑区与结果区之间的水平拖动分隔条。仅在 split 态且有结果区时显示。 */}

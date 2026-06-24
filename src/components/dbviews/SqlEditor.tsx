@@ -37,6 +37,11 @@ export interface SqlEditorProps {
   completion?: CompletionSource
   /** plain 模式下的语法诊断源(如 redis 命令诊断)。非 plain 时忽略。 */
   lintSource?: (view: EditorView) => Diagnostic[]
+  /**
+   * 非 plain(SQL)模式下,在 lang-sql 内置补全之外追加的补全源(如函数签名补全、
+   * 外键 JOIN 建议)。与内置补全合并显示,不替换它(保留现有表/列补全不退化)。
+   */
+  extraCompletion?: CompletionSource
 }
 
 /** Imperative handle exposed to parents (e.g. SqlConsole) for cursor-aware
@@ -161,7 +166,7 @@ const catioTheme = EditorView.theme(
 )
 
 export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function SqlEditor(
-  { code, onChange, minHeight, target = 'prod-orders', schema, onRun, onRunSelection, placeholder, plain, completion, lintSource },
+  { code, onChange, minHeight, target = 'prod-orders', schema, onRun, onRunSelection, placeholder, plain, completion, lintSource, extraCompletion },
   ref,
 ) {
   const { t: tr } = useTranslation()
@@ -180,6 +185,9 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
       return exts
     }
     const exts: Extension[] = [sql({ dialect: PostgreSQL, schema, upperCaseKeywords: true }), autocompletion()]
+    // 追加的 SQL 补全源(函数签名补全 / 外键 JOIN 建议)。通过 languageData 注册,
+    // 与 lang-sql 内置的表/列/关键字补全合并显示(不 override,故现有补全不退化)。
+    if (extraCompletion) exts.push(EditorState.languageData.of(() => [{ autocomplete: extraCompletion }]))
     // SQL 诊断(未闭合括号/字符串、未知表名)+ gutter 标记,与 redis 控制台一致。
     if (lintSource) exts.push(linter(view => lintSource(view)), lintGutter())
     return exts
@@ -275,7 +283,7 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
     if (!view) return
     view.dispatch({ effects: sqlCompartment.current.reconfigure(langExt()) })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [schema, plain, completion, lintSource])
+  }, [schema, plain, completion, lintSource, extraCompletion])
 
   // Sync external `code` changes (e.g. AI-inserted SQL, Clear button) into the
   // doc without clobbering the cursor while the user types locally.
