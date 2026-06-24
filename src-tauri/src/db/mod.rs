@@ -11,6 +11,7 @@ pub mod manager;
 pub mod commands;
 pub mod dml;
 pub mod export;
+pub mod xlsx_export;
 pub mod table_import;
 pub mod transfer;
 pub mod sql_file;

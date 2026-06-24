@@ -529,6 +529,21 @@ pub async fn export_file(path: String, contents: String) -> Result<(), String> {
     std::fs::write(&path, contents).map_err(|e| e.to_string())
 }
 
+/// 把当前网格的列 + 行构建成 .xlsx 字节并写入 `path`。二进制不经 IPC 当字符串传:前端
+/// 选好路径后把列名/行(JSON 值)传进来,后端用 xlsx_export::build_xlsx_workbook(手写
+/// OOXML + zip 打包,纯函数已单测)生成字节直接落盘。
+#[tauri::command]
+pub async fn db_export_xlsx(
+    columns: Vec<String>, rows: Vec<Vec<serde_json::Value>>, sheet_name: Option<String>, path: String,
+) -> Result<(), String> {
+    let bytes = crate::db::xlsx_export::build_xlsx_workbook(&crate::db::xlsx_export::XlsxWorksheetData {
+        sheet_name,
+        columns,
+        rows,
+    })?;
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())
+}
+
 /// 解析整库导出的「单表行上限」。
 ///
 /// codex 评审阻断项修复：调用方**省略** `row_limit` 时返回 `None`（无上限，导出全部

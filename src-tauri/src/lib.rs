@@ -74,6 +74,7 @@ pub fn run() {
             db::commands::db_snippets,
             db::commands::db_save_snippet,
             db::commands::export_file,
+            db::commands::db_export_xlsx,
             db::commands::db_export_database,
             db::commands::db_import_preview,
             db::commands::db_import_table,

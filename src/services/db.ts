@@ -318,6 +318,19 @@ export async function exportFile(path: string, contents: string): Promise<void> 
 }
 
 /**
+ * 把列 + 行导出为 .xlsx。二进制在后端构建并直接写盘(不把字节当字符串过 IPC):
+ * 前端选好路径后把列名/行(JSON 值)传给后端 db_export_xlsx(纯函数已单测)。
+ */
+export async function exportXlsx(args: {
+  columns: string[]; rows: unknown[][]; sheetName?: string; path: string
+}): Promise<void> {
+  if (!isTauri()) throw new Error('exportXlsx requires the Tauri runtime')
+  return tauriInvoke('db_export_xlsx', {
+    columns: args.columns, rows: args.rows, sheetName: args.sheetName, path: args.path,
+  })
+}
+
+/**
  * Whole-database SQL export: DDL (supplied per table) + data INSERT batches.
  * The frontend gathers the per-table DDL (its structure-panel logic) and passes
  * it as `tableDdls`; the backend pages through rows and assembles the script.

@@ -3,11 +3,12 @@ import { useState, useMemo, useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn, IconBtn } from '../atoms'
-import { previewDml, applyEdits, queryPage, tablePreview, tableQuery, exportFile, dbErrMsg, type EditRequest } from '../../services/db'
+import { previewDml, applyEdits, queryPage, tablePreview, tableQuery, exportFile, exportXlsx, dbErrMsg, type EditRequest } from '../../services/db'
 import type { ResultColumn } from '../../services/types'
 import { reduceCellSelection, reduceRowSelection, isCellInRange, normalizeRange, cellsInRange, type GridSelection } from './gridSelection'
 import { filterRows, filterModeNeedsValue, type FilterRule, type FilterMode } from './gridFilter'
 import { buildInsertSql, buildUpdateSql } from './copySql'
+import { buildMarkdownTable } from './markdownTable'
 import { visibleColumnNames, allNullColumnNames, toggleColumnVisibility, showAllColumns } from './columnVisibility'
 import { dialectFor } from './structureDdl'
 import { supportsServerFilter } from './serverFilter'
@@ -479,12 +480,16 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   // (after filter + sort) and columns. SQL reuses the same INSERT builder as the
   // grid's "copy as SQL" path (copySql.buildInsertSql), so escaping/quoting stays
   // consistent with single-row edits (dml.rs::build_insert).
-  function buildExport(format: 'csv' | 'json' | 'sql'): { text: string; type: string } {
+  function buildExport(format: 'csv' | 'json' | 'sql' | 'md'): { text: string; type: string } {
     const displayRows = pageRows.map(({ row }) => row)
     if (format === 'sql') {
       const colNames = columns.map(c => c.name)
       const sql = buildInsertSql(displayRows, table, colNames, dialectFor(engine), schema)
       return { text: sql, type: 'text/plain' }
+    }
+    if (format === 'md') {
+      const md = buildMarkdownTable(columns.map(c => c.name), displayRows)
+      return { text: md, type: 'text/markdown' }
     }
     if (format === 'csv') {
       const header = columns.map(c => csvEscape(c.name)).join(',')
@@ -502,9 +507,30 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   // Export the displayed rows. Inside Tauri the webview `<a download>` is a no-op,
   // so pick a destination via the dialog plugin and write the file through the
   // backend. Outside Tauri keep the Blob download so the demo still works.
-  async function exportAs(format: 'csv' | 'json' | 'sql') {
+  async function exportAs(format: 'csv' | 'json' | 'sql' | 'md' | 'xlsx') {
     setExportMenuOpen(false)
     setExportErr(null)
+    // XLSX 是二进制:由后端构建字节并写盘,不把字节当字符串过 IPC。
+    if (format === 'xlsx') {
+      if (!isTauri()) {
+        setExportErr(t('dbviews.applyError', { message: 'XLSX export requires the desktop app' }))
+        return
+      }
+      try {
+        const { save } = await import('@tauri-apps/plugin-dialog')
+        const path = await save({
+          defaultPath: 'export.xlsx',
+          filters: [{ name: 'Excel', extensions: ['xlsx'] }],
+        })
+        if (path) {
+          const displayRows = pageRows.map(({ row }) => row)
+          await exportXlsx({ columns: columns.map(c => c.name), rows: displayRows, sheetName: table, path })
+        }
+      } catch (e) {
+        setExportErr(t('dbviews.applyError', { message: dbErrMsg(e) }))
+      }
+      return
+    }
     const { text, type } = buildExport(format)
     if (!isTauri()) {
       triggerDownload(text, type, `export.${format}`)
@@ -1072,11 +1098,17 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
               onClick={() => { setExportMenuOpen(o => !o); setSortMenuOpen(false) }}>{t('dbviews.export')}</Btn>
             {exportMenuOpen && (
               <div className="pop-in" style={{ position: 'absolute', top: 'calc(100% + 6px)', right: 0, zIndex: 60, minWidth: 120, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', borderRadius: 10, boxShadow: 'var(--shadow-window)', padding: 4 }}>
-                {(['csv', 'json', 'sql'] as const).map(fmt => (
+                {([
+                  { fmt: 'csv', icon: 'table-2', label: 'CSV' },
+                  { fmt: 'json', icon: 'file-code', label: 'JSON' },
+                  { fmt: 'sql', icon: 'database', label: 'SQL' },
+                  { fmt: 'xlsx', icon: 'layout-grid', label: 'Excel (.xlsx)' },
+                  { fmt: 'md', icon: 'file-code', label: 'Markdown (.md)' },
+                ] as const).map(({ fmt, icon, label }) => (
                   <button key={fmt} className="row" onClick={() => exportAs(fmt)}
                     style={{ width: '100%', gap: 8, padding: '6px 10px', borderRadius: 7, border: 'none', background: 'transparent', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 12.5, textAlign: 'left' }}>
-                    <Icon name={fmt === 'csv' ? 'table-2' : fmt === 'sql' ? 'database' : 'file-code'} size={13} />
-                    {fmt.toUpperCase()}
+                    <Icon name={icon} size={13} />
+                    {label}
                   </button>
                 ))}
               </div>

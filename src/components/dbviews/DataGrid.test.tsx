@@ -12,6 +12,7 @@ const queryPage = vi.fn()
 const tablePreview = vi.fn()
 const tableQuery = vi.fn()
 const exportFile = vi.fn()
+const exportXlsx = vi.fn()
 vi.mock('../../services/db', () => ({
   previewDml: (...a: unknown[]) => previewDml(...a),
   applyEdits: (...a: unknown[]) => applyEdits(...a),
@@ -19,6 +20,7 @@ vi.mock('../../services/db', () => ({
   tablePreview: (...a: unknown[]) => tablePreview(...a),
   tableQuery: (...a: unknown[]) => tableQuery(...a),
   exportFile: (...a: unknown[]) => exportFile(...a),
+  exportXlsx: (...a: unknown[]) => exportXlsx(...a),
   dbErrMsg: (e: unknown) => (e instanceof Error ? e.message : String(e)),
 }))
 
@@ -506,6 +508,61 @@ describe('DataGrid generic rows', () => {
     expect(contents).toContain('INSERT INTO "orders" ("id", "name") VALUES (1, \'alice\');')
     // 单引号转义为加倍单引号(对齐 dml.rs)
     expect(contents).toContain("(2, 'O''Hara')")
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
+
+  it('S2: Markdown 导出 —— 当前显示行渲染成管道表格,经 exportFile 落盘', async () => {
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: {}, configurable: true })
+    dialogSave.mockReset()
+    dialogSave.mockResolvedValue('/tmp/export.md')
+    exportFile.mockReset()
+    const columns: ResultColumn[] = [
+      { name: 'id', type: 'int', pk: true },
+      { name: 'name', type: 'text' },
+    ]
+    const rows: unknown[][] = [[1, 'a|b'], [2, 'x']]
+    wrap(<DataGrid columns={columns} rows={rows} connId="c1" table="orders" engine="postgres" />)
+
+    fireEvent.click(screen.getByText('Export'))
+    const mdBtn = screen.getByText('Markdown (.md)')
+    expect(mdBtn).toBeInTheDocument()
+    fireEvent.click(mdBtn)
+
+    await waitFor(() => expect(exportFile).toHaveBeenCalledTimes(1))
+    const [path, contents] = exportFile.mock.calls[0] as [string, string]
+    expect(path).toBe('/tmp/export.md')
+    expect(contents).toContain('| id  | name')
+    expect(contents).toContain('| --- |')
+    // 管道符转义为 \|
+    expect(contents).toContain('a\\|b')
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
+
+  it('S2: Excel 导出 —— 二进制走后端 exportXlsx(列/行/sheetName/path)而非 exportFile', async () => {
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: {}, configurable: true })
+    dialogSave.mockReset()
+    dialogSave.mockResolvedValue('/tmp/export.xlsx')
+    exportFile.mockReset()
+    exportXlsx.mockReset()
+    const columns: ResultColumn[] = [
+      { name: 'id', type: 'int', pk: true },
+      { name: 'name', type: 'text' },
+    ]
+    const rows: unknown[][] = [[1, 'alice'], [2, 'bob']]
+    wrap(<DataGrid columns={columns} rows={rows} connId="c1" table="orders" engine="postgres" />)
+
+    fireEvent.click(screen.getByText('Export'))
+    const xlsxBtn = screen.getByText('Excel (.xlsx)')
+    expect(xlsxBtn).toBeInTheDocument()
+    fireEvent.click(xlsxBtn)
+
+    await waitFor(() => expect(exportXlsx).toHaveBeenCalledTimes(1))
+    expect(exportFile).not.toHaveBeenCalled()
+    const [arg] = exportXlsx.mock.calls[0] as [{ columns: string[]; rows: unknown[][]; sheetName?: string; path: string }]
+    expect(arg.path).toBe('/tmp/export.xlsx')
+    expect(arg.columns).toEqual(['id', 'name'])
+    expect(arg.rows).toEqual([[1, 'alice'], [2, 'bob']])
+    expect(arg.sheetName).toBe('orders')
     delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
   })
 
