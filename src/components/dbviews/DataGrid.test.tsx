@@ -524,7 +524,7 @@ describe('DataGrid generic rows', () => {
     wrap(<DataGrid columns={columns} rows={rows} connId="c1" table="orders" engine="postgres" />)
 
     fireEvent.click(screen.getByText('Export'))
-    const mdBtn = screen.getByText('Markdown (.md)')
+    const mdBtn = screen.getByText('Markdown')
     expect(mdBtn).toBeInTheDocument()
     fireEvent.click(mdBtn)
 
@@ -552,7 +552,7 @@ describe('DataGrid generic rows', () => {
     wrap(<DataGrid columns={columns} rows={rows} connId="c1" table="orders" engine="postgres" />)
 
     fireEvent.click(screen.getByText('Export'))
-    const xlsxBtn = screen.getByText('Excel (.xlsx)')
+    const xlsxBtn = screen.getByText('Excel')
     expect(xlsxBtn).toBeInTheDocument()
     fireEvent.click(xlsxBtn)
 
@@ -626,6 +626,26 @@ describe('DataGrid generic rows', () => {
       wrap(<DataGrid columns={columns} rows={rows} statusTones={{}} />)
       expect(screen.queryByPlaceholderText('WHERE')).toBeNull()
       expect(screen.queryByPlaceholderText('ORDER BY')).toBeNull()
+    })
+
+    it('WHERE 输入框聚焦后弹出字段/关键字候选,点击列名插入', () => {
+      wrap(<DataGrid columns={columns} rows={rows} connId="c1" table="orders" schema="public" livePreview />)
+      const where = screen.getByPlaceholderText('WHERE') as HTMLInputElement
+      fireEvent.focus(where)
+      // 候选含列名(id/name)与 WHERE 关键字(AND);点击列名插入到输入框。
+      const idOpt = screen.getAllByText('id').find(el => el.closest('button'))!
+      expect(idOpt).toBeTruthy()
+      expect(screen.getByText('AND')).toBeInTheDocument()
+      fireEvent.mouseDown(idOpt)
+      expect(where.value).toBe('id')
+    })
+
+    it('拖拽表头字段名到 WHERE 输入框,在光标处插入列名', () => {
+      wrap(<DataGrid columns={columns} rows={rows} connId="c1" table="orders" schema="public" livePreview />)
+      const where = screen.getByPlaceholderText('WHERE') as HTMLInputElement
+      const dt = { getData: (t: string) => (t === 'text/plain' ? 'name' : ''), setData: () => {}, effectAllowed: '' }
+      fireEvent.drop(where, { dataTransfer: dt })
+      expect(where.value).toBe('name')
     })
 
     it('非 SQL 引擎(mongodb/redis/es)即使 livePreview 也不显示 WHERE / ORDER BY 输入框', () => {

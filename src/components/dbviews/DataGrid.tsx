@@ -12,6 +12,7 @@ import { buildMarkdownTable } from './markdownTable'
 import { visibleColumnNames, allNullColumnNames, toggleColumnVisibility, showAllColumns } from './columnVisibility'
 import { dialectFor } from './structureDdl'
 import { supportsServerFilter } from './serverFilter'
+import { clauseSuggest, applyClauseItem, insertAtCursor, type ClauseMode, type ClauseSuggest, type ClauseItem } from './clauseComplete'
 import { TableImportDialog } from './TableImportDialog'
 
 export interface DataGridProps {
@@ -160,6 +161,42 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   const [orderInput, setOrderInput] = useState('')
   const [serverWhere, setServerWhere] = useState('')
   const [serverOrder, setServerOrder] = useState('')
+  // WHERE/ORDER BY 输入框的字段/关键字候选下拉:记录当前活跃输入框 + 候选(光标处 token)。
+  const whereRef = useRef<HTMLInputElement>(null)
+  const orderRef = useRef<HTMLInputElement>(null)
+  const [clause, setClause] = useState<{ which: ClauseMode; sug: ClauseSuggest } | null>(null)
+  const clauseRef = (which: ClauseMode) => (which === 'where' ? whereRef : orderRef)
+  // 按当前输入框光标位置刷新候选(focus/输入/点击/方向键时调用)。
+  function refreshClause(which: ClauseMode, el: HTMLInputElement | null) {
+    if (!el) return
+    setClause({ which, sug: clauseSuggest(el.value, el.selectionStart ?? el.value.length, colNames, which) })
+  }
+  // 选中候选:替换光标处 token,刷新输入框值并把光标移到插入末尾,再重算候选。
+  function pickClause(item: ClauseItem) {
+    if (!clause) return
+    const which = clause.which
+    const cur = which === 'where' ? whereInput : orderInput
+    const { value, cursor } = applyClauseItem(cur, clause.sug, item)
+    ;(which === 'where' ? setWhereInput : setOrderInput)(value)
+    requestAnimationFrame(() => {
+      const el = clauseRef(which).current
+      if (el) { el.focus(); el.setSelectionRange(cursor, cursor); refreshClause(which, el) }
+    })
+  }
+  // 拖拽:把表头字段名拖入输入框 → 在光标处插入列名。
+  function dropClause(which: ClauseMode, e: React.DragEvent<HTMLInputElement>) {
+    e.preventDefault()
+    const name = e.dataTransfer.getData('text/plain')
+    if (!name) return
+    const el = clauseRef(which).current
+    const cur = which === 'where' ? whereInput : orderInput
+    const pos = el?.selectionStart ?? cur.length
+    const { value, cursor } = insertAtCursor(cur, pos, name)
+    ;(which === 'where' ? setWhereInput : setOrderInput)(value)
+    requestAnimationFrame(() => {
+      if (el) { el.focus(); el.setSelectionRange(cursor, cursor); refreshClause(which, el) }
+    })
+  }
   const [sortMenuOpen, setSortMenuOpen] = useState(false)
   const [exportMenuOpen, setExportMenuOpen] = useState(false)
   const sortMenuRef = useRef<HTMLDivElement>(null)
@@ -359,6 +396,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   // 直接用提交值构造取数闭包,避免 setState 后 fetchPage memo 尚未刷新导致读到旧片段。
   async function submitServerFilter() {
     if (!(connId && livePreview)) return
+    setClause(null)
     const w = whereInput.trim()
     const o = orderInput.trim()
     setServerWhere(w)
@@ -1102,8 +1140,8 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
                   { fmt: 'csv', icon: 'table-2', label: 'CSV' },
                   { fmt: 'json', icon: 'file-code', label: 'JSON' },
                   { fmt: 'sql', icon: 'database', label: 'SQL' },
-                  { fmt: 'xlsx', icon: 'layout-grid', label: 'Excel (.xlsx)' },
-                  { fmt: 'md', icon: 'file-code', label: 'Markdown (.md)' },
+                  { fmt: 'xlsx', icon: 'layout-grid', label: 'Excel' },
+                  { fmt: 'md', icon: 'file-code', label: 'Markdown' },
                 ] as const).map(({ fmt, icon, label }) => (
                   <button key={fmt} className="row" onClick={() => exportAs(fmt)}
                     style={{ width: '100%', gap: 8, padding: '6px 10px', borderRadius: 7, border: 'none', background: 'transparent', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 12.5, textAlign: 'left' }}>
@@ -1123,22 +1161,45 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
           返回 Unsupported,暴露输入框只会让用户提交后撞上误导性报错(codex 阻断项[P2])。 */}
       {livePreview && connId && supportsServerFilter(engine) && (
         <div className="row" style={{ padding: '7px 12px', borderBottom: '1px solid var(--border-hairline)', background: 'var(--surface-subtle)', gap: 8 }}>
-          <div className="row gap6" style={{ flex: 1, minWidth: 0 }}>
-            <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-faint)', flex: 'none' }}>WHERE</span>
-            <input value={whereInput} onChange={e => setWhereInput(e.target.value)}
-              placeholder="WHERE" aria-label={t('dbviews.whereClause')}
-              onKeyDown={e => { if (e.key === 'Enter') submitServerFilter() }}
-              className="mono"
-              style={{ flex: 1, minWidth: 0, border: '1px solid var(--border-hairline)', borderRadius: 7, padding: '4px 8px', background: 'var(--surface-card)', color: 'var(--text-primary)', font: 'inherit', fontSize: 12, outline: 'none' }} />
-          </div>
-          <div className="row gap6" style={{ flex: 1, minWidth: 0 }}>
-            <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-faint)', flex: 'none' }}>ORDER BY</span>
-            <input value={orderInput} onChange={e => setOrderInput(e.target.value)}
-              placeholder="ORDER BY" aria-label={t('dbviews.orderByClause')}
-              onKeyDown={e => { if (e.key === 'Enter') submitServerFilter() }}
-              className="mono"
-              style={{ flex: 1, minWidth: 0, border: '1px solid var(--border-hairline)', borderRadius: 7, padding: '4px 8px', background: 'var(--surface-card)', color: 'var(--text-primary)', font: 'inherit', fontSize: 12, outline: 'none' }} />
-          </div>
+          {([
+            { which: 'where' as ClauseMode, value: whereInput, set: setWhereInput, ref: whereRef, label: 'WHERE', aria: 'dbviews.whereClause' },
+            { which: 'order' as ClauseMode, value: orderInput, set: setOrderInput, ref: orderRef, label: 'ORDER BY', aria: 'dbviews.orderByClause' },
+          ]).map(({ which, value, set, ref, label, aria }) => (
+            <div key={which} className="row gap6" style={{ flex: 1, minWidth: 0 }}>
+              <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-faint)', flex: 'none' }}>{label}</span>
+              {/* relative 容器:候选下拉绝对定位在输入框下方。支持字段名拖入 + 字段/关键字候选。 */}
+              <div className="col" style={{ flex: 1, minWidth: 0, position: 'relative' }}>
+                <input ref={ref} value={value}
+                  onChange={e => { set(e.target.value); refreshClause(which, e.currentTarget) }}
+                  onFocus={e => refreshClause(which, e.currentTarget)}
+                  onClick={e => refreshClause(which, e.currentTarget)}
+                  onBlur={() => setTimeout(() => setClause(c => (c && c.which === which ? null : c)), 120)}
+                  onDragOver={e => e.preventDefault()}
+                  onDrop={e => dropClause(which, e)}
+                  placeholder={label} aria-label={t(aria)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') { setClause(null); submitServerFilter() }
+                    else if (e.key === 'Escape') setClause(null)
+                  }}
+                  className="mono"
+                  style={{ width: '100%', minWidth: 0, border: '1px solid var(--border-hairline)', borderRadius: 7, padding: '4px 8px', background: 'var(--surface-card)', color: 'var(--text-primary)', font: 'inherit', fontSize: 12, outline: 'none' }} />
+                {clause?.which === which && clause.sug.items.length > 0 && (
+                  <div className="pop-in" style={{ position: 'absolute', top: 'calc(100% + 4px)', left: 0, zIndex: 70, minWidth: 180, maxHeight: 220, overflowY: 'auto', background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', borderRadius: 8, boxShadow: 'var(--shadow-window)', padding: 4 }}>
+                    {clause.sug.items.slice(0, 50).map(it => (
+                      <button key={it.kind + ':' + it.label} type="button"
+                        onMouseDown={e => { e.preventDefault(); pickClause(it) }}
+                        className="row" style={{ width: '100%', gap: 8, padding: '4px 8px', border: 'none', background: 'transparent', cursor: 'pointer', textAlign: 'left', fontSize: 12, color: 'var(--text-primary)', borderRadius: 6 }}
+                        onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = 'var(--accent-soft)' }}
+                        onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}>
+                        <Icon name={it.kind === 'column' ? 'columns' : 'command'} size={12} style={{ color: it.kind === 'column' ? 'var(--accent-primary)' : 'var(--text-faint)', flex: 'none' }} />
+                        <span className="ell mono">{it.label}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          ))}
           <Btn size="sm" variant="secondary" icon="search" onClick={submitServerFilter}>{t('dbviews.applyServerFilter')}</Btn>
         </div>
       )}
@@ -1225,7 +1286,10 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
             {visibleColumns.map((col) => (
               <div key={col.name} style={{ ...thStyle, position: 'relative' }} onClick={() => toggleSort(col.name)} className="gridhead">
                 <Icon name={col.icon ?? colIcon(col)} size={12} style={{ color: col.pk ? 'var(--signal-amber)' : col.fk ? 'var(--signal-blue)' : 'var(--text-faint)' }} />
-                <span className="ell" style={{ color: 'var(--text-secondary)', fontWeight: 600 }} title={commentMode && col.comment ? col.comment : undefined}>{headLabel(col)}</span>
+                <span className="ell" draggable
+                  onDragStart={e => { e.stopPropagation(); e.dataTransfer.setData('text/plain', col.name); e.dataTransfer.effectAllowed = 'copy' }}
+                  style={{ color: 'var(--text-secondary)', fontWeight: 600, cursor: 'grab' }}
+                  title={commentMode && col.comment ? col.comment : undefined}>{headLabel(col)}</span>
                 {col.pk && <span style={{ fontSize: 9, color: 'var(--signal-amber)', fontWeight: 700 }}>PK</span>}
                 {sortCol === col.name && <Icon name={sortDir === 'asc' ? 'chevron-up' : 'chevron-down'} size={12} style={{ color: 'var(--accent-primary)', marginLeft: 'auto' }} />}
                 {/* 列宽拖动手柄：列右缘，stopPropagation 避免触发排序 */}
