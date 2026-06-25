@@ -36,10 +36,10 @@ export function clauseSuggest(value: string, cursor: number, columns: string[], 
   const kws: ClauseItem[] = (mode === 'where' ? WHERE_KEYWORDS : ORDER_KEYWORDS)
     .map(k => ({ label: k, insert: k, kind: 'keyword' as const }))
   const all = [...cols, ...kws]
-  // 空 token → 全部候选(列在前);否则按前缀(大小写不敏感)过滤,并剔除与 token 完全相等的项
-  // ——已打全/刚选中的候选不再重复弹出(真机反馈:选中后候选一直显示);以其为前缀的更长候选仍保留。
+  // 真机反馈:聚焦/空 token 不弹候选(空 token → 无候选),只有输入了前缀、匹配到字段/关键字时才弹;
+  // 并剔除与 token 完全相等的项(已打全/刚选中不再重复弹),以其为前缀的更长候选仍保留。
   const items = lower === ''
-    ? all
+    ? []
     : all.filter(i => { const l = i.label.toLowerCase(); return l.startsWith(lower) && l !== lower })
   return { start, end: pos, items }
 }
@@ -49,12 +49,4 @@ export function applyClauseItem(value: string, sug: ClauseSuggest, item: ClauseI
   const before = value.slice(0, sug.start)
   const after = value.slice(sug.end)
   return { value: before + item.insert + after, cursor: (before + item.insert).length }
-}
-
-/** 在光标处插入一段文本(用于「拖字段名到输入框」),返回新值与新光标位置。 */
-export function insertAtCursor(value: string, cursor: number, text: string): { value: string; cursor: number } {
-  const pos = Math.max(0, Math.min(cursor, value.length))
-  const before = value.slice(0, pos)
-  const after = value.slice(pos)
-  return { value: before + text + after, cursor: before.length + text.length }
 }

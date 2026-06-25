@@ -1,15 +1,13 @@
 import { describe, it, expect } from 'vitest'
-import { clauseSuggest, applyClauseItem, insertAtCursor } from './clauseComplete'
+import { clauseSuggest, applyClauseItem } from './clauseComplete'
 
 const COLS = ['id', 'secucode', 'security_code', 'org_code']
 
 describe('clauseSuggest', () => {
-  it('空 token 返回全部列 + 关键字(列在前)', () => {
-    const s = clauseSuggest('', 0, COLS, 'where')
-    expect(s.start).toBe(0)
-    expect(s.end).toBe(0)
-    expect(s.items.slice(0, 4).map(i => i.label)).toEqual(COLS)
-    expect(s.items.some(i => i.kind === 'keyword' && i.label === 'AND')).toBe(true)
+  it('空 token(聚焦/操作符后)不返回候选 —— 不弹挂框', () => {
+    expect(clauseSuggest('', 0, COLS, 'where').items).toEqual([])
+    // org_code= 后光标处 token 为空 → 不弹(真机反馈)。
+    expect(clauseSuggest('org_code=', 9, COLS, 'where').items).toEqual([])
   })
 
   it('按前缀过滤列名(大小写不敏感),并给出 token 替换区间', () => {
@@ -39,19 +37,14 @@ describe('clauseSuggest', () => {
     expect(s.items.map(i => i.label)).toEqual(['code_x'])
   })
 
-  it('WHERE 模式给 AND/OR 等关键字,ORDER 模式给 ASC/DESC', () => {
-    const w = clauseSuggest('', 0, COLS, 'where').items.filter(i => i.kind === 'keyword').map(i => i.label)
+  it('输入前缀匹配关键字:WHERE 给 AND,ORDER 给 ASC,互不混入', () => {
+    // 输入 'a' → WHERE 匹配 AND(列里无以 a 开头者);ORDER 匹配 ASC。
+    const w = clauseSuggest('org_code = 1 a', 14, COLS, 'where').items.map(i => i.label)
     expect(w).toContain('AND')
-    expect(w).toContain('IS NULL')
-    const o = clauseSuggest('', 0, COLS, 'order').items.filter(i => i.kind === 'keyword').map(i => i.label)
-    expect(o).toEqual(['ASC', 'DESC'])
-  })
-
-  it('ORDER BY:输入 id 后补 ASC/DESC 不应混入 WHERE 关键字', () => {
-    const o = clauseSuggest('id ', 3, COLS, 'order')
-    // token 为空(光标在空格后)→ 全部列 + ASC/DESC,无 AND/OR
-    expect(o.items.some(i => i.label === 'AND')).toBe(false)
-    expect(o.items.some(i => i.label === 'ASC')).toBe(true)
+    expect(w).not.toContain('ASC')
+    const o = clauseSuggest('id a', 4, COLS, 'order').items.map(i => i.label)
+    expect(o).toContain('ASC')
+    expect(o).not.toContain('AND')
   })
 })
 
@@ -70,13 +63,5 @@ describe('applyClauseItem', () => {
     const r = applyClauseItem(value, sug, { label: 'secucode', insert: 'secucode', kind: 'column' })
     expect(r.value).toBe('secucode = 1')
     expect(r.cursor).toBe('secucode'.length)
-  })
-})
-
-describe('insertAtCursor', () => {
-  it('在光标处插入文本(拖字段名),光标落在插入末尾', () => {
-    const r = insertAtCursor('a = 1 AND ', 10, 'org_code')
-    expect(r.value).toBe('a = 1 AND org_code')
-    expect(r.cursor).toBe('a = 1 AND org_code'.length)
   })
 })

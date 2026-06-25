@@ -628,24 +628,18 @@ describe('DataGrid generic rows', () => {
       expect(screen.queryByPlaceholderText('ORDER BY')).toBeNull()
     })
 
-    it('WHERE 输入框聚焦后弹出字段/关键字候选,点击列名插入', () => {
+    it('WHERE 输入框聚焦不弹候选;输入前缀匹配字段后才弹,点击插入', () => {
       wrap(<DataGrid columns={columns} rows={rows} connId="c1" table="orders" schema="public" livePreview />)
       const where = screen.getByPlaceholderText('WHERE') as HTMLInputElement
+      // 聚焦(空输入)不弹候选:关键字 AND 只在候选下拉出现,此时应不存在。
       fireEvent.focus(where)
-      // 候选含列名(id/name)与 WHERE 关键字(AND);点击列名插入到输入框。
+      expect(screen.queryByText('AND')).toBeNull()
+      // 输入前缀 'i' → 匹配列 id → 弹候选,点击插入。
+      fireEvent.change(where, { target: { value: 'i' } })
       const idOpt = screen.getAllByText('id').find(el => el.closest('button'))!
       expect(idOpt).toBeTruthy()
-      expect(screen.getByText('AND')).toBeInTheDocument()
       fireEvent.mouseDown(idOpt)
       expect(where.value).toBe('id')
-    })
-
-    it('拖拽表头字段名到 WHERE 输入框,在光标处插入列名', () => {
-      wrap(<DataGrid columns={columns} rows={rows} connId="c1" table="orders" schema="public" livePreview />)
-      const where = screen.getByPlaceholderText('WHERE') as HTMLInputElement
-      const dt = { getData: (t: string) => (t === 'text/plain' ? 'name' : ''), setData: () => {}, effectAllowed: '' }
-      fireEvent.drop(where, { dataTransfer: dt })
-      expect(where.value).toBe('name')
     })
 
     it('非 SQL 引擎(mongodb/redis/es)即使 livePreview 也不显示 WHERE / ORDER BY 输入框', () => {

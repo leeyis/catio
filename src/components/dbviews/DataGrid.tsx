@@ -12,7 +12,7 @@ import { buildMarkdownTable } from './markdownTable'
 import { visibleColumnNames, allNullColumnNames, toggleColumnVisibility, showAllColumns } from './columnVisibility'
 import { dialectFor } from './structureDdl'
 import { supportsServerFilter } from './serverFilter'
-import { clauseSuggest, applyClauseItem, insertAtCursor, type ClauseMode, type ClauseSuggest, type ClauseItem } from './clauseComplete'
+import { clauseSuggest, applyClauseItem, type ClauseMode, type ClauseSuggest, type ClauseItem } from './clauseComplete'
 import { TableImportDialog } from './TableImportDialog'
 
 export interface DataGridProps {
@@ -180,20 +180,6 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
     ;(which === 'where' ? setWhereInput : setOrderInput)(value)
     requestAnimationFrame(() => {
       const el = clauseRef(which).current
-      if (el) { el.focus(); el.setSelectionRange(cursor, cursor); refreshClause(which, el) }
-    })
-  }
-  // 拖拽:把表头字段名拖入输入框 → 在光标处插入列名。
-  function dropClause(which: ClauseMode, e: React.DragEvent<HTMLInputElement>) {
-    e.preventDefault()
-    const name = e.dataTransfer.getData('text/plain')
-    if (!name) return
-    const el = clauseRef(which).current
-    const cur = which === 'where' ? whereInput : orderInput
-    const pos = el?.selectionStart ?? cur.length
-    const { value, cursor } = insertAtCursor(cur, pos, name)
-    ;(which === 'where' ? setWhereInput : setOrderInput)(value)
-    requestAnimationFrame(() => {
       if (el) { el.focus(); el.setSelectionRange(cursor, cursor); refreshClause(which, el) }
     })
   }
@@ -1174,8 +1160,6 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
                   onFocus={e => refreshClause(which, e.currentTarget)}
                   onClick={e => refreshClause(which, e.currentTarget)}
                   onBlur={() => setTimeout(() => setClause(c => (c && c.which === which ? null : c)), 120)}
-                  onDragOver={e => e.preventDefault()}
-                  onDrop={e => dropClause(which, e)}
                   placeholder={label} aria-label={t(aria)}
                   onKeyDown={e => {
                     if (e.key === 'Enter') { setClause(null); submitServerFilter() }
@@ -1286,9 +1270,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
             {visibleColumns.map((col) => (
               <div key={col.name} style={{ ...thStyle, position: 'relative' }} onClick={() => toggleSort(col.name)} className="gridhead">
                 <Icon name={col.icon ?? colIcon(col)} size={12} style={{ color: col.pk ? 'var(--signal-amber)' : col.fk ? 'var(--signal-blue)' : 'var(--text-faint)' }} />
-                <span className="ell" draggable
-                  onDragStart={e => { e.stopPropagation(); e.dataTransfer.setData('text/plain', col.name); e.dataTransfer.effectAllowed = 'copy' }}
-                  style={{ color: 'var(--text-secondary)', fontWeight: 600, cursor: 'grab' }}
+                <span className="ell" style={{ color: 'var(--text-secondary)', fontWeight: 600 }}
                   title={commentMode && col.comment ? col.comment : undefined}>{headLabel(col)}</span>
                 {col.pk && <span style={{ fontSize: 9, color: 'var(--signal-amber)', fontWeight: 700 }}>PK</span>}
                 {sortCol === col.name && <Icon name={sortDir === 'asc' ? 'chevron-up' : 'chevron-down'} size={12} style={{ color: 'var(--accent-primary)', marginLeft: 'auto' }} />}
