@@ -26,7 +26,7 @@ use crate::ssh::SshError;
 /// 滚动窗口容量（cpu/mem/net/gpu util 各保留最近 N 个采样点）。
 const WINDOW_CAP: usize = 60;
 /// 进程列表上限。
-const PROC_LIMIT: usize = 8;
+const PROC_LIMIT: usize = 10;
 
 // ────────────────────────────────────────────────
 // Monitor 快照（serde camelCase 匹配前端 src/services/types.ts）

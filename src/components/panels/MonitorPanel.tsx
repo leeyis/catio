@@ -242,10 +242,10 @@ export function MonitorPanel({ onClose, conn: _conn, sessionId }: MonitorPanelPr
           </div>
           <div className="col" style={{ gap: 2 }}>
             <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.4px', textTransform: 'uppercase', color: 'var(--text-faint)', padding: '4px 2px' }}>{t('panels.topProcs')}</span>
-            <div className="row mono" style={{ fontSize: 10, color: 'var(--text-faint)', padding: '0 8px 4px' }}><span style={{ width: 42 }}>{t('panels.procPid')}</span><span className="grow">{t('panels.procCmd')}</span><span style={{ width: 38, textAlign: 'right' }}>{t('panels.procCpu')}</span><span style={{ width: 38, textAlign: 'right' }}>{t('panels.procMem')}</span></div>
+            <div className="row mono" style={{ fontSize: 10, color: 'var(--text-faint)', padding: '0 8px 4px', gap: 10 }}><span style={{ width: 56, flexShrink: 0 }}>{t('panels.procPid')}</span><span className="grow">{t('panels.procCmd')}</span><span style={{ width: 38, textAlign: 'right' }}>{t('panels.procCpu')}</span><span style={{ width: 38, textAlign: 'right' }}>{t('panels.procMem')}</span></div>
             {mon.procs.map(p => (
-              <div key={p.pid} className="row mono" style={{ fontSize: 11, padding: '5px 8px', borderRadius: 7, color: 'var(--text-secondary)' }}>
-                <span style={{ width: 42, color: 'var(--text-faint)' }}>{p.pid}</span>
+              <div key={p.pid} className="row mono" style={{ fontSize: 11, padding: '5px 8px', borderRadius: 7, color: 'var(--text-secondary)', gap: 10 }}>
+                <span style={{ width: 56, flexShrink: 0, color: 'var(--text-faint)' }}>{p.pid}</span>
                 <span className="grow ell">{p.cmd}</span>
                 <span style={{ width: 38, textAlign: 'right', color: p.cpu > 10 ? 'var(--signal-amber)' : 'var(--text-secondary)' }}>{p.cpu}</span>
                 <span style={{ width: 38, textAlign: 'right' }}>{p.mem}</span>
