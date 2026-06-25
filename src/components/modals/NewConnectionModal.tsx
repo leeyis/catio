@@ -485,8 +485,8 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
             <span style={{ fontSize: 12, color: 'var(--text-faint)' }}>{isEdit ? t('modals.editSub') : t('modals.newConnectionSub')}</span>
           </div>
           <div className="row gap8" style={{ alignItems: 'center' }}>
-            {/* 从 DBeaver / Navicat 导入连接 — 仅新建模式提供 */}
-            {!isEdit && (
+            {/* 从 DBeaver / Navicat 导入连接 — 仅新建模式、数据库选项卡提供 */}
+            {!isEdit && kind === 'db' && (
               <button className="btn btn-ghost" onClick={() => setShowImport(true)} title={t('importConn.title')}>
                 <Icon name="download" size={14} /> {t('modals.importConnections')}
               </button>
