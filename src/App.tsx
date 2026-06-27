@@ -84,6 +84,8 @@ export default function App() {
   // auto-opened mock host/db). Tabs are created on demand by openConn/openLiveTab.
   const [tabs, setTabs] = useState<Tab[]>([])
   const [activeTab, setActiveTab] = useState<string>('')
+  // Pending unsaved-changes confirmation when closing a dirty remote-file tab.
+  const [closeConfirm, setCloseConfirm] = useState<{ id: string; title: string } | null>(null)
   // Monotonic counter for unique tab ids. A connId can now own MULTIPLE tabs
   // (复制标签), so `tab-${connId}` is no longer unique — append a fresh seq.
   const tabSeq = useRef(0)
@@ -830,7 +832,7 @@ export default function App() {
       return next
     })
   }
-  function closeTab(id: string) {
+  function doCloseTab(id: string) {
     setTabs(prev => {
       const closing = prev.find(tb => tb.id === id)
       const next = prev.filter(tb => tb.id !== id)
@@ -842,6 +844,12 @@ export default function App() {
       }
       return next
     })
+  }
+  // Guard: closing a remote-file tab with unsaved edits asks for confirmation first.
+  function closeTab(id: string) {
+    const tab = tabs.find(tb => tb.id === id)
+    if (tab && tab.kind === 'remote-file' && tab.dirty) { setCloseConfirm({ id, title: tab.title }); return }
+    doCloseTab(id)
   }
   function closeOthers(id: string) {
     setTabs(prev => {
@@ -1484,6 +1492,17 @@ export default function App() {
             syncMcpTargets()
             void openConn(dbProfileToConnection(profile, true))
           }}
+        />
+      )}
+
+      {closeConfirm && (
+        <ConfirmModal
+          title={t('remoteFile.closeUnsavedTitle')}
+          message={t('remoteFile.closeUnsavedBody', { name: closeConfirm.title })}
+          confirmLabel={t('remoteFile.closeDiscard')}
+          danger
+          onConfirm={() => { const c = closeConfirm; setCloseConfirm(null); doCloseTab(c.id) }}
+          onCancel={() => setCloseConfirm(null)}
         />
       )}
 

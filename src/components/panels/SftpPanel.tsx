@@ -449,6 +449,9 @@ export function SftpPanel({ onClose, conn, sessionId, onEditFile }: SftpPanelPro
                 background: 'var(--surface-overlay, var(--surface-card))',
                 border: '1px solid var(--border-hairline)', boxShadow: 'var(--shadow-card)',
               }}>
+              {ctxMenu.item.type === 'file' && onEditFile && (
+                <CtxItem icon="file-code" label={t('remoteFile.openInEditor')} onClick={() => { const it = ctxMenu.item; setCtxMenu(null); onEditFile(it.path) }} />
+              )}
               {ctxMenu.item.type === 'file' && (
                 <CtxItem icon="download" label={t('panels.sftpDownload')} onClick={() => { const it = ctxMenu.item; setCtxMenu(null); downloadItem(it) }} />
               )}
