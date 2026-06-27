@@ -333,15 +333,23 @@ export function SftpPanel({ onClose, conn, sessionId, onEditFile }: SftpPanelPro
                 border: '1px solid var(--border-hairline)', borderRadius: 8, outline: 'none',
               }}
             />
-            <IconBtn name="star" size={15} variant="bare"
-              title={favorites.includes(path) ? t('panels.sftpUnfavorite') : t('panels.sftpFavorite')}
-              onClick={() => { if (path) setFavorites(toggleFavorite(path)) }}
-              style={{ color: favorites.includes(path) ? 'var(--signal-amber)' : undefined }} />
             <IconBtn name="bookmark" size={15} variant="bare" title={t('panels.sftpQuickJump')} onClick={() => setJumpOpen(o => !o)}
-              style={{ color: jumpOpen ? 'var(--accent-primary)' : undefined }} />
+              style={{ color: jumpOpen || favorites.includes(path) ? 'var(--accent-primary)' : undefined }} />
             {jumpOpen && (
-              <div onMouseLeave={() => setJumpOpen(false)} style={{ position: 'absolute', right: 8, top: 42, zIndex: 60, minWidth: 210, maxHeight: 340, overflowY: 'auto', padding: 4, borderRadius: 10, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', boxShadow: 'var(--shadow-dropdown)' }}>
-                {favorites.length > 0 && <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-faint)', padding: '4px 8px' }}>{t('panels.sftpFavorites')}</div>}
+              <div onMouseLeave={() => setJumpOpen(false)} style={{ position: 'absolute', right: 8, top: 42, zIndex: 60, minWidth: 250, maxHeight: 360, overflowY: 'auto', padding: 4, borderRadius: 10, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', boxShadow: 'var(--shadow-dropdown)' }}>
+                {/* 顶部:明确的「收藏/取消收藏当前目录」动作,带当前目录名 */}
+                <button onClick={() => { if (path) setFavorites(toggleFavorite(path)) }} disabled={!path}
+                  className="row" style={{ width: '100%', gap: 8, alignItems: 'center', padding: '8px', borderRadius: 7, border: 'none', background: 'transparent', cursor: path ? 'pointer' : 'default', textAlign: 'left' }}
+                  onMouseEnter={e => (e.currentTarget.style.background = 'var(--accent-soft)')}
+                  onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
+                  <Icon name="star" size={14} style={{ color: favorites.includes(path) ? 'var(--signal-amber)' : 'var(--text-tertiary)', flex: 'none' }} />
+                  <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)', flex: 'none' }}>{favorites.includes(path) ? t('panels.sftpFavRemoveCurrent') : t('panels.sftpFavAddCurrent')}</span>
+                  <span className="ell mono" style={{ flex: 1, minWidth: 0, fontSize: 11, color: 'var(--text-faint)', textAlign: 'right' }}>{baseName(path) || path || '/'}</span>
+                </button>
+                <div style={{ height: 1, margin: '4px 0', background: 'var(--border-hairline)' }} />
+                {/* 收藏夹 */}
+                <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-faint)', padding: '4px 8px' }}>{t('panels.sftpFavorites')}</div>
+                {favorites.length === 0 && <div style={{ fontSize: 11, color: 'var(--text-faint)', padding: '2px 8px 6px' }}>{t('panels.sftpFavEmpty')}</div>}
                 {favorites.map(p => (
                   <div key={`fav:${p}`} className="row" style={{ alignItems: 'center', gap: 2 }}>
                     <button onClick={() => jumpTo(p)} className="ell mono"
@@ -351,6 +359,7 @@ export function SftpPanel({ onClose, conn, sessionId, onEditFile }: SftpPanelPro
                     <IconBtn name="x" size={11} variant="bare" title={t('panels.sftpUnfavorite')} onClick={() => setFavorites(toggleFavorite(p))} />
                   </div>
                 ))}
+                {/* 常用目录 */}
                 <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-faint)', padding: '4px 8px' }}>{t('panels.sftpCommonDirs')}</div>
                 {COMMON_DIRS.filter(p => !favorites.includes(p)).map(p => (
                   <button key={`common:${p}`} onClick={() => jumpTo(p)} className="ell mono"
