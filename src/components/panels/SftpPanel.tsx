@@ -8,6 +8,7 @@ import { PanelEmpty } from './PanelEmpty'
 import { sftpList, sftpRealpath, sftpMkdir, sftpTouch, sftpRename, sftpDelete } from '../../services/ssh'
 import { useTransfers, startUpload, startDownload, cancelTransfer, onTransferDone } from '../../state/transfers'
 import { getSftpNav, setSftpNav } from '../../state/sftpNav'
+import { loadFavorites, toggleFavorite, COMMON_DIRS } from '../../state/sftpFavorites'
 
 function isTauriEnv(): boolean {
   return (
@@ -75,6 +76,9 @@ export function SftpPanel({ onClose, conn, sessionId, onEditFile }: SftpPanelPro
   const [items, setItems] = useState<SftpItem[]>(() => (sessionId ? getSftpNav(sessionId)?.items ?? [] : []))
   const [path, setPath] = useState<string>(() => (sessionId ? getSftpNav(sessionId)?.path ?? '' : ''))
   const [pathInput, setPathInput] = useState<string>(() => (sessionId ? getSftpNav(sessionId)?.path ?? '' : ''))
+  // Path favorites + quick-jump dropdown (C1).
+  const [favorites, setFavorites] = useState<string[]>(() => loadFavorites())
+  const [jumpOpen, setJumpOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [selected, setSelected] = useState<string | null>(null)
@@ -268,6 +272,34 @@ export function SftpPanel({ onClose, conn, sessionId, onEditFile }: SftpPanelPro
 
   const isRoot = path === '/' || path === ''
 
+  // Quick-jump: '~' resolves to the home dir (sftp default cwd); others go through goPath.
+  const jumpTo = (p: string) => {
+    setJumpOpen(false)
+    if (p === '~') {
+      if (sessionId) sftpRealpath(sessionId, '.').then(load).catch(e => setError(String(e)))
+      return
+    }
+    goPath(p)
+  }
+
+  // Close the quick-jump dropdown on outside click / Escape (the opening click has
+  // already fired before this effect registers, so it won't self-close).
+  useEffect(() => {
+    if (!jumpOpen) return
+    const onClose = () => setJumpOpen(false)
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setJumpOpen(false) }
+    window.addEventListener('click', onClose)
+    window.addEventListener('keydown', onKey)
+    return () => { window.removeEventListener('click', onClose); window.removeEventListener('keydown', onKey) }
+  }, [jumpOpen])
+
+  // Keep favorites in sync if another window toggles them.
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => { if (e.key === 'catio-sftp-favorites') setFavorites(loadFavorites()) }
+    window.addEventListener('storage', onStorage)
+    return () => window.removeEventListener('storage', onStorage)
+  }, [])
+
   return (
     <PanelShell
       icon="folder"
@@ -286,7 +318,7 @@ export function SftpPanel({ onClose, conn, sessionId, onEditFile }: SftpPanelPro
       ) : (
         <>
           {/* address bar */}
-          <div className="row gap6" style={{ padding: '8px 10px', borderBottom: '1px solid var(--border-hairline)' }}>
+          <div className="row gap6" style={{ padding: '8px 10px', borderBottom: '1px solid var(--border-hairline)', position: 'relative' }}>
             <IconBtn name="chevron-up" size={15} variant="bare" title={t('panels.sftpUp')} onClick={() => { if (!isRoot) load(parentPath(path)) }} style={{ opacity: isRoot ? 0.4 : 1 }} />
             <input
               className="mono"
@@ -301,6 +333,32 @@ export function SftpPanel({ onClose, conn, sessionId, onEditFile }: SftpPanelPro
                 border: '1px solid var(--border-hairline)', borderRadius: 8, outline: 'none',
               }}
             />
+            <IconBtn name={favorites.includes(path) ? 'circle-check' : 'circle-dot'} size={15} variant="bare"
+              title={favorites.includes(path) ? t('panels.sftpUnfavorite') : t('panels.sftpFavorite')}
+              onClick={() => { if (path) setFavorites(toggleFavorite(path)) }}
+              style={{ color: favorites.includes(path) ? 'var(--accent-primary)' : undefined }} />
+            <IconBtn name="corner-down-right" size={15} variant="bare" title={t('panels.sftpQuickJump')} onClick={() => setJumpOpen(o => !o)} />
+            {jumpOpen && (
+              <div onMouseLeave={() => setJumpOpen(false)} style={{ position: 'absolute', right: 8, top: 42, zIndex: 60, minWidth: 210, maxHeight: 340, overflowY: 'auto', padding: 4, borderRadius: 10, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', boxShadow: 'var(--shadow-dropdown)' }}>
+                {favorites.length > 0 && <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-faint)', padding: '4px 8px' }}>{t('panels.sftpFavorites')}</div>}
+                {favorites.map(p => (
+                  <div key={`fav:${p}`} className="row" style={{ alignItems: 'center', gap: 2 }}>
+                    <button onClick={() => jumpTo(p)} className="ell mono"
+                      style={{ flex: 1, minWidth: 0, textAlign: 'left', padding: '6px 8px', fontSize: 12, background: 'transparent', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', borderRadius: 7 }}
+                      onMouseEnter={e => (e.currentTarget.style.background = 'var(--accent-soft)')}
+                      onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>{p}</button>
+                    <IconBtn name="x" size={11} variant="bare" title={t('panels.sftpUnfavorite')} onClick={() => setFavorites(toggleFavorite(p))} />
+                  </div>
+                ))}
+                <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-faint)', padding: '4px 8px' }}>{t('panels.sftpCommonDirs')}</div>
+                {COMMON_DIRS.filter(p => !favorites.includes(p)).map(p => (
+                  <button key={`common:${p}`} onClick={() => jumpTo(p)} className="ell mono"
+                    style={{ display: 'block', width: '100%', textAlign: 'left', padding: '6px 8px', fontSize: 12, background: 'transparent', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', borderRadius: 7 }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--accent-soft)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>{p}</button>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* active transfers */}
