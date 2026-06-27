@@ -271,6 +271,7 @@ export function SftpPanel({ onClose, conn, sessionId, onEditFile }: SftpPanelPro
   }, [ctxMenu])
 
   const isRoot = path === '/' || path === ''
+  const jumpBoxRef = useRef<HTMLDivElement>(null)
 
   // Quick-jump: '~' resolves to the home dir (sftp default cwd); others go through goPath.
   const jumpTo = (p: string) => {
@@ -282,15 +283,19 @@ export function SftpPanel({ onClose, conn, sessionId, onEditFile }: SftpPanelPro
     goPath(p)
   }
 
-  // Close the quick-jump dropdown on outside click / Escape (the opening click has
-  // already fired before this effect registers, so it won't self-close).
+  // Close the favorites menu only when clicking OUTSIDE it (mousedown + contains check),
+  // or on Escape. Clicks on the bookmark button / inside the menu stay open so the
+  // favorite-toggle feedback is visible. (The old window-click handler closed the menu on
+  // the same click that opened it → looked like nothing happened.)
   useEffect(() => {
     if (!jumpOpen) return
-    const onClose = () => setJumpOpen(false)
+    const onDown = (e: MouseEvent) => {
+      if (jumpBoxRef.current && !jumpBoxRef.current.contains(e.target as Node)) setJumpOpen(false)
+    }
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setJumpOpen(false) }
-    window.addEventListener('click', onClose)
-    window.addEventListener('keydown', onKey)
-    return () => { window.removeEventListener('click', onClose); window.removeEventListener('keydown', onKey) }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey) }
   }, [jumpOpen])
 
   // Keep favorites in sync if another window toggles them.
@@ -318,7 +323,7 @@ export function SftpPanel({ onClose, conn, sessionId, onEditFile }: SftpPanelPro
       ) : (
         <>
           {/* address bar */}
-          <div className="row gap6" style={{ padding: '8px 10px', borderBottom: '1px solid var(--border-hairline)', position: 'relative' }}>
+          <div ref={jumpBoxRef} className="row gap6" style={{ padding: '8px 10px', borderBottom: '1px solid var(--border-hairline)', position: 'relative' }}>
             <IconBtn name="arrow-up" size={15} variant="bare" title={t('panels.sftpUp')} onClick={() => { if (!isRoot) load(parentPath(path)) }} style={{ opacity: isRoot ? 0.4 : 1 }} />
             <input
               className="mono"
@@ -336,7 +341,7 @@ export function SftpPanel({ onClose, conn, sessionId, onEditFile }: SftpPanelPro
             <IconBtn name="bookmark" size={15} variant="bare" title={t('panels.sftpQuickJump')} onClick={() => setJumpOpen(o => !o)}
               style={{ color: jumpOpen || favorites.includes(path) ? 'var(--accent-primary)' : undefined }} />
             {jumpOpen && (
-              <div onMouseLeave={() => setJumpOpen(false)} style={{ position: 'absolute', right: 8, top: 42, zIndex: 60, minWidth: 250, maxHeight: 360, overflowY: 'auto', padding: 4, borderRadius: 10, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', boxShadow: 'var(--shadow-dropdown)' }}>
+              <div style={{ position: 'absolute', right: 8, top: 42, zIndex: 60, minWidth: 250, maxHeight: 360, overflowY: 'auto', padding: 4, borderRadius: 10, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', boxShadow: 'var(--shadow-dropdown)' }}>
                 {/* 顶部:明确的「收藏/取消收藏当前目录」动作,带当前目录名 */}
                 <button onClick={() => { if (path) setFavorites(toggleFavorite(path)) }} disabled={!path}
                   className="row" style={{ width: '100%', gap: 8, alignItems: 'center', padding: '8px', borderRadius: 7, border: 'none', background: 'transparent', cursor: path ? 'pointer' : 'default', textAlign: 'left' }}
