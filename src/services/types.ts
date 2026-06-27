@@ -33,6 +33,8 @@ export interface Connection {
   host?: string
   /** Telnet/Mosh target port. */
   port?: number
+  /** Mosh login user (proto === 'mosh'). */
+  user?: string
   /** Serial device name, e.g. "COM3" / "/dev/ttyUSB0" (proto === 'serial'). */
   serialPort?: string
   /** Serial baud rate (proto === 'serial'). */

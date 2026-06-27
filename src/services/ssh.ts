@@ -133,6 +133,11 @@ export async function termOpenTelnet(host: string, port: number): Promise<string
   return tauriInvoke<string>('term_open_telnet', { host, port })
 }
 
+/** Open a Mosh terminal by delegating to the system `mosh` client in a local PTY. */
+export async function termOpenMosh(host: string, user: string, cols: number, rows: number): Promise<string> {
+  return tauriInvoke<string>('term_open_mosh', { host, user, cols, rows })
+}
+
 export async function serialListPorts(): Promise<string[]> {
   if (!isTauri()) return []
   return tauriInvoke<string[]>('serial_list_ports')

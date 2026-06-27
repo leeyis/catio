@@ -26,8 +26,8 @@ export interface NewConnectionModalProps {
   initialKind?: 'host' | 'db'
   /** ORCH: emit a live connect request for a HOST/SSH connection. */
   onConnect?: (args: SshConnectArgs, display: { name: string; profileId?: string }) => void
-  /** Open a non-SSH terminal (local/serial/telnet) instead of starting an SSH session. */
-  onOpenTerminal?: (desc: { proto: 'local' | 'serial' | 'telnet'; name: string; host?: string; port?: number; serialPort?: string; baud?: number }) => void
+  /** Open a non-SSH terminal (local/serial/telnet/mosh) instead of starting an SSH session. */
+  onOpenTerminal?: (desc: { proto: 'local' | 'serial' | 'telnet' | 'mosh'; name: string; host?: string; port?: number; user?: string; serialPort?: string; baud?: number }) => void
   /** Called on a successful live DB connect (Tauri) with the saved profile, so the
    *  caller can immediately open the workbench for it. Not called in non-Tauri dev. */
   onConnected?: (profile: DbProfile, secret?: string) => void
@@ -362,13 +362,18 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onO
       onClose()
       return
     }
-    // 本地/串口/Telnet:不建 SSH 会话,直接开终端标签。必填项为空时保持弹窗并聚焦,不静默关闭。
-    if (kind === 'host' && (proto === 'local' || proto === 'serial' || proto === 'telnet') && onOpenTerminal) {
+    // 本地/串口/Telnet/Mosh:不建内置 SSH 会话,直接开终端标签。必填为空时保持弹窗并聚焦,不静默关闭。
+    if (kind === 'host' && (proto === 'local' || proto === 'serial' || proto === 'telnet' || proto === 'mosh') && onOpenTerminal) {
       const name = (nameRef.current?.value || '').trim()
       if (proto === 'telnet') {
         const host = (hostRef.current?.value || '').trim()
         if (!host) { hostRef.current?.focus(); return }
         onOpenTerminal({ proto: 'telnet', name: name || host, host, port: Number(portRef.current?.value) || 23 })
+      } else if (proto === 'mosh') {
+        const host = (hostRef.current?.value || '').trim()
+        const user = (userRef.current?.value || '').trim()
+        if (!host) { hostRef.current?.focus(); return }
+        onOpenTerminal({ proto: 'mosh', name: name || host, host, user })
       } else if (proto === 'serial') {
         const sp = (serialPortRef.current?.value || '').trim()
         if (!sp) { serialPortRef.current?.focus(); return }

@@ -40,6 +40,7 @@ pub fn run() {
             ssh::sftp::sftp_read_file,
             ssh::sftp::sftp_write_file,
             localterm::term_open_local,
+            localterm::term_open_mosh,
             localterm::term_open_serial,
             localterm::term_open_telnet,
             localterm::serial_list_ports,

@@ -12,7 +12,7 @@ import '@xterm/xterm/css/xterm.css'
 import { ConnGlyph } from '../atoms'
 import { usePrefs, monoFontStack } from '../../state/preferences'
 import {
-  termOpenLocal, termOpenSerial, termOpenTelnet,
+  termOpenLocal, termOpenSerial, termOpenTelnet, termOpenMosh,
   termLocalReady, termLocalWrite, termLocalResize, termLocalClose, listen,
 } from '../../services/ssh'
 import type { Connection } from '../../services/types'
@@ -95,6 +95,7 @@ export function LocalTerminalPane({ conn, active }: LocalTerminalPaneProps) {
         try {
           if (proto === 'serial') chanId = await termOpenSerial(conn.serialPort || '', conn.baud || 115200)
           else if (proto === 'telnet') chanId = await termOpenTelnet(conn.host || '', conn.port || 23)
+          else if (proto === 'mosh') chanId = await termOpenMosh(conn.host || '', conn.user || '', term.cols, term.rows)
           else chanId = await termOpenLocal(term.cols, term.rows)
         } catch (e) {
           term.write(`\r\n\x1b[31m${t('localTerm.openFailed')}: ${String((e as { message?: string } | null)?.message ?? e)}\x1b[0m\r\n`)
@@ -172,7 +173,9 @@ export function LocalTerminalPane({ conn, active }: LocalTerminalPaneProps) {
     ? `${conn.serialPort ?? ''} · ${conn.baud ?? 115200} baud`
     : proto === 'telnet'
       ? `telnet ${conn.host ?? ''}:${conn.port ?? 23}`
-      : t('localTerm.localShell')
+      : proto === 'mosh'
+        ? `mosh ${conn.user ? conn.user + '@' : ''}${conn.host ?? ''}`
+        : t('localTerm.localShell')
 
   return (
     <div className="col" style={{ height: '100%', minHeight: 0, flex: 1, width: '100%', minWidth: 0, overflow: 'hidden', position: 'relative' }}>

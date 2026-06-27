@@ -437,19 +437,22 @@ export default function App() {
 
   // Open a non-SSH terminal (local shell / serial / telnet) in a fresh tab. No SSH
   // session — LocalTerminalPane drives the transport over the term_local_* IPC.
-  function openTerminalConn(desc: { proto: 'local' | 'serial' | 'telnet'; name: string; host?: string; port?: number; serialPort?: string; baud?: number }) {
+  function openTerminalConn(desc: { proto: 'local' | 'serial' | 'telnet' | 'mosh'; name: string; host?: string; port?: number; user?: string; serialPort?: string; baud?: number }) {
     const connId = `term-${desc.proto}-${tabSeq.current++}`
     const sub = desc.proto === 'serial'
       ? `${desc.serialPort ?? ''} · ${desc.baud ?? 115200}`
       : desc.proto === 'telnet'
         ? `telnet ${desc.host ?? ''}:${desc.port ?? 23}`
-        : 'local shell'
+        : desc.proto === 'mosh'
+          ? `mosh ${desc.user ? desc.user + '@' : ''}${desc.host ?? ''}`
+          : 'local shell'
     const conn: Connection = {
       id: connId, group: '', kind: 'host', proto: desc.proto, name: desc.name, sub,
-      icon: desc.proto === 'serial' ? 'hard-drive' : desc.proto === 'telnet' ? 'globe' : 'terminal',
+      icon: desc.proto === 'serial' ? 'hard-drive' : (desc.proto === 'telnet' || desc.proto === 'mosh') ? 'globe' : 'terminal',
       status: 'up',
       ...(desc.host ? { host: desc.host } : {}),
       ...(desc.port ? { port: desc.port } : {}),
+      ...(desc.user ? { user: desc.user } : {}),
       ...(desc.serialPort ? { serialPort: desc.serialPort } : {}),
       ...(desc.baud ? { baud: desc.baud } : {}),
     }
@@ -1440,10 +1443,10 @@ export default function App() {
                     const isShown = view === 'workbench' && tab.id === activeTab
                     return (
                       <div key={tab.id} style={{ height: '100%', display: isShown ? 'flex' : 'none', position: 'absolute', inset: 0 }}>
-                        {tab.kind === 'terminal' && tabConn && (tabConn.proto === 'local' || tabConn.proto === 'serial' || tabConn.proto === 'telnet') && (
+                        {tab.kind === 'terminal' && tabConn && (tabConn.proto === 'local' || tabConn.proto === 'serial' || tabConn.proto === 'telnet' || tabConn.proto === 'mosh') && (
                           <LocalTerminalPane conn={tabConn} active={isShown} />
                         )}
-                        {tab.kind === 'terminal' && !(tabConn && (tabConn.proto === 'local' || tabConn.proto === 'serial' || tabConn.proto === 'telnet')) && (
+                        {tab.kind === 'terminal' && !(tabConn && (tabConn.proto === 'local' || tabConn.proto === 'serial' || tabConn.proto === 'telnet' || tabConn.proto === 'mosh')) && (
                           <TerminalPane conn={tabConn} sessionId={tab.sessionId} active={isShown} resolveSessionId={resolveSessionId} mxCandidates={mxCandidates} ensureSession={ensureSession} onConnectTarget={onConnectTarget} sendToPty={sendToPty} onChannel={(_sid, chan) => setChanMap(m => { const n = { ...m }; if (chan) n[tab.id] = chan; else delete n[tab.id]; return n })} />
                         )}
                         {tab.kind === 'sql' && tabConn && (

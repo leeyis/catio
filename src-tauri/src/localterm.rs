@@ -145,26 +145,20 @@ fn home_dir() -> Option<String> {
         .ok()
 }
 
-/// 打开一个本地 shell 终端（PTY）。
-#[tauri::command]
-pub async fn term_open_local(
+/// 在本地 PTY 里跑给定命令，接到终端 owner。供本地 shell / mosh 共用。
+fn open_pty_terminal(
+    cmd: portable_pty::CommandBuilder,
     cols: u32,
     rows: u32,
     app: tauri::AppHandle,
-    mgr: tauri::State<'_, LocalTermManager>,
+    mgr: &LocalTermManager,
 ) -> Result<String, SshError> {
-    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+    use portable_pty::{native_pty_system, PtySize};
 
     let size = PtySize { rows: rows as u16, cols: cols as u16, pixel_width: 0, pixel_height: 0 };
     let pair = native_pty_system()
         .openpty(size)
         .map_err(|e| SshError::Io(e.to_string()))?;
-
-    let mut cmd = CommandBuilder::new(default_shell());
-    cmd.env("TERM", "xterm-256color");
-    if let Some(home) = home_dir() {
-        cmd.cwd(home);
-    }
     let mut child = pair
         .slave
         .spawn_command(cmd)
@@ -183,7 +177,49 @@ pub async fn term_open_local(
         let _ = child.wait();
     });
 
-    Ok(launch(app, reader, writer, resize, closer, &mgr))
+    Ok(launch(app, reader, writer, resize, closer, mgr))
+}
+
+/// 打开一个本地 shell 终端（PTY）。
+#[tauri::command]
+pub async fn term_open_local(
+    cols: u32,
+    rows: u32,
+    app: tauri::AppHandle,
+    mgr: tauri::State<'_, LocalTermManager>,
+) -> Result<String, SshError> {
+    let mut cmd = portable_pty::CommandBuilder::new(default_shell());
+    cmd.env("TERM", "xterm-256color");
+    if let Some(home) = home_dir() {
+        cmd.cwd(home);
+    }
+    open_pty_terminal(cmd, cols, rows, app, &mgr)
+}
+
+/// 打开一个 Mosh 终端：委托系统 `mosh` 客户端在本地 PTY 里跑 `mosh user@host`
+/// （mosh 自行 SSH 起 mosh-server 再走 UDP）。需本机已安装 mosh，否则 spawn 失败回错误。
+#[tauri::command]
+pub async fn term_open_mosh(
+    host: String,
+    user: String,
+    cols: u32,
+    rows: u32,
+    app: tauri::AppHandle,
+    mgr: tauri::State<'_, LocalTermManager>,
+) -> Result<String, SshError> {
+    if host.trim().is_empty() {
+        return Err(SshError::Io("mosh host is empty".into()));
+    }
+    let target = if user.trim().is_empty() { host } else { format!("{user}@{host}") };
+    let mut cmd = portable_pty::CommandBuilder::new("mosh");
+    // `--` 终止 mosh 选项扫描,防止 host 以 `-` 开头被当成选项注入(如 --ssh=<cmd> 致 RCE)。
+    cmd.arg("--");
+    cmd.arg(target);
+    cmd.env("TERM", "xterm-256color");
+    if let Some(home) = home_dir() {
+        cmd.cwd(home);
+    }
+    open_pty_terminal(cmd, cols, rows, app, &mgr)
 }
 
 /// 打开一个串口终端。`baud` 波特率（常见 9600 / 115200）。
