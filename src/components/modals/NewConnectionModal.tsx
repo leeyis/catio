@@ -30,8 +30,8 @@ export interface NewConnectionModalProps {
   onOpenTerminal?: (desc: { proto: 'local' | 'serial' | 'telnet' | 'mosh'; name: string; host?: string; port?: number; user?: string; serialPort?: string; baud?: number }) => void
   /** Open a VNC remote-desktop session. */
   onOpenRemoteDesktop?: (desc: { name: string; host: string; port: number; password: string }) => void
-  /** Launch the system RDP client for host:port. */
-  onLaunchRdp?: (desc: { host: string; port: number; user: string }) => void
+  /** Save an RDP connection (reusable sidebar record) and launch the system RDP client. */
+  onSaveRdp?: (desc: { name: string; host: string; port: number; user: string; group: string }) => void
   /** Called on a successful live DB connect (Tauri) with the saved profile, so the
    *  caller can immediately open the workbench for it. Not called in non-Tauri dev. */
   onConnected?: (profile: DbProfile, secret?: string) => void
@@ -120,7 +120,7 @@ function shortVersion(v: string): string {
 
 // ---- Component ----
 
-export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onOpenTerminal, onOpenRemoteDesktop, onLaunchRdp, onConnected, editProfile, onSaved }: NewConnectionModalProps) {
+export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onOpenTerminal, onOpenRemoteDesktop, onSaveRdp, onConnected, editProfile, onSaved }: NewConnectionModalProps) {
   const D = useData()
   const { t } = useTranslation()
   const isEdit = !!editProfile
@@ -375,13 +375,14 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onO
       onClose()
       return
     }
-    // RDP:委托系统 RDP 客户端(mstsc/xfreerdp)启动,不在 app 内嵌。
-    if (kind === 'host' && proto === 'rdp' && onLaunchRdp) {
+    // RDP:保存为可复用连接记录,并委托系统 RDP 客户端(mstsc/xfreerdp)启动。
+    if (kind === 'host' && proto === 'rdp' && onSaveRdp) {
       const host = (hostRef.current?.value || '').trim()
       if (!host) { hostRef.current?.focus(); return }
+      const name = (nameRef.current?.value || '').trim() || host
       const user = (userRef.current?.value || '').trim()
       const port = Number(portRef.current?.value) || 3389
-      onLaunchRdp({ host, port, user })
+      onSaveRdp({ name, host, port, user, group })
       onClose()
       return
     }
@@ -1014,7 +1015,7 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onO
               ? <Btn variant="primary" icon="check" onClick={handleDbSaveAndConnect} disabled={dbConnecting}>
                   {dbConnecting ? t('modals.connecting') ?? 'Connecting…' : isEdit ? t('modals.save') : t('modals.saveAndConnect')}
                 </Btn>
-              : <Btn variant="primary" icon="check" onClick={handleSave}>{isEdit ? t('modals.save') : (kind === 'host' && proto !== 'ssh' ? t('modals.connect') : t('modals.saveAndConnect'))}</Btn>}
+              : <Btn variant="primary" icon="check" onClick={handleSave}>{isEdit ? t('modals.save') : (kind === 'host' && proto !== 'ssh' && proto !== 'rdp' ? t('modals.connect') : t('modals.saveAndConnect'))}</Btn>}
           </div>
         </div>
       </div>

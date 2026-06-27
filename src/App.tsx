@@ -41,6 +41,7 @@ import {
 } from './state/dbConnections'
 import { sshConnect, sshDisconnect, sshTrustHost, isTauri, onHistory, sshSysinfo, sshDetectOs, importSshConfig, tunnelOpen, rdpLaunch } from './services/ssh'
 import { useTunnelConnections, saveTunnelConnection, removeTunnelConnection, generateTunnelId } from './state/tunnelConnections'
+import { useRdpConnections, saveRdpConnection, removeRdpConnection, generateRdpId } from './state/rdpConnections'
 import type { SshConnectArgs, AuthMethod } from './services/ssh'
 import { mcpSyncTargets } from './services/mcp'
 import { createVaultCredential, unlockVault, lockVault, isVaultUnlocked, recallSecret, rememberSecret } from './state/vault'
@@ -70,6 +71,7 @@ export default function App() {
   const D = useData()
   const dbProfiles = useDbConnections()
   const tunnelProfiles = useTunnelConnections()
+  const rdpProfiles = useRdpConnections()
   // Active DB connections live in a module-level Map (not React state). Bump this
   // to force a re-render when a connection is opened/closed so the vault status
   // and the details panel reflect the change.
@@ -250,7 +252,20 @@ export default function App() {
     icon: 'git-branch',
     status: 'idle',
   }))
-  const vaultConns = ownsVault ? [...profileConns, ...realDbConns, ...tunnelConns] : []
+  // Saved RDP connections → rdp Connection rows (open = launch system RDP client).
+  const rdpConns: Connection[] = rdpProfiles.map(p => ({
+    id: p.id,
+    group: p.group ?? '',
+    kind: 'rdp',
+    name: p.name,
+    sub: `RDP · ${p.user ? p.user + '@' : ''}${p.host}:${p.port}`,
+    icon: 'monitor',
+    status: 'idle',
+    host: p.host,
+    port: p.port,
+    ...(p.user ? { user: p.user } : {}),
+  }))
+  const vaultConns = ownsVault ? [...profileConns, ...realDbConns, ...tunnelConns, ...rdpConns] : []
   const currentName = authEnabled && sessionUser && sessionUser !== '__open' ? sessionUser : 'skyler'
 
   function enableAuth() {
@@ -666,6 +681,12 @@ export default function App() {
       )
       return
     }
+    // Saved RDP connection: launch the system RDP client.
+    if (conn.kind === 'rdp') {
+      const rp = rdpProfiles.find(p => p.id === conn.id)
+      if (rp) void rdpLaunch(rp.host, rp.port, rp.user ?? '').catch(e => setConnectError(String((e as { message?: string } | null)?.message ?? e)))
+      return
+    }
     // Saved port-forward (C2): ensure the host SSH session, then open the tunnel.
     if (conn.kind === 'tunnel') {
       const tp = tunnelProfiles.find(p => p.id === conn.id)
@@ -1075,7 +1096,7 @@ export default function App() {
 
   // 连接 — look up the profile and run the real connect flow.
   function connectFromDetail(conn: Connection) {
-    if (conn.kind === 'tunnel') { void openConn(conn); closeDetailPanel(); return }
+    if (conn.kind === 'tunnel' || conn.kind === 'rdp') { void openConn(conn); closeDetailPanel(); return }
     const profile = profiles.find(p => p.id === conn.id)
     if (!profile) return
     void connectProfile(
@@ -1157,6 +1178,11 @@ export default function App() {
       if (detailConn?.id === conn.id) { setDetailConn(null); setPanelOpen(false) }
       return
     }
+    if (conn.kind === 'rdp') {
+      try { removeRdpConnection(conn.id) } catch { /* ignore */ }
+      if (detailConn?.id === conn.id) { setDetailConn(null); setPanelOpen(false) }
+      return
+    }
     if (sessionMap[conn.id]) teardownSession(conn.id)
     try { deleteProfile(conn.id) } catch { /* localStorage unavailable — ignore */ }
     // Drop this host's shell command history too (req: 删连接同步删历史).
@@ -1175,6 +1201,9 @@ export default function App() {
       } else if (c.kind === 'tunnel') {
         const p = tunnelProfiles.find(x => x.id === c.id)
         if (p) saveTunnelConnection({ ...p, group: groupId || undefined }) // 内部 notify()
+      } else if (c.kind === 'rdp') {
+        const p = rdpProfiles.find(x => x.id === c.id)
+        if (p) saveRdpConnection({ ...p, group: groupId || undefined })
       } else {
         const p = dbProfiles.find(x => x.id === c.id)
         if (p) saveDbConnection({ ...p, group: groupId || undefined }) // 内部 notify()
@@ -1192,6 +1221,8 @@ export default function App() {
         deleteHistoryForProfile(c.id)
       } else if (c.kind === 'tunnel') {
         try { removeTunnelConnection(c.id) } catch { /* ignore */ }
+      } else if (c.kind === 'rdp') {
+        try { removeRdpConnection(c.id) } catch { /* ignore */ }
       } else {
         const p = dbProfiles.find(x => x.id === c.id)
         if (p) deleteDbProfile(p)
@@ -1607,7 +1638,11 @@ export default function App() {
           onConnect={connectProfile}
           onOpenTerminal={openTerminalConn}
           onOpenRemoteDesktop={openVncConn}
-          onLaunchRdp={d => { void rdpLaunch(d.host, d.port, d.user).catch(e => setConnectError(String((e as { message?: string } | null)?.message ?? e))) }}
+          onSaveRdp={d => {
+            // Persist as a reusable sidebar connection, then launch the system RDP client.
+            saveRdpConnection({ id: generateRdpId(), name: d.name, host: d.host, port: d.port, ...(d.user ? { user: d.user } : {}), ...(d.group ? { group: d.group } : {}) })
+            void rdpLaunch(d.host, d.port, d.user).catch(e => setConnectError(String((e as { message?: string } | null)?.message ?? e)))
+          }}
           onConnected={(profile, secret) => {
             if (secret) rememberConnSecret(profile.id, secret)
             bumpDbActive()

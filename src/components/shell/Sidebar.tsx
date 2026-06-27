@@ -211,7 +211,8 @@ export function Sidebar({ activeId, onOpen, onDetail, collapsed, onToggleCollaps
 
   const conns = useMemo(() => {
     return allConns.filter(c => {
-      if (filter !== 'all' && c.kind !== filter) return false
+      // RDP connections are remote-machine connections → show them under the "host" filter too.
+      if (filter !== 'all' && c.kind !== filter && !(filter === 'host' && c.kind === 'rdp')) return false
       if (!query) return true
       const q = query.toLowerCase()
       return c.name.toLowerCase().includes(q) || c.sub.toLowerCase().includes(q) || (c.tags || []).some(tag => tag.includes(q))

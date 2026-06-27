@@ -2,7 +2,7 @@
 
 // ---- Connection / Vault ----
 
-export type ConnKind = 'host' | 'db' | 'tunnel'
+export type ConnKind = 'host' | 'db' | 'tunnel' | 'rdp'
 export type ConnStatus = 'up' | 'idle' | 'down'
 
 export interface Group {
