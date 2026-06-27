@@ -27,7 +27,7 @@ export interface Connection {
   status: ConnStatus
   tags?: string[]
   lastUsed?: string
-  proto?: 'ssh' | 'telnet' | 'local' | 'serial' | 'mosh'
+  proto?: 'ssh' | 'telnet' | 'local' | 'serial' | 'mosh' | 'vnc'
   os?: string
   /** Telnet/Mosh target host (proto === 'telnet' | 'mosh'). */
   host?: string

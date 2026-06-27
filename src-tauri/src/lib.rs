@@ -4,6 +4,7 @@ pub mod mcp;
 pub mod scan;
 pub mod localterm;
 pub mod vnc;
+pub mod vncconn;
 
 use ssh::manager::SessionManager;
 use db::manager::ConnManager;
@@ -19,6 +20,7 @@ pub fn run() {
         .manage(scan::ScanState::default())
         .manage(db::SqlFileState::default())
         .manage(localterm::LocalTermManager::default())
+        .manage(vncconn::VncManager::default())
         .invoke_handler(tauri::generate_handler![
             ssh::conn::ssh_connect,
             ssh::conn::ssh_disconnect,
@@ -49,6 +51,10 @@ pub fn run() {
             localterm::term_local_write,
             localterm::term_local_resize,
             localterm::term_local_close,
+            vncconn::vnc_connect,
+            vncconn::vnc_pointer,
+            vncconn::vnc_key,
+            vncconn::vnc_close,
             ssh::tunnel::tunnel_open,
             ssh::tunnel::tunnel_close,
             ssh::tunnel::tunnel_list,

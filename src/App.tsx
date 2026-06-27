@@ -9,6 +9,7 @@ import { WorkbenchTabs } from './components/workbench/WorkbenchTabs'
 import { TerminalPane } from './components/workbench/TerminalPane'
 import { RemoteFileEditor } from './components/workbench/RemoteFileEditor'
 import { LocalTerminalPane } from './components/workbench/LocalTerminalPane'
+import { VncPane } from './components/workbench/VncPane'
 import { DbWorkbench } from './components/workbench/DbWorkbench'
 import { AIPanel } from './components/panels/AIPanel'
 import { SftpPanel } from './components/panels/SftpPanel'
@@ -89,6 +90,8 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<string>('')
   // Pending unsaved-changes confirmation when closing a dirty remote-file tab.
   const [closeConfirm, setCloseConfirm] = useState<{ id: string; title: string } | null>(null)
+  // Transient VNC passwords (connId → password), in-memory only — never persisted.
+  const [vncSecrets, setVncSecrets] = useState<Record<string, string>>({})
   // Monotonic counter for unique tab ids. A connId can now own MULTIPLE tabs
   // (复制标签), so `tab-${connId}` is no longer unique — append a fresh seq.
   const tabSeq = useRef(0)
@@ -457,6 +460,22 @@ export default function App() {
       ...(desc.baud ? { baud: desc.baud } : {}),
     }
     setLiveConns(prev => ({ ...prev, [connId]: conn }))
+    const tabId = newTabId(connId)
+    setTabs(prev => [...prev, { id: tabId, kind: 'terminal', connId, title: desc.name }])
+    setActiveTab(tabId)
+    setView('workbench')
+  }
+
+  // Open a VNC remote-desktop tab. Password is kept transient (in-memory) only.
+  function openVncConn(desc: { name: string; host: string; port: number; password: string }) {
+    const connId = `vnc-${tabSeq.current++}`
+    const conn: Connection = {
+      id: connId, group: '', kind: 'host', proto: 'vnc', name: desc.name,
+      sub: `vnc ${desc.host}:${desc.port}`, icon: 'monitor', status: 'up',
+      host: desc.host, port: desc.port,
+    }
+    setLiveConns(prev => ({ ...prev, [connId]: conn }))
+    setVncSecrets(prev => ({ ...prev, [connId]: desc.password }))
     const tabId = newTabId(connId)
     setTabs(prev => [...prev, { id: tabId, kind: 'terminal', connId, title: desc.name }])
     setActiveTab(tabId)
@@ -892,6 +911,11 @@ export default function App() {
     })
   }
   function doCloseTab(id: string) {
+    // Wipe the transient VNC password for this tab's conn (in-memory only).
+    const closingTab = tabs.find(tb => tb.id === id)
+    if (closingTab && vncSecrets[closingTab.connId] != null) {
+      setVncSecrets(prev => { const n = { ...prev }; delete n[closingTab.connId]; return n })
+    }
     setTabs(prev => {
       const closing = prev.find(tb => tb.id === id)
       const next = prev.filter(tb => tb.id !== id)
@@ -1443,10 +1467,13 @@ export default function App() {
                     const isShown = view === 'workbench' && tab.id === activeTab
                     return (
                       <div key={tab.id} style={{ height: '100%', display: isShown ? 'flex' : 'none', position: 'absolute', inset: 0 }}>
+                        {tab.kind === 'terminal' && tabConn && tabConn.proto === 'vnc' && (
+                          <VncPane conn={tabConn} password={vncSecrets[tabConn.id] ?? ''} active={isShown} />
+                        )}
                         {tab.kind === 'terminal' && tabConn && (tabConn.proto === 'local' || tabConn.proto === 'serial' || tabConn.proto === 'telnet' || tabConn.proto === 'mosh') && (
                           <LocalTerminalPane conn={tabConn} active={isShown} />
                         )}
-                        {tab.kind === 'terminal' && !(tabConn && (tabConn.proto === 'local' || tabConn.proto === 'serial' || tabConn.proto === 'telnet' || tabConn.proto === 'mosh')) && (
+                        {tab.kind === 'terminal' && tabConn?.proto !== 'vnc' && !(tabConn && (tabConn.proto === 'local' || tabConn.proto === 'serial' || tabConn.proto === 'telnet' || tabConn.proto === 'mosh')) && (
                           <TerminalPane conn={tabConn} sessionId={tab.sessionId} active={isShown} resolveSessionId={resolveSessionId} mxCandidates={mxCandidates} ensureSession={ensureSession} onConnectTarget={onConnectTarget} sendToPty={sendToPty} onChannel={(_sid, chan) => setChanMap(m => { const n = { ...m }; if (chan) n[tab.id] = chan; else delete n[tab.id]; return n })} />
                         )}
                         {tab.kind === 'sql' && tabConn && (
@@ -1579,6 +1606,7 @@ export default function App() {
           onClose={() => { setShowNew(false); setEditing(null); setEditProfile(null) }}
           onConnect={connectProfile}
           onOpenTerminal={openTerminalConn}
+          onOpenRemoteDesktop={openVncConn}
           onConnected={(profile, secret) => {
             if (secret) rememberConnSecret(profile.id, secret)
             bumpDbActive()

@@ -369,6 +369,13 @@
     "details": "详情",
     "close": "关闭"
   },
+  "vnc": {
+    "connecting": "连接中…",
+    "connected": "已连接",
+    "disconnected": "已断开",
+    "closed": "连接已关闭",
+    "noDesktop": "(演示模式:非桌面环境,VNC 未连接)"
+  },
   "localTerm": {
     "localShell": "本地 shell",
     "openFailed": "打开终端失败",

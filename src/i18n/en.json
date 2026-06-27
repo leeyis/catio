@@ -369,6 +369,13 @@
     "details": "Details",
     "close": "Close"
   },
+  "vnc": {
+    "connecting": "Connecting…",
+    "connected": "Connected",
+    "disconnected": "Disconnected",
+    "closed": "Connection closed",
+    "noDesktop": "(demo mode: not a desktop environment, VNC not connected)"
+  },
   "localTerm": {
     "localShell": "Local shell",
     "openFailed": "Failed to open terminal",

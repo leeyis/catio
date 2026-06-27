@@ -161,6 +161,21 @@ export async function termLocalClose(chanId: string): Promise<void> {
   return tauriInvoke('term_local_close', { chanId })
 }
 
+// ---- VNC remote desktop ----
+
+export async function vncConnect(host: string, port: number, password: string): Promise<string> {
+  return tauriInvoke<string>('vnc_connect', { host, port, password })
+}
+export async function vncPointer(sessionId: string, mask: number, x: number, y: number): Promise<void> {
+  return tauriInvoke('vnc_pointer', { sessionId, mask, x, y })
+}
+export async function vncKey(sessionId: string, down: boolean, keysym: number): Promise<void> {
+  return tauriInvoke('vnc_key', { sessionId, down, keysym })
+}
+export async function vncClose(sessionId: string): Promise<void> {
+  return tauriInvoke('vnc_close', { sessionId })
+}
+
 // ---- Event listener ----
 // Returns an unlisten callback. No-op (returns no-op) outside Tauri.
 // Uses Tauri's Event<T> generic so cb is fully typed without `any`.
