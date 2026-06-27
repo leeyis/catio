@@ -117,6 +117,45 @@ export async function termClose(sessionId: string, chanId: string): Promise<void
   return tauriInvoke('term_close', { sessionId, chanId })
 }
 
+// ---- Non-SSH terminals (local shell / serial / telnet) ----
+// They reuse the same `term://{chanId}` event protocol but a session-independent
+// registry, so write/resize/close take only chanId (no sessionId).
+
+export async function termOpenLocal(cols: number, rows: number): Promise<string> {
+  return tauriInvoke<string>('term_open_local', { cols, rows })
+}
+
+export async function termOpenSerial(port: string, baud: number): Promise<string> {
+  return tauriInvoke<string>('term_open_serial', { port, baud })
+}
+
+export async function termOpenTelnet(host: string, port: number): Promise<string> {
+  return tauriInvoke<string>('term_open_telnet', { host, port })
+}
+
+export async function serialListPorts(): Promise<string[]> {
+  if (!isTauri()) return []
+  return tauriInvoke<string[]>('serial_list_ports')
+}
+
+/** Signal the backend that the frontend has registered its `term://` listener, so the
+ *  reader thread may start (prevents losing the first screen of output). */
+export async function termLocalReady(chanId: string): Promise<void> {
+  return tauriInvoke('term_local_ready', { chanId })
+}
+
+export async function termLocalWrite(chanId: string, dataBase64: string): Promise<void> {
+  return tauriInvoke('term_local_write', { chanId, dataBase64 })
+}
+
+export async function termLocalResize(chanId: string, cols: number, rows: number): Promise<void> {
+  return tauriInvoke('term_local_resize', { chanId, cols, rows })
+}
+
+export async function termLocalClose(chanId: string): Promise<void> {
+  return tauriInvoke('term_local_close', { chanId })
+}
+
 // ---- Event listener ----
 // Returns an unlisten callback. No-op (returns no-op) outside Tauri.
 // Uses Tauri's Event<T> generic so cb is fully typed without `any`.

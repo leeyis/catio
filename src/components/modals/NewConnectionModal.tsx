@@ -5,7 +5,7 @@ import { Icon } from '../Icon'
 import { Btn, IconBtn, Segmented, Toggle, ConnGlyph } from '../atoms'
 import { useData } from '../../state/DataContext'
 import type { AuthMethod, SshConnectArgs, SshTestResult } from '../../services/ssh'
-import { sshTest } from '../../services/ssh'
+import { sshTest, serialListPorts } from '../../services/ssh'
 import { dbConnect, testConnection, dbErrMsg } from '../../services/db'
 import { enginesByGroup, findEngine, matchEngineId } from '../../services/dbEngines'
 import { jdbcDriverStatus, downloadJdbcDriver, openJdbcDriversDir, importJdbcDriver, JDBC_DOWNLOADABLE, type JdbcDriverStatus } from '../../services/jdbcDrivers'
@@ -26,6 +26,8 @@ export interface NewConnectionModalProps {
   initialKind?: 'host' | 'db'
   /** ORCH: emit a live connect request for a HOST/SSH connection. */
   onConnect?: (args: SshConnectArgs, display: { name: string; profileId?: string }) => void
+  /** Open a non-SSH terminal (local/serial/telnet) instead of starting an SSH session. */
+  onOpenTerminal?: (desc: { proto: 'local' | 'serial' | 'telnet'; name: string; host?: string; port?: number; serialPort?: string; baud?: number }) => void
   /** Called on a successful live DB connect (Tauri) with the saved profile, so the
    *  caller can immediately open the workbench for it. Not called in non-Tauri dev. */
   onConnected?: (profile: DbProfile, secret?: string) => void
@@ -114,7 +116,7 @@ function shortVersion(v: string): string {
 
 // ---- Component ----
 
-export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onConnected, editProfile, onSaved }: NewConnectionModalProps) {
+export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onOpenTerminal, onConnected, editProfile, onSaved }: NewConnectionModalProps) {
   const D = useData()
   const { t } = useTranslation()
   const isEdit = !!editProfile
@@ -127,6 +129,7 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
   const nameRef = useRef<HTMLInputElement>(null)
   const hostRef = useRef<HTMLInputElement>(null)
   const portRef = useRef<HTMLInputElement>(null)
+  const serialPortRef = useRef<HTMLInputElement>(null)
   const userRef = useRef<HTMLInputElement>(null)
   const PROTOS = [
     { id: 'ssh', label: 'SSH' }, { id: 'mosh', label: 'Mosh' },
@@ -154,6 +157,12 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
   const [engineOpen, setEngineOpen] = useState(false)
   const engineRef = useRef<HTMLDivElement>(null)
   const [proto, setProto] = useState('ssh')
+  // Serial config (proto === 'serial'): baud + discovered port list.
+  const [baud, setBaud] = useState('115200')
+  const [serialPorts, setSerialPorts] = useState<string[]>([])
+  useEffect(() => {
+    if (proto === 'serial') serialListPorts().then(setSerialPorts).catch(() => { /* none */ })
+  }, [proto])
   const [authMethod, setAuthMethod] = useState<AuthMethod['method']>(editHost?.auth.method ?? 'password')
   const [keyPath, setKeyPath] = useState(editHost?.auth.method === 'keyFile' ? editHost.auth.path : '')
   // In-memory secret only: password (password auth) or key passphrase (key-file auth).
@@ -350,6 +359,23 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
         saveProfile({ id: editHost.id, name, host, port, user, auth, jump, ...(group ? { group } : {}), ...(editHost.os ? { os: editHost.os } : {}) })
       } catch { /* localStorage unavailable — ignore */ }
       onSaved?.()
+      onClose()
+      return
+    }
+    // 本地/串口/Telnet:不建 SSH 会话,直接开终端标签。必填项为空时保持弹窗并聚焦,不静默关闭。
+    if (kind === 'host' && (proto === 'local' || proto === 'serial' || proto === 'telnet') && onOpenTerminal) {
+      const name = (nameRef.current?.value || '').trim()
+      if (proto === 'telnet') {
+        const host = (hostRef.current?.value || '').trim()
+        if (!host) { hostRef.current?.focus(); return }
+        onOpenTerminal({ proto: 'telnet', name: name || host, host, port: Number(portRef.current?.value) || 23 })
+      } else if (proto === 'serial') {
+        const sp = (serialPortRef.current?.value || '').trim()
+        if (!sp) { serialPortRef.current?.focus(); return }
+        onOpenTerminal({ proto: 'serial', name: name || sp, serialPort: sp, baud: Number(baud) || 115200 })
+      } else {
+        onOpenTerminal({ proto: 'local', name: name || 'Local' })
+      }
       onClose()
       return
     }
@@ -571,6 +597,25 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onC
             <div className="col" style={{ gap: 6, marginBottom: 16 }}>
               <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.protocol')}</span>
               <Segmented value={proto} onChange={setProto} options={PROTOS.map(p => ({ value: p.id, label: p.label }))} />
+            </div>
+          )}
+
+          {/* Serial config (proto === 'serial'): device port + baud rate */}
+          {kind === 'host' && proto === 'serial' && (
+            <div className="row gap10" style={{ marginBottom: 14 }}>
+              <label className="col" style={{ gap: 5, flex: 2 }}>
+                <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.serialPort')}</span>
+                <input key={`sp-${serialPorts.length}`} ref={serialPortRef} list="catio-serial-ports" defaultValue={serialPorts[0] ?? ''} placeholder="COM3 / /dev/ttyUSB0"
+                  className="mono" style={{ height: 36, padding: '0 10px', borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }} />
+                <datalist id="catio-serial-ports">{serialPorts.map(p => <option key={p} value={p} />)}</datalist>
+              </label>
+              <label className="col" style={{ gap: 5, flex: 1 }}>
+                <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.serialBaud')}</span>
+                <select value={baud} onChange={e => setBaud(e.target.value)} aria-label={t('modals.serialBaud')}
+                  style={{ height: 36, padding: '0 10px', borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', fontSize: 13, color: 'var(--text-primary)', outline: 'none', cursor: 'pointer' }}>
+                  {['9600', '19200', '38400', '57600', '115200', '230400', '460800', '921600'].map(b => <option key={b} value={b}>{b}</option>)}
+                </select>
+              </label>
             </div>
           )}
 

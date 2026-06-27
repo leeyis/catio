@@ -369,6 +369,12 @@
     "details": "详情",
     "close": "关闭"
   },
+  "localTerm": {
+    "localShell": "本地 shell",
+    "openFailed": "打开终端失败",
+    "closed": "连接已关闭",
+    "demoHint": "（演示模式：非桌面环境，终端未连接）"
+  },
   "remoteFile": {
     "loading": "加载中…",
     "retry": "重试",
@@ -751,6 +757,8 @@
     "proxyJumpUser": "跳板用户",
     "proxyJumpSecret": "跳板密码/口令",
     "protoLocal": "本地",
+    "serialPort": "串口",
+    "serialBaud": "波特率",
     "testConnection": "测试连接",
     "testPassed": "测试通过 · {{version}} · {{latency}}ms",
     "testing": "测试中…",

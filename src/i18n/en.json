@@ -369,6 +369,12 @@
     "details": "Details",
     "close": "Close"
   },
+  "localTerm": {
+    "localShell": "Local shell",
+    "openFailed": "Failed to open terminal",
+    "closed": "connection closed",
+    "demoHint": "(demo mode: not a desktop environment, terminal not connected)"
+  },
   "remoteFile": {
     "loading": "Loading…",
     "retry": "Retry",
@@ -751,6 +757,8 @@
     "proxyJumpUser": "Jump user",
     "proxyJumpSecret": "Jump password/passphrase",
     "protoLocal": "Local",
+    "serialPort": "Serial port",
+    "serialBaud": "Baud rate",
     "testConnection": "Test connection",
     "testPassed": "Test passed · {{version}} · {{latency}}ms",
     "testing": "Testing…",

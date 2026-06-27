@@ -27,8 +27,16 @@ export interface Connection {
   status: ConnStatus
   tags?: string[]
   lastUsed?: string
-  proto?: 'ssh' | 'telnet' | 'local'
+  proto?: 'ssh' | 'telnet' | 'local' | 'serial' | 'mosh'
   os?: string
+  /** Telnet/Mosh target host (proto === 'telnet' | 'mosh'). */
+  host?: string
+  /** Telnet/Mosh target port. */
+  port?: number
+  /** Serial device name, e.g. "COM3" / "/dev/ttyUSB0" (proto === 'serial'). */
+  serialPort?: string
+  /** Serial baud rate (proto === 'serial'). */
+  baud?: number
   /** Protocol family (DbType) — drives DDL dialect / quoting. Keep this the
    *  family (e.g. "mysql"), not a catalog variant id, so dialect selection stays
    *  correct for MySQL-wire engines (TiDB, GoldenDB, …). */

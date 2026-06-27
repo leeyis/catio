@@ -8,6 +8,7 @@ import { SettingsView } from './components/views/SettingsView'
 import { WorkbenchTabs } from './components/workbench/WorkbenchTabs'
 import { TerminalPane } from './components/workbench/TerminalPane'
 import { RemoteFileEditor } from './components/workbench/RemoteFileEditor'
+import { LocalTerminalPane } from './components/workbench/LocalTerminalPane'
 import { DbWorkbench } from './components/workbench/DbWorkbench'
 import { AIPanel } from './components/panels/AIPanel'
 import { SftpPanel } from './components/panels/SftpPanel'
@@ -419,6 +420,31 @@ export default function App() {
       ? prev.map(tb => tb.id === id ? { ...tb, sessionId } : tb)
       : [...prev, { id, kind: 'remote-file', connId, title, sessionId, path: filePath }])
     setActiveTab(id)
+    setView('workbench')
+  }
+
+  // Open a non-SSH terminal (local shell / serial / telnet) in a fresh tab. No SSH
+  // session — LocalTerminalPane drives the transport over the term_local_* IPC.
+  function openTerminalConn(desc: { proto: 'local' | 'serial' | 'telnet'; name: string; host?: string; port?: number; serialPort?: string; baud?: number }) {
+    const connId = `term-${desc.proto}-${tabSeq.current++}`
+    const sub = desc.proto === 'serial'
+      ? `${desc.serialPort ?? ''} · ${desc.baud ?? 115200}`
+      : desc.proto === 'telnet'
+        ? `telnet ${desc.host ?? ''}:${desc.port ?? 23}`
+        : 'local shell'
+    const conn: Connection = {
+      id: connId, group: '', kind: 'host', proto: desc.proto, name: desc.name, sub,
+      icon: desc.proto === 'serial' ? 'hard-drive' : desc.proto === 'telnet' ? 'globe' : 'terminal',
+      status: 'up',
+      ...(desc.host ? { host: desc.host } : {}),
+      ...(desc.port ? { port: desc.port } : {}),
+      ...(desc.serialPort ? { serialPort: desc.serialPort } : {}),
+      ...(desc.baud ? { baud: desc.baud } : {}),
+    }
+    setLiveConns(prev => ({ ...prev, [connId]: conn }))
+    const tabId = newTabId(connId)
+    setTabs(prev => [...prev, { id: tabId, kind: 'terminal', connId, title: desc.name }])
+    setActiveTab(tabId)
     setView('workbench')
   }
 
@@ -1373,7 +1399,10 @@ export default function App() {
                     const isShown = view === 'workbench' && tab.id === activeTab
                     return (
                       <div key={tab.id} style={{ height: '100%', display: isShown ? 'flex' : 'none', position: 'absolute', inset: 0 }}>
-                        {tab.kind === 'terminal' && (
+                        {tab.kind === 'terminal' && tabConn && (tabConn.proto === 'local' || tabConn.proto === 'serial' || tabConn.proto === 'telnet') && (
+                          <LocalTerminalPane conn={tabConn} active={isShown} />
+                        )}
+                        {tab.kind === 'terminal' && !(tabConn && (tabConn.proto === 'local' || tabConn.proto === 'serial' || tabConn.proto === 'telnet')) && (
                           <TerminalPane conn={tabConn} sessionId={tab.sessionId} active={isShown} resolveSessionId={resolveSessionId} mxCandidates={mxCandidates} ensureSession={ensureSession} onConnectTarget={onConnectTarget} sendToPty={sendToPty} onChannel={(_sid, chan) => setChanMap(m => { const n = { ...m }; if (chan) n[tab.id] = chan; else delete n[tab.id]; return n })} />
                         )}
                         {tab.kind === 'sql' && tabConn && (
@@ -1486,6 +1515,7 @@ export default function App() {
           onSaved={reloadProfiles}
           onClose={() => { setShowNew(false); setEditing(null); setEditProfile(null) }}
           onConnect={connectProfile}
+          onOpenTerminal={openTerminalConn}
           onConnected={(profile, secret) => {
             if (secret) rememberConnSecret(profile.id, secret)
             bumpDbActive()

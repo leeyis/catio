@@ -2,6 +2,7 @@ pub mod ssh;
 pub mod db;
 pub mod mcp;
 pub mod scan;
+pub mod localterm;
 
 use ssh::manager::SessionManager;
 use db::manager::ConnManager;
@@ -16,6 +17,7 @@ pub fn run() {
         .manage(mcp::McpState::default())
         .manage(scan::ScanState::default())
         .manage(db::SqlFileState::default())
+        .manage(localterm::LocalTermManager::default())
         .invoke_handler(tauri::generate_handler![
             ssh::conn::ssh_connect,
             ssh::conn::ssh_disconnect,
@@ -37,6 +39,14 @@ pub fn run() {
             ssh::sftp::sftp_touch,
             ssh::sftp::sftp_read_file,
             ssh::sftp::sftp_write_file,
+            localterm::term_open_local,
+            localterm::term_open_serial,
+            localterm::term_open_telnet,
+            localterm::serial_list_ports,
+            localterm::term_local_ready,
+            localterm::term_local_write,
+            localterm::term_local_resize,
+            localterm::term_local_close,
             ssh::tunnel::tunnel_open,
             ssh::tunnel::tunnel_close,
             ssh::tunnel::tunnel_list,
