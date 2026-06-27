@@ -319,7 +319,7 @@ export function SftpPanel({ onClose, conn, sessionId, onEditFile }: SftpPanelPro
         <>
           {/* address bar */}
           <div className="row gap6" style={{ padding: '8px 10px', borderBottom: '1px solid var(--border-hairline)', position: 'relative' }}>
-            <IconBtn name="chevron-up" size={15} variant="bare" title={t('panels.sftpUp')} onClick={() => { if (!isRoot) load(parentPath(path)) }} style={{ opacity: isRoot ? 0.4 : 1 }} />
+            <IconBtn name="arrow-up" size={15} variant="bare" title={t('panels.sftpUp')} onClick={() => { if (!isRoot) load(parentPath(path)) }} style={{ opacity: isRoot ? 0.4 : 1 }} />
             <input
               className="mono"
               value={pathInput}
@@ -333,11 +333,12 @@ export function SftpPanel({ onClose, conn, sessionId, onEditFile }: SftpPanelPro
                 border: '1px solid var(--border-hairline)', borderRadius: 8, outline: 'none',
               }}
             />
-            <IconBtn name={favorites.includes(path) ? 'circle-check' : 'circle-dot'} size={15} variant="bare"
+            <IconBtn name="star" size={15} variant="bare"
               title={favorites.includes(path) ? t('panels.sftpUnfavorite') : t('panels.sftpFavorite')}
               onClick={() => { if (path) setFavorites(toggleFavorite(path)) }}
-              style={{ color: favorites.includes(path) ? 'var(--accent-primary)' : undefined }} />
-            <IconBtn name="corner-down-right" size={15} variant="bare" title={t('panels.sftpQuickJump')} onClick={() => setJumpOpen(o => !o)} />
+              style={{ color: favorites.includes(path) ? 'var(--signal-amber)' : undefined }} />
+            <IconBtn name="bookmark" size={15} variant="bare" title={t('panels.sftpQuickJump')} onClick={() => setJumpOpen(o => !o)}
+              style={{ color: jumpOpen ? 'var(--accent-primary)' : undefined }} />
             {jumpOpen && (
               <div onMouseLeave={() => setJumpOpen(false)} style={{ position: 'absolute', right: 8, top: 42, zIndex: 60, minWidth: 210, maxHeight: 340, overflowY: 'auto', padding: 4, borderRadius: 10, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', boxShadow: 'var(--shadow-dropdown)' }}>
                 {favorites.length > 0 && <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-faint)', padding: '4px 8px' }}>{t('panels.sftpFavorites')}</div>}

@@ -168,6 +168,14 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onO
   useEffect(() => {
     if (proto === 'serial') serialListPorts().then(setSerialPorts).catch(() => { /* none */ })
   }, [proto])
+  // Default the port to each protocol's standard when creating a new host connection
+  // (the port field is uncontrolled, so set it imperatively on protocol change).
+  useEffect(() => {
+    if (kind !== 'host' || isEdit) return
+    const defs: Record<string, string> = { ssh: '22', mosh: '22', telnet: '23', vnc: '5900', rdp: '3389' }
+    const d = defs[proto]
+    if (d && portRef.current) portRef.current.value = d
+  }, [proto, kind, isEdit])
   const [authMethod, setAuthMethod] = useState<AuthMethod['method']>(editHost?.auth.method ?? 'password')
   const [keyPath, setKeyPath] = useState(editHost?.auth.method === 'keyFile' ? editHost.auth.path : '')
   // In-memory secret only: password (password auth) or key passphrase (key-file auth).
@@ -817,8 +825,8 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onO
             )}
           </div>
 
-          {/* auth method — host/SSH only */}
-          {kind === 'host' && (
+          {/* auth method — SSH only (VNC/RDP/telnet/serial/local don't use it) */}
+          {kind === 'host' && proto === 'ssh' && (
             <div className="col gap10" style={{ marginBottom: 14 }}>
               <div className="col" style={{ gap: 6 }}>
                 <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.authMethod')}</span>
@@ -846,7 +854,8 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onO
             </div>
           )}
 
-          {/* tunnel / proxyjump — the integration bridge */}
+          {/* tunnel / proxyjump — SSH host & DB-over-SSH only (irrelevant for VNC/RDP/etc.) */}
+          {(kind === 'db' || proto === 'ssh') && (
           <div style={{ border: '1px solid var(--border-hairline)', borderRadius: 14, overflow: 'hidden', marginBottom: 6 }}>
             <div className="row" style={{ justifyContent: 'space-between', padding: '12px 14px', background: tunnel ? 'var(--accent-soft-alt)' : 'var(--surface-subtle)' }}>
               <div className="row gap10">
@@ -962,6 +971,7 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onO
               </div>
             )}
           </div>
+          )}
         </div>
 
         {/* footer */}
@@ -979,8 +989,9 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onO
                 <><Icon name="zap" size={15} /> {t('modals.testConnection')}</>
               )}
             </button>
-          ) : (
-            // Host/SSH kind: real sshTest with latency + ok/error.
+          ) : proto === 'ssh' ? (
+            // Host/SSH kind: real sshTest with latency + ok/error. Only SSH can be tested;
+            // VNC/RDP/telnet/serial/local connect directly (no test step).
             <button className="btn btn-secondary" onClick={runTest}
               disabled={testing || !canTest}
               style={{ opacity: testing || !canTest ? 0.55 : 1, cursor: testing || !canTest ? 'not-allowed' : 'pointer' }}>
@@ -996,14 +1007,14 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onO
                 <><Icon name="zap" size={15} /> {t('modals.testConn')}</>
               )}
             </button>
-          )}
+          ) : null}
           <div className="row gap8">
             <Btn variant="ghost" onClick={onClose}>{t('modals.cancel')}</Btn>
             {kind === 'db'
               ? <Btn variant="primary" icon="check" onClick={handleDbSaveAndConnect} disabled={dbConnecting}>
                   {dbConnecting ? t('modals.connecting') ?? 'Connecting…' : isEdit ? t('modals.save') : t('modals.saveAndConnect')}
                 </Btn>
-              : <Btn variant="primary" icon="check" onClick={handleSave}>{isEdit ? t('modals.save') : t('modals.saveAndConnect')}</Btn>}
+              : <Btn variant="primary" icon="check" onClick={handleSave}>{isEdit ? t('modals.save') : (kind === 'host' && proto !== 'ssh' ? t('modals.connect') : t('modals.saveAndConnect'))}</Btn>}
           </div>
         </div>
       </div>

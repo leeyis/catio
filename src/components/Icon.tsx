@@ -15,6 +15,8 @@ const P: Record<string, string> = {
   'chevron-up': '<path d="m18 15-6-6-6 6"/>',
   'arrow-right': '<path d="M5 12h14M12 5l7 7-7 7"/>',
   'arrow-up-right': '<path d="M7 7h10v10M7 17 17 7"/>',
+  'arrow-up': '<path d="m5 12 7-7 7 7"/><path d="M12 19V5"/>',
+  bookmark: '<path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"/>',
   'external-link': '<path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
   info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>',
   square: '<rect x="4" y="4" width="16" height="16" rx="2"/>',
