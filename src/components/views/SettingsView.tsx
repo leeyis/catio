@@ -15,6 +15,7 @@ import type { ModelTestResult } from '../../services'
 import { isTauri } from '../../services/ssh'
 import { mcpStart, mcpStop, mcpStatus } from '../../services/mcp'
 import type { McpInfo } from '../../services/mcp'
+import { exportConfig, importConfig } from '../../services/configSync'
 
 // ---- Prop types ----
 
@@ -564,6 +565,70 @@ function ConnDefaults({ onImportSshConfig }: { onImportSshConfig?: () => Promise
   )
 }
 
+// Encrypted config export/import (B3) — move connections + settings across devices.
+function ConfigSyncBlock() {
+  const { t } = useTranslation()
+  const [expPass, setExpPass] = useState('')
+  const [bundle, setBundle] = useState('')
+  const [impPass, setImpPass] = useState('')
+  const [impText, setImpText] = useState('')
+  const [status, setStatus] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  async function doExport() {
+    if (!expPass || busy) return
+    setBusy(true); setStatus(null)
+    try { setBundle(await exportConfig(expPass)) }
+    catch (e) { setStatus({ kind: 'error', text: String((e as { message?: string } | null)?.message ?? e) }) }
+    finally { setBusy(false) }
+  }
+  function copyBundle() { if (bundle && navigator.clipboard) navigator.clipboard.writeText(bundle).catch(() => {}) }
+  async function doImport() {
+    if (!impPass || !impText.trim() || busy) return
+    setBusy(true); setStatus(null)
+    try {
+      const r = await importConfig(impText, impPass)
+      setStatus({ kind: 'ok', text: t('settings.syncImported', { count: r.keys }) })
+      setTimeout(() => window.location.reload(), 900)
+    } catch (e) { setStatus({ kind: 'error', text: String((e as { message?: string } | null)?.message ?? e) }) }
+    finally { setBusy(false) }
+  }
+
+  const inputStyle: React.CSSProperties = { height: 34, padding: '0 10px', borderRadius: 8, fontSize: 13, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', color: 'var(--text-primary)', outline: 'none', boxSizing: 'border-box' }
+  const taStyle: React.CSSProperties = { ...inputStyle, height: 80, padding: '8px 10px', resize: 'vertical', fontFamily: 'monospace', fontSize: 11, width: '100%' }
+
+  return (
+    <Block title={t('settings.syncTitle')} hint={t('settings.syncHint')}>
+      <div className="col" style={{ gap: 8, marginBottom: 16 }}>
+        <span style={{ fontSize: 12.5, fontWeight: 600 }}>{t('settings.syncExport')}</span>
+        <div className="row gap8" style={{ alignItems: 'center' }}>
+          <input type="password" placeholder={t('settings.syncPassphraseHint')} value={expPass} onChange={e => setExpPass(e.target.value)} style={{ ...inputStyle, flex: 1 }} />
+          <Btn variant="secondary" size="sm" icon="lock" disabled={expPass.length < 8 || busy} onClick={() => void doExport()}>{t('settings.syncExportBtn')}</Btn>
+        </div>
+        {bundle && (
+          <div className="col" style={{ gap: 6 }}>
+            <textarea readOnly value={bundle} style={taStyle} onFocus={e => e.currentTarget.select()} />
+            <div className="row"><Btn variant="ghost" size="sm" icon="copy" onClick={copyBundle}>{t('settings.syncCopy')}</Btn></div>
+          </div>
+        )}
+      </div>
+      <div className="col" style={{ gap: 8 }}>
+        <span style={{ fontSize: 12.5, fontWeight: 600 }}>{t('settings.syncImport')}</span>
+        <textarea placeholder={t('settings.syncImportPlaceholder')} value={impText} onChange={e => setImpText(e.target.value)} style={taStyle} />
+        <div className="row gap8" style={{ alignItems: 'center' }}>
+          <input type="password" placeholder={t('settings.syncPassphrase')} value={impPass} onChange={e => setImpPass(e.target.value)} style={{ ...inputStyle, flex: 1 }} />
+          <Btn variant="primary" size="sm" icon="download" disabled={!impPass || !impText.trim() || busy} onClick={() => void doImport()}>{t('settings.syncImportBtn')}</Btn>
+        </div>
+      </div>
+      {status && (
+        <div className="row gap6" style={{ marginTop: 10, fontSize: 11.5, color: status.kind === 'error' ? 'var(--danger-fg)' : 'var(--signal-green)' }}>
+          {status.kind === 'ok' && <Icon name="check" size={12} />}<span>{status.text}</span>
+        </div>
+      )}
+    </Block>
+  )
+}
+
 function MCPSettings() {
   const { t } = useTranslation()
   const tauri = isTauri()
@@ -708,7 +773,7 @@ export function SettingsView({ theme, onTheme, onClose, authEnabled, users, curr
           {nav === 'appearance' && <><ThemeSettings theme={theme} onTheme={onTheme} /><AppearanceSettings /></>}
           {nav === 'security' && <SecuritySettings authEnabled={authEnabled} users={users} currentUser={currentUser} ownerUser={ownerUser} onEnableAuth={onEnableAuth} onDisableAuth={onDisableAuth} onLock={onLock} onRemoveUser={onRemoveUser} />}
           {nav === 'ai' && <AISettings />}
-          {nav === 'connections' && <ConnDefaults onImportSshConfig={onImportSshConfig} />}
+          {nav === 'connections' && <><ConnDefaults onImportSshConfig={onImportSshConfig} /><ConfigSyncBlock /></>}
           {nav === 'mcp' && <MCPSettings />}
           {nav === 'about' && <AboutSettings />}
         </div>
