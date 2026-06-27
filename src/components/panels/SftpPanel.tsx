@@ -63,9 +63,11 @@ export interface SftpPanelProps {
   onClose: () => void
   conn?: Connection
   sessionId?: string
+  /** Open a remote file in the editor (double-click / context menu). When absent, files download. */
+  onEditFile?: (path: string) => void
 }
 
-export function SftpPanel({ onClose, conn, sessionId }: SftpPanelProps) {
+export function SftpPanel({ onClose, conn, sessionId, onEditFile }: SftpPanelProps) {
   const { t } = useTranslation()
 
   // Seed from the per-session cache so reopening the panel restores the directory
@@ -208,7 +210,8 @@ export function SftpPanel({ onClose, conn, sessionId }: SftpPanelProps) {
 
   const openItem = (it: SftpItem) => {
     if (it.type === 'dir') load(it.path)
-    else if (it.type === 'file') downloadItem(it)
+    // 双击文本文件进编辑器(二进制/超大由编辑器侧检测并回退下载);无 onEditFile 时退回直接下载。
+    else if (it.type === 'file') { if (onEditFile) onEditFile(it.path); else downloadItem(it) }
   }
 
   const goPath = (raw: string) => {

@@ -369,6 +369,27 @@
     "details": "Details",
     "close": "Close"
   },
+  "remoteFile": {
+    "loading": "Loading…",
+    "retry": "Retry",
+    "noSession": "No SSH session available",
+    "binary": "Binary file — can't edit inline",
+    "download": "Download",
+    "save": "Save",
+    "saving": "Saving…",
+    "unsaved": "Unsaved",
+    "truncated": "File too large — previewing first 5MB only; download to edit",
+    "conflict": "The remote file changed; saving will overwrite those changes",
+    "reload": "Reload",
+    "overwrite": "Overwrite anyway",
+    "cancel": "Cancel",
+    "openInEditor": "Open in editor",
+    "closeUnsavedTitle": "Unsaved changes",
+    "closeUnsavedBody": "\"{{name}}\" has unsaved changes. Close anyway?",
+    "closeSave": "Save & close",
+    "closeDiscard": "Close without saving",
+    "closeCancel": "Cancel"
+  },
   "workbench": {
     "collapseSidebar": "Collapse sidebar",
     "expandSidebar": "Expand sidebar",

@@ -7,6 +7,7 @@ import ScanWizard from './components/scan/ScanWizard'
 import { SettingsView } from './components/views/SettingsView'
 import { WorkbenchTabs } from './components/workbench/WorkbenchTabs'
 import { TerminalPane } from './components/workbench/TerminalPane'
+import { RemoteFileEditor } from './components/workbench/RemoteFileEditor'
 import { DbWorkbench } from './components/workbench/DbWorkbench'
 import { AIPanel } from './components/panels/AIPanel'
 import { SftpPanel } from './components/panels/SftpPanel'
@@ -405,6 +406,18 @@ export default function App() {
     const trimmed = title.trim()
     if (!trimmed) return
     setTabs(prev => prev.map(tb => tb.id === id ? { ...tb, title: trimmed } : tb))
+  }
+
+  // Open (or re-focus) a remote-file editor tab. The id is stable per (connId, path)
+  // so re-opening the same file reuses its tab; sessionId is refreshed on reconnect.
+  function openRemoteFile(connId: string, sessionId: string | undefined, filePath: string) {
+    const id = `rfile:${connId}:${filePath}`
+    const title = filePath.split(/[/\\]/).pop() || filePath
+    setTabs(prev => prev.some(tb => tb.id === id)
+      ? prev.map(tb => tb.id === id ? { ...tb, sessionId } : tb)
+      : [...prev, { id, kind: 'remote-file', connId, title, sessionId, path: filePath }])
+    setActiveTab(id)
+    setView('workbench')
   }
 
   // Build a display Connection for a live SSH session and open its terminal tab.
@@ -1358,6 +1371,10 @@ export default function App() {
                         {tab.kind === 'sql' && tabConn && (
                           <DbWorkbench conn={tabConn} density={density} active={isShown} />
                         )}
+                        {tab.kind === 'remote-file' && tab.path && (
+                          <RemoteFileEditor sessionId={tab.sessionId} path={tab.path}
+                            onDirtyChange={d => setTabs(prev => prev.map(tb => tb.id === tab.id && tb.dirty !== d ? { ...tb, dirty: d } : tb))} />
+                        )}
                       </div>
                     )
                   })}
@@ -1380,7 +1397,7 @@ export default function App() {
                 onNewConversation={cur ? (() => newAgentConversation(cur.id)) : undefined}
                 onRestoreConversation={cur ? (convId => restoreConversation(cur.id, convId)) : undefined}
                 onDeleteConversation={cur ? (convId => deleteAgentConversation(cur.id, convId)) : undefined} />}
-              {activePanel === 'sftp' && <SftpPanel onClose={() => setPanelOpen(false)} conn={curConn ?? undefined} sessionId={cur?.sessionId} />}
+              {activePanel === 'sftp' && <SftpPanel onClose={() => setPanelOpen(false)} conn={curConn ?? undefined} sessionId={cur?.sessionId} onEditFile={p => { if (cur) openRemoteFile(cur.connId, cur.sessionId, p) }} />}
               {activePanel === 'monitor' && <MonitorPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} />}
               {activePanel === 'tunnels' && <TunnelsPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} activeConnId={cur?.connId} profiles={profiles} />}
               {activePanel === 'snippets' && <SnippetsPanel onClose={() => setPanelOpen(false)} snippets={snippets} onChange={() => setSnippets(loadSnippets())} onInsert={insertToTerminal} canInsert={canInsert} canInsertEditor={canInsertEditor} />}

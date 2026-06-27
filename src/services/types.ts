@@ -416,11 +416,15 @@ export interface Automation {
 
 export interface Tab {
   id: string
-  kind: 'terminal' | 'sql'
+  kind: 'terminal' | 'sql' | 'remote-file'
   connId: string
   title: string
   /** Live SSH session id (ORCH). Omitted for demo/mock tabs. */
   sessionId?: string
+  /** Remote file path (kind === 'remote-file'). */
+  path?: string
+  /** Unsaved-changes indicator for remote-file tabs (drives the tab bar dot). */
+  dirty?: boolean
 }
 
 // ---- Top-level DATA shape ----

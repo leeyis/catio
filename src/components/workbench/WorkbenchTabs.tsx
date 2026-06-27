@@ -85,10 +85,11 @@ export function WorkbenchTabs({ tabs, activeTab, onActivate, onClose, onCloseOth
               background: active ? 'var(--accent-soft)' : 'transparent',
               border: active ? '1px solid var(--accent-border)' : '1px solid transparent',
             }}>
-            <Icon name={tab.kind === 'terminal' ? (conn && conn.proto === 'local' ? 'terminal' : 'globe') : 'table-2'} size={14}
+            <Icon name={tab.kind === 'terminal' ? (conn && conn.proto === 'local' ? 'terminal' : 'globe') : tab.kind === 'remote-file' ? 'file-code' : 'table-2'} size={14}
               style={{ color: active ? 'var(--accent-primary)' : 'var(--text-tertiary)' }} />
             <span className="ell" style={{ maxWidth: 150, fontSize: 12.5, fontWeight: active ? 600 : 500, color: active ? 'var(--accent-primary)' : 'var(--text-secondary)' }}>{tab.title}</span>
             {tab.kind === 'terminal' && <span className="dot" style={{ background: 'var(--signal-green)' }} />}
+            {tab.kind === 'remote-file' && tab.dirty && <span className="dot" style={{ background: 'var(--signal-amber)' }} />}
             <button className="icon-btn bare" style={{ width: 18, height: 18 }} onClick={(e) => { e.stopPropagation(); onClose(tab.id); }}><Icon name="x" size={12} /></button>
           </div>
         );

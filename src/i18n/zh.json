@@ -369,6 +369,27 @@
     "details": "详情",
     "close": "关闭"
   },
+  "remoteFile": {
+    "loading": "加载中…",
+    "retry": "重试",
+    "noSession": "无可用 SSH 会话",
+    "binary": "二进制文件,无法在线编辑",
+    "download": "下载",
+    "save": "保存",
+    "saving": "保存中…",
+    "unsaved": "未保存",
+    "truncated": "文件过大,仅预览前 5MB,请下载后编辑",
+    "conflict": "远端文件已变更,继续保存将覆盖对方的改动",
+    "reload": "重新加载",
+    "overwrite": "仍然覆盖",
+    "cancel": "取消",
+    "openInEditor": "用编辑器打开",
+    "closeUnsavedTitle": "有未保存的更改",
+    "closeUnsavedBody": "“{{name}}” 有未保存的更改,确定关闭吗?",
+    "closeSave": "保存并关闭",
+    "closeDiscard": "不保存关闭",
+    "closeCancel": "取消"
+  },
   "workbench": {
     "collapseSidebar": "收起侧栏",
     "expandSidebar": "展开侧栏",
