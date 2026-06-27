@@ -23,19 +23,23 @@ export interface TunnelsPanelProps {
   activeConnId?: string
   /** All saved profiles — used to derive the real jump chain. */
   profiles?: ConnectionProfile[]
+  /** Persist this forward as a reusable connection (C2). Absent → no save UI. */
+  onSaveProfile?: (kind: 'L' | 'R' | 'D', bind: string, target: string, name: string) => void
 }
 
 // ---- New-forward overlay form ----
 interface NewForwardFormProps {
   onSubmit: (kind: 'L' | 'R' | 'D', bind: string, target: string) => void
   onCancel: () => void
+  onSaveProfile?: (kind: 'L' | 'R' | 'D', bind: string, target: string, name: string) => void
 }
 
-function NewForwardForm({ onSubmit, onCancel }: NewForwardFormProps) {
+function NewForwardForm({ onSubmit, onCancel, onSaveProfile }: NewForwardFormProps) {
   const { t } = useTranslation()
   const [kind, setKind] = useState<'L' | 'R' | 'D'>('L')
   const [bind, setBind] = useState('')
   const [target, setTarget] = useState('')
+  const [name, setName] = useState('')
 
   const handleSubmit = (e?: React.FormEvent) => {
     e?.preventDefault()
@@ -92,8 +96,17 @@ function NewForwardForm({ onSubmit, onCancel }: NewForwardFormProps) {
           />
         </div>
       )}
+      {onSaveProfile && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>{t('panels.fwdSaveName')}</span>
+          <input style={inputStyle} placeholder={t('panels.fwdSaveNamePlaceholder')} value={name} onChange={e => setName(e.target.value)} />
+        </div>
+      )}
       <div className="row gap6" style={{ justifyContent: 'flex-end' }}>
         <Btn variant="ghost" size="sm" onClick={onCancel}>{t('panels.cancel')}</Btn>
+        {onSaveProfile && (
+          <Btn variant="ghost" size="sm" onClick={() => { if (bind.trim() && name.trim()) onSaveProfile(kind, bind.trim(), target.trim(), name.trim()) }} disabled={!bind.trim() || !name.trim()}>{t('panels.fwdSave')}</Btn>
+        )}
         <Btn variant="primary" size="sm" onClick={() => handleSubmit()} disabled={!bind.trim()}>{t('panels.fwdAdd')}</Btn>
       </div>
     </form>
@@ -102,7 +115,7 @@ function NewForwardForm({ onSubmit, onCancel }: NewForwardFormProps) {
 
 // ---- Main panel ----
 
-export function TunnelsPanel({ onClose, sessionId, activeConnId, profiles }: TunnelsPanelProps) {
+export function TunnelsPanel({ onClose, sessionId, activeConnId, profiles, onSaveProfile }: TunnelsPanelProps) {
   const { t } = useTranslation()
   const D = useData()
   const typeLabel: Record<string, string> = { L: 'Local', R: 'Remote', D: 'Dynamic' }
@@ -218,6 +231,7 @@ export function TunnelsPanel({ onClose, sessionId, activeConnId, profiles }: Tun
             <NewForwardForm
               onSubmit={handleCreate}
               onCancel={() => setShowForm(false)}
+              onSaveProfile={onSaveProfile ? (kind, bind, target, name) => { setShowForm(false); onSaveProfile(kind, bind, target, name) } : undefined}
             />
           )}
         </div>

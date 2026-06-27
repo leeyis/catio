@@ -38,7 +38,8 @@ import {
   setActiveDbConnection, removeDbConnection, removeActiveDbConnection, saveDbConnection,
   type DbProfile,
 } from './state/dbConnections'
-import { sshConnect, sshDisconnect, sshTrustHost, isTauri, onHistory, sshSysinfo, sshDetectOs, importSshConfig } from './services/ssh'
+import { sshConnect, sshDisconnect, sshTrustHost, isTauri, onHistory, sshSysinfo, sshDetectOs, importSshConfig, tunnelOpen } from './services/ssh'
+import { useTunnelConnections, saveTunnelConnection, removeTunnelConnection, generateTunnelId } from './state/tunnelConnections'
 import type { SshConnectArgs, AuthMethod } from './services/ssh'
 import { mcpSyncTargets } from './services/mcp'
 import { createVaultCredential, unlockVault, lockVault, isVaultUnlocked, recallSecret, rememberSecret } from './state/vault'
@@ -67,6 +68,7 @@ import type { Attachment } from './components/panels/AIPanel'
 export default function App() {
   const D = useData()
   const dbProfiles = useDbConnections()
+  const tunnelProfiles = useTunnelConnections()
   // Active DB connections live in a module-level Map (not React state). Bump this
   // to force a re-render when a connection is opened/closed so the vault status
   // and the details panel reflect the change.
@@ -235,7 +237,17 @@ export default function App() {
   // Real saved DB connections (reactive) → db Connection rows.
   const activeProfileIds = new Set(listActiveDbConnections().map(a => a.profileId))
   const realDbConns = dbProfiles.map(p => dbProfileToConnection(p, activeProfileIds.has(p.id)))
-  const vaultConns = ownsVault ? [...profileConns, ...realDbConns] : []
+  // Saved port-forward connections (C2) → tunnel Connection rows.
+  const tunnelConns: Connection[] = tunnelProfiles.map(p => ({
+    id: p.id,
+    group: p.group ?? '',
+    kind: 'tunnel',
+    name: p.name,
+    sub: p.kind === 'D' ? `SOCKS · ${p.bind}` : `${p.kind} · ${p.bind} → ${p.target ?? ''}`,
+    icon: 'git-branch',
+    status: 'idle',
+  }))
+  const vaultConns = ownsVault ? [...profileConns, ...realDbConns, ...tunnelConns] : []
   const currentName = authEnabled && sessionUser && sessionUser !== '__open' ? sessionUser : 'skyler'
 
   function enableAuth() {
@@ -632,6 +644,24 @@ export default function App() {
       )
       return
     }
+    // Saved port-forward (C2): ensure the host SSH session, then open the tunnel.
+    if (conn.kind === 'tunnel') {
+      const tp = tunnelProfiles.find(p => p.id === conn.id)
+      if (!tp) return
+      const sid = await ensureSession(tp.hostProfileId)
+      if (sid === 'needs-auth' || sid === 'failed') {
+        // Host not connected and can't connect silently → connect it interactively first.
+        const hostConn = vaultConns.find(c => c.id === tp.hostProfileId)
+        if (hostConn) void openConn(hostConn)
+        return
+      }
+      try {
+        await tunnelOpen(sid, { kind: tp.kind, bind: tp.bind, target: tp.kind === 'D' ? null : (tp.target ?? null) })
+        setActivePanel('tunnels')
+        setPanelOpen(true)
+      } catch (e) { setConnectError(String((e as { message?: string } | null)?.message ?? e)) }
+      return
+    }
     // DB connection: if already live, open its SQL workbench tab; otherwise reuse a
     // cached secret (auth-gated) or prompt for the password and connect. Falls back
     // to the details panel only if the saved profile can't be resolved.
@@ -1018,6 +1048,7 @@ export default function App() {
 
   // 连接 — look up the profile and run the real connect flow.
   function connectFromDetail(conn: Connection) {
+    if (conn.kind === 'tunnel') { void openConn(conn); closeDetailPanel(); return }
     const profile = profiles.find(p => p.id === conn.id)
     if (!profile) return
     void connectProfile(
@@ -1094,6 +1125,11 @@ export default function App() {
 
   // 删除 (confirmed) — remove the profile, tear down any session, close the panel.
   function confirmDelete(conn: Connection) {
+    if (conn.kind === 'tunnel') {
+      try { removeTunnelConnection(conn.id) } catch { /* ignore */ }
+      if (detailConn?.id === conn.id) { setDetailConn(null); setPanelOpen(false) }
+      return
+    }
     if (sessionMap[conn.id]) teardownSession(conn.id)
     try { deleteProfile(conn.id) } catch { /* localStorage unavailable — ignore */ }
     // Drop this host's shell command history too (req: 删连接同步删历史).
@@ -1109,6 +1145,9 @@ export default function App() {
       if (c.kind === 'host') {
         const p = profiles.find(x => x.id === c.id)
         if (p) { try { saveProfile({ ...p, group: groupId || undefined }) } catch { /* localStorage 不可用 */ } }
+      } else if (c.kind === 'tunnel') {
+        const p = tunnelProfiles.find(x => x.id === c.id)
+        if (p) saveTunnelConnection({ ...p, group: groupId || undefined }) // 内部 notify()
       } else {
         const p = dbProfiles.find(x => x.id === c.id)
         if (p) saveDbConnection({ ...p, group: groupId || undefined }) // 内部 notify()
@@ -1124,6 +1163,8 @@ export default function App() {
         if (sessionMap[c.id]) teardownSession(c.id)
         try { deleteProfile(c.id) } catch { /* localStorage 不可用 */ }
         deleteHistoryForProfile(c.id)
+      } else if (c.kind === 'tunnel') {
+        try { removeTunnelConnection(c.id) } catch { /* ignore */ }
       } else {
         const p = dbProfiles.find(x => x.id === c.id)
         if (p) deleteDbProfile(p)
@@ -1436,7 +1477,26 @@ export default function App() {
                 onDeleteConversation={cur ? (convId => deleteAgentConversation(cur.id, convId)) : undefined} />}
               {activePanel === 'sftp' && <SftpPanel onClose={() => setPanelOpen(false)} conn={curConn ?? undefined} sessionId={cur?.sessionId} onEditFile={p => { if (cur) openRemoteFile(cur.connId, cur.sessionId, p) }} />}
               {activePanel === 'monitor' && <MonitorPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} />}
-              {activePanel === 'tunnels' && <TunnelsPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} activeConnId={cur?.connId} profiles={profiles} />}
+              {activePanel === 'tunnels' && <TunnelsPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} activeConnId={cur?.connId} profiles={profiles}
+                onSaveProfile={cur ? (kind, bind, target, name) => {
+                  // Resolve the active tab's (live) connId back to a STABLE saved profile id,
+                  // so the forward can re-establish its host session after restart. Falls back
+                  // to the live connId (works while the host stays connected) if unresolved.
+                  const liveConn = liveConns[cur.connId] ?? vaultConns.find(c => c.id === cur.connId)
+                  let hostProfileId = cur.connId
+                  const sub = liveConn?.sub ?? ''
+                  const at = sub.indexOf('@')
+                  if (at >= 0) {
+                    const user = sub.slice(0, at)
+                    const hp = sub.slice(at + 1)
+                    const colon = hp.lastIndexOf(':')
+                    const host = colon > 0 ? hp.slice(0, colon) : hp
+                    const port = colon > 0 ? Number(hp.slice(colon + 1)) : 22
+                    const match = loadProfiles().find(p => p.host === host && p.port === port && p.user === user)
+                    if (match) hostProfileId = match.id
+                  }
+                  saveTunnelConnection({ id: generateTunnelId(), name, kind, bind, target: target || undefined, hostProfileId })
+                } : undefined} />}
               {activePanel === 'snippets' && <SnippetsPanel onClose={() => setPanelOpen(false)} snippets={snippets} onChange={() => setSnippets(loadSnippets())} onInsert={insertToTerminal} canInsert={canInsert} canInsertEditor={canInsertEditor} />}
               {activePanel === 'history' && <HistoryPanel onClose={() => setPanelOpen(false)} onAddSnippet={addSnippet} items={mergedHistory} onClear={() => { clearHistory(); setHistory([]); setDbHistory([]); void clearDbHistory() }}
                 // History is scoped to the active tab: no active tab → empty hint;
