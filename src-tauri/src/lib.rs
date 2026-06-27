@@ -3,6 +3,7 @@ pub mod db;
 pub mod mcp;
 pub mod scan;
 pub mod localterm;
+pub mod vnc;
 
 use ssh::manager::SessionManager;
 use db::manager::ConnManager;
