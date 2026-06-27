@@ -211,8 +211,8 @@ export function Sidebar({ activeId, onOpen, onDetail, collapsed, onToggleCollaps
 
   const conns = useMemo(() => {
     return allConns.filter(c => {
-      // RDP connections are remote-machine connections → show them under the "host" filter too.
-      if (filter !== 'all' && c.kind !== filter && !(filter === 'host' && c.kind === 'rdp')) return false
+      // RDP/VNC are remote-machine connections → show them under the "host" filter too.
+      if (filter !== 'all' && c.kind !== filter && !(filter === 'host' && (c.kind === 'rdp' || c.kind === 'vnc'))) return false
       if (!query) return true
       const q = query.toLowerCase()
       return c.name.toLowerCase().includes(q) || c.sub.toLowerCase().includes(q) || (c.tags || []).some(tag => tag.includes(q))

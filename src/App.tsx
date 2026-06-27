@@ -42,6 +42,8 @@ import {
 import { sshConnect, sshDisconnect, sshTrustHost, isTauri, onHistory, sshSysinfo, sshDetectOs, importSshConfig, tunnelOpen, rdpLaunch } from './services/ssh'
 import { useTunnelConnections, saveTunnelConnection, removeTunnelConnection, generateTunnelId } from './state/tunnelConnections'
 import { useRdpConnections, saveRdpConnection, removeRdpConnection, generateRdpId } from './state/rdpConnections'
+import { useVncConnections, saveVncConnection, removeVncConnection, generateVncId } from './state/vncConnections'
+import { setSessionSecret } from './state/sessionSecrets'
 import type { SshConnectArgs, AuthMethod } from './services/ssh'
 import { mcpSyncTargets } from './services/mcp'
 import { createVaultCredential, unlockVault, lockVault, isVaultUnlocked, recallSecret, rememberSecret } from './state/vault'
@@ -72,6 +74,7 @@ export default function App() {
   const dbProfiles = useDbConnections()
   const tunnelProfiles = useTunnelConnections()
   const rdpProfiles = useRdpConnections()
+  const vncProfiles = useVncConnections()
   // Active DB connections live in a module-level Map (not React state). Bump this
   // to force a re-render when a connection is opened/closed so the vault status
   // and the details panel reflect the change.
@@ -265,7 +268,19 @@ export default function App() {
     port: p.port,
     ...(p.user ? { user: p.user } : {}),
   }))
-  const vaultConns = ownsVault ? [...profileConns, ...realDbConns, ...tunnelConns, ...rdpConns] : []
+  // Saved VNC connections → vnc Connection rows (open = embedded VNC session).
+  const vncConns: Connection[] = vncProfiles.map(p => ({
+    id: p.id,
+    group: p.group ?? '',
+    kind: 'vnc',
+    name: p.name,
+    sub: `VNC · ${p.host}:${p.port}`,
+    icon: 'monitor',
+    status: 'idle',
+    host: p.host,
+    port: p.port,
+  }))
+  const vaultConns = ownsVault ? [...profileConns, ...realDbConns, ...tunnelConns, ...rdpConns, ...vncConns] : []
   const currentName = authEnabled && sessionUser && sessionUser !== '__open' ? sessionUser : 'skyler'
 
   function enableAuth() {
@@ -687,6 +702,14 @@ export default function App() {
       if (rp) void rdpLaunch(rp.host, rp.port, rp.user ?? '').catch(e => setConnectError(String((e as { message?: string } | null)?.message ?? e)))
       return
     }
+    // Saved VNC connection: open an embedded VNC tab, reusing the cached password.
+    if (conn.kind === 'vnc') {
+      const vp = vncProfiles.find(p => p.id === conn.id)
+      if (!vp) return
+      const pw = getSessionSecret(vp.id) ?? (await cachedSecret(vp.id)) ?? ''
+      openVncConn({ name: vp.name, host: vp.host, port: vp.port, password: pw })
+      return
+    }
     // Saved port-forward (C2): ensure the host SSH session, then open the tunnel.
     if (conn.kind === 'tunnel') {
       const tp = tunnelProfiles.find(p => p.id === conn.id)
@@ -1096,7 +1119,7 @@ export default function App() {
 
   // 连接 — look up the profile and run the real connect flow.
   function connectFromDetail(conn: Connection) {
-    if (conn.kind === 'tunnel' || conn.kind === 'rdp') { void openConn(conn); closeDetailPanel(); return }
+    if (conn.kind === 'tunnel' || conn.kind === 'rdp' || conn.kind === 'vnc') { void openConn(conn); closeDetailPanel(); return }
     const profile = profiles.find(p => p.id === conn.id)
     if (!profile) return
     void connectProfile(
@@ -1183,6 +1206,11 @@ export default function App() {
       if (detailConn?.id === conn.id) { setDetailConn(null); setPanelOpen(false) }
       return
     }
+    if (conn.kind === 'vnc') {
+      try { removeVncConnection(conn.id) } catch { /* ignore */ }
+      if (detailConn?.id === conn.id) { setDetailConn(null); setPanelOpen(false) }
+      return
+    }
     if (sessionMap[conn.id]) teardownSession(conn.id)
     try { deleteProfile(conn.id) } catch { /* localStorage unavailable — ignore */ }
     // Drop this host's shell command history too (req: 删连接同步删历史).
@@ -1204,6 +1232,9 @@ export default function App() {
       } else if (c.kind === 'rdp') {
         const p = rdpProfiles.find(x => x.id === c.id)
         if (p) saveRdpConnection({ ...p, group: groupId || undefined })
+      } else if (c.kind === 'vnc') {
+        const p = vncProfiles.find(x => x.id === c.id)
+        if (p) saveVncConnection({ ...p, group: groupId || undefined })
       } else {
         const p = dbProfiles.find(x => x.id === c.id)
         if (p) saveDbConnection({ ...p, group: groupId || undefined }) // 内部 notify()
@@ -1223,6 +1254,8 @@ export default function App() {
         try { removeTunnelConnection(c.id) } catch { /* ignore */ }
       } else if (c.kind === 'rdp') {
         try { removeRdpConnection(c.id) } catch { /* ignore */ }
+      } else if (c.kind === 'vnc') {
+        try { removeVncConnection(c.id) } catch { /* ignore */ }
       } else {
         const p = dbProfiles.find(x => x.id === c.id)
         if (p) deleteDbProfile(p)
@@ -1637,7 +1670,14 @@ export default function App() {
           onClose={() => { setShowNew(false); setEditing(null); setEditProfile(null) }}
           onConnect={connectProfile}
           onOpenTerminal={openTerminalConn}
-          onOpenRemoteDesktop={openVncConn}
+          onSaveVnc={d => {
+            // Persist as a reusable sidebar connection, remember the password (session +
+            // vault), then open the embedded VNC tab.
+            const id = generateVncId()
+            saveVncConnection({ id, name: d.name, host: d.host, port: d.port, ...(d.group ? { group: d.group } : {}) })
+            if (d.password) { setSessionSecret(id, d.password); rememberConnSecret(id, d.password) }
+            openVncConn({ name: d.name, host: d.host, port: d.port, password: d.password })
+          }}
           onSaveRdp={d => {
             // Persist as a reusable sidebar connection, then launch the system RDP client.
             saveRdpConnection({ id: generateRdpId(), name: d.name, host: d.host, port: d.port, ...(d.user ? { user: d.user } : {}), ...(d.group ? { group: d.group } : {}) })
