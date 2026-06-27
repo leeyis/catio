@@ -39,7 +39,7 @@ import {
   setActiveDbConnection, removeDbConnection, removeActiveDbConnection, saveDbConnection,
   type DbProfile,
 } from './state/dbConnections'
-import { sshConnect, sshDisconnect, sshTrustHost, isTauri, onHistory, sshSysinfo, sshDetectOs, importSshConfig, tunnelOpen } from './services/ssh'
+import { sshConnect, sshDisconnect, sshTrustHost, isTauri, onHistory, sshSysinfo, sshDetectOs, importSshConfig, tunnelOpen, rdpLaunch } from './services/ssh'
 import { useTunnelConnections, saveTunnelConnection, removeTunnelConnection, generateTunnelId } from './state/tunnelConnections'
 import type { SshConnectArgs, AuthMethod } from './services/ssh'
 import { mcpSyncTargets } from './services/mcp'
@@ -1607,6 +1607,7 @@ export default function App() {
           onConnect={connectProfile}
           onOpenTerminal={openTerminalConn}
           onOpenRemoteDesktop={openVncConn}
+          onLaunchRdp={d => { void rdpLaunch(d.host, d.port, d.user).catch(e => setConnectError(String((e as { message?: string } | null)?.message ?? e))) }}
           onConnected={(profile, secret) => {
             if (secret) rememberConnSecret(profile.id, secret)
             bumpDbActive()

@@ -176,6 +176,11 @@ export async function vncClose(sessionId: string): Promise<void> {
   return tauriInvoke('vnc_close', { sessionId })
 }
 
+/** Launch the platform RDP client (mstsc / xfreerdp / Microsoft Remote Desktop) for host:port. */
+export async function rdpLaunch(host: string, port: number, user: string): Promise<void> {
+  return tauriInvoke('rdp_launch', { host, port, user })
+}
+
 // ---- Event listener ----
 // Returns an unlisten callback. No-op (returns no-op) outside Tauri.
 // Uses Tauri's Event<T> generic so cb is fully typed without `any`.

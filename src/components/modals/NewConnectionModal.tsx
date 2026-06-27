@@ -30,6 +30,8 @@ export interface NewConnectionModalProps {
   onOpenTerminal?: (desc: { proto: 'local' | 'serial' | 'telnet' | 'mosh'; name: string; host?: string; port?: number; user?: string; serialPort?: string; baud?: number }) => void
   /** Open a VNC remote-desktop session. */
   onOpenRemoteDesktop?: (desc: { name: string; host: string; port: number; password: string }) => void
+  /** Launch the system RDP client for host:port. */
+  onLaunchRdp?: (desc: { host: string; port: number; user: string }) => void
   /** Called on a successful live DB connect (Tauri) with the saved profile, so the
    *  caller can immediately open the workbench for it. Not called in non-Tauri dev. */
   onConnected?: (profile: DbProfile, secret?: string) => void
@@ -118,7 +120,7 @@ function shortVersion(v: string): string {
 
 // ---- Component ----
 
-export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onOpenTerminal, onOpenRemoteDesktop, onConnected, editProfile, onSaved }: NewConnectionModalProps) {
+export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onOpenTerminal, onOpenRemoteDesktop, onLaunchRdp, onConnected, editProfile, onSaved }: NewConnectionModalProps) {
   const D = useData()
   const { t } = useTranslation()
   const isEdit = !!editProfile
@@ -136,7 +138,7 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onO
   const PROTOS = [
     { id: 'ssh', label: 'SSH' }, { id: 'mosh', label: 'Mosh' },
     { id: 'telnet', label: 'Telnet' }, { id: 'serial', label: 'Serial' },
-    { id: 'vnc', label: 'VNC' },
+    { id: 'vnc', label: 'VNC' }, { id: 'rdp', label: 'RDP' },
     { id: 'local', label: t('modals.protoLocal') },
   ]
   // Edit mode opens on the tab matching the profile kind; otherwise the sidebar tab.
@@ -362,6 +364,16 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onO
         saveProfile({ id: editHost.id, name, host, port, user, auth, jump, ...(group ? { group } : {}), ...(editHost.os ? { os: editHost.os } : {}) })
       } catch { /* localStorage unavailable — ignore */ }
       onSaved?.()
+      onClose()
+      return
+    }
+    // RDP:委托系统 RDP 客户端(mstsc/xfreerdp)启动,不在 app 内嵌。
+    if (kind === 'host' && proto === 'rdp' && onLaunchRdp) {
+      const host = (hostRef.current?.value || '').trim()
+      if (!host) { hostRef.current?.focus(); return }
+      const user = (userRef.current?.value || '').trim()
+      const port = Number(portRef.current?.value) || 3389
+      onLaunchRdp({ host, port, user })
       onClose()
       return
     }

@@ -5,6 +5,7 @@ pub mod scan;
 pub mod localterm;
 pub mod vnc;
 pub mod vncconn;
+pub mod rdp;
 
 use ssh::manager::SessionManager;
 use db::manager::ConnManager;
@@ -55,6 +56,7 @@ pub fn run() {
             vncconn::vnc_pointer,
             vncconn::vnc_key,
             vncconn::vnc_close,
+            rdp::rdp_launch,
             ssh::tunnel::tunnel_open,
             ssh::tunnel::tunnel_close,
             ssh::tunnel::tunnel_list,
