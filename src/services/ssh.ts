@@ -176,6 +176,44 @@ export async function sftpDelete(sessionId: string, path: string, isDir: boolean
   return tauriInvoke('sftp_delete', { sessionId, path, isDir })
 }
 
+// ---- Remote file editing ----
+
+/** Remote file content for inline editing. Mirrors backend `RemoteFileContent`. */
+export interface RemoteFileContent {
+  /** UTF-8 text (lossy); empty when binary. */
+  content: string
+  /** True when the file looks binary (NUL in first 8KiB). */
+  isBinary: boolean
+  /** Total byte size on the server. */
+  size: number
+  /** mtime (unix seconds), used as the conflict-detection base. */
+  modified: number | null
+  /** Permission bits (low 12, octal), restored on save. */
+  mode: number | null
+  /** True when content was truncated to the size limit (read-only preview). */
+  truncated: boolean
+}
+
+/** Read a remote file's content into memory for editing. `maxBytes` defaults to 5MB on the backend. */
+export async function sftpReadFile(sessionId: string, path: string, maxBytes?: number): Promise<RemoteFileContent> {
+  return tauriInvoke<RemoteFileContent>('sftp_read_file', { sessionId, path, maxBytes })
+}
+
+/**
+ * Write content back to a remote file. Pass `baseModified` (the mtime from the prior read) to
+ * enable conflict detection — the backend returns an `SshError` of kind `Conflict` if the file
+ * changed on the server. Returns the new mtime to use as the next save's base.
+ */
+export async function sftpWriteFile(
+  sessionId: string,
+  path: string,
+  content: string,
+  baseModified?: number | null,
+  mode?: number | null,
+): Promise<number> {
+  return tauriInvoke<number>('sftp_write_file', { sessionId, path, content, baseModified, mode })
+}
+
 // ---- Bytes formatter ----
 export function formatBytes(n: number): string {
   if (n === 0) return '0 B'

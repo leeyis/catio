@@ -35,6 +35,8 @@ pub fn run() {
             ssh::sftp::sftp_rename,
             ssh::sftp::sftp_delete,
             ssh::sftp::sftp_touch,
+            ssh::sftp::sftp_read_file,
+            ssh::sftp::sftp_write_file,
             ssh::tunnel::tunnel_open,
             ssh::tunnel::tunnel_close,
             ssh::tunnel::tunnel_list,

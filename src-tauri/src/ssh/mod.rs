@@ -35,6 +35,8 @@ pub enum SshError {
     Tunnel(String),
     #[error("io error: {0}")]
     Io(String),
+    #[error("file changed on server")]
+    Conflict,
 }
 
 impl Serialize for SshError {
@@ -49,6 +51,7 @@ impl Serialize for SshError {
             SshError::Sftp(_) => ("Sftp", self.to_string()),
             SshError::Tunnel(_) => ("Tunnel", self.to_string()),
             SshError::Io(_) => ("Io", self.to_string()),
+            SshError::Conflict => ("Conflict", self.to_string()),
         };
         let mut st = s.serialize_struct("SshError", 2)?;
         st.serialize_field("kind", kind)?;

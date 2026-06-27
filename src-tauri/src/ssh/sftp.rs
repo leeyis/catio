@@ -56,6 +56,29 @@ pub struct TransferProgress {
     pub percent: f64,
 }
 
+/// 远端文件内容（在线编辑读取）。serde camelCase 匹配前端 `RemoteFileContent`。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteFileContent {
+    /// UTF-8 文本（lossy 解码）；二进制时为空串。
+    pub content: String,
+    /// 是否二进制（前 8KiB 含 NUL 字节）。
+    pub is_binary: bool,
+    /// 远端文件总字节数。
+    pub size: u64,
+    /// 修改时间（unix 秒），保存时的冲突检测基准。
+    pub modified: Option<i64>,
+    /// 权限位（低 12 位八进制），写回时还原。
+    pub mode: Option<u32>,
+    /// 内容是否因超过上限被截断（仅作只读预览）。
+    pub truncated: bool,
+}
+
+/// 在线编辑可读取的最大字节数（5MB）；超过则只读预览，提示走下载。
+const EDIT_MAX_BYTES: u64 = 5 * 1024 * 1024;
+/// 在线编辑读取的单次 SFTP read 长度。
+const EDIT_RW_CHUNK: usize = 32 * 1024;
+
 /// 单调递增的传输 id 计数器（避免引入 uuid 依赖）。
 static TRANSFER_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -836,6 +859,153 @@ pub async fn sftp_touch(
     let cmd = format!("touch -- {}", shell_escape(&path));
     exec(&mgr, &session_id, &cmd).await?;
     Ok(())
+}
+
+/// 读取远端文件内容到内存（在线编辑）。内容传输走 SFTP 子系统；
+/// 返回大小 / 修改时间 / 权限位用于保存时的冲突检测与权限还原。
+///
+/// - `max_bytes` 缺省取 [`EDIT_MAX_BYTES`]；超限只读取前 `max_bytes` 字节并置 `truncated`。
+/// - 前 8KiB 含 NUL 字节即判定二进制，`content` 留空、`is_binary = true`，前端引导走下载。
+#[tauri::command]
+pub async fn sftp_read_file(
+    session_id: String,
+    path: String,
+    max_bytes: Option<u64>,
+    mgr: tauri::State<'_, SessionManager>,
+) -> Result<RemoteFileContent, SshError> {
+    use russh_sftp::protocol::OpenFlags;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let limit = max_bytes.unwrap_or(EDIT_MAX_BYTES);
+    let sftp = crate::ssh::sftp_transfer::open_sftp(&mgr, &session_id).await?;
+
+    let attrs = sftp
+        .metadata(path.as_str())
+        .await
+        .map_err(|e| SshError::Sftp(e.to_string()))?;
+    let size = attrs.size.unwrap_or(0);
+    let modified = attrs.mtime.map(|m| m as i64);
+    let mode = attrs.permissions.map(|p| p & 0o7777);
+
+    // 读取至多 limit+1 字节以判断是否截断。
+    let mut remote = sftp
+        .open_with_flags(path.as_str(), OpenFlags::READ)
+        .await
+        .map_err(|e| SshError::Sftp(e.to_string()))?;
+    let cap = limit.saturating_add(1) as usize;
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = vec![0u8; EDIT_RW_CHUNK];
+    loop {
+        let n = remote
+            .read(&mut chunk)
+            .await
+            .map_err(|e| SshError::Sftp(e.to_string()))?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if buf.len() >= cap {
+            break;
+        }
+    }
+    let _ = remote.shutdown().await;
+
+    let truncated = buf.len() as u64 > limit;
+    if truncated {
+        buf.truncate(limit as usize);
+    }
+
+    // 二进制判定：前 8KiB 含 NUL 字节即视为二进制（git 同款启发，对截断鲁棒）。
+    let probe_len = buf.len().min(8192);
+    let is_binary = buf[..probe_len].contains(&0);
+
+    Ok(RemoteFileContent {
+        content: if is_binary {
+            String::new()
+        } else {
+            String::from_utf8_lossy(&buf).into_owned()
+        },
+        is_binary,
+        size,
+        modified,
+        mode,
+        truncated,
+    })
+}
+
+/// 写回远端文件内容（在线编辑保存）。
+///
+/// 1. 冲突检测：`base_modified` 与远端当前 mtime 不一致 → 返回 [`SshError::Conflict`]，前端弹冲突提示。
+/// 2. 原子写：先写临时文件 `<path>.catio.tmp`（SFTP），再 `mv -f` 覆盖目标
+///    （SFTP v3 rename 不保证可覆盖已存在文件，故走 exec mv，与 mkdir/rename 同一架构）。
+/// 3. 还原权限位（临时文件以默认权限创建）。
+/// 4. 返回新的 mtime，作为下次保存的冲突检测基准。
+#[tauri::command]
+pub async fn sftp_write_file(
+    session_id: String,
+    path: String,
+    content: String,
+    base_modified: Option<i64>,
+    mode: Option<u32>,
+    mgr: tauri::State<'_, SessionManager>,
+) -> Result<i64, SshError> {
+    use russh_sftp::protocol::OpenFlags;
+    use tokio::io::AsyncWriteExt;
+
+    let sftp = crate::ssh::sftp_transfer::open_sftp(&mgr, &session_id).await?;
+
+    // 1. 冲突检测。
+    if let Some(base) = base_modified {
+        if let Ok(attrs) = sftp.metadata(path.as_str()).await {
+            if let Some(cur) = attrs.mtime.map(|m| m as i64) {
+                if cur != base {
+                    return Err(SshError::Conflict);
+                }
+            }
+        }
+    }
+
+    // 2. 写临时文件（SFTP 子系统）。
+    let tmp = format!("{}.catio.tmp", path);
+    {
+        let mut f = sftp
+            .open_with_flags(
+                tmp.as_str(),
+                OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
+            )
+            .await
+            .map_err(|e| SshError::Sftp(e.to_string()))?;
+        f.write_all(content.as_bytes())
+            .await
+            .map_err(|e| SshError::Sftp(e.to_string()))?;
+        f.shutdown()
+            .await
+            .map_err(|e| SshError::Sftp(e.to_string()))?;
+    }
+
+    // 3. 还原原权限位。
+    if let Some(m) = mode {
+        let _ = exec(
+            &mgr,
+            &session_id,
+            &format!("chmod {:o} {}", m & 0o7777, shell_escape(&tmp)),
+        )
+        .await;
+    }
+
+    // 4. 原子替换目标；失败则清理临时文件并上报。
+    let mv = format!("mv -f -- {} {}", shell_escape(&tmp), shell_escape(&path));
+    if let Err(e) = exec(&mgr, &session_id, &mv).await {
+        let _ = sftp.remove_file(tmp.as_str()).await;
+        return Err(e);
+    }
+
+    // 5. 返回新 mtime。
+    let attrs = sftp
+        .metadata(path.as_str())
+        .await
+        .map_err(|e| SshError::Sftp(e.to_string()))?;
+    Ok(attrs.mtime.map(|m| m as i64).unwrap_or(0))
 }
 
 // ─── 单元测试（纯函数 parse_ls_output）────────────────────────────────────────
