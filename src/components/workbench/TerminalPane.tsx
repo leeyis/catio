@@ -58,6 +58,13 @@ export interface TerminalPaneProps {
    * termOpen resolves, and with null on close/unmount.
    */
   onChannel?: (sessionId: string, chanId: string | null) => void
+  /**
+   * Split view: whether this pane is the FOCUSED one. Snippet/history/AI insert+run,
+   * keyboard auto-focus, and the Agent terminal-buffer registration only apply to the
+   * focused pane, so a "run" doesn't fan out to every split terminal. Single (un-split)
+   * terminals are always focused → default true preserves the original behaviour.
+   */
+  isFocused?: boolean
 }
 
 // Tauri detection — mirror services/ssh.ts guard (not exported there).
@@ -163,7 +170,7 @@ interface MxTarget {
 }
 type MxRunState = Record<string, MxTarget>
 
-export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCandidates, ensureSession, onConnectTarget, sendToPty, onChannel }: TerminalPaneProps) {
+export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCandidates, ensureSession, onConnectTarget, sendToPty, onChannel, isFocused = true }: TerminalPaneProps) {
   const { t } = useTranslation()
   const D = useData()
   const { prefs } = usePrefs()
@@ -714,8 +721,6 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
     })
 
     if (live && sessionId) {
-      // Expose this session's buffer to the Catio Agent (read-terminal-buffer pref).
-      registerTermBuffer(sessionId, () => dumpTermBuffer(term))
       // ---- LIVE: wire to term_* IPC ----
       ;(async () => {
         const openedChanId = await termOpen(sessionId, term.cols, term.rows)
@@ -724,7 +729,7 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
         onChannelRef.current?.(sessionId, openedChanId)
         // 连接建立后立即激活终端焦点,免去用户手动点一下终端才能输入(仅当本 pane 是当前
         // 显示的 tab 时,避免在后台打开时抢焦点)。
-        if (active) { try { term.focus() } catch { /* best-effort */ } }
+        if (active && isFocused) { try { term.focus() } catch { /* best-effort */ } }
         unlisten = await listen<TermEvent>(`term://${openedChanId}`, (p) => {
           if (typeof p.bytesBase64 === 'string') {
             // 同帧可能携带 inputStart(此时这些字节即提示符本身)。先 write 提示符,
@@ -794,7 +799,7 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
       if (unlisten) unlisten()
       // Only call termClose if the channel is still live (not already closed by server).
       if (live && sessionId && chanIdRef.current) { termClose(sessionId, chanIdRef.current); chanIdRef.current = null }
-      if (live && sessionId) { onChannelRef.current?.(sessionId, null); unregisterTermBuffer(sessionId) }
+      if (live && sessionId) { onChannelRef.current?.(sessionId, null) }
       term.dispose()
       termRef.current = null
       fitAddonRef.current = null
@@ -822,7 +827,9 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
   // text into the PTY without executing; `catio-run` writes it then sends a
   // carriage-return (\r) — exactly what pressing Enter does — so it executes.
   useEffect(() => {
-    if (!active) return
+    // Only the focused pane (split view) consumes insert/run, so a "run" doesn't fire
+    // in every split terminal at once.
+    if (!active || !isFocused) return
     const writeToPty = (text: string) => {
       if (!live || !sessionId) return false
       const chanId = chanIdRef.current
@@ -848,7 +855,16 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
       window.removeEventListener('catio-insert', onInsert)
       window.removeEventListener('catio-run', onRun)
     }
-  }, [active, live, sessionId])
+  }, [active, isFocused, live, sessionId])
+
+  // Expose ONLY the focused pane's buffer to the Agent (split panes share a sessionId,
+  // so registering by sessionId from every pane would collide / clobber). Reads termRef
+  // lazily so it stays correct across re-inits.
+  useEffect(() => {
+    if (!live || !sessionId || !isFocused) return
+    registerTermBuffer(sessionId, () => { const t = termRef.current; return t ? dumpTermBuffer(t) : '' })
+    return () => unregisterTermBuffer(sessionId)
+  }, [isFocused, live, sessionId])
 
   // When this pane becomes the shown tab, its container regained a real size.
   // Refit xterm to the now-laid-out container, push the new size to the live PTY,
@@ -864,10 +880,10 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
       if (live && sessionId && chanIdRef.current) {
         try { termResize(sessionId, chanIdRef.current, term.cols, term.rows) } catch { /* best-effort */ }
       }
-      try { term.focus() } catch { /* best-effort */ }
+      if (isFocused) { try { term.focus() } catch { /* best-effort */ } }
     })
     return () => cancelAnimationFrame(id)
-  }, [active, live, sessionId])
+  }, [active, isFocused, live, sessionId])
 
   function copySel() {
     if (selBar && navigator.clipboard) navigator.clipboard.writeText(selBar.text).catch(() => {})

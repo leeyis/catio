@@ -376,6 +376,12 @@
     "closed": "Connection closed",
     "noDesktop": "(demo mode: not a desktop environment, VNC not connected)"
   },
+  "split": {
+    "splitRight": "Split right",
+    "splitDown": "Split down",
+    "closePane": "Close this terminal",
+    "count": "{{n}} terminals"
+  },
   "localTerm": {
     "localShell": "Local shell",
     "openFailed": "Failed to open terminal",

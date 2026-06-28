@@ -376,6 +376,12 @@
     "closed": "连接已关闭",
     "noDesktop": "(演示模式:非桌面环境,VNC 未连接)"
   },
+  "split": {
+    "splitRight": "左右分屏",
+    "splitDown": "上下分屏",
+    "closePane": "关闭此终端",
+    "count": "{{n}} 个终端"
+  },
   "localTerm": {
     "localShell": "本地 shell",
     "openFailed": "打开终端失败",

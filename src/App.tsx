@@ -6,9 +6,9 @@ import { HomeView } from './components/views/HomeView'
 import ScanWizard from './components/scan/ScanWizard'
 import { SettingsView } from './components/views/SettingsView'
 import { WorkbenchTabs } from './components/workbench/WorkbenchTabs'
-import { TerminalPane } from './components/workbench/TerminalPane'
 import { RemoteFileEditor } from './components/workbench/RemoteFileEditor'
 import { LocalTerminalPane } from './components/workbench/LocalTerminalPane'
+import { SplitTerminal } from './components/workbench/SplitTerminal'
 import { VncPane } from './components/workbench/VncPane'
 import { DbWorkbench } from './components/workbench/DbWorkbench'
 import { AIPanel } from './components/panels/AIPanel'
@@ -1538,7 +1538,7 @@ export default function App() {
                           <LocalTerminalPane conn={tabConn} active={isShown} />
                         )}
                         {tab.kind === 'terminal' && tabConn?.proto !== 'vnc' && !(tabConn && (tabConn.proto === 'local' || tabConn.proto === 'serial' || tabConn.proto === 'telnet' || tabConn.proto === 'mosh')) && (
-                          <TerminalPane conn={tabConn} sessionId={tab.sessionId} active={isShown} resolveSessionId={resolveSessionId} mxCandidates={mxCandidates} ensureSession={ensureSession} onConnectTarget={onConnectTarget} sendToPty={sendToPty} onChannel={(_sid, chan) => setChanMap(m => { const n = { ...m }; if (chan) n[tab.id] = chan; else delete n[tab.id]; return n })} />
+                          <SplitTerminal conn={tabConn} sessionId={tab.sessionId} active={isShown} resolveSessionId={resolveSessionId} mxCandidates={mxCandidates} ensureSession={ensureSession} onConnectTarget={onConnectTarget} sendToPty={sendToPty} onChannel={(_sid, chan) => setChanMap(m => { const n = { ...m }; if (chan) n[tab.id] = chan; else delete n[tab.id]; return n })} />
                         )}
                         {tab.kind === 'sql' && tabConn && (
                           <DbWorkbench conn={tabConn} density={density} active={isShown} />
