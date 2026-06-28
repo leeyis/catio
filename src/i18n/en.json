@@ -376,6 +376,9 @@
     "closed": "Connection closed",
     "noDesktop": "(demo mode: not a desktop environment, VNC not connected)"
   },
+  "terminal": {
+    "disconnected": "Disconnected — click this connection in the sidebar to reconnect"
+  },
   "split": {
     "splitRight": "Split right",
     "splitDown": "Split down",

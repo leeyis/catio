@@ -52,6 +52,7 @@ import { loadRecentSessions, recordRecentSession } from './state/recentSessions'
 import { getSessionSecret } from './state/sessionSecrets'
 import type { HistoryItem } from './services/types'
 import { loadProfiles, saveProfile, deleteProfile } from './state/connections'
+import { saveOpenTabs, restoreOpenTabs } from './state/tabPersistence'
 import { loadSnippets, saveSnippet, newSnippetId } from './state/snippets'
 import {
   loadConversations,
@@ -85,14 +86,14 @@ export default function App() {
   const initTheme = hash.includes('amber') ? 'amber' : hash.includes('grove') ? 'grove' : ((localStorage.getItem('catio-theme') || 'dawn') as 'dawn' | 'amber' | 'grove')
   const initView = (['home', 'workbench', 'settings'] as const).find(v => hash.includes(v)) || 'home'
   const [tweaks, setTweak] = useTweaks({ ...TWEAK_DEFAULTS, theme: initTheme })
-  const [view, setView] = useState<string>(initView)
+  const [view, setView] = useState<string>(() => (restoreOpenTabs() ? 'workbench' : initView))
   const [prevView, setPrevView] = useState<string>('home')
   // Which Settings section to open to (theme | security | ai | ...).
   const [settingsSection, setSettingsSection] = useState<string>('appearance')
   // Start with no open tabs — the app lands on 'home' by default (clean, no
   // auto-opened mock host/db). Tabs are created on demand by openConn/openLiveTab.
-  const [tabs, setTabs] = useState<Tab[]>([])
-  const [activeTab, setActiveTab] = useState<string>('')
+  const [tabs, setTabs] = useState<Tab[]>(() => restoreOpenTabs()?.tabs ?? [])
+  const [activeTab, setActiveTab] = useState<string>(() => restoreOpenTabs()?.activeTab ?? '')
   // Pending unsaved-changes confirmation when closing a dirty remote-file tab.
   const [closeConfirm, setCloseConfirm] = useState<{ id: string; title: string } | null>(null)
   // Transient VNC passwords (connId → password), in-memory only — never persisted.
@@ -150,6 +151,8 @@ export default function App() {
   // Real saved connection profiles (localStorage) — these seed the Vault & Home.
   const [profiles, setProfiles] = useState<ConnectionProfile[]>(() => loadProfiles())
   const reloadProfiles = () => setProfiles(loadProfiles())
+  // Persist open tabs so they survive an app restart.
+  useEffect(() => { saveOpenTabs(tabs, activeTab) }, [tabs, activeTab])
 
   // ---- ORCH: live SSH session orchestration ----
   // connId -> sessionId for live (Tauri) connections.
@@ -228,6 +231,32 @@ export default function App() {
   const locked = authEnabled && !sessionUser
   // the first account created owns the seed vault; other users get an isolated (empty) vault
   const ownsVault = !authEnabled || sessionUser === ownerUser || sessionUser === '__open'
+  // Silently reconnect restored tabs ONCE the vault is usable (auth users have no cached
+  // credentials until they log in, and the vault key is lost on restart — so this must be
+  // driven by unlock, not mount). No-op without persistent creds; the disconnected terminal
+  // then shows a "reconnect from the sidebar" notice.
+  const restoredReconnectRef = useRef(false)
+  useEffect(() => {
+    if (restoredReconnectRef.current || locked) return
+    restoredReconnectRef.current = true
+    const r = restoreOpenTabs()
+    if (!r) return
+    const seen = new Set<string>()
+    for (const tb of r.tabs) {
+      if (seen.has(tb.connId)) continue
+      seen.add(tb.connId)
+      if (profiles.some(p => p.id === tb.connId)) {
+        void ensureSession(tb.connId) // SSH: silent reconnect with cached creds
+      } else {
+        const dbp = dbProfiles.find(p => p.id === tb.connId)
+        if (dbp) void (async () => {
+          const sec = getSessionSecret(dbp.id) ?? (await cachedSecret(dbp.id))
+          if (sec) { try { await connectDbProfile(dbp, sec) } catch { /* stays dormant until user connects */ } }
+        })()
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [locked])
   // Vault = real saved SSH host profiles + real saved DB connections (reactive).
   // Mock DB connections are excluded — only real saved profiles drive DB rows now.
   // Real saved SSH host profiles (localStorage) → host Connection rows.

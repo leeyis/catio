@@ -774,8 +774,16 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
           ro.observe(hostEl)
         }
       })()
+    } else if (isTauri()) {
+      // Restored tab whose session ended / wasn't reconnected. Show a clear notice rather
+      // than misleading mock data (the dev/non-Tauri path below keeps the read-only mock).
+      term.write(`\r\n\x1b[2m[${t('terminal.disconnected')}]\x1b[0m\r\n`)
+      if (typeof ResizeObserver !== 'undefined') {
+        ro = new ResizeObserver(() => { if (hasSize()) { try { fitAddon.fit() } catch { /* no layout */ } } })
+        ro.observe(hostEl)
+      }
     } else {
-      // ---- DEMO: read-only mock buffer, no IPC wiring ----
+      // ---- DEMO (non-Tauri dev): read-only mock buffer, no IPC wiring ----
       ;(async () => {
         const buf = await getTermBuffer(conn ? conn.id : 'h-bastion')
         if (disposed) return

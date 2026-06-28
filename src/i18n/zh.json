@@ -376,6 +376,9 @@
     "closed": "连接已关闭",
     "noDesktop": "(演示模式:非桌面环境,VNC 未连接)"
   },
+  "terminal": {
+    "disconnected": "连接已断开 — 在左侧栏点击该连接可重新连接"
+  },
   "split": {
     "splitRight": "左右分屏",
     "splitDown": "上下分屏",
