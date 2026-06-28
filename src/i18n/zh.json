@@ -379,6 +379,22 @@
   "terminal": {
     "disconnected": "连接已断开 — 在左侧栏点击该连接可重新连接"
   },
+  "compare": {
+    "title": "数据对比",
+    "source": "源表",
+    "target": "目标表",
+    "pickTable": "选择表…",
+    "compare": "对比",
+    "comparing": "对比中…",
+    "syncSql": "同步 SQL(使目标与源一致)",
+    "copy": "复制",
+    "identical": "-- 两表数据一致,无需同步",
+    "noPk": "源表没有主键,无法按主键对比",
+    "pkMissing": "结果列中缺少主键列",
+    "colMismatch": "源表与目标表的列不一致,无法安全对比",
+    "deleteSuppressed": "数据超出行数上限,已省略 {{n}} 条 DELETE 以防误删;请缩小范围后再对比",
+    "truncated": "已截断为前 {{n}} 行"
+  },
   "split": {
     "splitRight": "左右分屏",
     "splitDown": "上下分屏",

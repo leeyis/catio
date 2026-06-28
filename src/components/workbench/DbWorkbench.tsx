@@ -10,6 +10,7 @@ import { DatabaseExportDialog, type DatabaseExportRequest } from '../dbviews/Dat
 import { DataTransferDialog, type TransferConnectionOption } from '../dbviews/DataTransferDialog'
 import { buildCreateTableDDL, dialectFor, qualifiedTable, supportsDdlExport } from '../dbviews/structureDdl'
 import { SchemaBrowser } from './SchemaBrowser'
+import { ComparePane } from './ComparePane'
 import { TablePane } from './TablePane'
 import { ObjectPane } from './ObjectPane'
 import { useData } from '../../state/DataContext'
@@ -48,12 +49,14 @@ export type WorkbenchTab =
   | { id: string; kind: 'object'; schema: string; name: string; objKind: 'view' | 'function' | 'procedure' }
   | { id: string; kind: 'sql'; qid: number; defaultSchema?: string }
   | { id: string; kind: 'er'; schema: string }
+  | { id: string; kind: 'compare' }
 
 const tabIdOf = {
   table: (schema: string, table: string) => `table:${schema}.${table}`,
   object: (kind: string, schema: string, name: string) => `object:${kind}:${schema}.${name}`,
   sql: (qid: number) => `sql:${qid}`,
   er: (schema: string) => `er:${schema}`,
+  compare: () => 'compare',
 }
 
 export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbenchProps) {
@@ -195,6 +198,10 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
       setQueryInitialCode(m => ({ ...m, [id]: seed }))
     }
     openTab({ id: tabIdOf.sql(id), kind: 'sql', qid: id, defaultSchema })
+  }
+  /** Open the Data Compare tab (source/target tables picked inside the pane). */
+  function openCompare() {
+    openTab({ id: tabIdOf.compare(), kind: 'compare' })
   }
   /** Open the CREATE TABLE/VIEW form modal for `schema`. No-op without a live connection. */
   function onNewObjectTemplate(schema: string, kind: 'table' | 'view') {
@@ -357,7 +364,7 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
     <div style={{ display: 'flex', alignItems: 'stretch', height: '100%', width: '100%', flex: 1, minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
       <SchemaBrowser onPick={pickTable} onPickObject={pickObject}
         active={activeTab?.kind === 'table' ? { schema: activeTab.schema, table: activeTab.table } : null}
-        onNewQuery={(schema) => newQuery(undefined, schema ?? namespace?.name)} onOpenER={openER} onNewObjectTemplate={onNewObjectTemplate} onRefresh={refreshSchema}
+        onNewQuery={(schema) => newQuery(undefined, schema ?? namespace?.name)} onOpenER={openER} onOpenCompare={connId ? openCompare : undefined} onNewObjectTemplate={onNewObjectTemplate} onRefresh={refreshSchema}
         onObjectAdmin={connId ? (op, objectType, schema, name) => setAdminObj({ op, objectType, schema, name }) : undefined}
         onTransferData={connId ? (schema, table) => setTransferSource({ schema, table }) : undefined}
         onExportDatabase={connId && supportsDdlExport(conn.engine) ? (schema) => setExportSchema(schema) : undefined}
@@ -379,10 +386,12 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
                 const icon = tb.kind === 'table' ? 'table-2'
                   : tb.kind === 'sql' ? 'file-code'
                   : tb.kind === 'er' ? 'network'
+                  : tb.kind === 'compare' ? 'git-compare'
                   : tb.objKind === 'view' ? 'eye' : 'function-square'
                 const label = tb.kind === 'table' ? tb.table
                   : tb.kind === 'sql' ? `query-${tb.qid}.sql`
                   : tb.kind === 'er' ? `ER · ${tb.schema}`
+                  : tb.kind === 'compare' ? t('compare.title')
                   : tb.name
                 return (
                   <div key={tb.id} data-testid={`wbtab-${tb.id}`} onClick={() => setActiveId(tb.id)}
@@ -446,6 +455,9 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
               )}
               {tb.kind === 'er' && (
                 <ERDiagram connId={connId ?? undefined} schema={tb.schema} onOpenTable={tname => pickTable(tb.schema, tname)} />
+              )}
+              {tb.kind === 'compare' && (
+                <ComparePane connId={connId ?? ''} engine={conn.engine} schemas={namespaces} />
               )}
             </div>
           ))}

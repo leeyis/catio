@@ -154,13 +154,14 @@ export interface QueryHistoryMeta {
   profileId?: string
 }
 
-export async function runQuery(connId: string, sql: string, defaultNamespace?: string, meta?: QueryHistoryMeta): Promise<QueryResult> {
+export async function runQuery(connId: string, sql: string, defaultNamespace?: string, meta?: QueryHistoryMeta, maxRows?: number): Promise<QueryResult> {
   if (!isTauri()) return mockQueryResult()
   const args: Record<string, unknown> = { connId, sql }
   if (defaultNamespace) args.defaultNamespace = defaultNamespace
   if (meta?.name) args.connName = meta.name
   if (meta?.engine) args.engine = meta.engine
   if (meta?.profileId) args.profileId = meta.profileId
+  if (maxRows != null) args.maxRows = maxRows
   return tauriInvoke<QueryResult>('db_query', args)
 }
 

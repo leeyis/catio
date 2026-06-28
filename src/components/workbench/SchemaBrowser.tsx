@@ -17,6 +17,8 @@ export interface SchemaBrowserProps {
   onNewQuery: (schema?: string) => void
   /** Open the ER diagram. With no arg → current namespace; with a schema name → that schema's ER. */
   onOpenER: (schema?: string) => void
+  /** Open the Data Compare tab. */
+  onOpenCompare?: () => void
   /** Open a fresh query tab seeded with a CREATE TABLE/VIEW template for the given schema. */
   onNewObjectTemplate?: (schema: string, kind: 'table' | 'view') => void
   /** Re-introspect the schema tree (drives both the header refresh button and the per-schema 刷新). */
@@ -71,7 +73,7 @@ export interface SchemaBrowserProps {
   onToggleCollapse?: () => void
 }
 
-export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, onObjectAdmin, onTransferData, onExportDatabase, schemas, conn, live, refreshing, loading, collapsed, onToggleCollapse, sqlActive, canSqlConsole = true, canEr = true, canStructureEdit = true, canViews = true, canFunctions = true }: SchemaBrowserProps) {
+export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpenER, onOpenCompare, onNewObjectTemplate, onRefresh, onObjectAdmin, onTransferData, onExportDatabase, schemas, conn, live, refreshing, loading, collapsed, onToggleCollapse, sqlActive, canSqlConsole = true, canEr = true, canStructureEdit = true, canViews = true, canFunctions = true }: SchemaBrowserProps) {
   const { t } = useTranslation()
   const D = useData()
   // Live path: render every supplied namespace; mock path: the single seeded schema (pixel-identical).
@@ -132,6 +134,11 @@ export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpen
             title={t('workbench.newQuery')} onClick={() => onNewQuery()}>
             <Icon name="terminal-square" size={15} style={{ color: 'var(--accent-primary)' }} />
           </button>
+          {live && canSqlConsole && onOpenCompare && (
+            <button className="icon-btn bare" data-testid="wb-compare" style={{ width: 26, height: 26 }} title={t('compare.title')} onClick={() => onOpenCompare()}>
+              <Icon name="git-compare" size={14} />
+            </button>
+          )}
           <button className="icon-btn bare" data-testid="wb-refresh" style={{ width: 26, height: 26 }} title={t('workbench.refresh')} onClick={onRefresh} disabled={refreshing}>
             <Icon name="refresh-cw" size={13} style={refreshing ? { animation: 'spin 1s linear infinite' } : undefined} />
           </button>

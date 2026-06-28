@@ -379,6 +379,22 @@
   "terminal": {
     "disconnected": "Disconnected — click this connection in the sidebar to reconnect"
   },
+  "compare": {
+    "title": "Data Compare",
+    "source": "Source table",
+    "target": "Target table",
+    "pickTable": "Pick a table…",
+    "compare": "Compare",
+    "comparing": "Comparing…",
+    "syncSql": "Sync SQL (make target match source)",
+    "copy": "Copy",
+    "identical": "-- Tables are identical, nothing to sync",
+    "noPk": "Source table has no primary key — can't compare by key",
+    "pkMissing": "Primary key column missing from the result",
+    "colMismatch": "Source and target columns differ — can't compare safely",
+    "deleteSuppressed": "Row limit exceeded — omitted {{n}} DELETE statement(s) to avoid deleting real rows; narrow the range and retry",
+    "truncated": "Truncated to the first {{n}} rows"
+  },
   "split": {
     "splitRight": "Split right",
     "splitDown": "Split down",
