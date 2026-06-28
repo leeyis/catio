@@ -1,12 +1,14 @@
-/* Split-view container for SSH terminals. Renders one or more TerminalPane panes sharing
- * the same SSH session (each opens its own PTY channel). With a single pane it is a thin
- * pass-through that fills the area (no extra chrome). The split / drag controls live inside
- * each pane's own toolbar (after the clear-screen button). Panes lay out in a row or column,
- * each flex:1 so they always tile evenly; a drag handle lets the user reorder them. The
- * focused pane gets an accent outline and its channel is reported up to App (so
- * snippet/history/AI "insert" targets the focused terminal). */
-import { useEffect, useRef, useState } from 'react'
+/* Split-view container for SSH terminals. Holds a binary tiling tree (see terminalLayout):
+ * splitting one pane only subdivides that pane's area, so e.g. splitting the right pane of a
+ * left/right layout into top/bottom leaves the left pane untouched. Leaves are rendered as a
+ * FLAT, stably-keyed list positioned absolutely from the computed tree — splitting / closing /
+ * swapping never reparents a leaf, so each TerminalPane (and its live PTY session) is
+ * preserved. The split / drag controls live in each pane's own toolbar; the focused pane gets
+ * an accent outline and its channel is reported up to App (so snippet/history/AI "insert"
+ * targets the focused terminal). */
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { TerminalPane } from './TerminalPane'
+import { splitLeaf, closeLeaf, swapLeaves, collectLeaves, computeRects, type PaneNode } from './terminalLayout'
 import type { Connection } from '../../services/types'
 
 export interface SplitTerminalProps {
@@ -25,13 +27,16 @@ export interface SplitTerminalProps {
 let paneSeq = 0
 
 export function SplitTerminal({ onChannel, ...paneProps }: SplitTerminalProps) {
-  const [panes, setPanes] = useState<string[]>(() => [`p${paneSeq++}`])
-  const [orientation, setOrientation] = useState<'row' | 'col'>('row')
-  const [focused, setFocused] = useState<string>(() => panes[0])
+  const [root, setRoot] = useState<PaneNode>(() => ({ type: 'leaf', id: `p${paneSeq++}` }))
+  const [focused, setFocused] = useState<string>(() => collectLeaves(root)[0])
   const [dragId, setDragId] = useState<string | null>(null)
   const [dropId, setDropId] = useState<string | null>(null)
   // Latest channel id per pane (so focus changes can re-report to App).
   const paneChan = useRef<Record<string, string | null>>({})
+
+  const leafIds = useMemo(() => collectLeaves(root), [root])
+  const rects = useMemo(() => computeRects(root), [root])
+  const multi = leafIds.length > 1
 
   // Report the focused pane's channel whenever focus changes.
   useEffect(() => {
@@ -39,55 +44,52 @@ export function SplitTerminal({ onChannel, ...paneProps }: SplitTerminalProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focused])
 
-  function splitInto(o: 'row' | 'col') {
-    setOrientation(o)
-    const id = `p${paneSeq++}`
-    setPanes(prev => [...prev, id])
-    setFocused(id)
+  function split(id: string, dir: 'row' | 'col') {
+    const newId = `p${paneSeq++}`
+    setRoot(prev => splitLeaf(prev, id, dir, newId))
+    setFocused(newId)
   }
-  function closePane(id: string) {
-    if (panes.length <= 1) return
-    const next = panes.filter(p => p !== id)
-    setPanes(next)
+  function close(id: string) {
+    const next = closeLeaf(root, id)
+    if (!next) return // can't close the last pane
     delete paneChan.current[id]
-    if (focused === id) setFocused(next[next.length - 1])
+    if (focused === id) {
+      const remaining = collectLeaves(next)
+      setFocused(remaining[remaining.length - 1])
+    }
+    setRoot(next)
   }
-  function reorder(from: string, to: string) {
-    if (!from || from === to) return
-    setPanes(prev => {
-      const arr = [...prev]
-      const fi = arr.indexOf(from), ti = arr.indexOf(to)
-      if (fi < 0 || ti < 0) return prev
-      arr.splice(fi, 1)
-      // After removing `from`, indices past it shift left by one — drop into the target's slot.
-      arr.splice(fi < ti ? ti - 1 : ti, 0, from)
-      return arr
-    })
-    setFocused(from)
+  function swap(a: string, b: string) {
+    if (!a || !b || a === b) return
+    setRoot(prev => swapLeaves(prev, a, b))
+    setFocused(a)
   }
-
-  const multi = panes.length > 1
 
   return (
-    <div className="row" style={{ height: '100%', width: '100%', minHeight: 0, alignItems: 'stretch', flexDirection: orientation === 'row' ? 'row' : 'column', gap: multi ? 2 : 0, background: 'var(--border-hairline)' }}>
-      {panes.map(id => (
-        <div key={id} onMouseDownCapture={() => setFocused(id)}
-          onDragOver={e => { if (dragId && dragId !== id) { e.preventDefault(); if (dropId !== id) setDropId(id) } }}
-          onDragLeave={() => { if (dropId === id) setDropId(null) }}
-          onDrop={e => { e.preventDefault(); if (dragId) reorder(dragId, id); setDragId(null); setDropId(null) }}
-          style={{ flex: 1, minWidth: 0, minHeight: 0, position: 'relative', background: 'var(--surface-subtle)', outline: multi ? (dropId === id ? '2px dashed var(--accent-primary)' : focused === id ? '2px solid var(--accent-border)' : 'none') : 'none', outlineOffset: '-2px' }}>
-          <TerminalPane {...paneProps} isFocused={id === focused}
-            onChannel={(sid, chan) => { paneChan.current[id] = chan; if (id === focused) onChannel?.(sid, chan) }}
-            split={{
-              count: panes.length,
-              onSplitRight: () => splitInto('row'),
-              onSplitDown: () => splitInto('col'),
-              onClose: () => closePane(id),
-              onDragStart: () => setDragId(id),
-              onDragEnd: () => { setDragId(null); setDropId(null) },
-            }} />
-        </div>
-      ))}
+    <div style={{ position: 'relative', height: '100%', width: '100%', minHeight: 0, background: 'var(--border-hairline)' }}>
+      {leafIds.map(id => {
+        const r = rects.get(id)!
+        return (
+          <div key={id} onMouseDownCapture={() => setFocused(id)}
+            onDragOver={e => { if (dragId && dragId !== id) { e.preventDefault(); if (dropId !== id) setDropId(id) } }}
+            onDragLeave={() => { if (dropId === id) setDropId(null) }}
+            onDrop={e => { e.preventDefault(); if (dragId) swap(dragId, id); setDragId(null); setDropId(null) }}
+            style={{ position: 'absolute', left: `${r.left}%`, top: `${r.top}%`, width: `${r.width}%`, height: `${r.height}%`, padding: multi ? 1 : 0, boxSizing: 'border-box' }}>
+            <div style={{ height: '100%', width: '100%', minHeight: 0, position: 'relative', background: 'var(--surface-subtle)', outline: multi ? (dropId === id ? '2px dashed var(--accent-primary)' : focused === id ? '2px solid var(--accent-border)' : 'none') : 'none', outlineOffset: '-2px' }}>
+              <TerminalPane {...paneProps} isFocused={id === focused}
+                onChannel={(sid, chan) => { paneChan.current[id] = chan; if (id === focused) onChannel?.(sid, chan) }}
+                split={{
+                  count: leafIds.length,
+                  onSplitRight: () => split(id, 'row'),
+                  onSplitDown: () => split(id, 'col'),
+                  onClose: () => close(id),
+                  onDragStart: () => setDragId(id),
+                  onDragEnd: () => { setDragId(null); setDropId(null) },
+                }} />
+            </div>
+          </div>
+        )
+      })}
     </div>
   )
 }
