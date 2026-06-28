@@ -3,12 +3,12 @@
  * SQL that makes the target match the source. The diff + SQL generation live in the pure,
  * unit-tested compareTables module. When the row window is truncated, DELETE generation is
  * suppressed so a partial source set can never delete real target rows. */
-import { useEffect, useMemo, useState, type CSSProperties } from 'react'
+import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
-import { runQuery, tableStructure, getSchema } from '../../services/db'
+import { runQuery, tableStructure, getSchema, execSyncBatch } from '../../services/db'
 import { listActiveDbConnections } from '../../state/dbConnections'
-import { computeDiff, genSyncSql, qtable, qid } from './compareTables'
+import { computeDiff, genSyncStatements, qtable, qid } from './compareTables'
 import type { SchemaNamespace } from '../../services/types'
 
 export interface ComparePaneProps {
@@ -20,6 +20,15 @@ export interface ComparePaneProps {
 }
 
 const ROW_LIMIT = 5000
+
+function Field({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="col" style={{ gap: 5, flex: 1, minWidth: 150 }}>
+      <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-tertiary)' }}>{label}</span>
+      {children}
+    </div>
+  )
+}
 
 interface Summary {
   inserts: number
@@ -44,10 +53,19 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
   const [error, setError] = useState<string | null>(null)
   const [summary, setSummary] = useState<Summary | null>(null)
   const [sql, setSql] = useState('')
+  const [statements, setStatements] = useState<string[]>([])
+  const [executing, setExecuting] = useState(false)
+  const [execMsg, setExecMsg] = useState<{ ok: boolean; text: string } | null>(null)
 
   const srcTables = useMemo(() => schemas.find(s => s.name === srcSchema)?.tables ?? [], [schemas, srcSchema])
   const tgtTables = useMemo(() => tgtSchemas.find(s => s.name === tgtSchema)?.tables ?? [], [tgtSchemas, tgtSchema])
   const tgtEngine = actives.find(a => a.connId === tgtConnId)?.dbType ?? engine
+
+  // Any selection change invalidates the generated SQL, so a stale batch can never be
+  // executed against a switched connection/table.
+  useEffect(() => {
+    setSql(''); setStatements([]); setSummary(null); setExecMsg(null)
+  }, [srcSchema, srcTable, tgtConnId, tgtSchema, tgtTable])
 
   // Load the target connection's schemas when it changes.
   useEffect(() => {
@@ -59,7 +77,7 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
 
   async function compare() {
     if (!srcTable || !tgtTable || busy) return
-    setBusy(true); setError(null); setSummary(null); setSql('')
+    setBusy(true); setError(null); setSummary(null); setSql(''); setStatements([]); setExecMsg(null)
     try {
       const st = await tableStructure(connId, srcSchema, srcTable)
       const pkCols = st.columns.filter(c => c.key === 'PK').map(c => c.name)
@@ -86,7 +104,9 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
       const truncated = srcQ.truncated === true || tgtQ.truncated === true
       const deleteSuppressed = truncated && diff.deletes.length > 0
       setSummary({ inserts: diff.inserts.length, updates: diff.updates.length, deletes: diff.deletes.length, truncated, deleteSuppressed })
-      setSql(genSyncSql(diff, tgtSchema, tgtTable, { engine: tgtEngine, allowDelete: !truncated }))
+      const stmts = genSyncStatements(diff, tgtSchema, tgtTable, { engine: tgtEngine, allowDelete: !truncated })
+      setStatements(stmts)
+      setSql(stmts.join('\n'))
     } catch (e) {
       setError(String((e as { message?: string } | null)?.message ?? e))
     } finally {
@@ -96,7 +116,24 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
 
   function copySql() { if (sql && navigator.clipboard) navigator.clipboard.writeText(sql).catch(() => {}) }
 
-  const selectStyle: CSSProperties = { height: 32, padding: '0 8px', borderRadius: 8, fontSize: 12.5, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', color: 'var(--text-primary)', outline: 'none', minWidth: 0 }
+  async function execute() {
+    if (!statements.length || executing) return
+    if (!window.confirm(t('compare.confirmExec', { n: statements.length }))) return
+    // Truncation suppressed DELETEs, so this only syncs the INSERT/UPDATE subset.
+    const partial = summary?.deleteSuppressed ?? false
+    setExecuting(true); setExecMsg(null)
+    try {
+      const affected = await execSyncBatch(tgtConnId, statements)
+      await compare() // refresh the diff first (it resets execMsg), then report the result
+      setExecMsg({ ok: true, text: t(partial ? 'compare.executedPartial' : 'compare.executed', { n: affected }) })
+    } catch (e) {
+      setExecMsg({ ok: false, text: t('compare.execFailed', { msg: String((e as { message?: string } | null)?.message ?? e) }) })
+    } finally {
+      setExecuting(false)
+    }
+  }
+
+  const selectStyle: CSSProperties = { height: 32, width: '100%', boxSizing: 'border-box', padding: '0 8px', borderRadius: 8, fontSize: 12.5, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', color: 'var(--text-primary)', outline: 'none', minWidth: 0 }
   const canCompare = !!srcTable && !!tgtTable && !busy
 
   return (
@@ -106,35 +143,35 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
         <span style={{ fontSize: 14, fontWeight: 700 }}>{t('compare.title')}</span>
       </div>
 
-      {/* source / target pickers */}
-      <div className="row" style={{ gap: 16, flexWrap: 'wrap' }}>
-        <div className="col" style={{ gap: 6, flex: 1, minWidth: 240 }}>
-          <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('compare.source')}</span>
-          <div className="row gap6">
-            <select value={srcSchema} onChange={e => { setSrcSchema(e.target.value); setSrcTable('') }} style={{ ...selectStyle, flex: 1 }}>
-              {schemas.map(s => <option key={s.name} value={s.name}>{s.name}</option>)}
-            </select>
-            <select value={srcTable} onChange={e => setSrcTable(e.target.value)} style={{ ...selectStyle, flex: 1.4 }}>
-              <option value="">{t('compare.pickTable')}</option>
-              {srcTables.map(tb => <option key={tb.name} value={tb.name}>{tb.name}</option>)}
-            </select>
-          </div>
-        </div>
-        <div className="col" style={{ gap: 6, flex: 1, minWidth: 240 }}>
-          <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('compare.target')}</span>
-          <div className="row gap6">
-            <select value={tgtConnId} onChange={e => { setTgtConnId(e.target.value); setTgtTable('') }} style={{ ...selectStyle, flex: 1 }}>
-              {actives.map(a => <option key={a.connId} value={a.connId}>{a.name}</option>)}
-            </select>
-            <select value={tgtSchema} onChange={e => { setTgtSchema(e.target.value); setTgtTable('') }} style={{ ...selectStyle, flex: 1 }}>
-              {tgtSchemas.map(s => <option key={s.name} value={s.name}>{s.name}</option>)}
-            </select>
-            <select value={tgtTable} onChange={e => setTgtTable(e.target.value)} style={{ ...selectStyle, flex: 1.4 }}>
-              <option value="">{t('compare.pickTable')}</option>
-              {tgtTables.map(tb => <option key={tb.name} value={tb.name}>{tb.name}</option>)}
-            </select>
-          </div>
-        </div>
+      {/* 5 labeled fields: source schema / source table / target conn / target schema / target table */}
+      <div className="row" style={{ gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+        <Field label={t('compare.srcSchema')}>
+          <select value={srcSchema} onChange={e => { setSrcSchema(e.target.value); setSrcTable('') }} style={selectStyle}>
+            {schemas.map(s => <option key={s.name} value={s.name}>{s.name}</option>)}
+          </select>
+        </Field>
+        <Field label={t('compare.srcTable')}>
+          <select value={srcTable} onChange={e => setSrcTable(e.target.value)} style={selectStyle}>
+            <option value="">{t('compare.pickTable')}</option>
+            {srcTables.map(tb => <option key={tb.name} value={tb.name}>{tb.name}</option>)}
+          </select>
+        </Field>
+        <Field label={t('compare.tgtConn')}>
+          <select value={tgtConnId} onChange={e => { setTgtConnId(e.target.value); setTgtTable('') }} style={selectStyle}>
+            {actives.map(a => <option key={a.connId} value={a.connId}>{a.name}</option>)}
+          </select>
+        </Field>
+        <Field label={t('compare.tgtSchema')}>
+          <select value={tgtSchema} onChange={e => { setTgtSchema(e.target.value); setTgtTable('') }} style={selectStyle}>
+            {tgtSchemas.map(s => <option key={s.name} value={s.name}>{s.name}</option>)}
+          </select>
+        </Field>
+        <Field label={t('compare.tgtTable')}>
+          <select value={tgtTable} onChange={e => setTgtTable(e.target.value)} style={selectStyle}>
+            <option value="">{t('compare.pickTable')}</option>
+            {tgtTables.map(tb => <option key={tb.name} value={tb.name}>{tb.name}</option>)}
+          </select>
+        </Field>
       </div>
 
       <div className="row" style={{ gap: 10, alignItems: 'center' }}>
@@ -166,10 +203,21 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
         <div className="col" style={{ gap: 6, flex: 1, minHeight: 0 }}>
           <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
             <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('compare.syncSql')}</span>
-            <button onClick={copySql} disabled={!sql} style={{ height: 26, padding: '0 10px', borderRadius: 7, border: '1px solid var(--border-hairline)', background: 'var(--surface-subtle)', color: 'var(--text-secondary)', fontSize: 12, cursor: sql ? 'pointer' : 'default' }}>
-              <Icon name="copy" size={12} /> {t('compare.copy')}
-            </button>
+            <div className="row gap6">
+              <button onClick={() => void execute()} disabled={!sql || executing} title={t('compare.executeHint')}
+                style={{ height: 26, padding: '0 12px', borderRadius: 7, border: 'none', background: 'var(--accent-primary)', color: '#fff', fontSize: 12, fontWeight: 600, cursor: sql && !executing ? 'pointer' : 'default', opacity: sql && !executing ? 1 : 0.5 }}>
+                <Icon name="play" size={12} /> {executing ? t('compare.executing') : t('compare.execute')}
+              </button>
+              <button onClick={copySql} disabled={!sql} style={{ height: 26, padding: '0 10px', borderRadius: 7, border: '1px solid var(--border-hairline)', background: 'var(--surface-subtle)', color: 'var(--text-secondary)', fontSize: 12, cursor: sql ? 'pointer' : 'default' }}>
+                <Icon name="copy" size={12} /> {t('compare.copy')}
+              </button>
+            </div>
           </div>
+          {execMsg && (
+            <div className="row gap6" style={{ fontSize: 12, color: execMsg.ok ? 'var(--signal-green)' : 'var(--danger-fg, #e5484d)' }}>
+              <Icon name={execMsg.ok ? 'check' : 'alert-triangle'} size={13} /> <span>{execMsg.text}</span>
+            </div>
+          )}
           <textarea readOnly value={sql || t('compare.identical')} onFocus={e => sql && e.currentTarget.select()}
             style={{ flex: 1, minHeight: 160, width: '100%', boxSizing: 'border-box', padding: 10, borderRadius: 8, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', color: 'var(--text-primary)', fontFamily: 'monospace', fontSize: 11.5, resize: 'vertical' }} />
         </div>

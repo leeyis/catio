@@ -107,6 +107,8 @@ export function qval(v: unknown, engine?: string): string {
     return /e/i.test(s) ? `'${s}'` : s // avoid scientific-notation literals some engines reject
   }
   if (typeof v === 'boolean') return boolAsBit(engine) ? (v ? '1' : '0') : (v ? 'TRUE' : 'FALSE')
+  // JSON/JSONB and array columns arrive as objects — serialize to JSON, not "[object Object]".
+  if (typeof v === 'object') return qval(JSON.stringify(v), engine)
   let s = String(v)
   if (isMysqlish(engine)) s = s.replace(/\\/g, '\\\\') // MySQL default mode treats \ as an escape char
   s = s.replace(/'/g, "''")
@@ -121,8 +123,8 @@ export interface SqlOptions {
   allowDelete: boolean
 }
 
-/** Generate the sync SQL that makes target match source. */
-export function genSyncSql(diff: CompareDiff, schema: string, table: string, opts: SqlOptions): string {
+/** Generate the sync statements (one per line) that make target match source. */
+export function genSyncStatements(diff: CompareDiff, schema: string, table: string, opts: SqlOptions): string[] {
   const { colNames, pkNames, inserts, updates, deletes } = diff
   const { engine, allowDelete } = opts
   const ref = qtable(schema, table, engine)
@@ -139,5 +141,10 @@ export function genSyncSql(diff: CompareDiff, schema: string, table: string, opt
   if (allowDelete) {
     for (const r of deletes) lines.push(`DELETE FROM ${ref} WHERE ${whereOf(r)};`)
   }
-  return lines.join('\n')
+  return lines
+}
+
+/** Generate the sync SQL that makes target match source (statements joined for display). */
+export function genSyncSql(diff: CompareDiff, schema: string, table: string, opts: SqlOptions): string {
+  return genSyncStatements(diff, schema, table, opts).join('\n')
 }

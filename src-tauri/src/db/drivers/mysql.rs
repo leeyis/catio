@@ -397,6 +397,21 @@ impl Driver for MySqlDriver {
         mysql_query_on_conn(&mut conn, sql, max_rows).await
     }
 
+    async fn exec_batch(&self, statements: &[String]) -> Result<u64, DbError> {
+        let mut conn = self.pool.get_conn().await
+            .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
+        // Dropping `tx` without commit() rolls back (mysql_async Transaction Drop).
+        let mut tx = conn.start_transaction(mysql_async::TxOpts::default()).await
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        let mut affected = 0u64;
+        for s in statements {
+            tx.query_drop(s.as_str()).await.map_err(|e| DbError::QueryFailed(e.to_string()))?;
+            affected += tx.affected_rows();
+        }
+        tx.commit().await.map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        Ok(affected)
+    }
+
     async fn query_with_default_namespace(&self, sql: &str, max_rows: u32, default_namespace: Option<&str>)
         -> Result<QueryResult, DbError> {
         let Some(database) = default_namespace.map(str::trim).filter(|s| !s.is_empty()) else {

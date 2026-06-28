@@ -166,6 +166,16 @@ export async function runQuery(connId: string, sql: string, defaultNamespace?: s
 }
 
 /**
+ * Execute a batch of statements (e.g. Data Compare's sync SQL) on `connId` inside one
+ * transaction — any error rolls the whole batch back. Returns rows affected. Throws outside
+ * Tauri and for engines without transactional batch support (Unsupported).
+ */
+export async function execSyncBatch(connId: string, statements: string[]): Promise<number> {
+  if (!isTauri()) throw new Error('执行需要 Tauri 运行时')
+  return tauriInvoke<number>('db_exec_batch', { connId, statements })
+}
+
+/**
  * Run EXPLAIN against the live backend and return the raw plan result (a single
  * JSON cell). The backend builds the dialect-correct `EXPLAIN (FORMAT JSON)` /
  * `EXPLAIN FORMAT=JSON`, gates to read-only statements, executes, and returns the

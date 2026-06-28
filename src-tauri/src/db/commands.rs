@@ -329,6 +329,25 @@ pub async fn db_apply_edits(conn_id: String, reqs: Vec<EditRequest>,
     Ok(affected)
 }
 
+/// Execute a batch of raw statements (e.g. Data Compare's generated sync SQL) on `conn_id`
+/// inside a single transaction. Any error rolls back the whole batch. Returns rows affected.
+#[tauri::command]
+pub async fn db_exec_batch(conn_id: String, statements: Vec<String>,
+    mgr: tauri::State<'_, ConnManager>) -> Result<u64, DbError> {
+    let drv = mgr.get(&conn_id).await.ok_or(DbError::NotFound(conn_id))?;
+    if !drv.capabilities().writable {
+        return Err(DbError::Unsupported("read-only engine".into()));
+    }
+    if matches!(drv.db_type(), crate::db::DatabaseType::Mongodb | crate::db::DatabaseType::Elasticsearch) {
+        return Err(DbError::Unsupported("transactional batch execution is not supported for this engine".into()));
+    }
+    let stmts: Vec<String> = statements.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    if stmts.is_empty() {
+        return Ok(0);
+    }
+    drv.exec_batch(&stmts).await
+}
+
 /// 危险操作的统一前置：取连接、确认可写引擎。对象管理（DROP/RENAME/TRUNCATE/复制
 /// 表结构）都要改写数据库结构，只读引擎一律拒绝；具体引擎的能力差异由 db_admin_sql
 /// 的纯函数兜底（返回 Unsupported）。

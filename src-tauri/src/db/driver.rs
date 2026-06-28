@@ -180,6 +180,12 @@ pub trait Driver: Send + Sync {
         -> Result<QueryResult, DbError> {
         self.query(sql, max_rows).await
     }
+    /// Execute multiple statements as ONE transaction; rolls back on the first error and
+    /// returns total rows affected. Default: unsupported — overridden by transaction-capable
+    /// SQL engines. Used by Data Compare's "execute sync SQL".
+    async fn exec_batch(&self, _statements: &[String]) -> Result<u64, DbError> {
+        Err(DbError::Unsupported("transactional batch execution is not supported for this engine".into()))
+    }
     /// 分页查询：用方言 paginate 包裹 SQL 后调 query。
     async fn paginated_query(&self, sql: &str, limit: u32, offset: u32) -> Result<QueryResult, DbError> {
         let paged = crate::db::dialect::paginate(self.db_type(), sql, limit, offset);

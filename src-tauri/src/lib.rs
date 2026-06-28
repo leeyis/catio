@@ -79,6 +79,7 @@ pub fn run() {
             db::commands::db_redis_edit,
             db::commands::db_preview_dml,
             db::commands::db_apply_edits,
+            db::commands::db_exec_batch,
             db::commands::db_drop_object,
             db::commands::db_drop_table_child_object,
             db::commands::db_rename_object,

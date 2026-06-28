@@ -716,6 +716,19 @@ impl Driver for PostgresDriver {
         pg_query_on_client(&client, sql, max_rows).await
     }
 
+    async fn exec_batch(&self, statements: &[String]) -> Result<u64, DbError> {
+        let mut client = self.pool.get().await
+            .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
+        // Dropping `tx` without commit() rolls back (tokio_postgres Transaction Drop).
+        let tx = client.transaction().await.map_err(|e| pg_query_err(&e))?;
+        let mut affected = 0u64;
+        for s in statements {
+            affected += tx.execute(s.as_str(), &[]).await.map_err(|e| pg_query_err(&e))?;
+        }
+        tx.commit().await.map_err(|e| pg_query_err(&e))?;
+        Ok(affected)
+    }
+
     async fn query_with_default_namespace(&self, sql: &str, max_rows: u32, default_namespace: Option<&str>)
         -> Result<QueryResult, DbError> {
         let Some(schema) = default_namespace.map(str::trim).filter(|s| !s.is_empty()) else {

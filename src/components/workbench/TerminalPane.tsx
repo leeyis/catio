@@ -65,6 +65,16 @@ export interface TerminalPaneProps {
    * terminals are always focused → default true preserves the original behaviour.
    */
   isFocused?: boolean
+  /** Split-view controls, rendered in this pane's toolbar (after clear-screen). Absent for
+   *  un-split / non-SSH terminals. `count` is the total pane count in the tab. */
+  split?: {
+    count: number
+    onSplitRight: () => void
+    onSplitDown: () => void
+    onClose: () => void
+    onDragStart: () => void
+    onDragEnd: () => void
+  }
 }
 
 // Tauri detection — mirror services/ssh.ts guard (not exported there).
@@ -170,7 +180,7 @@ interface MxTarget {
 }
 type MxRunState = Record<string, MxTarget>
 
-export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCandidates, ensureSession, onConnectTarget, sendToPty, onChannel, isFocused = true }: TerminalPaneProps) {
+export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCandidates, ensureSession, onConnectTarget, sendToPty, onChannel, isFocused = true, split }: TerminalPaneProps) {
   const { t } = useTranslation()
   const D = useData()
   const { prefs } = usePrefs()
@@ -997,6 +1007,19 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
           <button className="icon-btn bare" title={t('workbench.searchBuffer')} onClick={() => setSearchOpen(o => !o)}
             style={{ color: searchOpen ? 'var(--accent-primary)' : undefined, background: searchOpen ? 'var(--accent-soft)' : undefined }}><Icon name="search" size={15} /></button>
           <button className="icon-btn bare" title={t('workbench.clearScreen')} onClick={() => { if (termRef.current) termRef.current.clear() }}><Icon name="broom" size={15} /></button>
+          {split && (
+            <>
+              <span style={{ width: 1, height: 16, background: 'var(--border-hairline)', margin: '0 2px' }} />
+              <button className="icon-btn bare" title={t('split.splitRight')} onClick={split.onSplitRight}><Icon name="columns" size={15} /></button>
+              <button className="icon-btn bare" title={t('split.splitDown')} onClick={split.onSplitDown}><Icon name="rows" size={15} /></button>
+              {split.count >= 2 && (
+                <>
+                  <button className="icon-btn bare" title={t('split.drag')} draggable onDragStart={split.onDragStart} onDragEnd={split.onDragEnd} style={{ cursor: 'grab' }}><Icon name="grip-vertical" size={15} /></button>
+                  <button className="icon-btn bare" title={t('split.closePane')} onClick={split.onClose}><Icon name="x" size={15} /></button>
+                </>
+              )}
+            </>
+          )}
         </div>
       </div>
 

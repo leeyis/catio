@@ -108,6 +108,10 @@ describe('qval escaping', () => {
     expect(qval(NaN)).toBe('NULL')
     expect(qval(42)).toBe('42')
   })
+  it('serializes object cells (JSON/JSONB) as JSON, not [object Object]', () => {
+    expect(qval({ a: 1 }, 'postgres')).toBe('\'{"a":1}\'')
+    expect(qval([1, 2], 'mysql')).toBe("'[1,2]'")
+  })
   it('emits dialect booleans', () => {
     expect(qval(true, 'mysql')).toBe('1')
     expect(qval(false, 'sqlserver')).toBe('0')

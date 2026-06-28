@@ -68,6 +68,18 @@ impl Driver for SqliteDriver {
         Ok(format!("SQLite {}", version))
     }
 
+    async fn exec_batch(&self, statements: &[String]) -> Result<u64, DbError> {
+        let mut conn = self.conn.lock().await;
+        // Dropping `tx` without commit() rolls back (rusqlite Transaction Drop).
+        let tx = conn.transaction().map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        let mut affected = 0u64;
+        for s in statements {
+            affected += tx.execute(s.as_str(), []).map_err(|e| DbError::QueryFailed(e.to_string()))? as u64;
+        }
+        tx.commit().map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        Ok(affected)
+    }
+
     async fn query(&self, sql: &str, max_rows: u32) -> Result<QueryResult, DbError> {
         let conn = self.conn.lock().await;
 

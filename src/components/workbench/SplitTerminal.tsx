@@ -1,11 +1,11 @@
-/* Split-view container for SSH terminals. Renders one or more TerminalPane panes
- * sharing the same SSH session (each opens its own PTY channel). Panes are laid out
- * in a single row or column; the focused pane gets an accent outline and its channel
- * is reported up to App (so snippet/history "insert" targets the focused terminal). */
+/* Split-view container for SSH terminals. Renders one or more TerminalPane panes sharing
+ * the same SSH session (each opens its own PTY channel). With a single pane it is a thin
+ * pass-through that fills the area (no extra chrome). The split / drag controls live inside
+ * each pane's own toolbar (after the clear-screen button). Panes lay out in a row or column,
+ * each flex:1 so they always tile evenly; a drag handle lets the user reorder them. The
+ * focused pane gets an accent outline and its channel is reported up to App (so
+ * snippet/history/AI "insert" targets the focused terminal). */
 import { useEffect, useRef, useState } from 'react'
-import { useTranslation } from 'react-i18next'
-import { Icon } from '../Icon'
-import { IconBtn } from '../atoms'
 import { TerminalPane } from './TerminalPane'
 import type { Connection } from '../../services/types'
 
@@ -25,10 +25,11 @@ export interface SplitTerminalProps {
 let paneSeq = 0
 
 export function SplitTerminal({ onChannel, ...paneProps }: SplitTerminalProps) {
-  const { t } = useTranslation()
   const [panes, setPanes] = useState<string[]>(() => [`p${paneSeq++}`])
   const [orientation, setOrientation] = useState<'row' | 'col'>('row')
   const [focused, setFocused] = useState<string>(() => panes[0])
+  const [dragId, setDragId] = useState<string | null>(null)
+  const [dropId, setDropId] = useState<string | null>(null)
   // Latest channel id per pane (so focus changes can re-report to App).
   const paneChan = useRef<Record<string, string | null>>({})
 
@@ -51,32 +52,42 @@ export function SplitTerminal({ onChannel, ...paneProps }: SplitTerminalProps) {
     delete paneChan.current[id]
     if (focused === id) setFocused(next[next.length - 1])
   }
+  function reorder(from: string, to: string) {
+    if (!from || from === to) return
+    setPanes(prev => {
+      const arr = [...prev]
+      const fi = arr.indexOf(from), ti = arr.indexOf(to)
+      if (fi < 0 || ti < 0) return prev
+      arr.splice(fi, 1)
+      // After removing `from`, indices past it shift left by one — drop into the target's slot.
+      arr.splice(fi < ti ? ti - 1 : ti, 0, from)
+      return arr
+    })
+    setFocused(from)
+  }
 
   const multi = panes.length > 1
 
   return (
-    <div className="col" style={{ height: '100%', width: '100%', minHeight: 0 }}>
-      {/* split controls */}
-      <div className="row" style={{ flex: 'none', gap: 4, alignItems: 'center', padding: '3px 8px', borderBottom: '1px solid var(--border-hairline)', background: 'var(--surface-card)' }}>
-        <IconBtn name="columns" size={14} variant="bare" title={t('split.splitRight')} onClick={() => splitInto('row')} />
-        <IconBtn name="rows" size={14} variant="bare" title={t('split.splitDown')} onClick={() => splitInto('col')} />
-        {multi && <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>{t('split.count', { n: panes.length })}</span>}
-      </div>
-      <div className="row" style={{ flex: 1, minHeight: 0, flexDirection: orientation === 'row' ? 'row' : 'column', gap: multi ? 1 : 0, background: 'var(--border-hairline)' }}>
-        {panes.map(id => (
-          <div key={id} onMouseDownCapture={() => setFocused(id)}
-            style={{ flex: 1, minWidth: 0, minHeight: 0, position: 'relative', background: 'var(--surface-subtle)', outline: multi && focused === id ? '2px solid var(--accent-border)' : 'none', outlineOffset: '-2px' }}>
-            <TerminalPane {...paneProps} isFocused={id === focused}
-              onChannel={(sid, chan) => { paneChan.current[id] = chan; if (id === focused) onChannel?.(sid, chan) }} />
-            {multi && (
-              <button className="icon-btn bare" title={t('split.closePane')} onClick={() => closePane(id)}
-                style={{ position: 'absolute', top: 6, right: 8, zIndex: 6, width: 20, height: 20, background: 'var(--surface-card)', borderRadius: 6 }}>
-                <Icon name="x" size={12} />
-              </button>
-            )}
-          </div>
-        ))}
-      </div>
+    <div className="row" style={{ height: '100%', width: '100%', minHeight: 0, alignItems: 'stretch', flexDirection: orientation === 'row' ? 'row' : 'column', gap: multi ? 2 : 0, background: 'var(--border-hairline)' }}>
+      {panes.map(id => (
+        <div key={id} onMouseDownCapture={() => setFocused(id)}
+          onDragOver={e => { if (dragId && dragId !== id) { e.preventDefault(); if (dropId !== id) setDropId(id) } }}
+          onDragLeave={() => { if (dropId === id) setDropId(null) }}
+          onDrop={e => { e.preventDefault(); if (dragId) reorder(dragId, id); setDragId(null); setDropId(null) }}
+          style={{ flex: 1, minWidth: 0, minHeight: 0, position: 'relative', background: 'var(--surface-subtle)', outline: multi ? (dropId === id ? '2px dashed var(--accent-primary)' : focused === id ? '2px solid var(--accent-border)' : 'none') : 'none', outlineOffset: '-2px' }}>
+          <TerminalPane {...paneProps} isFocused={id === focused}
+            onChannel={(sid, chan) => { paneChan.current[id] = chan; if (id === focused) onChannel?.(sid, chan) }}
+            split={{
+              count: panes.length,
+              onSplitRight: () => splitInto('row'),
+              onSplitDown: () => splitInto('col'),
+              onClose: () => closePane(id),
+              onDragStart: () => setDragId(id),
+              onDragEnd: () => { setDragId(null); setDropId(null) },
+            }} />
+        </div>
+      ))}
     </div>
   )
 }
