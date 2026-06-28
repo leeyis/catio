@@ -1,5 +1,5 @@
 /* ported from ref-ui/_extract/blob7.txt — chrome verbatim; middle surface swapped to xterm.js (A10) */
-import { useState, useMemo, useRef, useEffect, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import { useState, useMemo, useRef, useEffect, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
@@ -72,8 +72,8 @@ export interface TerminalPaneProps {
     onSplitRight: () => void
     onSplitDown: () => void
     onClose: () => void
-    onDragStart: () => void
-    onDragEnd: () => void
+    /** Pointer-based drag start (HTML5 DnD is swallowed by Tauri's file-drop handler). */
+    onDragStart: (e: ReactPointerEvent) => void
   }
 }
 
@@ -1014,7 +1014,7 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
               <button className="icon-btn bare" title={t('split.splitDown')} onClick={split.onSplitDown}><Icon name="rows" size={15} /></button>
               {split.count >= 2 && (
                 <>
-                  <button className="icon-btn bare" title={t('split.drag')} draggable onDragStart={split.onDragStart} onDragEnd={split.onDragEnd} style={{ cursor: 'grab' }}><Icon name="grip-vertical" size={15} /></button>
+                  <button className="icon-btn bare" title={t('split.drag')} onPointerDown={split.onDragStart} style={{ cursor: 'grab' }}><Icon name="grip-vertical" size={15} /></button>
                   <button className="icon-btn bare" title={t('split.closePane')} onClick={split.onClose}><Icon name="x" size={15} /></button>
                 </>
               )}
