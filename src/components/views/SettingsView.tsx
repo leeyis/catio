@@ -16,6 +16,7 @@ import { isTauri } from '../../services/ssh'
 import { mcpStart, mcpStop, mcpStatus } from '../../services/mcp'
 import type { McpInfo } from '../../services/mcp'
 import { exportConfig, importConfig } from '../../services/configSync'
+import { ServerAccountBlock } from '../auth/ServerAccountBlock'
 
 // ---- Prop types ----
 
@@ -213,6 +214,8 @@ function SecuritySettings({ authEnabled, users = [], currentUser, ownerUser, onE
   const [cleared, setCleared] = useState(false)
   return (
     <Block title={t('settings.securityTitle')} hint={t('settings.securityHint')}>
+      {/* server-deploy account + user management (renders nothing in the desktop app) */}
+      <ServerAccountBlock />
       {/* multi-user identity gate */}
       <div style={{ border: `1px solid ${authEnabled ? 'var(--accent-border)' : 'var(--border-hairline)'}`, borderRadius: 14, overflow: 'hidden', marginBottom: 16, background: authEnabled ? 'var(--accent-soft-alt)' : 'var(--surface-card)' }}>
         <div className="row" style={{ justifyContent: 'space-between', gap: 16, padding: '14px 16px' }}>

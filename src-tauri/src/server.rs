@@ -15,6 +15,7 @@
 //! (terminals, SFTP transfer, file import/export) are not exposed here yet — they arrive
 //! over a WebSocket / multipart in later milestones and fall through to a clear error.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,7 +23,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use axum::{
     extract::{Json, State},
-    http::{header, StatusCode, Uri},
+    http::{header, HeaderMap, HeaderValue, StatusCode, Uri},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
     Router,
@@ -30,6 +31,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::auth::{new_session_token, AuthDb, User};
 use crate::db::commands::{self, ConnectResult};
 use crate::db::db_admin_sql::{
     self, DatabaseObjectType, DropObjectSqlOptions, DropTableChildObjectSqlOptions,
@@ -51,24 +53,32 @@ pub struct AppState {
     // MULTI-USER extension point: one shared manager today. Swap for a session-keyed map.
     pub conns: Arc<ConnManager>,
     pub static_dir: Arc<PathBuf>,
-    /// Persisted state dir (history/snippets now; users/connections/vault in M2). Maps to
-    /// the Docker data volume `/app/data`.
+    /// Persisted state dir (history/snippets + the auth DB now; connections/vault later). Maps
+    /// to the Docker data volume `/app/data`.
     pub data_dir: Arc<PathBuf>,
     /// Serializes the history/snippet load-modify-save so concurrent tabs/requests can't drop
     /// entries by last-writer-wins (the file IO is sync, so a std Mutex held without `.await`
     /// across it is correct and cheap).
     pub history_lock: Arc<std::sync::Mutex<()>>,
+    /// User store (argon2-hashed accounts) backing M2 access control.
+    pub auth: Arc<AuthDb>,
+    /// In-memory session token → user. A restart logs everyone out (acceptable Phase 1).
+    pub sessions: Arc<std::sync::Mutex<HashMap<String, User>>>,
 }
 
 impl AppState {
-    /// Construct with a fresh ConnManager + locks. Tests inject their own dirs.
-    pub fn new(static_dir: PathBuf, data_dir: PathBuf) -> Self {
-        AppState {
+    /// Construct with a fresh ConnManager + locks, opening the auth DB under `data_dir`.
+    pub fn new(static_dir: PathBuf, data_dir: PathBuf) -> Result<Self, String> {
+        let _ = std::fs::create_dir_all(&data_dir);
+        let auth = AuthDb::open(&data_dir.join("catio.db"))?;
+        Ok(AppState {
             conns: Arc::new(ConnManager::default()),
             static_dir: Arc::new(static_dir),
             data_dir: Arc::new(data_dir),
             history_lock: Arc::new(std::sync::Mutex::new(())),
-        }
+            auth: Arc::new(auth),
+            sessions: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        })
     }
 }
 
@@ -87,11 +97,28 @@ pub fn build_router(state: AppState) -> Router {
 
 pub async fn run_server(addr: SocketAddr, static_dir: PathBuf) -> std::io::Result<()> {
     let data_dir = std::env::var("CATIO_DATA").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("data"));
-    let _ = std::fs::create_dir_all(&data_dir);
-    let state = AppState::new(static_dir, data_dir);
+    let state = AppState::new(static_dir, data_dir)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    bootstrap_admin_from_env(&state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("catio-server listening on http://{addr}");
     axum::serve(listener, build_router(state)).await
+}
+
+/// First-run admin: if there are no users yet and CATIO_ADMIN_USER / CATIO_ADMIN_PASSWORD are
+/// both set, create the initial admin. Otherwise the first browser visit drives `auth_bootstrap`.
+fn bootstrap_admin_from_env(state: &AppState) {
+    if state.auth.user_count().unwrap_or(1) != 0 {
+        return;
+    }
+    if let (Ok(user), Ok(pass)) = (std::env::var("CATIO_ADMIN_USER"), std::env::var("CATIO_ADMIN_PASSWORD")) {
+        match state.auth.create_user(&user, &pass, true) {
+            Ok(_) => println!("catio-server: created initial admin '{user}' from env"),
+            Err(e) => eprintln!("catio-server: failed to create initial admin: {e}"),
+        }
+    } else {
+        println!("catio-server: no users yet — set CATIO_ADMIN_USER/PASSWORD or create the first admin in the browser");
+    }
 }
 
 #[derive(Deserialize)]
@@ -101,8 +128,137 @@ struct InvokeReq {
     args: Value,
 }
 
-async fn invoke(State(st): State<AppState>, Json(req): Json<InvokeReq>) -> Response {
+async fn invoke(State(st): State<AppState>, headers: HeaderMap, Json(req): Json<InvokeReq>) -> Response {
+    let token = session_token(&headers);
+    let user = token.as_ref().and_then(|t| st.sessions.lock().unwrap().get(t).cloned());
+
+    // Public / cookie-managing auth commands — reachable WITHOUT a session.
+    match req.cmd.as_str() {
+        "auth_login" => return auth_login(&st, &req.args).await,
+        "auth_logout" => return auth_logout(&st, token),
+        "auth_me" => {
+            // `needsBootstrap` lets the UI show the first-run "create admin" form (no users yet)
+            // instead of the normal login form.
+            let needs_bootstrap = st.auth.user_count().map(|n| n == 0).unwrap_or(false);
+            return Json(json!({ "user": user, "needsBootstrap": needs_bootstrap })).into_response();
+        }
+        "auth_bootstrap" => return auth_bootstrap(&st, &req.args).await,
+        _ => {}
+    }
+
+    // Gate everything else: no valid session → 401. This is the whole access-control story for
+    // M2 — one boundary in front of the shared core, so /api/invoke and (M3) /ws share it.
+    let Some(user) = user else {
+        return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "未登录" }))).into_response();
+    };
+
+    // User administration. Listing is allowed for any logged-in user; mutations are admin-only.
+    match req.cmd.as_str() {
+        "user_list" => return json_or_err(st.auth.list_users()),
+        "user_create" => return user_create(&st, &req.args, &user),
+        "user_delete" => return user_delete(&st, &req.args, &user),
+        _ => {}
+    }
+
     match dispatch(&st, &req.cmd, req.args).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+/// Read the `catio_session` value out of the Cookie header.
+fn session_token(headers: &HeaderMap) -> Option<String> {
+    let cookie = headers.get(header::COOKIE)?.to_str().ok()?;
+    cookie.split(';').find_map(|p| {
+        p.trim().strip_prefix("catio_session=").filter(|v| !v.is_empty()).map(str::to_string)
+    })
+}
+
+/// Build a JSON `{ user }` response that also (re)sets the session cookie. HttpOnly keeps it out
+/// of JS; SameSite=Strict blocks cross-site sends (defense-in-depth atop the same-origin setup).
+fn login_response(user: &User, token: &str) -> Response {
+    let mut resp = Json(json!({ "user": user })).into_response();
+    let cookie = format!("catio_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=604800");
+    if let Ok(v) = HeaderValue::from_str(&cookie) {
+        resp.headers_mut().insert(header::SET_COOKIE, v);
+    }
+    resp
+}
+
+async fn auth_login(st: &AppState, args: &Value) -> Response {
+    let username = args.get("username").and_then(Value::as_str).unwrap_or("");
+    let password = args.get("password").and_then(Value::as_str).unwrap_or("");
+    match st.auth.verify_login(username, password) {
+        Ok(user) => {
+            let token = new_session_token();
+            st.sessions.lock().unwrap().insert(token.clone(), user.clone());
+            login_response(&user, &token)
+        }
+        Err(e) => (StatusCode::UNAUTHORIZED, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+fn auth_logout(st: &AppState, token: Option<String>) -> Response {
+    if let Some(t) = token {
+        st.sessions.lock().unwrap().remove(&t);
+    }
+    let mut resp = Json(json!({ "ok": true })).into_response();
+    if let Ok(v) = HeaderValue::from_str("catio_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0") {
+        resp.headers_mut().insert(header::SET_COOKIE, v);
+    }
+    resp
+}
+
+/// First-run: create the initial admin from the browser when no users exist yet, then auto-login.
+async fn auth_bootstrap(st: &AppState, args: &Value) -> Response {
+    match st.auth.user_count() {
+        Ok(0) => {
+            let username = args.get("username").and_then(Value::as_str).unwrap_or("");
+            let password = args.get("password").and_then(Value::as_str).unwrap_or("");
+            match st.auth.create_user(username, password, true) {
+                Ok(user) => {
+                    let token = new_session_token();
+                    st.sessions.lock().unwrap().insert(token.clone(), user.clone());
+                    login_response(&user, &token)
+                }
+                Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+            }
+        }
+        Ok(_) => (StatusCode::BAD_REQUEST, Json(json!({ "error": "已存在用户,无法重复初始化" }))).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+fn user_create(st: &AppState, args: &Value, actor: &User) -> Response {
+    if !actor.is_admin {
+        return forbidden();
+    }
+    let username = args.get("username").and_then(Value::as_str).unwrap_or("");
+    let password = args.get("password").and_then(Value::as_str).unwrap_or("");
+    let is_admin = args.get("isAdmin").and_then(Value::as_bool).unwrap_or(false);
+    json_or_err(st.auth.create_user(username, password, is_admin))
+}
+
+fn user_delete(st: &AppState, args: &Value, actor: &User) -> Response {
+    if !actor.is_admin {
+        return forbidden();
+    }
+    let Some(id) = args.get("id").and_then(Value::as_i64) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "`id` required" }))).into_response();
+    };
+    match st.auth.delete_user(id) {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+fn forbidden() -> Response {
+    (StatusCode::FORBIDDEN, Json(json!({ "error": "需要管理员权限" }))).into_response()
+}
+
+/// Serialize `Ok` as JSON (200) or map `Err(String)` to a 400 `{error}`.
+fn json_or_err<T: serde::Serialize>(r: Result<T, String>) -> Response {
+    match r {
         Ok(v) => Json(v).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
     }
