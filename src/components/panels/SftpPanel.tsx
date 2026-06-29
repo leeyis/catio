@@ -5,8 +5,8 @@ import { IconBtn } from '../atoms'
 import type { Connection, SftpItem } from '../../services/types'
 import { PanelShell } from './PanelShell'
 import { PanelEmpty } from './PanelEmpty'
-import { sftpList, sftpRealpath, sftpMkdir, sftpTouch, sftpRename, sftpDelete, sftpUploadWeb, sftpDownloadUrl } from '../../services/ssh'
-import { useTransfers, startUpload, startDownload, cancelTransfer, onTransferDone } from '../../state/transfers'
+import { sftpList, sftpRealpath, sftpMkdir, sftpTouch, sftpRename, sftpDelete, sftpDownloadUrl } from '../../services/ssh'
+import { useTransfers, startUpload, startDownload, startWebUpload, cancelTransfer, onTransferDone } from '../../state/transfers'
 import { getSftpNav, setSftpNav } from '../../state/sftpNav'
 import { loadFavorites, toggleFavorite, COMMON_DIRS } from '../../state/sftpFavorites'
 
@@ -200,15 +200,17 @@ export function SftpPanel({ onClose, conn, sessionId, onEditFile }: SftpPanelPro
   // ---- actions ----
   const webFileInputRef = useRef<HTMLInputElement>(null)
 
-  // Server mode: HTML5 multipart upload of the browser-picked files into the current dir.
-  const onWebFilesPicked = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Server mode: HTML5 multipart upload of the browser-picked files into the current dir. Each file
+  // is tracked in the global transfers store (progress bar + speed via XHR upload.onprogress) and
+  // the listing refreshes per file on completion (onTransferDone), so big uploads show live progress
+  // instead of appearing frozen.
+  const onWebFilesPicked = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files
     if (files && sessionId) {
+      const dir = pathRef.current
       for (const file of Array.from(files)) {
-        try { await sftpUploadWeb(sessionId, joinPath(pathRef.current, file.name), file) }
-        catch (err) { setError(String(err)) }
+        startWebUpload(sessionId, joinPath(dir, file.name), file, dir).catch(err => setError(String(err)))
       }
-      load(pathRef.current) // refresh the listing to show the uploaded files
     }
     e.target.value = '' // reset so picking the same file again still fires change
   }

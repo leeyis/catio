@@ -333,10 +333,13 @@ export function ScanWizard({ onClose, onImported, existingHostKeys, existingDbKe
       const id = await scanStart(args)
       setScanId(id)
     } catch (e) {
-      // 启动失败（如非 Tauri）：停止扫描态，停在步骤③显示空结果。
+      // 启动失败（鉴权/网络/非 Tauri 等）：停扫描态，并把原因写进实时日志，避免“停在
+      // 扫描中、0/0、空日志”让人以为卡死。
       setScanning(false)
       setDone(true)
       stopTimer()
+      const message = e instanceof Error ? e.message : String(e)
+      setLogs(prev => [...prev, { scanId: '', level: 'warn', message: `扫描启动失败：${message}` }])
       console.error('scanStart 失败', e)
     }
   }, [mode, canStart, dictText, ranges, concurrency, defaultPorts, keyFiles, keyUsersRaw, customPorts, selectedEngineIds])

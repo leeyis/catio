@@ -116,7 +116,6 @@ const onClose = () => winAction('close')
 
 export function TitleBar({ theme, onToggleTheme, onOpenSettings, settingsActive }: TitleBarProps) {
   const { t } = useTranslation()
-  const serverAuth = useServerAuth()
 
   // Detect macOS — default false so plain-browser / jsdom always shows Windows-style buttons.
   // Only set true when positively detected (navigator.platform contains 'Mac').
@@ -146,18 +145,18 @@ export function TitleBar({ theme, onToggleTheme, onOpenSettings, settingsActive 
         <button className={`tb-iconbtn ${settingsActive ? 'active' : ''}`} title={t('shell.settings')} onClick={onOpenSettings}>
           <Icon name="settings" size={17} />
         </button>
-        <div className="tb-divider" />
-        {isServer() ? (
-          // Browser deploy: no OS window to minimize/maximize; the close button logs out.
-          <div className="win-controls">
-            <button className="win-btn close" title={t('serverAuth.logout')} onClick={() => { void serverAuth.logout() }}><Icon name="x" size={16} /></button>
-          </div>
-        ) : !isMac && (
-          <div className="win-controls">
-            <button className="win-btn" title={t('shell.minimize')} onClick={() => { void onMin() }}><Icon name="minus" size={15} /></button>
-            <button className="win-btn" title={t('shell.maximize')} onClick={() => { void onMax() }}><svg width="11" height="11" viewBox="0 0 11 11"><rect x="1.2" y="1.2" width="8.6" height="8.6" rx="1.6" fill="none" stroke="currentColor" strokeWidth="1.3"/></svg></button>
-            <button className="win-btn close" title={t('shell.close')} onClick={() => { void onClose() }}><Icon name="x" size={16} /></button>
-          </div>
+        {/* OS window controls — DESKTOP only. In the browser deploy there's no window to
+            minimize/maximize/close, and logout lives in the sidebar footer, so we render nothing
+            here (avoids a duplicate logout icon). */}
+        {!isServer() && !isMac && (
+          <>
+            <div className="tb-divider" />
+            <div className="win-controls">
+              <button className="win-btn" title={t('shell.minimize')} onClick={() => { void onMin() }}><Icon name="minus" size={15} /></button>
+              <button className="win-btn" title={t('shell.maximize')} onClick={() => { void onMax() }}><svg width="11" height="11" viewBox="0 0 11 11"><rect x="1.2" y="1.2" width="8.6" height="8.6" rx="1.6" fill="none" stroke="currentColor" strokeWidth="1.3"/></svg></button>
+              <button className="win-btn close" title={t('shell.close')} onClick={() => { void onClose() }}><Icon name="x" size={16} /></button>
+            </div>
+          </>
         )}
       </div>
     </div>

@@ -248,18 +248,40 @@ export function sftpDownloadUrl(sessionId: string, remotePath: string): string {
   return `/api/sftp/download?${qs.toString()}`
 }
 
-/** Server-mode upload: POST a browser-picked File; the server writes it to `remotePath` over SFTP. */
-export async function sftpUploadWeb(sessionId: string, remotePath: string, file: File): Promise<void> {
-  const fd = new FormData()
-  fd.append('sessionId', sessionId)
-  fd.append('remotePath', remotePath)
-  fd.append('file', file)
-  const res = await fetch('/api/sftp/upload', { method: 'POST', credentials: 'include', body: fd })
-  if (!res.ok) {
-    let msg = `HTTP ${res.status}`
-    try { const j = await res.json() as { error?: unknown }; if (j?.error) msg = String(j.error) } catch { /* non-json body */ }
-    throw new Error(msg)
-  }
+/** Server-mode upload: POST a browser-picked File; the server writes it to `remotePath` over SFTP.
+ *  Uses XMLHttpRequest (not fetch) so `upload.onprogress` can drive a progress bar + speed readout
+ *  — fetch has no upload-progress. `onProgress(loaded,total)` fires as bytes go out; an `AbortSignal`
+ *  cancels the in-flight POST. */
+export function sftpUploadWeb(
+  sessionId: string,
+  remotePath: string,
+  file: File,
+  onProgress?: (loaded: number, total: number) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const fd = new FormData()
+    fd.append('sessionId', sessionId)
+    fd.append('remotePath', remotePath)
+    fd.append('file', file)
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', '/api/sftp/upload')
+    xhr.withCredentials = true
+    xhr.upload.onprogress = e => { if (e.lengthComputable && onProgress) onProgress(e.loaded, e.total) }
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) { resolve(); return }
+      let msg = `HTTP ${xhr.status}`
+      try { const j = JSON.parse(xhr.responseText) as { error?: unknown }; if (j?.error) msg = String(j.error) } catch { /* non-json */ }
+      reject(new Error(msg))
+    }
+    xhr.onerror = () => reject(new Error('上传失败(网络错误)'))
+    xhr.onabort = () => reject(new DOMException('上传已取消', 'AbortError'))
+    if (signal) {
+      if (signal.aborted) { xhr.abort(); return }
+      signal.addEventListener('abort', () => xhr.abort(), { once: true })
+    }
+    xhr.send(fd)
+  })
 }
 
 export async function sftpTouch(sessionId: string, path: string): Promise<void> {

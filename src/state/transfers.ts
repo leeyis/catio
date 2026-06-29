@@ -9,8 +9,10 @@
 // merely subscribes to and renders this store.
 
 import { useSyncExternalStore } from 'react'
-import { sftpUpload, sftpDownload, sftpTransferCancel, listen } from '../services/ssh'
+import { sftpUpload, sftpDownload, sftpTransferCancel, sftpUploadWeb, listen } from '../services/ssh'
 import type { TransferProgress } from '../services/types'
+
+let webUploadSeq = 0
 
 export interface Transfer {
   id: string
@@ -113,9 +115,50 @@ export async function startDownload(sessionId: string, remotePath: string, dest:
   await track(id, filename, 'down', dir)
 }
 
+/** Server-mode (browser) upload tracked in the same UI as desktop transfers. Progress + speed come
+ *  from the XHR `upload.onprogress` (no Tauri events here); cancel aborts the POST. */
+export async function startWebUpload(sessionId: string, remotePath: string, file: File, dir: string): Promise<void> {
+  const id = `web-up-${(webUploadSeq += 1)}`
+  const controller = new AbortController()
+  cleanups[id] = () => controller.abort()
+  transfers = [...transfers, { id, filename: file.name, percent: 0, speed: 0, status: 'active', kind: 'up', dir }]
+  emit()
+  try {
+    await sftpUploadWeb(sessionId, remotePath, file, (loaded, total) => {
+      const now = Date.now()
+      const prev = sample[id]
+      let nextSpeed: number | undefined
+      if (!prev) sample[id] = { bytes: loaded, time: now }
+      else if (now - prev.time >= 500) {
+        nextSpeed = (loaded - prev.bytes) / ((now - prev.time) / 1000)
+        sample[id] = { bytes: loaded, time: now }
+      }
+      const percent = total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0
+      transfers = transfers.map(x => (x.id === id ? { ...x, percent, speed: nextSpeed !== undefined ? nextSpeed : x.speed } : x))
+      emit()
+    }, controller.signal)
+    // success → drop the row + notify the panel to refresh.
+    delete sample[id]; delete cleanups[id]
+    transfers = transfers.filter(x => x.id !== id)
+    emit()
+    doneSubs.forEach(f => f(dir, 'up'))
+  } catch (e) {
+    delete sample[id]; delete cleanups[id]
+    if (e instanceof DOMException && e.name === 'AbortError') {
+      transfers = transfers.filter(x => x.id !== id) // cancelled → just remove
+      emit()
+      return
+    }
+    transfers = transfers.map(x => (x.id === id ? { ...x, status: 'error' } : x))
+    emit()
+    setTimeout(() => { transfers = transfers.filter(x => x.id !== id); emit() }, 4000)
+    throw e
+  }
+}
+
 /** Cancel an in-flight transfer: stop the backend, stop listening, drop the row. */
 export function cancelTransfer(id: string): void {
-  sftpTransferCancel(id).catch(() => { /* best-effort */ })
+  if (!id.startsWith('web-up-')) sftpTransferCancel(id).catch(() => { /* best-effort */ })
   cleanups[id]?.()
   transfers = transfers.filter(x => x.id !== id)
   emit()
