@@ -207,49 +207,72 @@ export async function listen<T>(event: string, cb: (payload: T) => void): Promis
 
 /** List a remote directory. Returns entries with rich metadata (size/mtime/perms/owner/group). */
 export async function sftpList(sessionId: string, path: string): Promise<SftpItem[]> {
-  if (isTauri() && sessionId) {
-    return tauriInvoke<SftpItem[]>('sftp_list', { sessionId, path })
+  if ((isTauri() || isServer()) && sessionId) {
+    return rpc<SftpItem[]>('sftp_list', { sessionId, path })
   }
   return []
 }
 
 /** Resolve a path to its absolute form ("." → home dir). */
 export async function sftpRealpath(sessionId: string, path: string): Promise<string> {
-  if (isTauri() && sessionId) {
-    return tauriInvoke<string>('sftp_realpath', { sessionId, path })
+  if ((isTauri() || isServer()) && sessionId) {
+    return rpc<string>('sftp_realpath', { sessionId, path })
   }
   return path
 }
 
-/** Start an upload. Returns a transfer id; progress flows via `transfer-progress-{id}` events. */
+/** Start an upload from a local filesystem path (desktop only). Returns a transfer id; progress
+ *  flows via `transfer-progress-{id}` events. Over web use {@link sftpUploadWeb} (HTML5). */
 export async function sftpUpload(sessionId: string, localPath: string, remotePath: string): Promise<string> {
   return tauriInvoke<string>('sftp_upload', { sessionId, localPath, remotePath })
 }
 
-/** Start a download. Returns a transfer id; progress flows via `transfer-progress-{id}` events. */
+/** Start a download to a local filesystem path (desktop only). Over web use
+ *  {@link sftpDownloadUrl} (the browser saves the file). */
 export async function sftpDownload(sessionId: string, remotePath: string, localPath: string): Promise<string> {
   return tauriInvoke<string>('sftp_download', { sessionId, remotePath, localPath })
 }
 
-export async function sftpTouch(sessionId: string, path: string): Promise<void> {
-  return tauriInvoke('sftp_touch', { sessionId, path })
+/** Server-mode download: the URL the browser navigates to so it saves the remote file itself
+ *  (the cookie rides along same-origin). */
+export function sftpDownloadUrl(sessionId: string, remotePath: string): string {
+  const qs = new URLSearchParams({ sessionId, path: remotePath })
+  return `/api/sftp/download?${qs.toString()}`
 }
 
-/** Request cancellation of an in-flight upload/download by its transfer id. */
+/** Server-mode upload: POST a browser-picked File; the server writes it to `remotePath` over SFTP. */
+export async function sftpUploadWeb(sessionId: string, remotePath: string, file: File): Promise<void> {
+  const fd = new FormData()
+  fd.append('sessionId', sessionId)
+  fd.append('remotePath', remotePath)
+  fd.append('file', file)
+  const res = await fetch('/api/sftp/upload', { method: 'POST', credentials: 'include', body: fd })
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`
+    try { const j = await res.json() as { error?: unknown }; if (j?.error) msg = String(j.error) } catch { /* non-json body */ }
+    throw new Error(msg)
+  }
+}
+
+export async function sftpTouch(sessionId: string, path: string): Promise<void> {
+  return rpc('sftp_touch', { sessionId, path })
+}
+
+/** Request cancellation of an in-flight upload/download by its transfer id (desktop transfers). */
 export async function sftpTransferCancel(transferId: string): Promise<void> {
   return tauriInvoke('sftp_transfer_cancel', { transferId })
 }
 
 export async function sftpMkdir(sessionId: string, path: string): Promise<void> {
-  return tauriInvoke('sftp_mkdir', { sessionId, path })
+  return rpc('sftp_mkdir', { sessionId, path })
 }
 
 export async function sftpRename(sessionId: string, from: string, to: string): Promise<void> {
-  return tauriInvoke('sftp_rename', { sessionId, from, to })
+  return rpc('sftp_rename', { sessionId, from, to })
 }
 
 export async function sftpDelete(sessionId: string, path: string, isDir: boolean): Promise<void> {
-  return tauriInvoke('sftp_delete', { sessionId, path, isDir })
+  return rpc('sftp_delete', { sessionId, path, isDir })
 }
 
 // ---- Remote file editing ----
@@ -272,7 +295,7 @@ export interface RemoteFileContent {
 
 /** Read a remote file's content into memory for editing. `maxBytes` defaults to 5MB on the backend. */
 export async function sftpReadFile(sessionId: string, path: string, maxBytes?: number): Promise<RemoteFileContent> {
-  return tauriInvoke<RemoteFileContent>('sftp_read_file', { sessionId, path, maxBytes })
+  return rpc<RemoteFileContent>('sftp_read_file', { sessionId, path, maxBytes })
 }
 
 /**
@@ -287,7 +310,7 @@ export async function sftpWriteFile(
   baseModified?: number | null,
   mode?: number | null,
 ): Promise<number> {
-  return tauriInvoke<number>('sftp_write_file', { sessionId, path, content, baseModified, mode })
+  return rpc<number>('sftp_write_file', { sessionId, path, content, baseModified, mode })
 }
 
 // ---- Bytes formatter ----

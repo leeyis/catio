@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::{
-    extract::{ws::{Message, WebSocket, WebSocketUpgrade}, Json, State},
+    extract::{ws::{Message, WebSocket, WebSocketUpgrade}, Json, Multipart, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode, Uri},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
@@ -117,6 +117,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/invoke", post(invoke))
         .route("/ws", get(ws_handler))
+        // SFTP binary transfers can't go through JSON /api/invoke: download streams the remote
+        // file to the browser, upload takes an HTML5 multipart body (M4).
+        .route("/api/sftp/download", get(sftp_download_handler))
+        .route("/api/sftp/upload", post(sftp_upload_handler))
         .fallback(spa)
         .with_state(state)
 }
@@ -721,6 +725,49 @@ async fn dispatch(st: &AppState, cmd: &str, args: Value) -> Result<Value, String
             Ok(Value::Null)
         }
 
+        // ── SFTP browse + file ops (request/response; download/upload are separate routes) ──
+        "sftp_list" => serde_json::to_value(
+            crate::ssh::sftp::list_directory(&st.ssh, require(&args, "sessionId")?, require(&args, "path")?).await.map_err(estr)?,
+        ).map_err(estr),
+        "sftp_realpath" => Ok(Value::String(
+            crate::ssh::sftp::realpath(&st.ssh, require(&args, "sessionId")?, require(&args, "path")?).await.map_err(estr)?,
+        )),
+        "sftp_mkdir" => {
+            crate::ssh::sftp::sftp_mkdir_core(&st.ssh, require(&args, "sessionId")?, require(&args, "path")?).await.map_err(estr)?;
+            Ok(Value::Null)
+        }
+        "sftp_rename" => {
+            crate::ssh::sftp::sftp_rename_core(&st.ssh, require(&args, "sessionId")?, require(&args, "from")?, require(&args, "to")?).await.map_err(estr)?;
+            Ok(Value::Null)
+        }
+        "sftp_delete" => {
+            crate::ssh::sftp::sftp_delete_core(&st.ssh, require(&args, "sessionId")?, require(&args, "path")?).await.map_err(estr)?;
+            Ok(Value::Null)
+        }
+        "sftp_touch" => {
+            crate::ssh::sftp::sftp_touch_core(&st.ssh, require(&args, "sessionId")?, require(&args, "path")?).await.map_err(estr)?;
+            Ok(Value::Null)
+        }
+        "sftp_read_file" => serde_json::to_value(
+            crate::ssh::sftp::sftp_read_file_core(
+                &st.ssh,
+                require(&args, "sessionId")?.to_string(),
+                require(&args, "path")?.to_string(),
+                args.get("maxBytes").and_then(Value::as_u64),
+            ).await.map_err(estr)?,
+        ).map_err(estr),
+        "sftp_write_file" => {
+            let mt = crate::ssh::sftp::sftp_write_file_core(
+                &st.ssh,
+                require(&args, "sessionId")?.to_string(),
+                require(&args, "path")?.to_string(),
+                require(&args, "content")?.to_string(),
+                args.get("baseModified").and_then(Value::as_i64),
+                args.get("mode").and_then(Value::as_u64).map(|m| m as u32),
+            ).await.map_err(estr)?;
+            Ok(json!(mt))
+        }
+
         // Not exposed over web in M1 — the frontend degrades on this error (it keeps the
         // desktop-only `if (!isTauri())` guard for these, so server mode never calls them):
         //   • terminals / VNC  → arrive over WebSocket in M3 / M5
@@ -877,6 +924,75 @@ async fn handle_ws_cmd(
         Err(e) => json!({ "type": "reply", "id": id, "ok": false, "error": e }),
     };
     let _ = tx.try_send(reply);
+}
+
+// ── SFTP binary transfer endpoints (M4) ──────────────────────────────────────────────────────
+
+/// True when the request carries a valid session cookie. Shared by the SFTP routes (which, like
+/// /api/invoke, must be gated).
+fn authed(st: &AppState, headers: &HeaderMap) -> bool {
+    session_token(headers).as_deref().and_then(|t| resolve_session(st, t)).is_some()
+}
+
+/// Strip characters that could break out of the Content-Disposition filename or inject headers.
+fn sanitize_filename(name: &str) -> String {
+    name.chars().filter(|c| !matches!(c, '"' | '\\' | '\r' | '\n' | ';')).collect()
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadQuery {
+    session_id: String,
+    path: String,
+}
+
+/// `GET /api/sftp/download?sessionId=&path=` — read the remote file and stream it to the browser
+/// as an attachment (the browser's own download UI shows progress). Buffers fully (Phase-1 LAN).
+async fn sftp_download_handler(State(st): State<AppState>, headers: HeaderMap, Query(q): Query<DownloadQuery>) -> Response {
+    if !authed(&st, &headers) {
+        return (StatusCode::UNAUTHORIZED, "未登录").into_response();
+    }
+    match crate::ssh::sftp::read_remote_bytes(&st.ssh, &q.session_id, &q.path).await {
+        Ok(bytes) => {
+            let filename = sanitize_filename(q.path.rsplit('/').next().unwrap_or("download"));
+            (
+                [
+                    (header::CONTENT_TYPE, "application/octet-stream".to_string()),
+                    (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{filename}\"")),
+                ],
+                bytes,
+            ).into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
+}
+
+/// `POST /api/sftp/upload` (multipart: sessionId, remotePath, file) — receive the browser-picked
+/// file and write it to the remote path over SFTP (the HTML5 upload that replaces Tauri's native
+/// drag-drop / local-path upload).
+async fn sftp_upload_handler(State(st): State<AppState>, headers: HeaderMap, mut multipart: Multipart) -> Response {
+    if !authed(&st, &headers) {
+        return (StatusCode::UNAUTHORIZED, "未登录").into_response();
+    }
+    let (mut session_id, mut remote_path, mut file_bytes) = (String::new(), String::new(), None::<Vec<u8>>);
+    while let Ok(Some(field)) = multipart.next_field().await {
+        match field.name() {
+            Some("sessionId") => session_id = field.text().await.unwrap_or_default(),
+            Some("remotePath") => remote_path = field.text().await.unwrap_or_default(),
+            Some("file") => file_bytes = field.bytes().await.ok().map(|b| b.to_vec()),
+            _ => {}
+        }
+    }
+    let Some(bytes) = file_bytes else {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "缺少文件" }))).into_response();
+    };
+    if session_id.is_empty() || remote_path.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "缺少 sessionId/remotePath" }))).into_response();
+    }
+    match crate::ssh::sftp::write_remote_bytes(&st.ssh, &session_id, &remote_path, &bytes).await {
+        Ok(()) => Json(json!({ "ok": true, "bytes": bytes.len() })).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+    }
 }
 
 // SPA fallback: serve a dist asset if it exists, else index.html with the server flag injected

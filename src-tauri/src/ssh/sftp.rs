@@ -817,8 +817,11 @@ pub async fn sftp_mkdir(
     path: String,
     mgr: tauri::State<'_, SessionManager>,
 ) -> Result<(), SshError> {
-    let cmd = format!("mkdir -p {}", shell_escape(&path));
-    exec(&mgr, &session_id, &cmd).await?;
+    sftp_mkdir_core(&mgr, &session_id, &path).await
+}
+
+pub async fn sftp_mkdir_core(mgr: &SessionManager, session_id: &str, path: &str) -> Result<(), SshError> {
+    exec(mgr, session_id, &format!("mkdir -p {}", shell_escape(path))).await?;
     Ok(())
 }
 
@@ -830,8 +833,11 @@ pub async fn sftp_rename(
     to: String,
     mgr: tauri::State<'_, SessionManager>,
 ) -> Result<(), SshError> {
-    let cmd = format!("mv -- {} {}", shell_escape(&from), shell_escape(&to));
-    exec(&mgr, &session_id, &cmd).await?;
+    sftp_rename_core(&mgr, &session_id, &from, &to).await
+}
+
+pub async fn sftp_rename_core(mgr: &SessionManager, session_id: &str, from: &str, to: &str) -> Result<(), SshError> {
+    exec(mgr, session_id, &format!("mv -- {} {}", shell_escape(from), shell_escape(to))).await?;
     Ok(())
 }
 
@@ -844,8 +850,11 @@ pub async fn sftp_delete(
     mgr: tauri::State<'_, SessionManager>,
 ) -> Result<(), SshError> {
     let _ = is_dir; // rm -rf 同时适用文件与目录；保留参数兼容前端签名。
-    let cmd = format!("rm -rf -- {}", shell_escape(&path));
-    exec(&mgr, &session_id, &cmd).await?;
+    sftp_delete_core(&mgr, &session_id, &path).await
+}
+
+pub async fn sftp_delete_core(mgr: &SessionManager, session_id: &str, path: &str) -> Result<(), SshError> {
+    exec(mgr, session_id, &format!("rm -rf -- {}", shell_escape(path))).await?;
     Ok(())
 }
 
@@ -856,8 +865,11 @@ pub async fn sftp_touch(
     path: String,
     mgr: tauri::State<'_, SessionManager>,
 ) -> Result<(), SshError> {
-    let cmd = format!("touch -- {}", shell_escape(&path));
-    exec(&mgr, &session_id, &cmd).await?;
+    sftp_touch_core(&mgr, &session_id, &path).await
+}
+
+pub async fn sftp_touch_core(mgr: &SessionManager, session_id: &str, path: &str) -> Result<(), SshError> {
+    exec(mgr, session_id, &format!("touch -- {}", shell_escape(path))).await?;
     Ok(())
 }
 
@@ -873,11 +885,20 @@ pub async fn sftp_read_file(
     max_bytes: Option<u64>,
     mgr: tauri::State<'_, SessionManager>,
 ) -> Result<RemoteFileContent, SshError> {
+    sftp_read_file_core(&mgr, session_id, path, max_bytes).await
+}
+
+pub async fn sftp_read_file_core(
+    mgr: &SessionManager,
+    session_id: String,
+    path: String,
+    max_bytes: Option<u64>,
+) -> Result<RemoteFileContent, SshError> {
     use russh_sftp::protocol::OpenFlags;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let limit = max_bytes.unwrap_or(EDIT_MAX_BYTES);
-    let sftp = crate::ssh::sftp_transfer::open_sftp(&mgr, &session_id).await?;
+    let sftp = crate::ssh::sftp_transfer::open_sftp(mgr, &session_id).await?;
 
     let attrs = sftp
         .metadata(path.as_str())
@@ -949,10 +970,21 @@ pub async fn sftp_write_file(
     mode: Option<u32>,
     mgr: tauri::State<'_, SessionManager>,
 ) -> Result<i64, SshError> {
+    sftp_write_file_core(&mgr, session_id, path, content, base_modified, mode).await
+}
+
+pub async fn sftp_write_file_core(
+    mgr: &SessionManager,
+    session_id: String,
+    path: String,
+    content: String,
+    base_modified: Option<i64>,
+    mode: Option<u32>,
+) -> Result<i64, SshError> {
     use russh_sftp::protocol::OpenFlags;
     use tokio::io::AsyncWriteExt;
 
-    let sftp = crate::ssh::sftp_transfer::open_sftp(&mgr, &session_id).await?;
+    let sftp = crate::ssh::sftp_transfer::open_sftp(mgr, &session_id).await?;
 
     // 1. 冲突检测。
     if let Some(base) = base_modified {
@@ -986,7 +1018,7 @@ pub async fn sftp_write_file(
     // 3. 还原原权限位。
     if let Some(m) = mode {
         let _ = exec(
-            &mgr,
+            mgr,
             &session_id,
             &format!("chmod {:o} {}", m & 0o7777, shell_escape(&tmp)),
         )
@@ -995,7 +1027,7 @@ pub async fn sftp_write_file(
 
     // 4. 原子替换目标；失败则清理临时文件并上报。
     let mv = format!("mv -f -- {} {}", shell_escape(&tmp), shell_escape(&path));
-    if let Err(e) = exec(&mgr, &session_id, &mv).await {
+    if let Err(e) = exec(mgr, &session_id, &mv).await {
         let _ = sftp.remove_file(tmp.as_str()).await;
         return Err(e);
     }
@@ -1006,6 +1038,36 @@ pub async fn sftp_write_file(
         .await
         .map_err(|e| SshError::Sftp(e.to_string()))?;
     Ok(attrs.mtime.map(|m| m as i64).unwrap_or(0))
+}
+
+// ─── Web 端字节级读写（download / upload HTTP 端点用）─────────────────────────
+
+/// 把整个远端文件读入内存（web 下载端点用）。Phase-1 局域网全量缓冲即可,流式留作 Future。
+pub async fn read_remote_bytes(mgr: &SessionManager, session_id: &str, path: &str) -> Result<Vec<u8>, SshError> {
+    use russh_sftp::protocol::OpenFlags;
+    use tokio::io::AsyncReadExt;
+    let sftp = crate::ssh::sftp_transfer::open_sftp(mgr, session_id).await?;
+    let mut remote = sftp
+        .open_with_flags(path, OpenFlags::READ)
+        .await
+        .map_err(|e| SshError::Sftp(e.to_string()))?;
+    let mut buf = Vec::new();
+    remote.read_to_end(&mut buf).await.map_err(|e| SshError::Sftp(e.to_string()))?;
+    Ok(buf)
+}
+
+/// 把字节写入远端文件(创建/截断)。web 上传端点(HTML5 multipart)用。
+pub async fn write_remote_bytes(mgr: &SessionManager, session_id: &str, path: &str, bytes: &[u8]) -> Result<(), SshError> {
+    use russh_sftp::protocol::OpenFlags;
+    use tokio::io::AsyncWriteExt;
+    let sftp = crate::ssh::sftp_transfer::open_sftp(mgr, session_id).await?;
+    let mut f = sftp
+        .open_with_flags(path, OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE)
+        .await
+        .map_err(|e| SshError::Sftp(e.to_string()))?;
+    f.write_all(bytes).await.map_err(|e| SshError::Sftp(e.to_string()))?;
+    f.shutdown().await.map_err(|e| SshError::Sftp(e.to_string()))?;
+    Ok(())
 }
 
 // ─── 单元测试（纯函数 parse_ls_output）────────────────────────────────────────

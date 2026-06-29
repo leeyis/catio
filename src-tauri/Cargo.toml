@@ -22,7 +22,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
-axum = { version = "0.7", features = ["ws"] }
+axum = { version = "0.7", features = ["ws", "multipart"] }
 tower-http = { version = "0.6", features = ["cors"] }
 tauri-plugin-http = "2"
 serde = { version = "1", features = ["derive"] }
@@ -72,7 +72,7 @@ strip = true
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "socks", "cookies"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "socks", "cookies", "multipart"] }
 # WebSocket client for the /ws integration tests (M3).
 tokio-tungstenite = "0.24"
 futures-util = "0.3"

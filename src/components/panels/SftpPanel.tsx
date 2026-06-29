@@ -5,7 +5,7 @@ import { IconBtn } from '../atoms'
 import type { Connection, SftpItem } from '../../services/types'
 import { PanelShell } from './PanelShell'
 import { PanelEmpty } from './PanelEmpty'
-import { sftpList, sftpRealpath, sftpMkdir, sftpTouch, sftpRename, sftpDelete } from '../../services/ssh'
+import { sftpList, sftpRealpath, sftpMkdir, sftpTouch, sftpRename, sftpDelete, sftpUploadWeb, sftpDownloadUrl } from '../../services/ssh'
 import { useTransfers, startUpload, startDownload, cancelTransfer, onTransferDone } from '../../state/transfers'
 import { getSftpNav, setSftpNav } from '../../state/sftpNav'
 import { loadFavorites, toggleFavorite, COMMON_DIRS } from '../../state/sftpFavorites'
@@ -15,6 +15,13 @@ function isTauriEnv(): boolean {
     typeof window !== 'undefined' &&
     ('__TAURI_INTERNALS__' in window || '__TAURI__' in window)
   )
+}
+
+// Server (browser) deploy: SFTP browse/ops go over HTTP; upload is HTML5 multipart, download is a
+// browser navigation to /api/sftp/download (rather than Tauri's native file dialogs).
+function isServerEnv(): boolean {
+  return typeof window !== 'undefined' && '__CATIO_SERVER__' in window &&
+    (window as unknown as Record<string, unknown>).__CATIO_SERVER__ === true
 }
 
 // ---- pure path helpers (absolute POSIX paths) ----
@@ -191,8 +198,25 @@ export function SftpPanel({ onClose, conn, sessionId, onEditFile }: SftpPanelPro
   }, [handleDrop])
 
   // ---- actions ----
+  const webFileInputRef = useRef<HTMLInputElement>(null)
+
+  // Server mode: HTML5 multipart upload of the browser-picked files into the current dir.
+  const onWebFilesPicked = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files
+    if (files && sessionId) {
+      for (const file of Array.from(files)) {
+        try { await sftpUploadWeb(sessionId, joinPath(pathRef.current, file.name), file) }
+        catch (err) { setError(String(err)) }
+      }
+      load(pathRef.current) // refresh the listing to show the uploaded files
+    }
+    e.target.value = '' // reset so picking the same file again still fires change
+  }
+
   const handleUploadClick = () => {
-    if (!sessionId || !isTauriEnv()) return
+    if (!sessionId) return
+    if (isServerEnv()) { webFileInputRef.current?.click(); return }
+    if (!isTauriEnv()) return
     import('@tauri-apps/plugin-dialog').then(({ open }) => {
       open({ multiple: true }).then(picked => {
         if (!picked) return
@@ -203,7 +227,18 @@ export function SftpPanel({ onClose, conn, sessionId, onEditFile }: SftpPanelPro
   }
 
   const downloadItem = (it: SftpItem) => {
-    if (!sessionId || !isTauriEnv()) return
+    if (!sessionId) return
+    if (isServerEnv()) {
+      // Let the browser save it (its own download UI shows progress). Cookie rides same-origin.
+      const a = document.createElement('a')
+      a.href = sftpDownloadUrl(sessionId, it.path)
+      a.download = it.name
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      return
+    }
+    if (!isTauriEnv()) return
     import('@tauri-apps/plugin-dialog').then(({ save }) => {
       save({ defaultPath: it.name }).then(dest => {
         if (!dest) return
@@ -322,6 +357,8 @@ export function SftpPanel({ onClose, conn, sessionId, onEditFile }: SftpPanelPro
         <PanelEmpty icon="folder" text={t('panels.noSessionHint')} />
       ) : (
         <>
+          {/* hidden HTML5 file picker for server-mode upload (desktop uses the native dialog) */}
+          <input ref={webFileInputRef} type="file" multiple style={{ display: 'none' }} onChange={onWebFilesPicked} />
           {/* address bar */}
           <div ref={jumpBoxRef} className="row gap6" style={{ padding: '8px 10px', borderBottom: '1px solid var(--border-hairline)', position: 'relative' }}>
             <IconBtn name="arrow-up" size={15} variant="bare" title={t('panels.sftpUp')} onClick={() => { if (!isRoot) load(parentPath(path)) }} style={{ opacity: isRoot ? 0.4 : 1 }} />
