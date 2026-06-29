@@ -265,20 +265,26 @@ export function sftpUploadWeb(
     fd.append('remotePath', remotePath)
     fd.append('file', file)
     const xhr = new XMLHttpRequest()
+    let abortHandler: (() => void) | undefined
+    const cleanup = () => { if (signal && abortHandler) signal.removeEventListener('abort', abortHandler) }
+    // Reject before send() if the signal is already aborted: xhr.abort() on an un-sent request is
+    // not guaranteed to fire `onabort`, which would leave the promise hanging.
+    if (signal?.aborted) { reject(new DOMException('上传已取消', 'AbortError')); return }
     xhr.open('POST', '/api/sftp/upload')
     xhr.withCredentials = true
     xhr.upload.onprogress = e => { if (e.lengthComputable && onProgress) onProgress(e.loaded, e.total) }
     xhr.onload = () => {
+      cleanup()
       if (xhr.status >= 200 && xhr.status < 300) { resolve(); return }
       let msg = `HTTP ${xhr.status}`
       try { const j = JSON.parse(xhr.responseText) as { error?: unknown }; if (j?.error) msg = String(j.error) } catch { /* non-json */ }
       reject(new Error(msg))
     }
-    xhr.onerror = () => reject(new Error('上传失败(网络错误)'))
-    xhr.onabort = () => reject(new DOMException('上传已取消', 'AbortError'))
+    xhr.onerror = () => { cleanup(); reject(new Error('上传失败(网络错误)')) }
+    xhr.onabort = () => { cleanup(); reject(new DOMException('上传已取消', 'AbortError')) }
     if (signal) {
-      if (signal.aborted) { xhr.abort(); return }
-      signal.addEventListener('abort', () => xhr.abort(), { once: true })
+      abortHandler = () => xhr.abort()
+      signal.addEventListener('abort', abortHandler, { once: true })
     }
     xhr.send(fd)
   })
