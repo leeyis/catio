@@ -9,6 +9,11 @@
 # the runtime keeps their shared objects — even though the headless server never opens a
 # webview (it links them transitively). Shrinking this (feature-gating Tauri out of the
 # server build) is a Future optimization, intentionally out of scope for Phase 1.
+#
+# KNOWN GAP (M1): JDBC engines (Oracle/DB2/Snowflake/…) need a JRE + the catio-jdbc plugin jar
+# that the desktop app wires up in its Tauri setup(). This image ships neither, so JDBC
+# db_connect fails here. Native engines (Postgres/MySQL/SQLite/Mongo/Redis/ClickHouse/…) work.
+# Adding the JRE + plugin is tracked for a later milestone.
 
 # ── stage 1: frontend ────────────────────────────────────────────────────────
 FROM node:20-bookworm AS web

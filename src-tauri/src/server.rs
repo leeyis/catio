@@ -29,7 +29,6 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tower_http::cors::CorsLayer;
 
 use crate::db::commands::{self, ConnectResult};
 use crate::db::db_admin_sql::{
@@ -55,27 +54,41 @@ pub struct AppState {
     /// Persisted state dir (history/snippets now; users/connections/vault in M2). Maps to
     /// the Docker data volume `/app/data`.
     pub data_dir: Arc<PathBuf>,
+    /// Serializes the history/snippet load-modify-save so concurrent tabs/requests can't drop
+    /// entries by last-writer-wins (the file IO is sync, so a std Mutex held without `.await`
+    /// across it is correct and cheap).
+    pub history_lock: Arc<std::sync::Mutex<()>>,
+}
+
+impl AppState {
+    /// Construct with a fresh ConnManager + locks. Tests inject their own dirs.
+    pub fn new(static_dir: PathBuf, data_dir: PathBuf) -> Self {
+        AppState {
+            conns: Arc::new(ConnManager::default()),
+            static_dir: Arc::new(static_dir),
+            data_dir: Arc::new(data_dir),
+            history_lock: Arc::new(std::sync::Mutex::new(())),
+        }
+    }
 }
 
 /// Build the router from an explicit state — the test seam (lets integration tests inject
 /// throwaway static/data dirs without touching process env).
 pub fn build_router(state: AppState) -> Router {
+    // No CORS layer: the UI is served from this same origin, so /api/invoke is same-origin and
+    // needs no CORS headers. A permissive policy would instead let ANY website a LAN user
+    // visits read this server's DB responses cross-origin — exactly the exfiltration we avoid.
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/invoke", post(invoke))
         .fallback(spa)
-        .layer(CorsLayer::permissive())
         .with_state(state)
 }
 
 pub async fn run_server(addr: SocketAddr, static_dir: PathBuf) -> std::io::Result<()> {
     let data_dir = std::env::var("CATIO_DATA").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("data"));
     let _ = std::fs::create_dir_all(&data_dir);
-    let state = AppState {
-        conns: Arc::new(ConnManager::default()),
-        static_dir: Arc::new(static_dir),
-        data_dir: Arc::new(data_dir),
-    };
+    let state = AppState::new(static_dir, data_dir);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("catio-server listening on http://{addr}");
     axum::serve(listener, build_router(state)).await
@@ -105,7 +118,9 @@ fn opt_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     args.get(key).and_then(Value::as_str)
 }
 fn u32_or(args: &Value, key: &str, default: u32) -> u32 {
-    args.get(key).and_then(Value::as_u64).map(|n| n as u32).unwrap_or(default)
+    // Saturate, don't truncate: `as u32` would wrap 4_294_967_296 → 0, and some drivers read
+    // 0 as "unbounded", an accidental resource blowup. Clamp to u32::MAX instead.
+    args.get(key).and_then(Value::as_u64).map(|n| n.min(u32::MAX as u64) as u32).unwrap_or(default)
 }
 fn from_arg<T: serde::de::DeserializeOwned>(args: &Value, key: &str) -> Result<T, String> {
     serde_json::from_value(args.get(key).cloned().unwrap_or(Value::Null)).map_err(estr)
@@ -115,10 +130,12 @@ fn now_stamp() -> String {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs().to_string()).unwrap_or_default()
 }
 
-/// Best-effort: record a DB query in the persisted history (never fails the query).
+/// Best-effort: record a DB query in the persisted history (never fails the query). The
+/// `history_lock` serializes the load-modify-save so concurrent requests don't drop entries.
 fn record_history(st: &AppState, conn_id: &str, sql: &str, dur: String, args: &Value) {
     let dir: &Path = st.data_dir.as_ref();
     if std::fs::create_dir_all(dir).is_err() { return; }
+    let _guard = st.history_lock.lock().unwrap_or_else(|e| e.into_inner());
     let entry = HistoryEntry {
         id: WEB_HISTORY_IDS.next(),
         kind: "sql".into(),
@@ -312,6 +329,23 @@ async fn dispatch(st: &AppState, cmd: &str, args: Value) -> Result<Value, String
             Ok(json!(rows_affected_from_result(&r).unwrap_or(0)))
         }
 
+        // ── Whole-DB SQL export (pure request/response; returns the script string) ─
+        "db_export_database" => {
+            let sql = commands::export_database_core(
+                conns,
+                require(&args, "connId")?.to_string(),
+                require(&args, "database")?.to_string(),
+                require(&args, "schema")?.to_string(),
+                serde_json::from_value(args.get("selectedTables").cloned().unwrap_or(json!([]))).map_err(estr)?,
+                serde_json::from_value(args.get("tableDdls").cloned().unwrap_or(json!({}))).map_err(estr)?,
+                args.get("includeStructure").and_then(Value::as_bool).unwrap_or(false),
+                args.get("includeData").and_then(Value::as_bool).unwrap_or(false),
+                args.get("batchSize").and_then(Value::as_u64).map(|n| n as usize),
+                args.get("rowLimit").and_then(Value::as_u64).map(|n| n.min(u32::MAX as u64) as u32),
+            ).await.map_err(estr)?;
+            Ok(Value::String(sql))
+        }
+
         // ── Object administration (drop / rename / truncate / duplicate / source) ─
         "db_drop_object" => {
             let drv = commands::writable_drv(require(&args, "connId")?, conns).await.map_err(estr)?;
@@ -387,11 +421,13 @@ async fn dispatch(st: &AppState, cmd: &str, args: Value) -> Result<Value, String
             Ok(serde_json::to_value(history::load_history(st.data_dir.as_ref())).map_err(estr)?)
         }
         "db_clear_history" => {
+            let _guard = st.history_lock.lock().unwrap_or_else(|e| e.into_inner());
             history::save_history(st.data_dir.as_ref(), &[]).map_err(estr)?;
             Ok(Value::Null)
         }
         "db_delete_history" => {
             let id = require(&args, "id")?;
+            let _guard = st.history_lock.lock().unwrap_or_else(|e| e.into_inner());
             let list: Vec<HistoryEntry> = history::load_history(st.data_dir.as_ref())
                 .into_iter().filter(|h| h.id != id).collect();
             history::save_history(st.data_dir.as_ref(), &list).map_err(estr)?;
@@ -399,6 +435,7 @@ async fn dispatch(st: &AppState, cmd: &str, args: Value) -> Result<Value, String
         }
         "db_delete_history_for_profile" => {
             let pid = require(&args, "profileId")?;
+            let _guard = st.history_lock.lock().unwrap_or_else(|e| e.into_inner());
             let list: Vec<HistoryEntry> = history::load_history(st.data_dir.as_ref())
                 .into_iter().filter(|h| h.profile_id.as_deref() != Some(pid)).collect();
             history::save_history(st.data_dir.as_ref(), &list).map_err(estr)?;
@@ -410,6 +447,7 @@ async fn dispatch(st: &AppState, cmd: &str, args: Value) -> Result<Value, String
         "db_save_snippet" => {
             let mut snippet: SnippetEntry = from_arg(&args, "snippet")?;
             if snippet.id.is_empty() { snippet.id = WEB_SNIPPET_IDS.next(); }
+            let _guard = st.history_lock.lock().unwrap_or_else(|e| e.into_inner());
             let mut list = history::load_snippets(st.data_dir.as_ref());
             match list.iter_mut().find(|s| s.id == snippet.id) {
                 Some(existing) => *existing = snippet,
@@ -419,9 +457,14 @@ async fn dispatch(st: &AppState, cmd: &str, args: Value) -> Result<Value, String
             Ok(Value::Null)
         }
 
-        // Streaming / file-path / desktop-only commands are not exposed over web yet
-        // (terminals & VNC arrive over WebSocket; SFTP/import/export need multipart or a
-        // server-side path). The frontend degrades on this error rather than mocking.
+        // Not exposed over web in M1 — the frontend degrades on this error (it keeps the
+        // desktop-only `if (!isTauri())` guard for these, so server mode never calls them):
+        //   • terminals / VNC  → arrive over WebSocket in M3 / M5
+        //   • SFTP             → M4 (browse/download + HTML5 upload)
+        //   • file-path/AppHandle commands (export_file, db_export_xlsx, db_import_*,
+        //     db_sql_file_*) → operate on the USER's local filesystem, meaningless server-side
+        //   • db_transfer_table → deferred to M3 (its progress stream needs the WS channel)
+        //   • JDBC engines      → the Docker image ships no JRE/plugin jar (documented gap)
         other => Err(format!("command not exposed over web yet: {other}")),
     }
 }
@@ -429,19 +472,30 @@ async fn dispatch(st: &AppState, cmd: &str, args: Value) -> Result<Value, String
 // SPA fallback: serve a dist asset if it exists, else index.html with the server flag injected
 // (so the frontend routes calls over HTTP instead of falling back to mock data).
 async fn spa(State(st): State<AppState>, uri: Uri) -> Response {
-    let rel = uri.path().trim_start_matches('/');
-    if !rel.is_empty() && !rel.contains("..") {
-        let file = st.static_dir.join(rel);
-        if file.is_file() {
-            if let Ok(bytes) = tokio::fs::read(&file).await {
-                return ([(header::CONTENT_TYPE, mime_of(&file))], bytes).into_response();
-            }
+    if let Some(file) = safe_asset_path(st.static_dir.as_ref(), uri.path()) {
+        if let Ok(bytes) = tokio::fs::read(&file).await {
+            return ([(header::CONTENT_TYPE, mime_of(&file))], bytes).into_response();
         }
     }
     match tokio::fs::read_to_string(st.static_dir.join("index.html")).await {
         Ok(html) => Html(inject_flag(&html)).into_response(),
         Err(_) => (StatusCode::NOT_FOUND, "UI not built — run `npm run build` first").into_response(),
     }
+}
+
+/// Resolve a request path to a real file STRICTLY inside `static_dir`, or `None`.
+///
+/// A `contains("..")` check is not enough: on Windows `dir.join("C:/Windows/x")` *replaces*
+/// `dir` (absolute joins win), and a symlink inside `dist` can point outside. So we canonicalize
+/// both the base and the candidate and require true prefix containment — the only robust guard
+/// against path traversal. Non-existent paths (SPA client routes like `/vault`) canonicalize to
+/// an error and fall through to index.html, which is the correct SPA behavior.
+fn safe_asset_path(static_dir: &Path, req_path: &str) -> Option<PathBuf> {
+    let rel = req_path.trim_start_matches('/');
+    if rel.is_empty() || rel.contains("..") || rel.contains('\\') { return None; }
+    let base = std::fs::canonicalize(static_dir).ok()?;
+    let full = std::fs::canonicalize(base.join(rel)).ok()?;
+    if full.starts_with(&base) && full.is_file() { Some(full) } else { None }
 }
 
 fn inject_flag(html: &str) -> String {
@@ -463,5 +517,38 @@ fn mime_of(p: &Path) -> &'static str {
         Some("woff2") => "font/woff2",
         Some("ico") => "image/x-icon",
         _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::safe_asset_path;
+    use std::fs;
+
+    #[test]
+    fn safe_asset_path_serves_real_assets_but_blocks_escapes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dist = tmp.path().join("dist");
+        fs::create_dir_all(dist.join("assets")).unwrap();
+        fs::write(dist.join("app.js"), "x").unwrap();
+        fs::write(dist.join("assets/i.js"), "y").unwrap();
+        // A secret sibling OUTSIDE dist — a successful traversal would leak it.
+        fs::write(tmp.path().join("secret.txt"), "SECRET").unwrap();
+
+        // Legit assets resolve inside dist.
+        assert!(safe_asset_path(&dist, "/app.js").is_some());
+        assert!(safe_asset_path(&dist, "/assets/i.js").is_some());
+
+        // dotdot, backslash, percent-encoded dots, and missing files are all rejected.
+        assert!(safe_asset_path(&dist, "/../secret.txt").is_none());
+        assert!(safe_asset_path(&dist, "/..\\secret.txt").is_none());
+        assert!(safe_asset_path(&dist, "/%2e%2e/secret.txt").is_none());
+        assert!(safe_asset_path(&dist, "/nope.js").is_none());
+
+        // An absolute path that canonicalizes OUTSIDE dist (the Windows `/C:/...` / unix `/etc`
+        // escape that `contains("..")` misses) must be rejected by the containment check.
+        let abs = tmp.path().join("secret.txt");
+        let abs_req = format!("/{}", abs.to_string_lossy().replace('\\', "/"));
+        assert!(safe_asset_path(&dist, &abs_req).is_none(), "leaked via absolute path: {abs_req}");
     }
 }

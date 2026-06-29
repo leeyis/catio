@@ -607,6 +607,18 @@ pub async fn db_export_database(conn_id: String, database: String, schema: Strin
     selected_tables: Vec<String>, table_ddls: std::collections::HashMap<String, String>,
     include_structure: bool, include_data: bool, batch_size: Option<usize>, row_limit: Option<u32>,
     mgr: tauri::State<'_, ConnManager>) -> Result<String, DbError> {
+    export_database_core(&mgr, conn_id, database, schema, selected_tables, table_ddls,
+        include_structure, include_data, batch_size, row_limit).await
+}
+
+/// Transport-agnostic core for whole-DB SQL export (no AppHandle/emit) — shared by the Tauri
+/// command above and the web `/api/invoke` head (`server.rs`) so the two heads cannot drift.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn export_database_core(
+    mgr: &ConnManager, conn_id: String, database: String, schema: String,
+    selected_tables: Vec<String>, table_ddls: std::collections::HashMap<String, String>,
+    include_structure: bool, include_data: bool, batch_size: Option<usize>, row_limit: Option<u32>,
+) -> Result<String, DbError> {
     let drv = mgr.get(&conn_id).await.ok_or_else(|| DbError::NotFound(conn_id.clone()))?;
     let has_schemas = drv.capabilities().schemas;
     let batch = batch_size.unwrap_or(crate::db::export::DEFAULT_INSERT_BATCH_SIZE);

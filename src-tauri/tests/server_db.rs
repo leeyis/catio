@@ -5,9 +5,7 @@
 //! `ConnManager`, so every call reuses the same connection like the real session.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 
-use catio_lib::db::manager::ConnManager;
 use catio_lib::server::{build_router, AppState};
 use serde_json::{json, Value};
 
@@ -15,11 +13,7 @@ use serde_json::{json, Value};
 /// base URL. The server task is detached; the OS reclaims the port when the test ends.
 async fn start() -> String {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let state = AppState {
-        conns: Arc::new(ConnManager::default()),
-        static_dir: Arc::new(tmp.path().to_path_buf()),
-        data_dir: Arc::new(tmp.path().join("data")),
-    };
+    let state = AppState::new(tmp.path().to_path_buf(), tmp.path().join("data"));
     // Keep the tempdir alive for the whole process (leak is fine in a test binary).
     std::mem::forget(tmp);
     let addr: SocketAddr = ([127, 0, 0, 1], 0).into();
@@ -201,6 +195,26 @@ async fn object_admin_truncate_and_drop() {
     let (st, _) = invoke(&base, "db_drop_object", json!({
         "connId": conn, "objectType": "TABLE", "schema": Value::Null, "name": "t" })).await;
     assert_eq!(st, 200);
+}
+
+#[tokio::test]
+async fn export_database_returns_sql_script() {
+    let base = start().await;
+    let conn = connect_mem(&base).await;
+    invoke(&base, "db_query", json!({ "connId": conn,
+        "sql": "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)" })).await;
+    invoke(&base, "db_query", json!({ "connId": conn,
+        "sql": "INSERT INTO t (id,v) VALUES (1,'a')" })).await;
+
+    // Whole-DB export is a pure request/response command (returns the SQL script as a string),
+    // routed through the shared export_database_core — so the browser can export too.
+    let (st, body) = invoke(&base, "db_export_database", json!({
+        "connId": conn, "database": "main", "schema": "main",
+        "selectedTables": ["t"], "tableDdls": {},
+        "includeStructure": true, "includeData": true
+    })).await;
+    assert_eq!(st, 200, "{body}");
+    assert!(body.as_str().unwrap().contains("INSERT INTO"), "{body}");
 }
 
 #[tokio::test]

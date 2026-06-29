@@ -318,8 +318,10 @@ export async function tableQuery(
  * grid's CSV/JSON export (the webview `<a download>` is a no-op inside Tauri).
  * No-op outside Tauri — the caller keeps the Blob-download fallback for the demo.
  */
+// Desktop-only: writes to the user's local disk. Over web the caller keeps its Blob-download
+// fallback (the file belongs on the user's machine, not the server), so server mode no-ops here.
 export async function exportFile(path: string, contents: string): Promise<void> {
-  if (!isTauri() && !isServer()) return
+  if (!isTauri()) return
   return rpc('export_file', { path, contents })
 }
 
@@ -330,7 +332,7 @@ export async function exportFile(path: string, contents: string): Promise<void> 
 export async function exportXlsx(args: {
   columns: string[]; rows: unknown[][]; sheetName?: string; path: string
 }): Promise<void> {
-  if (!isTauri() && !isServer()) throw new Error('exportXlsx requires the Tauri runtime')
+  if (!isTauri()) throw new Error('exportXlsx requires the Tauri runtime')
   return rpc('db_export_xlsx', {
     columns: args.columns, rows: args.rows, sheetName: args.sheetName, path: args.path,
   })
@@ -370,7 +372,7 @@ export interface ImportSummary { rowsImported: number; totalRows: number }
 
 /** 读取并预览导入文件（解析在后端 table_import，纯函数已单测）。 */
 export async function importPreview(filePath: string): Promise<ImportPreview> {
-  if (!isTauri() && !isServer()) throw new Error('importPreview requires the Tauri runtime')
+  if (!isTauri()) throw new Error('importPreview requires the Tauri runtime')
   return rpc<ImportPreview>('db_import_preview', { filePath })
 }
 
@@ -379,7 +381,7 @@ export async function importTable(args: {
   connId: string; schema?: string; table: string; filePath: string;
   mappings: ImportColumnMapping[]; mode: 'append' | 'truncate'; batchSize?: number;
 }): Promise<ImportSummary> {
-  if (!isTauri() && !isServer()) throw new Error('importTable requires the Tauri runtime')
+  if (!isTauri()) throw new Error('importTable requires the Tauri runtime')
   return rpc<ImportSummary>('db_import_table', args)
 }
 
@@ -418,7 +420,7 @@ export interface SqlFilePreview { fileName: string; sizeBytes: number; statement
 
 /** 读 SQL 文件并按目标连接方言切分，返回预览（文件名/大小/语句数）。 */
 export async function sqlFilePreview(connId: string, filePath: string): Promise<SqlFilePreview> {
-  if (!isTauri() && !isServer()) throw new Error('sqlFilePreview requires the Tauri runtime')
+  if (!isTauri()) throw new Error('sqlFilePreview requires the Tauri runtime')
   return rpc<SqlFilePreview>('db_sql_file_preview', { connId, filePath })
 }
 
@@ -429,12 +431,13 @@ export async function sqlFilePreview(connId: string, filePath: string): Promise<
 export async function runSqlFile(args: {
   executionId: string; connId: string; filePath: string; continueOnError: boolean
 }): Promise<void> {
-  if (!isTauri() && !isServer()) throw new Error('runSqlFile requires the Tauri runtime')
+  if (!isTauri()) throw new Error('runSqlFile requires the Tauri runtime')
   return rpc<void>('db_run_sql_file', { req: args })
 }
 
 /** 取消正在执行的 SQL 文件批量任务。 */
 export async function cancelSqlFile(executionId: string): Promise<void> {
+  if (!isTauri()) return // pairs with the desktop-only runSqlFile; no-op over web
   return rpc<void>('db_cancel_sql_file', { executionId })
 }
 

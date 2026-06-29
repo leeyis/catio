@@ -64,4 +64,14 @@ describe('services/transport', () => {
     const { rpc } = await import('./transport')
     await expect(rpc('db_query', {})).rejects.toThrow(/no transport|mock/i)
   })
+
+  it('rpc surfaces the HTTP status (not a JSON parse error) when a proxy returns HTML', async () => {
+    setServer(true)
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false, status: 502,
+      text: () => Promise.resolve('<html><body>502 Bad Gateway</body></html>'),
+    }))
+    const { rpc } = await import('./transport')
+    await expect(rpc('db_query', {})).rejects.toThrow('HTTP 502')
+  })
 })

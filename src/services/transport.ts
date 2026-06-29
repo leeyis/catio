@@ -46,7 +46,14 @@ export async function rpc<T>(cmd: string, args?: Record<string, unknown>): Promi
       body: JSON.stringify({ cmd, args: args ?? {} }),
     })
     const text = await res.text()
-    const data: unknown = text ? JSON.parse(text) : null
+    // Parse defensively: a reverse proxy can return HTML/plaintext (502/504/404) that is not
+    // JSON. Surface the HTTP status instead of a misleading "Unexpected token <" parse error.
+    let data: unknown = null
+    try {
+      data = text ? JSON.parse(text) : null
+    } catch {
+      throw new Error(res.ok ? `Invalid JSON response (HTTP ${res.status})` : `HTTP ${res.status}`)
+    }
     if (!res.ok) {
       const msg = (data && typeof data === 'object' && 'error' in data)
         ? String((data as { error: unknown }).error)
