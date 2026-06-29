@@ -22,17 +22,23 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::{
-    extract::{Json, State},
+    extract::{ws::{Message, WebSocket, WebSocketUpgrade}, Json, State},
     http::{header, HeaderMap, HeaderValue, StatusCode, Uri},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
     Router,
 };
+use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::auth::{new_session_token, AuthDb, User};
 use crate::db::commands::{self, ConnectResult};
+use crate::events::EventSink;
+use crate::server_ws::WsHub;
+use crate::ssh::conn::{connect_checked, test_connection, ConnectArgs as SshConnectArgs};
+use crate::ssh::manager::{Session as SshSession, SessionManager};
+use crate::ssh::term::{term_close_core, term_open_core, term_resize_core, term_write_core};
 use crate::db::db_admin_sql::{
     self, DatabaseObjectType, DropObjectSqlOptions, DropTableChildObjectSqlOptions,
     DuplicateTableStructureSqlOptions, RenameObjectSqlOptions, TableAdminSqlOptions,
@@ -47,6 +53,7 @@ use crate::db::object_source_sql::{self, EditableObjectSourceSqlInput, ObjectSou
 static WEB_CONN_IDS: IdGen = IdGen::new("conn");
 static WEB_HISTORY_IDS: IdGen = IdGen::new("hist");
 static WEB_SNIPPET_IDS: IdGen = IdGen::new("snip");
+static WEB_SSH_IDS: IdGen = IdGen::new("sess");
 
 #[derive(Clone)]
 pub struct AppState {
@@ -66,6 +73,11 @@ pub struct AppState {
     /// 1). Expired entries are pruned on lookup and on every login, bounding growth and stopping
     /// a leaked-but-expired token from being replayed until process restart.
     pub sessions: Arc<std::sync::Mutex<HashMap<String, Session>>>,
+    /// Shared SSH session manager (M3). Like `conns`, one workspace for now; the multi-user
+    /// extension point swaps this for a session-keyed map.
+    pub ssh: Arc<SessionManager>,
+    /// WebSocket hub: topic subscriptions + the `EventSink` the terminal core emits through.
+    pub ws: Arc<WsHub>,
 }
 
 /// A live session: which user, and when it stops being valid (server-side enforced TTL).
@@ -89,6 +101,8 @@ impl AppState {
             history_lock: Arc::new(std::sync::Mutex::new(())),
             auth: Arc::new(auth),
             sessions: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            ssh: Arc::new(SessionManager::default()),
+            ws: Arc::new(WsHub::default()),
         })
     }
 }
@@ -102,6 +116,7 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/invoke", post(invoke))
+        .route("/ws", get(ws_handler))
         .fallback(spa)
         .with_state(state)
 }
@@ -659,6 +674,53 @@ async fn dispatch(st: &AppState, cmd: &str, args: Value) -> Result<Value, String
             Ok(Value::Null)
         }
 
+        // ── SSH connection lifecycle (HTTP request/response; terminals stream over /ws) ──
+        "ssh_test" => {
+            let a: SshConnectArgs = from_arg(&args, "args")?;
+            serde_json::to_value(test_connection(a).await).map_err(estr)
+        }
+        "ssh_connect" => {
+            let a: SshConnectArgs = from_arg(&args, "args")?;
+            let dir = st.data_dir.as_ref();
+            let _ = std::fs::create_dir_all(dir);
+            let (handle, fingerprint, forwarded, jump, host_key_trusted) =
+                connect_checked(&a, Some(dir.as_path())).await.map_err(estr)?;
+            let session_id = WEB_SSH_IDS.next();
+            st.ssh.insert(session_id.clone(), SshSession {
+                handle,
+                host: a.host.clone(),
+                user: a.user.clone(),
+                terms: std::collections::HashMap::new(),
+                forwarded,
+                _jump: jump,
+            }).await;
+            Ok(json!({
+                "sessionId": session_id,
+                "hostKeyFingerprint": fingerprint,
+                "hostKeyTrusted": host_key_trusted,
+            }))
+        }
+        "ssh_disconnect" => {
+            let session_id = require(&args, "sessionId")?;
+            st.ssh.remove_monitor(session_id).await;
+            let sess = st.ssh.remove(session_id).await.ok_or("session not found")?;
+            sess.lock().await.handle
+                .disconnect(russh::Disconnect::ByApplication, "", "en").await.ok();
+            Ok(Value::Null)
+        }
+        "ssh_trust_host" => {
+            let host_port = require(&args, "hostPort")?.to_string();
+            let fingerprint = require(&args, "fingerprint")?.to_string();
+            let dir = st.data_dir.as_ref();
+            let _ = std::fs::create_dir_all(dir);
+            let path = dir.join("known_hosts");
+            let mut map = std::fs::read_to_string(&path)
+                .map(|s| crate::ssh::knownhosts::parse(&s)).unwrap_or_default();
+            map.insert(host_port, fingerprint);
+            std::fs::write(&path, crate::ssh::knownhosts::serialize(&map)).map_err(estr)?;
+            Ok(Value::Null)
+        }
+
         // Not exposed over web in M1 — the frontend degrades on this error (it keeps the
         // desktop-only `if (!isTauri())` guard for these, so server mode never calls them):
         //   • terminals / VNC  → arrive over WebSocket in M3 / M5
@@ -669,6 +731,122 @@ async fn dispatch(st: &AppState, cmd: &str, args: Value) -> Result<Value, String
         //   • JDBC engines      → the Docker image ships no JRE/plugin jar (documented gap)
         other => Err(format!("command not exposed over web yet: {other}")),
     }
+}
+
+// ── WebSocket streaming channel (M3) ────────────────────────────────────────────────────────
+
+/// `GET /ws` — the single streaming channel. Gated by the SAME session cookie as `/api/invoke`
+/// (a browser cannot send custom headers on a WS handshake, but it DOES send cookies, so the
+/// session rides along). Rejected with 401 before the upgrade when unauthenticated.
+async fn ws_handler(State(st): State<AppState>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+    let token = session_token(&headers);
+    if token.as_deref().and_then(|t| resolve_session(&st, t)).is_none() {
+        return (StatusCode::UNAUTHORIZED, "未登录").into_response();
+    }
+    ws.on_upgrade(move |socket| handle_ws(socket, st))
+}
+
+/// Drive one WS connection: a writer task drains the per-connection channel to the socket while
+/// the reader loop handles sub/unsub/cmd/ping. On close, the connection is unregistered and any
+/// terminals it opened are closed (so a dropped browser tab doesn't leak remote shells).
+async fn handle_ws(socket: WebSocket, st: AppState) {
+    let (mut ws_tx, mut ws_rx) = socket.split();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    let conn_id = st.ws.register(tx.clone());
+    // (session_id, chan_id) of terminals opened on THIS connection, for cleanup on disconnect.
+    let opened: Arc<std::sync::Mutex<Vec<(String, String)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    let writer = tokio::spawn(async move {
+        while let Some(env) = rx.recv().await {
+            if ws_tx.send(Message::Text(env.to_string())).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    while let Some(Ok(msg)) = ws_rx.next().await {
+        match msg {
+            Message::Text(t) => {
+                let Ok(env) = serde_json::from_str::<Value>(&t) else { continue };
+                match env.get("type").and_then(Value::as_str) {
+                    Some("sub") => if let Some(topic) = env.get("topic").and_then(Value::as_str) {
+                        st.ws.subscribe(conn_id, topic);
+                    },
+                    Some("unsub") => if let Some(topic) = env.get("topic").and_then(Value::as_str) {
+                        st.ws.unsubscribe(conn_id, topic);
+                    },
+                    Some("ping") => { let _ = tx.send(json!({ "type": "pong" })); }
+                    Some("cmd") => {
+                        let cmd = env.get("cmd").and_then(Value::as_str).unwrap_or("").to_string();
+                        let id = env.get("id").cloned().unwrap_or(Value::Null);
+                        let cmd_args = env.get("args").cloned().unwrap_or_else(|| json!({}));
+                        handle_ws_cmd(&st, conn_id, &tx, &cmd, id, &cmd_args, &opened).await;
+                    }
+                    _ => {}
+                }
+            }
+            Message::Close(_) => break,
+            _ => {}
+        }
+    }
+
+    writer.abort();
+    st.ws.unregister(conn_id);
+    let terms = opened.lock().unwrap().clone();
+    for (sid, cid) in terms {
+        let _ = term_close_core(&st.ssh, &sid, &cid).await;
+    }
+}
+
+/// Handle a `cmd` envelope (the streaming commands that don't fit request/response), replying
+/// `{type:"reply", id, ok, result|error}`. term_open auto-subscribes the originating connection
+/// to the new `term://{chanId}` (and `history://{sessionId}`) so no early output is lost.
+async fn handle_ws_cmd(
+    st: &AppState,
+    conn_id: u64,
+    tx: &tokio::sync::mpsc::UnboundedSender<Value>,
+    cmd: &str,
+    id: Value,
+    args: &Value,
+    opened: &std::sync::Mutex<Vec<(String, String)>>,
+) {
+    let sid = || args.get("sessionId").and_then(Value::as_str).unwrap_or("").to_string();
+    let cid = || args.get("chanId").and_then(Value::as_str).unwrap_or("").to_string();
+    let result: Result<Value, String> = match cmd {
+        "term_open" => {
+            let session_id = sid();
+            let cols = u32_or(args, "cols", 80);
+            let rows = u32_or(args, "rows", 24);
+            st.ws.subscribe(conn_id, &format!("history://{session_id}"));
+            let sink: Arc<dyn EventSink> = st.ws.clone();
+            match term_open_core(session_id.clone(), cols, rows, sink, &st.ssh).await {
+                Ok(chan_id) => {
+                    st.ws.subscribe(conn_id, &format!("term://{chan_id}"));
+                    opened.lock().unwrap().push((session_id, chan_id.clone()));
+                    Ok(json!({ "chanId": chan_id }))
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        }
+        "term_write" => term_write_core(&st.ssh, &sid(), &cid(),
+            args.get("dataBase64").and_then(Value::as_str).unwrap_or(""))
+            .await.map(|_| Value::Null).map_err(|e| e.to_string()),
+        "term_resize" => term_resize_core(&st.ssh, &sid(), &cid(),
+            u32_or(args, "cols", 80), u32_or(args, "rows", 24))
+            .await.map(|_| Value::Null).map_err(|e| e.to_string()),
+        "term_close" => {
+            let (s, c) = (sid(), cid());
+            opened.lock().unwrap().retain(|(os, oc)| !(os == &s && oc == &c));
+            st.ws.unsubscribe(conn_id, &format!("term://{c}"));
+            term_close_core(&st.ssh, &s, &c).await.map(|_| Value::Null).map_err(|e| e.to_string())
+        }
+        other => Err(format!("ws command not supported: {other}")),
+    };
+    let reply = match result {
+        Ok(v) => json!({ "type": "reply", "id": id, "ok": true, "result": v }),
+        Err(e) => json!({ "type": "reply", "id": id, "ok": false, "error": e }),
+    };
+    let _ = tx.send(reply);
 }
 
 // SPA fallback: serve a dist asset if it exists, else index.html with the server flag injected

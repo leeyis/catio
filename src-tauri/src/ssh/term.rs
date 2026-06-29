@@ -16,11 +16,13 @@
 //!     `ChannelMsg::Data { data: Bytes }`、`ExtendedData { data: Bytes, ext: u32 }`、
 //!     `Eof`、`Close`。
 
+use std::sync::Arc;
+
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use russh::ChannelMsg;
-use tauri::Emitter;
 use tokio::sync::mpsc;
 
+use crate::events::EventSink;
 use crate::ssh::{ids::IdGen, manager::SessionManager, osc, shell_integration, SshError};
 
 static CHAN_IDS: IdGen = IdGen::new("chan");
@@ -62,6 +64,19 @@ pub async fn term_open(
     rows: u32,
     app: tauri::AppHandle,
     mgr: tauri::State<'_, SessionManager>,
+) -> Result<String, SshError> {
+    term_open_core(session_id, cols, rows, Arc::new(crate::events::TauriSink(app)), &mgr).await
+}
+
+/// Transport-agnostic terminal open. Identical to the desktop command body, but emits frames
+/// through an `EventSink` (Tauri webview bus on desktop, WebSocket hub on the web head) so the
+/// owner task, OSC scanning, shell-integration audit and dedup logic are NOT duplicated.
+pub async fn term_open_core(
+    session_id: String,
+    cols: u32,
+    rows: u32,
+    sink: Arc<dyn EventSink>,
+    mgr: &SessionManager,
 ) -> Result<String, SshError> {
     let sess = mgr
         .get(&session_id)
@@ -147,20 +162,20 @@ pub async fn term_open(
                 msg = channel.wait() => match msg {
                     Some(ChannelMsg::Data { ref data }) => {
                         emit_scanned(
-                            &app, &evt, &history_evt, &host, &mut scanner, data,
+                            sink.as_ref(), &evt, &history_evt, &host, &mut scanner, data,
                             &mut cur_cmd, &mut cur_cwd, &mut cur_start,
                             &mut muted, &started, &mut last_emit, &mut strip_lead_nl,
                         );
                     }
                     Some(ChannelMsg::ExtendedData { ref data, .. }) => {
                         emit_scanned(
-                            &app, &evt, &history_evt, &host, &mut scanner, data,
+                            sink.as_ref(), &evt, &history_evt, &host, &mut scanner, data,
                             &mut cur_cmd, &mut cur_cwd, &mut cur_start,
                             &mut muted, &started, &mut last_emit, &mut strip_lead_nl,
                         );
                     }
                     Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
-                        let _ = app.emit(&evt, serde_json::json!({ "closed": true }));
+                        sink.emit(&evt, serde_json::json!({ "closed": true }));
                         break;
                     }
                     _ => {}
@@ -183,7 +198,7 @@ pub async fn term_open(
 /// emitting `history://{sessionId}` on each completed command.
 #[allow(clippy::too_many_arguments)]
 fn emit_scanned(
-    app: &tauri::AppHandle,
+    sink: &dyn EventSink,
     evt: &str,
     history_evt: &str,
     host: &str,
@@ -234,7 +249,7 @@ fn emit_scanned(
             frame["inputStart"] = serde_json::Value::Bool(true);
             input_start_emitted = true;
         }
-        let _ = app.emit(evt, frame);
+        sink.emit(evt, frame);
     }
     // Always process events for the audit state machine regardless of mute.
     for ev in events {
@@ -251,12 +266,12 @@ fn emit_scanned(
                 // input-start frame. (Multiple InputStart in one batch collapse into
                 // a single emitted frame — the flag is idempotent for the UI.)
                 if !input_start_emitted {
-                    let _ = app.emit(evt, serde_json::json!({ "inputStart": true }));
+                    sink.emit(evt, serde_json::json!({ "inputStart": true }));
                     input_start_emitted = true;
                 }
             }
             osc::OscEvent::ExecStart => {
-                let _ = app.emit(evt, serde_json::json!({ "execStart": true }));
+                sink.emit(evt, serde_json::json!({ "execStart": true }));
             }
             osc::OscEvent::ExecEnd(code) => {
                 if let Some(cmd) = cur_cmd.take() {
@@ -267,7 +282,7 @@ fn emit_scanned(
                         continue;
                     }
                     let dur = cur_start.elapsed().as_millis() as u64;
-                    let _ = app.emit(
+                    sink.emit(
                         history_evt,
                         serde_json::json!({
                             "id": HIST_IDS.next(),
@@ -293,17 +308,27 @@ pub async fn term_write(
     data_base64: String,
     mgr: tauri::State<'_, SessionManager>,
 ) -> Result<(), SshError> {
+    term_write_core(&mgr, &session_id, &chan_id, &data_base64).await
+}
+
+/// Transport-agnostic terminal write — shared by the Tauri command and the web WS handler.
+pub async fn term_write_core(
+    mgr: &SessionManager,
+    session_id: &str,
+    chan_id: &str,
+    data_base64: &str,
+) -> Result<(), SshError> {
     let sess = mgr
-        .get(&session_id)
+        .get(session_id)
         .await
-        .ok_or_else(|| SshError::NotFound(session_id.clone()))?;
+        .ok_or_else(|| SshError::NotFound(session_id.to_string()))?;
     let bytes = B64
         .decode(data_base64.as_bytes())
         .map_err(|e| SshError::Io(e.to_string()))?;
     let tx = sess
         .lock()
         .await
-        .get_term(&chan_id)
+        .get_term(chan_id)
         .ok_or(SshError::ChannelClosed)?;
     tx.send(TermCmd::Write(bytes))
         .map_err(|_| SshError::ChannelClosed)
@@ -318,14 +343,25 @@ pub async fn term_resize(
     rows: u32,
     mgr: tauri::State<'_, SessionManager>,
 ) -> Result<(), SshError> {
+    term_resize_core(&mgr, &session_id, &chan_id, cols, rows).await
+}
+
+/// Transport-agnostic terminal resize — shared by the Tauri command and the web WS handler.
+pub async fn term_resize_core(
+    mgr: &SessionManager,
+    session_id: &str,
+    chan_id: &str,
+    cols: u32,
+    rows: u32,
+) -> Result<(), SshError> {
     let sess = mgr
-        .get(&session_id)
+        .get(session_id)
         .await
-        .ok_or_else(|| SshError::NotFound(session_id.clone()))?;
+        .ok_or_else(|| SshError::NotFound(session_id.to_string()))?;
     let tx = sess
         .lock()
         .await
-        .get_term(&chan_id)
+        .get_term(chan_id)
         .ok_or(SshError::ChannelClosed)?;
     tx.send(TermCmd::Resize(cols, rows))
         .map_err(|_| SshError::ChannelClosed)
@@ -338,11 +374,20 @@ pub async fn term_close(
     chan_id: String,
     mgr: tauri::State<'_, SessionManager>,
 ) -> Result<(), SshError> {
+    term_close_core(&mgr, &session_id, &chan_id).await
+}
+
+/// Transport-agnostic terminal close — shared by the Tauri command and the web WS handler.
+pub async fn term_close_core(
+    mgr: &SessionManager,
+    session_id: &str,
+    chan_id: &str,
+) -> Result<(), SshError> {
     let sess = mgr
-        .get(&session_id)
+        .get(session_id)
         .await
-        .ok_or_else(|| SshError::NotFound(session_id.clone()))?;
-    if let Some(tx) = sess.lock().await.remove_term(&chan_id) {
+        .ok_or_else(|| SshError::NotFound(session_id.to_string()))?;
+    if let Some(tx) = sess.lock().await.remove_term(chan_id) {
         let _ = tx.send(TermCmd::Close);
     }
     Ok(())

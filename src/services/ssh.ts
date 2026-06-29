@@ -22,6 +22,10 @@ async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Prom
   return invoke<T>(cmd, args)
 }
 
+// Web transport: rpc() routes ssh_* request/response over HTTP in server mode; subscribe()/wsCmd()
+// carry the terminal stream + term_* commands over the WebSocket (M3).
+import { rpc, isServer, subscribe, wsCmd } from './transport'
+
 // ---- SSH session lifecycle ----
 
 export type AuthMethod = { method: 'password' } | { method: 'keyFile'; path: string }
@@ -56,23 +60,23 @@ export interface SshTestResult {
 }
 
 export async function sshConnect(args: SshConnectArgs): Promise<SshConnectResult> {
-  return tauriInvoke<SshConnectResult>('ssh_connect', { args })
+  return rpc<SshConnectResult>('ssh_connect', { args })
 }
 
 // Real connection test: connect+auth then disconnect, returning latency.
-// Outside Tauri there is no SSH stack, so report a non-success result rather
+// Outside Tauri/server there is no SSH stack, so report a non-success result rather
 // than pretending the test passed.
 export async function sshTest(args: SshConnectArgs): Promise<SshTestResult> {
-  if (!isTauri()) return { ok: false, latencyMs: 0, error: 'desktop-only' }
-  return tauriInvoke<SshTestResult>('ssh_test', { args })
+  if (!isTauri() && !isServer()) return { ok: false, latencyMs: 0, error: 'desktop-only' }
+  return rpc<SshTestResult>('ssh_test', { args })
 }
 
 export async function sshDisconnect(sessionId: string): Promise<void> {
-  return tauriInvoke('ssh_disconnect', { sessionId })
+  return rpc('ssh_disconnect', { sessionId })
 }
 
 export async function sshTrustHost(hostPort: string, fingerprint: string): Promise<void> {
-  return tauriInvoke('ssh_trust_host', { hostPort, fingerprint })
+  return rpc('ssh_trust_host', { hostPort, fingerprint })
 }
 
 // ---- ~/.ssh/config import ----
@@ -101,19 +105,26 @@ export async function importSshConfig(): Promise<ImportedHost[]> {
 
 // ---- Terminal channel ----
 
+// Terminal commands: in server mode they ride the WebSocket (`wsCmd`) alongside the output
+// stream; on desktop they are plain Tauri invokes. term_open returns the channel id either way
+// (the WS reply wraps it in `{ chanId }`).
 export async function termOpen(sessionId: string, cols: number, rows: number): Promise<string> {
+  if (isServer()) return (await wsCmd<{ chanId: string }>('term_open', { sessionId, cols, rows })).chanId
   return tauriInvoke<string>('term_open', { sessionId, cols, rows })
 }
 
 export async function termWrite(sessionId: string, chanId: string, dataBase64: string): Promise<void> {
+  if (isServer()) { await wsCmd('term_write', { sessionId, chanId, dataBase64 }); return }
   return tauriInvoke('term_write', { sessionId, chanId, dataBase64 })
 }
 
 export async function termResize(sessionId: string, chanId: string, cols: number, rows: number): Promise<void> {
+  if (isServer()) { await wsCmd('term_resize', { sessionId, chanId, cols, rows }); return }
   return tauriInvoke('term_resize', { sessionId, chanId, cols, rows })
 }
 
 export async function termClose(sessionId: string, chanId: string): Promise<void> {
+  if (isServer()) { await wsCmd('term_close', { sessionId, chanId }); return }
   return tauriInvoke('term_close', { sessionId, chanId })
 }
 
@@ -185,10 +196,11 @@ export async function rdpLaunch(host: string, port: number, user: string): Promi
 // Returns an unlisten callback. No-op (returns no-op) outside Tauri.
 // Uses Tauri's Event<T> generic so cb is fully typed without `any`.
 
+// Delegates to the transport's `subscribe`: Tauri `listen` on desktop, the WebSocket
+// subscription in server mode, and a no-op in dev/test. All terminal/history/monitor panes
+// route their event subscriptions through here, so they stream in the browser unchanged.
 export async function listen<T>(event: string, cb: (payload: T) => void): Promise<() => void> {
-  if (!isTauri()) return () => { /* no-op outside Tauri */ }
-  const { listen: tauriListen } = await import('@tauri-apps/api/event')
-  return tauriListen<T>(event, e => cb(e.payload))
+  return subscribe(event, p => cb(p as T))
 }
 
 // ---- SFTP ----

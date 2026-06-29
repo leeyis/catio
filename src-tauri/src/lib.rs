@@ -1,7 +1,9 @@
 pub mod ssh;
 pub mod db;
 pub mod server;
+pub mod server_ws;
 pub mod auth;
+pub mod events;
 pub mod mcp;
 pub mod scan;
 pub mod localterm;

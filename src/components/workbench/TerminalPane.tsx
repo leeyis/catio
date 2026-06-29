@@ -82,6 +82,12 @@ const isTauri = (): boolean =>
   typeof window !== 'undefined' &&
   ('__TAURI_INTERNALS__' in window || '__TAURI__' in window)
 
+// Server (browser deploy) detection — the SSH terminal streams over the WebSocket there, so the
+// LIVE path must engage in server mode too (not the dev mock).
+const isServer = (): boolean =>
+  typeof window !== 'undefined' && '__CATIO_SERVER__' in window &&
+  (window as unknown as Record<string, unknown>).__CATIO_SERVER__ === true
+
 // term:// event payload shape (A7 contract): data frame OR close notice.
 // inputStart/execStart carry OSC 633;B / 633;C signals from the backend so the
 // frontend knows when the prompt finished (start capturing input) and when a
@@ -256,7 +262,7 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
   // 的口径一致:conn.sub 形如 `user@host:port`,后端 term.rs 写入的 target 即 s.host(裸 host/IP),
   // 取 @ 后、: 前的主机段二者方可相等匹配。不复用于工具栏显示,避免改动既有 UI。
   const matchHost = conn ? hostFromSub(conn.sub) : 'db-bastion'
-  const live = !!sessionId && isTauri()
+  const live = !!sessionId && (isTauri() || isServer())
 
   // 把 connId 映射到显示名：优先候选列表，回退 D.byId，最后用 id 本身。
   const nameForConn = (connId: string): string =>

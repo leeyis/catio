@@ -73,3 +73,6 @@ strip = true
 tempfile = "3"
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "socks", "cookies"] }
+# WebSocket client for the /ws integration tests (M3).
+tokio-tungstenite = "0.24"
+futures-util = "0.3"

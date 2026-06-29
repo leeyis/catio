@@ -40,6 +40,7 @@ import {
   type DbProfile,
 } from './state/dbConnections'
 import { sshConnect, sshDisconnect, sshTrustHost, isTauri, onHistory, sshSysinfo, sshDetectOs, importSshConfig, tunnelOpen, rdpLaunch } from './services/ssh'
+import { isServer } from './services/transport'
 import { useTunnelConnections, saveTunnelConnection, removeTunnelConnection, generateTunnelId } from './state/tunnelConnections'
 import { useRdpConnections, saveRdpConnection, removeRdpConnection, generateRdpId } from './state/rdpConnections'
 import { useVncConnections, saveVncConnection, removeVncConnection, generateVncId } from './state/vncConnections'
@@ -628,8 +629,9 @@ export default function App() {
   // reconnect actions. `args.secret` may carry an in-memory secret typed in the
   // modal; when present we connect straight away (no second prompt).
   async function connectProfile(args: SshConnectArgs, display: { name: string; profileId?: string }) {
-    if (!isTauri()) {
-      // Demo path: no IPC, just open a demo terminal tab (no sessionId).
+    if (!isTauri() && !isServer()) {
+      // Demo path (dev/test only): no IPC, just open a demo terminal tab (no sessionId).
+      // In server mode we fall through to the real connect (sshConnect over HTTP → WS terminal).
       openLiveTab(args, display.name)
       return
     }
@@ -858,7 +860,7 @@ export default function App() {
     // 2) 取该 profile，复用 openConn 的 profile→args 构造逻辑做静默连接。
     const profile = profiles.find(p => p.id === connId)
     if (!profile) return 'needs-auth'
-    if (!isTauri()) return 'failed'
+    if (!isTauri() && !isServer()) return 'failed'
     const args: SshConnectArgs = {
       host: profile.host,
       port: profile.port,
