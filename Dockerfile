@@ -30,10 +30,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         librsvg2-dev libssl-dev libxdo-dev pkg-config \
         libudev-dev \
     && rm -rf /var/lib/apt/lists/*
+# Build resilience on slow/flaky links: keep retrying, and never abort on cargo's default
+# "too slow" check (<10 bytes/sec for 30s) which trips on a stalled crates.io fetch.
+ENV CARGO_NET_RETRY=10 \
+    CARGO_HTTP_LOW_SPEED_LIMIT=0 \
+    CARGO_HTTP_TIMEOUT=300 \
+    CARGO_HTTP_MULTIPLEXING=false
 WORKDIR /app
 COPY src-tauri ./src-tauri
 WORKDIR /app/src-tauri
-RUN cargo build --release --bin catio-server
+# Cache the downloaded registry across builds (BuildKit) so a code-only change doesn't re-fetch
+# every dependency. Only the registry is cached — target/ stays in the layer for the COPY below.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    cargo build --release --bin catio-server
 RUN strip target/release/catio-server || true
 
 # ── stage 3: runtime ─────────────────────────────────────────────────────────
