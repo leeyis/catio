@@ -174,16 +174,22 @@ export async function termLocalClose(chanId: string): Promise<void> {
 
 // ---- VNC remote desktop ----
 
+// VNC: framebuffer stream (vnc-init/rect/closed) flows over the WS in server mode (via the
+// subscribe()-backed `listen` in VncPane); connect/pointer/key/close ride the WS too as `wsCmd`.
 export async function vncConnect(host: string, port: number, password: string): Promise<string> {
+  if (isServer()) return (await wsCmd<{ sessionId: string }>('vnc_connect', { host, port, password })).sessionId
   return tauriInvoke<string>('vnc_connect', { host, port, password })
 }
 export async function vncPointer(sessionId: string, mask: number, x: number, y: number): Promise<void> {
+  if (isServer()) { await wsCmd('vnc_pointer', { sessionId, mask, x, y }); return }
   return tauriInvoke('vnc_pointer', { sessionId, mask, x, y })
 }
 export async function vncKey(sessionId: string, down: boolean, keysym: number): Promise<void> {
+  if (isServer()) { await wsCmd('vnc_key', { sessionId, down, keysym }); return }
   return tauriInvoke('vnc_key', { sessionId, down, keysym })
 }
 export async function vncClose(sessionId: string): Promise<void> {
+  if (isServer()) { await wsCmd('vnc_close', { sessionId }); return }
   return tauriInvoke('vnc_close', { sessionId })
 }
 

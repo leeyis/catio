@@ -77,6 +77,29 @@ async fn ws_ping_pong_and_cmd_reply() {
 }
 
 #[tokio::test]
+async fn ws_vnc_cmds_route_and_reply() {
+    let host = start().await;
+    let cookie = bootstrap_cookie(&host).await;
+    let mut req = format!("ws://{host}/ws").into_client_request().unwrap();
+    req.headers_mut().insert(COOKIE, cookie.parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+
+    // vnc_connect with an empty host errors immediately (no TCP attempt) — proves cmd routing.
+    ws.send(Message::Text(json!({ "type": "cmd", "id": "v1", "cmd": "vnc_connect",
+        "args": { "host": "", "port": 5900, "password": "" } }).to_string())).await.unwrap();
+    let r = recv_json(&mut ws).await;
+    assert_eq!(r["id"], "v1");
+    assert_eq!(r["ok"], false, "{r}");
+
+    // vnc_pointer against a bogus session → channel-closed error.
+    ws.send(Message::Text(json!({ "type": "cmd", "id": "v2", "cmd": "vnc_pointer",
+        "args": { "sessionId": "nope", "mask": 0, "x": 0, "y": 0 } }).to_string())).await.unwrap();
+    let r = recv_json(&mut ws).await;
+    assert_eq!(r["id"], "v2");
+    assert_eq!(r["ok"], false);
+}
+
+#[tokio::test]
 async fn ws_unknown_cmd_replies_error() {
     let host = start().await;
     let cookie = bootstrap_cookie(&host).await;

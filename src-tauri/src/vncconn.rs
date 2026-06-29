@@ -11,7 +11,7 @@
 //! live paths (SSH terminal, remote-file edit) that are exercised in the running app.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use des::cipher::{BlockEncrypt, KeyInit};
@@ -23,6 +23,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::task::AbortHandle;
 
+use crate::events::EventSink;
 use crate::ssh::ids::IdGen;
 use crate::ssh::SshError;
 use crate::vnc;
@@ -231,7 +232,7 @@ pub async fn vnc_connect(
     let wa = writer_abort.clone();
     let ta = ticker_abort.clone();
     let reader = tokio::spawn(async move {
-        let res = pump_messages_split(&mut rd, &app2, &id2).await;
+        let res = pump_messages_split(&mut rd, &crate::events::TauriSink(app2.clone()), &id2).await;
         wa.abort();
         ta.abort();
         let _ = app2.emit(&format!("vnc-closed://{id2}"), serde_json::json!({ "error": res.err().map(|e| e.to_string()) }));
@@ -245,7 +246,7 @@ pub async fn vnc_connect(
 /// Pump server→client messages over the read half, emitting framebuffer rects.
 async fn pump_messages_split(
     rd: &mut tokio::net::tcp::OwnedReadHalf,
-    app: &tauri::AppHandle,
+    sink: &dyn EventSink,
     id: &str,
 ) -> Result<(), SshError> {
     let rect_evt = format!("vnc-rect://{id}");
@@ -265,19 +266,19 @@ async fn pump_messages_split(
                             let len = r.width as usize * r.height as usize * 4;
                             let mut pixels = vec![0u8; len];
                             rd.read_exact(&mut pixels).await.map_err(|e| SshError::Io(e.to_string()))?;
-                            let _ = app.emit(&rect_evt, serde_json::json!({
+                            sink.emit(&rect_evt, serde_json::json!({
                                 "x": r.x, "y": r.y, "w": r.width, "h": r.height, "enc": "raw", "data": B64.encode(&pixels),
                             }));
                         }
                         1 => {
                             let sx = rd.read_u16().await.map_err(|e| SshError::Io(e.to_string()))?;
                             let sy = rd.read_u16().await.map_err(|e| SshError::Io(e.to_string()))?;
-                            let _ = app.emit(&rect_evt, serde_json::json!({
+                            sink.emit(&rect_evt, serde_json::json!({
                                 "x": r.x, "y": r.y, "w": r.width, "h": r.height, "enc": "copy", "srcX": sx, "srcY": sy,
                             }));
                         }
                         -223 => {
-                            let _ = app.emit(&init_evt, serde_json::json!({ "width": r.width, "height": r.height }));
+                            sink.emit(&init_evt, serde_json::json!({ "width": r.width, "height": r.height }));
                         }
                         other => return Err(SshError::Sftp(format!("unsupported VNC encoding {other}"))),
                     }
@@ -303,24 +304,99 @@ async fn pump_messages_split(
     }
 }
 
+/// Transport-agnostic VNC connect (web head). Mirrors the desktop command's orchestration but
+/// emits through an `EventSink` (the WS hub) and removes its session from an `Arc<VncManager>` on
+/// natural disconnect. The protocol bulk (`handshake`, `pump_messages_split`) is SHARED with the
+/// desktop command, so only the connect/task wiring differs.
+pub async fn vnc_connect_core(
+    host: String,
+    port: u16,
+    password: String,
+    sink: Arc<dyn EventSink>,
+    mgr: Arc<VncManager>,
+    on_open: impl FnOnce(&str),
+) -> Result<String, SshError> {
+    if host.trim().is_empty() {
+        return Err(SshError::Io("vnc host is empty".into()));
+    }
+    let mut stream = tokio::time::timeout(std::time::Duration::from_secs(10), TcpStream::connect((host.as_str(), port)))
+        .await
+        .map_err(|_| SshError::HostUnreachable(format!("{host}:{port}")))?
+        .map_err(|e| SshError::Io(e.to_string()))?;
+    let si = tokio::time::timeout(std::time::Duration::from_secs(15), handshake(&mut stream, &password))
+        .await
+        .map_err(|_| SshError::HostUnreachable("VNC handshake timed out".into()))??;
+
+    let id = VNC_IDS.next();
+    // Subscribe the WS connection to vnc-init/rect/closed BEFORE the first emit (no lost frames).
+    on_open(&id);
+    sink.emit(&format!("vnc-init://{id}"), serde_json::json!({ "width": si.width, "height": si.height, "name": si.name }));
+
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (mut rd, mut wr) = stream.into_split();
+    let (fbw, fbh) = (si.width, si.height);
+    let _ = input_tx.send(vnc::encode_fb_update_request(false, 0, 0, fbw, fbh).to_vec());
+    let writer = tokio::spawn(async move {
+        while let Some(bytes) = input_rx.recv().await {
+            if wr.write_all(&bytes).await.is_err() { break; }
+        }
+    });
+    let ticker_tx = input_tx.clone();
+    let ticker = tokio::spawn(async move {
+        let mut iv = tokio::time::interval(std::time::Duration::from_millis(50));
+        loop {
+            iv.tick().await;
+            if ticker_tx.send(vnc::encode_fb_update_request(true, 0, 0, fbw, fbh).to_vec()).is_err() { break; }
+        }
+    });
+    let writer_abort = writer.abort_handle();
+    let ticker_abort = ticker.abort_handle();
+
+    let id2 = id.clone();
+    let (wa, ta) = (writer_abort.clone(), ticker_abort.clone());
+    let mgr2 = mgr.clone();
+    let reader = tokio::spawn(async move {
+        let res = pump_messages_split(&mut rd, sink.as_ref(), &id2).await;
+        wa.abort();
+        ta.abort();
+        sink.emit(&format!("vnc-closed://{id2}"), serde_json::json!({ "error": res.err().map(|e| e.to_string()) }));
+        mgr2.remove(&id2);
+    });
+
+    mgr.insert(id.clone(), VncSession { input_tx, aborts: vec![reader.abort_handle(), writer_abort, ticker_abort] });
+    Ok(id)
+}
+
 /// Send a pointer event (button mask + position).
 #[tauri::command]
 pub fn vnc_pointer(session_id: String, mask: u8, x: u16, y: u16, mgr: tauri::State<'_, VncManager>) -> Result<(), SshError> {
-    let tx = mgr.input(&session_id).ok_or(SshError::ChannelClosed)?;
+    vnc_pointer_core(&mgr, &session_id, mask, x, y)
+}
+
+pub fn vnc_pointer_core(mgr: &VncManager, session_id: &str, mask: u8, x: u16, y: u16) -> Result<(), SshError> {
+    let tx = mgr.input(session_id).ok_or(SshError::ChannelClosed)?;
     tx.send(vnc::encode_pointer_event(mask, x, y).to_vec()).map_err(|_| SshError::ChannelClosed)
 }
 
 /// Send a key event (down flag + X11 keysym).
 #[tauri::command]
 pub fn vnc_key(session_id: String, down: bool, keysym: u32, mgr: tauri::State<'_, VncManager>) -> Result<(), SshError> {
-    let tx = mgr.input(&session_id).ok_or(SshError::ChannelClosed)?;
+    vnc_key_core(&mgr, &session_id, down, keysym)
+}
+
+pub fn vnc_key_core(mgr: &VncManager, session_id: &str, down: bool, keysym: u32) -> Result<(), SshError> {
+    let tx = mgr.input(session_id).ok_or(SshError::ChannelClosed)?;
     tx.send(vnc::encode_key_event(down, keysym).to_vec()).map_err(|_| SshError::ChannelClosed)
 }
 
 /// Close a VNC session.
 #[tauri::command]
 pub fn vnc_close(session_id: String, mgr: tauri::State<'_, VncManager>) -> Result<(), SshError> {
-    if let Some(s) = mgr.remove(&session_id) {
+    vnc_close_core(&mgr, &session_id)
+}
+
+pub fn vnc_close_core(mgr: &VncManager, session_id: &str) -> Result<(), SshError> {
+    if let Some(s) = mgr.remove(session_id) {
         for a in s.aborts {
             a.abort();
         }

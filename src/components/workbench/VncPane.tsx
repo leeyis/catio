@@ -17,6 +17,11 @@ const isTauri = (): boolean =>
   typeof window !== 'undefined' &&
   ('__TAURI_INTERNALS__' in window || '__TAURI__' in window)
 
+// Server (browser) deploy: VNC streams over the WebSocket, so the live path engages here too.
+const isServer = (): boolean =>
+  typeof window !== 'undefined' && '__CATIO_SERVER__' in window &&
+  (window as unknown as Record<string, unknown>).__CATIO_SERVER__ === true
+
 interface InitEvent { width: number; height: number; name?: string }
 interface RectEvent { x: number; y: number; w: number; h: number; enc: 'raw' | 'copy'; data?: string; srcX?: number; srcY?: number }
 interface ClosedEvent { error?: string | null }
@@ -53,7 +58,7 @@ export function VncPane({ conn, password, active }: VncPaneProps) {
   const [errMsg, setErrMsg] = useState('')
 
   useEffect(() => {
-    if (!isTauri()) { setStatus('error'); setErrMsg(t('vnc.noDesktop')); return }
+    if (!isTauri() && !isServer()) { setStatus('error'); setErrMsg(t('vnc.noDesktop')); return }
     let disposed = false
     const unlisteners: Array<() => void> = []
 

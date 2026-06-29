@@ -39,6 +39,7 @@ use crate::server_ws::WsHub;
 use crate::ssh::conn::{connect_checked, test_connection, ConnectArgs as SshConnectArgs};
 use crate::ssh::manager::{Session as SshSession, SessionManager};
 use crate::ssh::term::{term_close_core, term_open_core, term_resize_core, term_write_core};
+use crate::vncconn::{vnc_close_core, vnc_connect_core, vnc_key_core, vnc_pointer_core, VncManager};
 use crate::db::db_admin_sql::{
     self, DatabaseObjectType, DropObjectSqlOptions, DropTableChildObjectSqlOptions,
     DuplicateTableStructureSqlOptions, RenameObjectSqlOptions, TableAdminSqlOptions,
@@ -78,6 +79,8 @@ pub struct AppState {
     pub ssh: Arc<SessionManager>,
     /// WebSocket hub: topic subscriptions + the `EventSink` the terminal core emits through.
     pub ws: Arc<WsHub>,
+    /// Shared VNC session manager (M5). Like `ssh`, one workspace for now.
+    pub vnc: Arc<VncManager>,
 }
 
 /// A live session: which user, and when it stops being valid (server-side enforced TTL).
@@ -103,6 +106,7 @@ impl AppState {
             sessions: Arc::new(std::sync::Mutex::new(HashMap::new())),
             ssh: Arc::new(SessionManager::default()),
             ws: Arc::new(WsHub::default()),
+            vnc: Arc::new(VncManager::default()),
         })
     }
 }
@@ -827,8 +831,10 @@ async fn handle_ws(socket: WebSocket, st: AppState, token: String) {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Value>(2048);
     let conn_id = st.ws.register(tx.clone());
-    // (session_id, chan_id) of terminals opened on THIS connection, for cleanup on disconnect.
+    // Terminals (session_id, chan_id) and VNC sessions opened on THIS connection — closed on
+    // disconnect so a dropped browser tab doesn't leak remote shells / VNC streams.
     let opened: Arc<std::sync::Mutex<Vec<(String, String)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let opened_vnc: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
 
     let writer = tokio::spawn(async move {
         while let Some(env) = rx.recv().await {
@@ -860,7 +866,7 @@ async fn handle_ws(socket: WebSocket, st: AppState, token: String) {
                         let cmd = env.get("cmd").and_then(Value::as_str).unwrap_or("").to_string();
                         let id = env.get("id").cloned().unwrap_or(Value::Null);
                         let cmd_args = env.get("args").cloned().unwrap_or_else(|| json!({}));
-                        handle_ws_cmd(&st, conn_id, &tx, &cmd, id, &cmd_args, &opened).await;
+                        handle_ws_cmd(&st, conn_id, &tx, &cmd, id, &cmd_args, &opened, &opened_vnc).await;
                     }
                     _ => {}
                 }
@@ -876,12 +882,17 @@ async fn handle_ws(socket: WebSocket, st: AppState, token: String) {
     for (sid, cid) in terms {
         let _ = term_close_core(&st.ssh, &sid, &cid).await;
     }
+    let vncs = opened_vnc.lock().unwrap().clone();
+    for sid in vncs {
+        let _ = vnc_close_core(&st.vnc, &sid);
+    }
 }
 
 /// Handle a `cmd` envelope (the streaming commands that don't fit request/response), replying
 /// `{type:"reply", id, ok, result|error}`. term_open subscribes the originating connection to
 /// `term://{chanId}` via the core's `on_open` hook — BEFORE the owner task can emit — so no early
 /// output is lost, and to `history://{sessionId}` for the command-audit stream.
+#[allow(clippy::too_many_arguments)]
 async fn handle_ws_cmd(
     st: &AppState,
     conn_id: u64,
@@ -890,6 +901,7 @@ async fn handle_ws_cmd(
     id: Value,
     args: &Value,
     opened: &std::sync::Mutex<Vec<(String, String)>>,
+    opened_vnc: &std::sync::Mutex<Vec<String>>,
 ) {
     let sid = || args.get("sessionId").and_then(Value::as_str).unwrap_or("").to_string();
     let cid = || args.get("chanId").and_then(Value::as_str).unwrap_or("").to_string();
@@ -923,6 +935,46 @@ async fn handle_ws_cmd(
             st.ws.unsubscribe(conn_id, &format!("term://{c}"));
             term_close_core(&st.ssh, &s, &c).await.map(|_| Value::Null).map_err(|e| e.to_string())
         }
+
+        // ── VNC over WS (M5): connect streams vnc-init/rect/closed; pointer/key drive input ──
+        "vnc_connect" => {
+            let host = args.get("host").and_then(Value::as_str).unwrap_or("").to_string();
+            let port = args.get("port").and_then(Value::as_u64).unwrap_or(5900) as u16;
+            let password = args.get("password").and_then(Value::as_str).unwrap_or("").to_string();
+            let sink: Arc<dyn EventSink> = st.ws.clone();
+            let hub = st.ws.clone();
+            match vnc_connect_core(host, port, password, sink, st.vnc.clone(), |vid| {
+                hub.subscribe(conn_id, &format!("vnc-init://{vid}"));
+                hub.subscribe(conn_id, &format!("vnc-rect://{vid}"));
+                hub.subscribe(conn_id, &format!("vnc-closed://{vid}"));
+            }).await {
+                Ok(vid) => {
+                    opened_vnc.lock().unwrap().push(vid.clone());
+                    Ok(json!({ "sessionId": vid }))
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        }
+        "vnc_pointer" => vnc_pointer_core(
+            &st.vnc, &sid(),
+            args.get("mask").and_then(Value::as_u64).unwrap_or(0) as u8,
+            args.get("x").and_then(Value::as_u64).unwrap_or(0) as u16,
+            args.get("y").and_then(Value::as_u64).unwrap_or(0) as u16,
+        ).map(|_| Value::Null).map_err(|e| e.to_string()),
+        "vnc_key" => vnc_key_core(
+            &st.vnc, &sid(),
+            args.get("down").and_then(Value::as_bool).unwrap_or(false),
+            args.get("keysym").and_then(Value::as_u64).unwrap_or(0) as u32,
+        ).map(|_| Value::Null).map_err(|e| e.to_string()),
+        "vnc_close" => {
+            let s = sid();
+            opened_vnc.lock().unwrap().retain(|x| x != &s);
+            st.ws.unsubscribe(conn_id, &format!("vnc-init://{s}"));
+            st.ws.unsubscribe(conn_id, &format!("vnc-rect://{s}"));
+            st.ws.unsubscribe(conn_id, &format!("vnc-closed://{s}"));
+            vnc_close_core(&st.vnc, &s).map(|_| Value::Null).map_err(|e| e.to_string())
+        }
+
         other => Err(format!("ws command not supported: {other}")),
     };
     let reply = match result {
