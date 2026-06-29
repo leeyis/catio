@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::{
-    extract::{ws::{Message, WebSocket, WebSocketUpgrade}, Json, Multipart, Query, State},
+    extract::{ws::{Message, WebSocket, WebSocketUpgrade}, DefaultBodyLimit, Json, Multipart, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode, Uri},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
@@ -120,7 +120,13 @@ pub fn build_router(state: AppState) -> Router {
         // SFTP binary transfers can't go through JSON /api/invoke: download streams the remote
         // file to the browser, upload takes an HTML5 multipart body (M4).
         .route("/api/sftp/download", get(sftp_download_handler))
-        .route("/api/sftp/upload", post(sftp_upload_handler))
+        // Raise the body limit for uploads (axum defaults to 2 MiB) to the transfer cap + margin
+        // for the multipart envelope; the SFTP write itself also enforces MAX_TRANSFER_BYTES.
+        .route(
+            "/api/sftp/upload",
+            post(sftp_upload_handler)
+                .layer(DefaultBodyLimit::max(crate::ssh::sftp::MAX_TRANSFER_BYTES + 16 * 1024 * 1024)),
+        )
         .fallback(spa)
         .with_state(state)
 }
@@ -934,9 +940,23 @@ fn authed(st: &AppState, headers: &HeaderMap) -> bool {
     session_token(headers).as_deref().and_then(|t| resolve_session(st, t)).is_some()
 }
 
-/// Strip characters that could break out of the Content-Disposition filename or inject headers.
-fn sanitize_filename(name: &str) -> String {
-    name.chars().filter(|c| !matches!(c, '"' | '\\' | '\r' | '\n' | ';')).collect()
+/// Build an RFC 6266 `Content-Disposition: attachment` value with both an ASCII `filename=`
+/// fallback (control/quote/non-ASCII → `_`) and a UTF-8 `filename*=` (RFC 5987 percent-encoded),
+/// so non-ASCII names (中文/emoji) download correctly and no control char can inject a header.
+fn content_disposition_attachment(name: &str) -> String {
+    let ascii: String = name
+        .chars()
+        .map(|c| if c.is_ascii() && !c.is_control() && c != '"' && c != '\\' { c } else { '_' })
+        .collect();
+    let ascii = if ascii.trim().is_empty() { "download".to_string() } else { ascii };
+    let mut enc = String::new();
+    for &b in name.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => enc.push(b as char),
+            _ => enc.push_str(&format!("%{b:02X}")),
+        }
+    }
+    format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{enc}")
 }
 
 #[derive(Deserialize)]
@@ -954,17 +974,21 @@ async fn sftp_download_handler(State(st): State<AppState>, headers: HeaderMap, Q
     }
     match crate::ssh::sftp::read_remote_bytes(&st.ssh, &q.session_id, &q.path).await {
         Ok(bytes) => {
-            let filename = sanitize_filename(q.path.rsplit('/').next().unwrap_or("download"));
+            let cd = content_disposition_attachment(q.path.rsplit('/').next().unwrap_or("download"));
             (
                 [
                     (header::CONTENT_TYPE, "application/octet-stream".to_string()),
-                    (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{filename}\"")),
+                    (header::CONTENT_DISPOSITION, cd),
                 ],
                 bytes,
             ).into_response()
         }
         Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     }
+}
+
+fn upload_field_err(e: axum::extract::multipart::MultipartError) -> Response {
+    (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("读取上传字段失败: {e}") }))).into_response()
 }
 
 /// `POST /api/sftp/upload` (multipart: sessionId, remotePath, file) — receive the browser-picked
@@ -975,11 +999,18 @@ async fn sftp_upload_handler(State(st): State<AppState>, headers: HeaderMap, mut
         return (StatusCode::UNAUTHORIZED, "未登录").into_response();
     }
     let (mut session_id, mut remote_path, mut file_bytes) = (String::new(), String::new(), None::<Vec<u8>>);
-    while let Ok(Some(field)) = multipart.next_field().await {
+    loop {
+        // Surface a multipart parse error as 400 rather than silently stopping with a half-read
+        // body (which could otherwise write a truncated file).
+        let field = match multipart.next_field().await {
+            Ok(Some(f)) => f,
+            Ok(None) => break,
+            Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("multipart 解析失败: {e}") }))).into_response(),
+        };
         match field.name() {
-            Some("sessionId") => session_id = field.text().await.unwrap_or_default(),
-            Some("remotePath") => remote_path = field.text().await.unwrap_or_default(),
-            Some("file") => file_bytes = field.bytes().await.ok().map(|b| b.to_vec()),
+            Some("sessionId") => match field.text().await { Ok(v) => session_id = v, Err(e) => return upload_field_err(e) },
+            Some("remotePath") => match field.text().await { Ok(v) => remote_path = v, Err(e) => return upload_field_err(e) },
+            Some("file") => match field.bytes().await { Ok(b) => file_bytes = Some(b.to_vec()), Err(e) => return upload_field_err(e) },
             _ => {}
         }
     }
@@ -1048,8 +1079,26 @@ fn mime_of(p: &Path) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::safe_asset_path;
+    use super::{content_disposition_attachment, safe_asset_path};
     use std::fs;
+
+    #[test]
+    fn content_disposition_handles_ascii_and_unicode() {
+        // ASCII stays as filename=, no filename* surprises break it.
+        let cd = content_disposition_attachment("report.csv");
+        assert!(cd.starts_with("attachment; filename=\"report.csv\""));
+        assert!(cd.contains("filename*=UTF-8''report.csv"));
+
+        // Non-ASCII → underscore fallback + percent-encoded UTF-8 filename*.
+        let cd = content_disposition_attachment("报告.csv");
+        assert!(cd.contains("filename=\"__.csv\""), "ascii fallback: {cd}");
+        assert!(cd.contains("filename*=UTF-8''%E6%8A%A5%E5%91%8A.csv"), "utf8: {cd}");
+
+        // Control chars / quotes can't inject a header.
+        let cd = content_disposition_attachment("a\"b\r\n.txt");
+        assert!(!cd.contains('\r') && !cd.contains('\n'));
+        assert!(cd.contains("filename=\"a_b__.txt\""), "{cd}");
+    }
 
     #[test]
     fn safe_asset_path_serves_real_assets_but_blocks_escapes() {

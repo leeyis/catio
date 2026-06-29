@@ -53,6 +53,16 @@ async fn sftp_ops_route_and_error_on_bogus_session() {
 }
 
 #[tokio::test]
+async fn sftp_delete_rejects_dangerous_paths() {
+    let host = start().await;
+    let cl = authed(&host).await;
+    // The guard fires before any SSH work, so even with a bogus session "/" is refused as dangerous.
+    let (st, body) = invoke(&cl, &host, "sftp_delete", json!({ "sessionId": "nope", "path": "/", "isDir": true })).await;
+    assert_eq!(st, 400);
+    assert!(body["error"].as_str().unwrap_or("").contains("危险路径"), "{body}");
+}
+
+#[tokio::test]
 async fn sftp_download_requires_auth() {
     let host = start().await;
     let res = reqwest::get(format!("http://{host}/api/sftp/download?sessionId=x&path=/etc/hostname")).await.unwrap();

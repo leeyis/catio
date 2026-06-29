@@ -821,8 +821,22 @@ pub async fn sftp_mkdir(
 }
 
 pub async fn sftp_mkdir_core(mgr: &SessionManager, session_id: &str, path: &str) -> Result<(), SshError> {
-    exec(mgr, session_id, &format!("mkdir -p {}", shell_escape(path))).await?;
+    // `--` stops a path beginning with `-` from being parsed as an option (shell_escape blocks
+    // shell injection but not option injection).
+    exec(mgr, session_id, &format!("mkdir -p -- {}", shell_escape(path))).await?;
     Ok(())
+}
+
+/// Reject catastrophic delete targets — even within the user's own (shared, Phase-1) session, the
+/// HTTP file API must not let `/`, `.`, `~`, or a top-level system dir be `rm -rf`'d.
+fn is_dangerous_delete_path(path: &str) -> bool {
+    let p = path.trim().trim_end_matches('/');
+    matches!(
+        p,
+        "" | "/" | "." | ".." | "~" | "~/*"
+            | "/root" | "/home" | "/etc" | "/usr" | "/var" | "/bin" | "/sbin"
+            | "/lib" | "/lib64" | "/boot" | "/dev" | "/proc" | "/sys" | "/opt"
+    ) || p == "~" || path.trim() == "~/"
 }
 
 /// 重命名/移动。
@@ -854,6 +868,9 @@ pub async fn sftp_delete(
 }
 
 pub async fn sftp_delete_core(mgr: &SessionManager, session_id: &str, path: &str) -> Result<(), SshError> {
+    if is_dangerous_delete_path(path) {
+        return Err(SshError::Io(format!("拒绝删除危险路径: {path}")));
+    }
     exec(mgr, session_id, &format!("rm -rf -- {}", shell_escape(path))).await?;
     Ok(())
 }
@@ -1020,7 +1037,7 @@ pub async fn sftp_write_file_core(
         let _ = exec(
             mgr,
             &session_id,
-            &format!("chmod {:o} {}", m & 0o7777, shell_escape(&tmp)),
+            &format!("chmod {:o} -- {}", m & 0o7777, shell_escape(&tmp)),
         )
         .await;
     }
@@ -1042,9 +1059,16 @@ pub async fn sftp_write_file_core(
 
 // ─── Web 端字节级读写（download / upload HTTP 端点用）─────────────────────────
 
-/// 把整个远端文件读入内存（web 下载端点用）。Phase-1 局域网全量缓冲即可,流式留作 Future。
+/// 单次下载/上传字节上限(512 MiB)。Phase-1 全量缓冲,封顶以防 OOM。
+pub const MAX_TRANSFER_BYTES: usize = 512 * 1024 * 1024;
+/// 单次 SFTP 读阻塞超时:防 FIFO/特殊文件(/dev/zero、某些 /proc)读操作永久挂起 server task。
+const READ_TIMEOUT_SECS: u64 = 30;
+
+/// 把远端文件读入内存(web 下载端点用)。带上限 + 每次读超时:超过 [`MAX_TRANSFER_BYTES`] 即拒绝
+/// (防超大文件/`/dev/zero` 之类的 OOM),单次读阻塞超时即报错(防 FIFO/特殊文件挂起)。
 pub async fn read_remote_bytes(mgr: &SessionManager, session_id: &str, path: &str) -> Result<Vec<u8>, SshError> {
     use russh_sftp::protocol::OpenFlags;
+    use std::time::Duration;
     use tokio::io::AsyncReadExt;
     let sftp = crate::ssh::sftp_transfer::open_sftp(mgr, session_id).await?;
     let mut remote = sftp
@@ -1052,21 +1076,49 @@ pub async fn read_remote_bytes(mgr: &SessionManager, session_id: &str, path: &st
         .await
         .map_err(|e| SshError::Sftp(e.to_string()))?;
     let mut buf = Vec::new();
-    remote.read_to_end(&mut buf).await.map_err(|e| SshError::Sftp(e.to_string()))?;
+    let mut chunk = vec![0u8; 64 * 1024];
+    loop {
+        let n = tokio::time::timeout(Duration::from_secs(READ_TIMEOUT_SECS), remote.read(&mut chunk))
+            .await
+            .map_err(|_| SshError::Io("下载读取超时(可能是特殊文件)".into()))?
+            .map_err(|e| SshError::Sftp(e.to_string()))?;
+        if n == 0 {
+            break;
+        }
+        if buf.len() + n > MAX_TRANSFER_BYTES {
+            return Err(SshError::Io("文件超出下载上限(512 MiB)".into()));
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
     Ok(buf)
 }
 
-/// 把字节写入远端文件(创建/截断)。web 上传端点(HTML5 multipart)用。
+/// 把字节原子写入远端文件(web 上传端点用)。先写临时文件 `<path>.catio.upload.tmp`(SFTP),
+/// 再 `mv -f` 覆盖目标——与在线编辑保存同语义,避免上传中断把已有文件截断/写半截。
 pub async fn write_remote_bytes(mgr: &SessionManager, session_id: &str, path: &str, bytes: &[u8]) -> Result<(), SshError> {
     use russh_sftp::protocol::OpenFlags;
     use tokio::io::AsyncWriteExt;
+    if bytes.len() > MAX_TRANSFER_BYTES {
+        return Err(SshError::Io("文件超出上传上限(512 MiB)".into()));
+    }
     let sftp = crate::ssh::sftp_transfer::open_sftp(mgr, session_id).await?;
-    let mut f = sftp
-        .open_with_flags(path, OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE)
-        .await
-        .map_err(|e| SshError::Sftp(e.to_string()))?;
-    f.write_all(bytes).await.map_err(|e| SshError::Sftp(e.to_string()))?;
-    f.shutdown().await.map_err(|e| SshError::Sftp(e.to_string()))?;
+    let tmp = format!("{path}.catio.upload.tmp");
+    {
+        let mut f = sftp
+            .open_with_flags(tmp.as_str(), OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE)
+            .await
+            .map_err(|e| SshError::Sftp(e.to_string()))?;
+        if let Err(e) = f.write_all(bytes).await {
+            let _ = sftp.remove_file(tmp.as_str()).await;
+            return Err(SshError::Sftp(e.to_string()));
+        }
+        f.shutdown().await.map_err(|e| SshError::Sftp(e.to_string()))?;
+    }
+    let mv = format!("mv -f -- {} {}", shell_escape(&tmp), shell_escape(path));
+    if let Err(e) = exec(mgr, session_id, &mv).await {
+        let _ = sftp.remove_file(tmp.as_str()).await;
+        return Err(e);
+    }
     Ok(())
 }
 
@@ -1075,6 +1127,17 @@ pub async fn write_remote_bytes(mgr: &SessionManager, session_id: &str, path: &s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dangerous_delete_paths_are_rejected() {
+        for p in ["", "/", ".", "..", "~", "~/", "/home", "/root", "/etc", "/usr/", "/", "  /  "] {
+            assert!(is_dangerous_delete_path(p), "should reject {p:?}");
+        }
+        // Normal user paths are allowed.
+        for p in ["/home/alice/notes.txt", "/tmp/x", "/home/alice/dir", "relative/file"] {
+            assert!(!is_dangerous_delete_path(p), "should allow {p:?}");
+        }
+    }
 
     #[test]
     fn parses_epoch_time_style_with_owner_group() {
