@@ -1122,6 +1122,46 @@ pub async fn write_remote_bytes(mgr: &SessionManager, session_id: &str, path: &s
     Ok(())
 }
 
+/// Stream an upload to the remote file CHUNK BY CHUNK (atomic temp + `mv`), without ever holding
+/// the whole file in memory — so multi-GB uploads work and don't OOM the server. No size cap (the
+/// remote disk is the bound), matching the desktop SFTP path. Returns the total bytes written.
+pub async fn write_remote_stream<S, B>(mgr: &SessionManager, session_id: &str, path: &str, mut stream: S) -> Result<u64, SshError>
+where
+    S: futures_util::Stream<Item = Result<B, std::io::Error>> + Unpin,
+    B: AsRef<[u8]>,
+{
+    use futures_util::StreamExt;
+    use russh_sftp::protocol::OpenFlags;
+    use tokio::io::AsyncWriteExt;
+    let sftp = crate::ssh::sftp_transfer::open_sftp(mgr, session_id).await?;
+    let tmp = format!("{path}.catio.upload.tmp");
+    let mut total: u64 = 0;
+    {
+        let mut f = sftp
+            .open_with_flags(tmp.as_str(), OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE)
+            .await
+            .map_err(|e| SshError::Sftp(e.to_string()))?;
+        while let Some(item) = stream.next().await {
+            let chunk = match item {
+                Ok(c) => c,
+                Err(e) => { let _ = sftp.remove_file(tmp.as_str()).await; return Err(SshError::Io(e.to_string())); }
+            };
+            if let Err(e) = f.write_all(chunk.as_ref()).await {
+                let _ = sftp.remove_file(tmp.as_str()).await;
+                return Err(SshError::Sftp(e.to_string()));
+            }
+            total += chunk.as_ref().len() as u64;
+        }
+        f.shutdown().await.map_err(|e| SshError::Sftp(e.to_string()))?;
+    }
+    let mv = format!("mv -f -- {} {}", shell_escape(&tmp), shell_escape(path));
+    if let Err(e) = exec(mgr, session_id, &mv).await {
+        let _ = sftp.remove_file(tmp.as_str()).await;
+        return Err(e);
+    }
+    Ok(total)
+}
+
 // ─── 单元测试（纯函数 parse_ls_output）────────────────────────────────────────
 
 #[cfg(test)]

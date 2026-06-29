@@ -135,12 +135,12 @@ pub fn build_router(state: AppState) -> Router {
         // SFTP binary transfers can't go through JSON /api/invoke: download streams the remote
         // file to the browser, upload takes an HTML5 multipart body (M4).
         .route("/api/sftp/download", get(sftp_download_handler))
-        // Raise the body limit for uploads (axum defaults to 2 MiB) to the transfer cap + margin
-        // for the multipart envelope; the SFTP write itself also enforces MAX_TRANSFER_BYTES.
+        // Disable axum's 2 MiB body limit for uploads: the handler STREAMS the multipart field to
+        // SFTP chunk-by-chunk (never buffering the whole file), so multi-GB uploads work without a
+        // cap or OOM. The session gate + the remote host's own disk are the real bounds.
         .route(
             "/api/sftp/upload",
-            post(sftp_upload_handler)
-                .layer(DefaultBodyLimit::max(crate::ssh::sftp::MAX_TRANSFER_BYTES + 16 * 1024 * 1024)),
+            post(sftp_upload_handler).layer(DefaultBodyLimit::disable()),
         )
         .fallback(spa)
         .with_state(state)
@@ -1251,7 +1251,7 @@ async fn sftp_upload_handler(State(st): State<AppState>, headers: HeaderMap, mut
     if !authed(&st, &headers) {
         return (StatusCode::UNAUTHORIZED, "未登录").into_response();
     }
-    let (mut session_id, mut remote_path, mut file_bytes) = (String::new(), String::new(), None::<Vec<u8>>);
+    let (mut session_id, mut remote_path) = (String::new(), String::new());
     loop {
         // Surface a multipart parse error as 400 rather than silently stopping with a half-read
         // body (which could otherwise write a truncated file).
@@ -1263,20 +1263,24 @@ async fn sftp_upload_handler(State(st): State<AppState>, headers: HeaderMap, mut
         match field.name() {
             Some("sessionId") => match field.text().await { Ok(v) => session_id = v, Err(e) => return upload_field_err(e) },
             Some("remotePath") => match field.text().await { Ok(v) => remote_path = v, Err(e) => return upload_field_err(e) },
-            Some("file") => match field.bytes().await { Ok(b) => file_bytes = Some(b.to_vec()), Err(e) => return upload_field_err(e) },
+            // STREAM the file straight to SFTP chunk-by-chunk — never buffer the whole file in
+            // memory, so multi-GB uploads work without OOM or a size cap. The frontend appends the
+            // fields in order (sessionId, remotePath, file), so the path is known by now.
+            Some("file") => {
+                if session_id.is_empty() || remote_path.is_empty() {
+                    return (StatusCode::BAD_REQUEST, Json(json!({ "error": "file 字段需在 sessionId/remotePath 之后" }))).into_response();
+                }
+                use futures_util::StreamExt;
+                let stream = field.map(|r| r.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string())));
+                return match crate::ssh::sftp::write_remote_stream(&st.ssh, &session_id, &remote_path, stream).await {
+                    Ok(n) => Json(json!({ "ok": true, "bytes": n })).into_response(),
+                    Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
+                };
+            }
             _ => {}
         }
     }
-    let Some(bytes) = file_bytes else {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "缺少文件" }))).into_response();
-    };
-    if session_id.is_empty() || remote_path.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "缺少 sessionId/remotePath" }))).into_response();
-    }
-    match crate::ssh::sftp::write_remote_bytes(&st.ssh, &session_id, &remote_path, &bytes).await {
-        Ok(()) => Json(json!({ "ok": true, "bytes": bytes.len() })).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
-    }
+    (StatusCode::BAD_REQUEST, Json(json!({ "error": "缺少文件" }))).into_response()
 }
 
 // SPA fallback: serve a dist asset if it exists, else index.html with the server flag injected
