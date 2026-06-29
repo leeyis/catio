@@ -28,6 +28,7 @@ FROM rust:1-bookworm AS server
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
         librsvg2-dev libssl-dev libxdo-dev pkg-config \
+        libudev-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY src-tauri ./src-tauri
@@ -39,7 +40,7 @@ RUN strip target/release/catio-server || true
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libwebkit2gtk-4.1-0 libgtk-3-0 libayatana-appindicator3-1 librsvg2-2 \
-        ca-certificates \
+        libudev1 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=server /app/src-tauri/target/release/catio-server /usr/local/bin/catio-server
