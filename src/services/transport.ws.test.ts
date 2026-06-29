@@ -18,6 +18,9 @@ class FakeWS {
 }
 
 const tick = () => new Promise(r => setTimeout(r, 0))
+const lastWs = () => FakeWS.instances[FakeWS.instances.length - 1]
+type Frame = { type: string; topic?: string; cmd?: string; id?: unknown }
+const frames = (ws: FakeWS): Frame[] => ws.sent.map(s => JSON.parse(s) as Frame)
 function setServer(on: boolean) {
   const w = window as unknown as Record<string, unknown>
   if (on) w.__CATIO_SERVER__ = true
@@ -37,27 +40,26 @@ describe('transport WebSocket client', () => {
     const { subscribe } = await import('./transport')
     const got: unknown[] = []
     const p = subscribe('term://c1', e => got.push(e))
-    const ws = FakeWS.instances.at(-1)!
+    const ws = lastWs()
     ws.fireOpen()
     const unsub = await p
 
-    const sent = () => ws.sent.map(s => JSON.parse(s))
-    expect(sent().some(m => m.type === 'sub' && m.topic === 'term://c1')).toBe(true)
+    expect(frames(ws).some(m => m.type === 'sub' && m.topic === 'term://c1')).toBe(true)
 
     ws.fireMsg({ type: 'event', topic: 'term://c1', payload: { bytesBase64: 'aGk=' } })
     expect(got).toEqual([{ bytesBase64: 'aGk=' }])
 
     unsub()
-    expect(sent().some(m => m.type === 'unsub' && m.topic === 'term://c1')).toBe(true)
+    expect(frames(ws).some(m => m.type === 'unsub' && m.topic === 'term://c1')).toBe(true)
   })
 
   it('wsCmd sends a cmd and resolves with the matching reply result', async () => {
     const { wsCmd } = await import('./transport')
     const pr = wsCmd<{ chanId: string }>('term_open', { sessionId: 's1', cols: 80, rows: 24 })
-    const ws = FakeWS.instances.at(-1)!
+    const ws = lastWs()
     ws.fireOpen()
     await tick()
-    const cmd = ws.sent.map(s => JSON.parse(s)).find(m => m.type === 'cmd')
+    const cmd = frames(ws).find(m => m.type === 'cmd')!
     expect(cmd.cmd).toBe('term_open')
     ws.fireMsg({ type: 'reply', id: cmd.id, ok: true, result: { chanId: 'chan-9' } })
     expect(await pr).toEqual({ chanId: 'chan-9' })
@@ -66,10 +68,10 @@ describe('transport WebSocket client', () => {
   it('wsCmd rejects on an error reply', async () => {
     const { wsCmd } = await import('./transport')
     const pr = wsCmd('term_open', { sessionId: 'nope' })
-    const ws = FakeWS.instances.at(-1)!
+    const ws = lastWs()
     ws.fireOpen()
     await tick()
-    const cmd = ws.sent.map(s => JSON.parse(s)).find(m => m.type === 'cmd')
+    const cmd = frames(ws).find(m => m.type === 'cmd')!
     ws.fireMsg({ type: 'reply', id: cmd.id, ok: false, error: 'session not found' })
     await expect(pr).rejects.toThrow('session not found')
   })

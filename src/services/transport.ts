@@ -80,6 +80,9 @@ let sock: WebSocket | null = null
 let connecting: Promise<WebSocket> | null = null
 let cmdSeq = 0
 let heartbeat: ReturnType<typeof setInterval> | null = null
+let missedPongs = 0
+/** Reply timeout — a never-answered command must not hang the UI or leak a pending entry forever. */
+const WS_CMD_TIMEOUT_MS = 15000
 
 function wsUrl(): string {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -94,9 +97,18 @@ function ensureSocket(): Promise<WebSocket> {
     s.onopen = () => {
       sock = s
       connecting = null
+      missedPongs = 0
       // Restore every active subscription after a (re)connect so streams resume.
       for (const topic of topicHandlers.keys()) s.send(JSON.stringify({ type: 'sub', topic }))
-      if (!heartbeat) heartbeat = setInterval(() => { if (sock?.readyState === WebSocket.OPEN) sock.send(JSON.stringify({ type: 'ping' })) }, 30000)
+      if (!heartbeat) {
+        heartbeat = setInterval(() => {
+          if (sock?.readyState !== WebSocket.OPEN) return
+          // Two missed pongs ⇒ half-open connection ⇒ force-close so onclose reconnects.
+          if (missedPongs >= 2) { sock.close(); return }
+          missedPongs++
+          sock.send(JSON.stringify({ type: 'ping' }))
+        }, 30000)
+      }
       resolve(s)
     }
     s.onerror = () => { if (connecting) { connecting = null; reject(new Error('WebSocket connection failed')) } }
@@ -107,6 +119,11 @@ function ensureSocket(): Promise<WebSocket> {
       // Fail any in-flight commands; subscriptions stay registered and re-sent on next connect.
       for (const [, p] of pendingReplies) p.reject(new Error('WebSocket closed'))
       pendingReplies.clear()
+      // Proactively reconnect when subscriptions are live: a receive-only terminal would not
+      // otherwise call ensureSocket again. Small delay avoids a tight reconnect storm.
+      if (topicHandlers.size > 0) {
+        setTimeout(() => { if (!sock && topicHandlers.size > 0) ensureSocket().catch(() => { /* retry on next close */ }) }, 1000)
+      }
     }
     s.onmessage = ev => {
       let env: { type?: string; topic?: string; payload?: unknown; id?: unknown; ok?: boolean; result?: unknown; error?: string }
@@ -121,8 +138,9 @@ function ensureSocket(): Promise<WebSocket> {
           if (env.ok) p.resolve(env.result)
           else p.reject(new Error(env.error || 'command failed'))
         }
+      } else if (env.type === 'pong') {
+        missedPongs = 0
       }
-      // 'pong' is just liveness; nothing to do.
     }
   })
   return connecting
@@ -131,6 +149,9 @@ function ensureSocket(): Promise<WebSocket> {
 /**
  * Subscribe to a backend event topic. Tauri → `listen`; server → WS subscription; dev/test → a
  * no-op (the mock path doesn't stream). Returns an unsubscribe function.
+ *
+ * The handler is registered synchronously (so a reconnect re-subscribes it); the immediate `sub`
+ * send is best-effort — if the socket isn't up yet, `onopen` resubscribes every live topic.
  */
 export async function subscribe(topic: string, handler: Handler): Promise<() => void> {
   if (isTauri()) {
@@ -141,8 +162,7 @@ export async function subscribe(topic: string, handler: Handler): Promise<() => 
     let set = topicHandlers.get(topic)
     if (!set) { set = new Set(); topicHandlers.set(topic, set) }
     set.add(handler)
-    const s = await ensureSocket()
-    s.send(JSON.stringify({ type: 'sub', topic }))
+    void ensureSocket().then(s => s.send(JSON.stringify({ type: 'sub', topic }))).catch(() => { /* resubscribed on reconnect */ })
     return () => {
       const cur = topicHandlers.get(topic)
       if (!cur) return
@@ -156,12 +176,25 @@ export async function subscribe(topic: string, handler: Handler): Promise<() => 
   return () => { /* no-op outside Tauri/server */ }
 }
 
-/** Send a streaming command over the WS and await its reply (server mode only). */
+/** Send a streaming command over the WS and await its reply (server mode only). Rejects on a
+ *  reply timeout so a dropped/forgotten reply can't hang the caller or leak a pending entry. */
 export async function wsCmd<T>(cmd: string, args: Record<string, unknown>): Promise<T> {
   const s = await ensureSocket()
   const id = `c${++cmdSeq}`
   return new Promise<T>((resolve, reject) => {
-    pendingReplies.set(id, { resolve: v => resolve(v as T), reject })
-    s.send(JSON.stringify({ type: 'cmd', id, cmd, args }))
+    const timer = setTimeout(() => {
+      if (pendingReplies.delete(id)) reject(new Error(`命令超时: ${cmd}`))
+    }, WS_CMD_TIMEOUT_MS)
+    pendingReplies.set(id, {
+      resolve: v => { clearTimeout(timer); resolve(v as T) },
+      reject: e => { clearTimeout(timer); reject(e) },
+    })
+    try {
+      s.send(JSON.stringify({ type: 'cmd', id, cmd, args }))
+    } catch (e) {
+      clearTimeout(timer)
+      pendingReplies.delete(id)
+      reject(e instanceof Error ? e : new Error(String(e)))
+    }
   })
 }

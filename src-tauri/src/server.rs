@@ -735,23 +735,44 @@ async fn dispatch(st: &AppState, cmd: &str, args: Value) -> Result<Value, String
 
 // ── WebSocket streaming channel (M3) ────────────────────────────────────────────────────────
 
+/// Cap on simultaneous WS connections — a coarse backstop against connection-flood DoS.
+const MAX_WS_CONNECTIONS: usize = 128;
+
 /// `GET /ws` — the single streaming channel. Gated by the SAME session cookie as `/api/invoke`
-/// (a browser cannot send custom headers on a WS handshake, but it DOES send cookies, so the
-/// session rides along). Rejected with 401 before the upgrade when unauthenticated.
+/// plus a same-origin Origin check (browsers always send Origin on a WS handshake, so this blocks
+/// cross-site WebSocket hijacking; the SameSite=Strict cookie already prevents the cookie itself
+/// from riding a cross-site handshake). Rejected before the upgrade when unauthenticated.
 async fn ws_handler(State(st): State<AppState>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
-    let token = session_token(&headers);
-    if token.as_deref().and_then(|t| resolve_session(&st, t)).is_none() {
+    if !origin_ok(&headers) {
+        return (StatusCode::FORBIDDEN, "bad origin").into_response();
+    }
+    let Some(token) = session_token(&headers) else {
+        return (StatusCode::UNAUTHORIZED, "未登录").into_response();
+    };
+    if resolve_session(&st, &token).is_none() {
         return (StatusCode::UNAUTHORIZED, "未登录").into_response();
     }
-    ws.on_upgrade(move |socket| handle_ws(socket, st))
+    if st.ws.conn_count() >= MAX_WS_CONNECTIONS {
+        return (StatusCode::SERVICE_UNAVAILABLE, "too many connections").into_response();
+    }
+    ws.on_upgrade(move |socket| handle_ws(socket, st, token))
 }
 
-/// Drive one WS connection: a writer task drains the per-connection channel to the socket while
-/// the reader loop handles sub/unsub/cmd/ping. On close, the connection is unregistered and any
-/// terminals it opened are closed (so a dropped browser tab doesn't leak remote shells).
-async fn handle_ws(socket: WebSocket, st: AppState) {
+/// Allow same-origin requests and Origin-absent ones (non-browser tools, e.g. the test client);
+/// reject a present-but-mismatched Origin.
+fn origin_ok(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) else { return true };
+    let origin_authority = origin.split("://").nth(1).unwrap_or("");
+    matches!(headers.get(header::HOST).and_then(|v| v.to_str().ok()), Some(host) if host == origin_authority)
+}
+
+/// Drive one WS connection: a writer task drains the per-connection BOUNDED channel to the socket
+/// while the reader loop handles sub/unsub/cmd/ping. Every `cmd` re-validates the session, so a
+/// logout/deletion/expiry severs an established socket. On close the connection is unregistered
+/// and any terminals it opened are closed (so a dropped browser tab doesn't leak remote shells).
+async fn handle_ws(socket: WebSocket, st: AppState, token: String) {
     let (mut ws_tx, mut ws_rx) = socket.split();
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Value>(2048);
     let conn_id = st.ws.register(tx.clone());
     // (session_id, chan_id) of terminals opened on THIS connection, for cleanup on disconnect.
     let opened: Arc<std::sync::Mutex<Vec<(String, String)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -775,8 +796,14 @@ async fn handle_ws(socket: WebSocket, st: AppState) {
                     Some("unsub") => if let Some(topic) = env.get("topic").and_then(Value::as_str) {
                         st.ws.unsubscribe(conn_id, topic);
                     },
-                    Some("ping") => { let _ = tx.send(json!({ "type": "pong" })); }
+                    Some("ping") => { let _ = tx.try_send(json!({ "type": "pong" })); }
                     Some("cmd") => {
+                        // Re-validate on every command — an upgrade-time check alone would leave an
+                        // established socket as a long-lived SSH control channel after logout.
+                        if resolve_session(&st, &token).is_none() {
+                            let _ = tx.try_send(json!({ "type": "reply", "id": env.get("id").cloned().unwrap_or(Value::Null), "ok": false, "error": "会话已失效,请重新登录" }));
+                            break;
+                        }
                         let cmd = env.get("cmd").and_then(Value::as_str).unwrap_or("").to_string();
                         let id = env.get("id").cloned().unwrap_or(Value::Null);
                         let cmd_args = env.get("args").cloned().unwrap_or_else(|| json!({}));
@@ -799,12 +826,13 @@ async fn handle_ws(socket: WebSocket, st: AppState) {
 }
 
 /// Handle a `cmd` envelope (the streaming commands that don't fit request/response), replying
-/// `{type:"reply", id, ok, result|error}`. term_open auto-subscribes the originating connection
-/// to the new `term://{chanId}` (and `history://{sessionId}`) so no early output is lost.
+/// `{type:"reply", id, ok, result|error}`. term_open subscribes the originating connection to
+/// `term://{chanId}` via the core's `on_open` hook — BEFORE the owner task can emit — so no early
+/// output is lost, and to `history://{sessionId}` for the command-audit stream.
 async fn handle_ws_cmd(
     st: &AppState,
     conn_id: u64,
-    tx: &tokio::sync::mpsc::UnboundedSender<Value>,
+    tx: &tokio::sync::mpsc::Sender<Value>,
     cmd: &str,
     id: Value,
     args: &Value,
@@ -819,9 +847,11 @@ async fn handle_ws_cmd(
             let rows = u32_or(args, "rows", 24);
             st.ws.subscribe(conn_id, &format!("history://{session_id}"));
             let sink: Arc<dyn EventSink> = st.ws.clone();
-            match term_open_core(session_id.clone(), cols, rows, sink, &st.ssh).await {
+            let hub = st.ws.clone();
+            match term_open_core(session_id.clone(), cols, rows, sink, &st.ssh, |chan_id| {
+                hub.subscribe(conn_id, &format!("term://{chan_id}"));
+            }).await {
                 Ok(chan_id) => {
-                    st.ws.subscribe(conn_id, &format!("term://{chan_id}"));
                     opened.lock().unwrap().push((session_id, chan_id.clone()));
                     Ok(json!({ "chanId": chan_id }))
                 }
@@ -846,7 +876,7 @@ async fn handle_ws_cmd(
         Ok(v) => json!({ "type": "reply", "id": id, "ok": true, "result": v }),
         Err(e) => json!({ "type": "reply", "id": id, "ok": false, "error": e }),
     };
-    let _ = tx.send(reply);
+    let _ = tx.try_send(reply);
 }
 
 // SPA fallback: serve a dist asset if it exists, else index.html with the server flag injected

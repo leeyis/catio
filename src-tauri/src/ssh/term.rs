@@ -65,18 +65,24 @@ pub async fn term_open(
     app: tauri::AppHandle,
     mgr: tauri::State<'_, SessionManager>,
 ) -> Result<String, SshError> {
-    term_open_core(session_id, cols, rows, Arc::new(crate::events::TauriSink(app)), &mgr).await
+    term_open_core(session_id, cols, rows, Arc::new(crate::events::TauriSink(app)), &mgr, |_| {}).await
 }
 
 /// Transport-agnostic terminal open. Identical to the desktop command body, but emits frames
 /// through an `EventSink` (Tauri webview bus on desktop, WebSocket hub on the web head) so the
 /// owner task, OSC scanning, shell-integration audit and dedup logic are NOT duplicated.
+///
+/// `on_open(chan_id)` runs synchronously the instant the channel id exists and BEFORE the owner
+/// task is spawned, so the web head can subscribe the connection to `term://{chanId}` with zero
+/// chance of losing the first emitted frame to a subscribe-after-emit race. Desktop passes a
+/// no-op (its event bus has no per-listener race).
 pub async fn term_open_core(
     session_id: String,
     cols: u32,
     rows: u32,
     sink: Arc<dyn EventSink>,
     mgr: &SessionManager,
+    on_open: impl FnOnce(&str),
 ) -> Result<String, SshError> {
     let sess = mgr
         .get(&session_id)
@@ -111,6 +117,8 @@ pub async fn term_open_core(
         .ok();
 
     let chan_id = CHAN_IDS.next();
+    // Subscribe (web head) BEFORE spawning the owner task, so no early frame is dropped.
+    on_open(&chan_id);
     let evt = format!("term://{chan_id}");
     let history_evt = format!("history://{session_id}");
     let (tx, mut rx) = mpsc::unbounded_channel::<TermCmd>();

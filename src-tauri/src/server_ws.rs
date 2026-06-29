@@ -12,13 +12,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use serde_json::{json, Value};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::Sender;
 
 use crate::events::EventSink;
 
+/// Cap on topics one connection may subscribe to — stops an authenticated client from growing
+/// the subscription set without bound.
+const MAX_TOPICS_PER_CONN: usize = 512;
+
 struct Conn {
-    /// Writer channel — carries fully-formed wire envelopes (events, replies, pongs).
-    tx: UnboundedSender<Value>,
+    /// Writer channel — carries fully-formed wire envelopes (events, replies, pongs). BOUNDED:
+    /// a slow client that can't drain its socket fills this and is dropped (below) rather than
+    /// letting `emit` queue JSON without limit and blow up server memory.
+    tx: Sender<Value>,
     topics: HashSet<String>,
 }
 
@@ -32,7 +38,7 @@ pub struct WsHub {
 
 impl WsHub {
     /// Register a connection's writer channel; returns its id (used for sub/unsub/unregister).
-    pub fn register(&self, tx: UnboundedSender<Value>) -> u64 {
+    pub fn register(&self, tx: Sender<Value>) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.conns.lock().unwrap().insert(id, Conn { tx, topics: HashSet::new() });
         id
@@ -43,9 +49,13 @@ impl WsHub {
         self.conns.lock().unwrap().remove(&id);
     }
 
+    /// Subscribe `id` to `topic`. Capped at `MAX_TOPICS_PER_CONN`; over the cap the request is
+    /// silently ignored (the connection already streams plenty).
     pub fn subscribe(&self, id: u64, topic: &str) {
         if let Some(c) = self.conns.lock().unwrap().get_mut(&id) {
-            c.topics.insert(topic.to_string());
+            if c.topics.contains(topic) || c.topics.len() < MAX_TOPICS_PER_CONN {
+                c.topics.insert(topic.to_string());
+            }
         }
     }
 
@@ -54,16 +64,31 @@ impl WsHub {
             c.topics.remove(topic);
         }
     }
+
+    /// Current connection count — used to cap total connections at the upgrade.
+    pub fn conn_count(&self) -> usize {
+        self.conns.lock().unwrap().len()
+    }
 }
 
 impl EventSink for WsHub {
     fn emit(&self, topic: &str, payload: Value) {
         let env = json!({ "type": "event", "topic": topic, "payload": payload });
-        let conns = self.conns.lock().unwrap();
-        for c in conns.values() {
-            if c.topics.contains(topic) {
-                // Unbounded send is non-blocking; a dead receiver just means a closing socket.
-                let _ = c.tx.send(env.clone());
+        // Collect connections whose bounded writer is full/closed and evict them after the
+        // borrow ends — a slow client that can't keep up is dropped, not allowed to balloon memory.
+        let mut dead = Vec::new();
+        {
+            let conns = self.conns.lock().unwrap();
+            for (id, c) in conns.iter() {
+                if c.topics.contains(topic) && c.tx.try_send(env.clone()).is_err() {
+                    dead.push(*id);
+                }
+            }
+        }
+        if !dead.is_empty() {
+            let mut conns = self.conns.lock().unwrap();
+            for id in dead {
+                conns.remove(&id);
             }
         }
     }
@@ -72,13 +97,13 @@ impl EventSink for WsHub {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::mpsc::unbounded_channel;
+    use tokio::sync::mpsc::channel;
 
     #[test]
     fn emit_reaches_only_subscribers() {
         let hub = WsHub::default();
-        let (tx_a, mut rx_a) = unbounded_channel();
-        let (tx_b, mut rx_b) = unbounded_channel();
+        let (tx_a, mut rx_a) = channel(16);
+        let (tx_b, mut rx_b) = channel(16);
         let a = hub.register(tx_a);
         let b = hub.register(tx_b);
 
