@@ -1,0 +1,10 @@
+# Keep the build context small + avoid leaking host build artifacts into the image.
+.git
+node_modules
+dist
+src-tauri/target
+.worktrees
+**/*.log
+# Desktop bundles / local data
+src-tauri/gen
+*.tmp

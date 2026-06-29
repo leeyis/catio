@@ -11,11 +11,19 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 name = "catio"
 path = "src/main.rs"
 
+# Web-server head (Option B spike): serves the built UI + exposes the same Rust core over
+# HTTP/WS for LAN browser access. Reuses catio_lib; does not affect the desktop binary.
+[[bin]]
+name = "catio-server"
+path = "src/bin/server.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+axum = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.6", features = ["cors"] }
 tauri-plugin-http = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -2,15 +2,10 @@ import { DATA } from './mockData'
 import type { ErRelation, HistoryItem, QueryResult, ResultColumn, Schema, Snippet, TableStructure } from './types'
 import type { RedisEdit } from '../components/dbviews/redisEdit'
 
-// ---- Tauri guard — function so tests can set window.__TAURI_INTERNALS__ dynamically ----
-const isTauri = (): boolean =>
-  typeof window !== 'undefined' &&
-  ('__TAURI_INTERNALS__' in window || '__TAURI__' in window)
-
-async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  const { invoke } = await import('@tauri-apps/api/core')
-  return invoke<T>(cmd, args)
-}
+// Transport: rpc() routes to Tauri invoke (desktop) or POST /api/invoke (server head);
+// isServer() lets the mock guard stay `if (!isTauri() && !isServer())` so vitest/dev (which
+// set neither flag) keep their mock path unchanged.
+import { rpc, isTauri, isServer } from './transport'
 
 /**
  * Extract a human-readable message from a thrown/rejected value. Tauri rejects a
@@ -80,8 +75,8 @@ export interface DbConnectResult {
 // ---- Connection lifecycle ----
 
 export async function dbConnect(args: DbConnectArgs): Promise<DbConnectResult> {
-  if (!isTauri()) throw new Error('dbConnect requires the Tauri runtime')
-  return tauriInvoke<DbConnectResult>('db_connect', { args })
+  if (!isTauri() && !isServer()) throw new Error('dbConnect requires the Tauri runtime')
+  return rpc<DbConnectResult>('db_connect', { args })
 }
 
 /** The non-secret subset of DbConnectArgs a saved profile carries (id/name etc. omitted). */
@@ -123,13 +118,13 @@ export interface TestConnResult {
  * Tauri runtime; throws outside it (there is no meaningful mock for a live test).
  */
 export async function testConnection(args: DbConnectArgs): Promise<TestConnResult> {
-  if (!isTauri()) throw new Error('测试连接需要 Tauri 运行时')
-  return tauriInvoke<TestConnResult>('db_test_connection', { args })
+  if (!isTauri() && !isServer()) throw new Error('测试连接需要 Tauri 运行时')
+  return rpc<TestConnResult>('db_test_connection', { args })
 }
 
 export async function dbDisconnect(connId: string): Promise<void> {
-  if (!isTauri()) throw new Error('dbDisconnect requires the Tauri runtime')
-  return tauriInvoke('db_disconnect', { connId })
+  if (!isTauri() && !isServer()) throw new Error('dbDisconnect requires the Tauri runtime')
+  return rpc('db_disconnect', { connId })
 }
 
 // ---- Query ----
@@ -155,14 +150,14 @@ export interface QueryHistoryMeta {
 }
 
 export async function runQuery(connId: string, sql: string, defaultNamespace?: string, meta?: QueryHistoryMeta, maxRows?: number): Promise<QueryResult> {
-  if (!isTauri()) return mockQueryResult()
+  if (!isTauri() && !isServer()) return mockQueryResult()
   const args: Record<string, unknown> = { connId, sql }
   if (defaultNamespace) args.defaultNamespace = defaultNamespace
   if (meta?.name) args.connName = meta.name
   if (meta?.engine) args.engine = meta.engine
   if (meta?.profileId) args.profileId = meta.profileId
   if (maxRows != null) args.maxRows = maxRows
-  return tauriInvoke<QueryResult>('db_query', args)
+  return rpc<QueryResult>('db_query', args)
 }
 
 /**
@@ -171,8 +166,8 @@ export async function runQuery(connId: string, sql: string, defaultNamespace?: s
  * Tauri and for engines without transactional batch support (Unsupported).
  */
 export async function execSyncBatch(connId: string, statements: string[]): Promise<number> {
-  if (!isTauri()) throw new Error('执行需要 Tauri 运行时')
-  return tauriInvoke<number>('db_exec_batch', { connId, statements })
+  if (!isTauri() && !isServer()) throw new Error('执行需要 Tauri 运行时')
+  return rpc<number>('db_exec_batch', { connId, statements })
 }
 
 /**
@@ -183,11 +178,11 @@ export async function execSyncBatch(connId: string, statements: string[]): Promi
  * this. Throws outside Tauri (no meaningful mock for a real plan).
  */
 export async function runExplain(connId: string, sql: string, defaultNamespace?: string): Promise<QueryResult> {
-  if (!isTauri()) throw new Error('执行计划需要 Tauri 运行时')
+  if (!isTauri() && !isServer()) throw new Error('执行计划需要 Tauri 运行时')
   const args: Record<string, unknown> = { connId, sql }
   // 沿用选中的 schema/库执行 EXPLAIN,否则后端落连接默认库,对未限定库名的查询报表不存在。
   if (defaultNamespace) args.defaultNamespace = defaultNamespace
-  return tauriInvoke<QueryResult>('db_explain', args)
+  return rpc<QueryResult>('db_explain', args)
 }
 
 // ---- Edits (DML preview / apply) ----
@@ -209,8 +204,8 @@ export interface EditRequest {
  * stub string so the editing UI stays demoable in the browser.
  */
 export async function previewDml(connId: string, req: EditRequest): Promise<string> {
-  if (!isTauri()) return '-- preview requires the Tauri runtime'
-  return tauriInvoke<string>('db_preview_dml', { connId, req })
+  if (!isTauri() && !isServer()) return '-- preview requires the Tauri runtime'
+  return rpc<string>('db_preview_dml', { connId, req })
 }
 
 /**
@@ -219,8 +214,8 @@ export async function previewDml(connId: string, req: EditRequest): Promise<stri
  * mock/demo flow does not crash.
  */
 export async function applyEdits(connId: string, reqs: EditRequest[]): Promise<number> {
-  if (!isTauri()) return 0
-  return tauriInvoke<number>('db_apply_edits', { connId, reqs })
+  if (!isTauri() && !isServer()) return 0
+  return rpc<number>('db_apply_edits', { connId, reqs })
 }
 
 // ---- Object administration (drop / rename / truncate / duplicate) ----
@@ -234,8 +229,8 @@ export type DbObjectType = 'TABLE' | 'VIEW' | 'PROCEDURE' | 'FUNCTION'
  * Destructive — the UI gates this behind a typed confirmation. Throws outside Tauri.
  */
 export async function dropObject(connId: string, objectType: DbObjectType, schema: string | undefined, name: string): Promise<number> {
-  if (!isTauri()) throw new Error('删除对象需要 Tauri 运行时')
-  return tauriInvoke<number>('db_drop_object', { connId, objectType, schema, name })
+  if (!isTauri() && !isServer()) throw new Error('删除对象需要 Tauri 运行时')
+  return rpc<number>('db_drop_object', { connId, objectType, schema, name })
 }
 
 /** Table child-object kinds that can be dropped (mirrors Rust `TableChildObjectType`). */
@@ -248,8 +243,8 @@ export type TableChildObjectKind = 'COLUMN' | 'INDEX' | 'FOREIGN_KEY' | 'TRIGGER
  * typed confirmation. Throws outside Tauri.
  */
 export async function dropTableChildObject(connId: string, objectType: TableChildObjectKind, schema: string | undefined, table: string, name: string): Promise<number> {
-  if (!isTauri()) throw new Error('删除子对象需要 Tauri 运行时')
-  return tauriInvoke<number>('db_drop_table_child_object', { connId, objectType, schema, table, name })
+  if (!isTauri() && !isServer()) throw new Error('删除子对象需要 Tauri 运行时')
+  return rpc<number>('db_drop_table_child_object', { connId, objectType, schema, table, name })
 }
 
 /**
@@ -258,8 +253,8 @@ export async function dropTableChildObject(connId: string, objectType: TableChil
  * outside Tauri.
  */
 export async function renameObject(connId: string, objectType: DbObjectType, schema: string | undefined, oldName: string, newName: string): Promise<number> {
-  if (!isTauri()) throw new Error('重命名对象需要 Tauri 运行时')
-  return tauriInvoke<number>('db_rename_object', { connId, objectType, schema, oldName, newName })
+  if (!isTauri() && !isServer()) throw new Error('重命名对象需要 Tauri 运行时')
+  return rpc<number>('db_rename_object', { connId, objectType, schema, oldName, newName })
 }
 
 /**
@@ -267,24 +262,24 @@ export async function renameObject(connId: string, objectType: DbObjectType, sch
  * Destructive — gated behind a typed confirmation in the UI. Throws outside Tauri.
  */
 export async function truncateTable(connId: string, schema: string | undefined, table: string): Promise<number> {
-  if (!isTauri()) throw new Error('清空表需要 Tauri 运行时')
-  return tauriInvoke<number>('db_truncate_table', { connId, schema, table })
+  if (!isTauri() && !isServer()) throw new Error('清空表需要 Tauri 运行时')
+  return rpc<number>('db_truncate_table', { connId, schema, table })
 }
 
 /**
  * Duplicate a table's structure (no data) into a new empty table. Throws outside Tauri.
  */
 export async function duplicateTableStructure(connId: string, schema: string | undefined, source: string, target: string): Promise<number> {
-  if (!isTauri()) throw new Error('复制表结构需要 Tauri 运行时')
-  return tauriInvoke<number>('db_duplicate_table_structure', { connId, schema, source, target })
+  if (!isTauri() && !isServer()) throw new Error('复制表结构需要 Tauri 运行时')
+  return rpc<number>('db_duplicate_table_structure', { connId, schema, source, target })
 }
 
 /** Paginated query — same shape as runQuery but with limit/offset windowing. */
 export async function queryPage(connId: string, sql: string, limit: number, offset: number, defaultNamespace?: string): Promise<QueryResult> {
-  if (!isTauri()) return mockQueryResult()
+  if (!isTauri() && !isServer()) return mockQueryResult()
   const args: Record<string, unknown> = { connId, sql, limit, offset }
   if (defaultNamespace) args.defaultNamespace = defaultNamespace
-  return tauriInvoke<QueryResult>('db_query_page', args)
+  return rpc<QueryResult>('db_query_page', args)
 }
 
 /**
@@ -297,8 +292,8 @@ export async function queryPage(connId: string, sql: string, limit: number, offs
 export async function tablePreview(
   connId: string, schema: string | undefined, table: string, limit: number, offset: number,
 ): Promise<QueryResult> {
-  if (!isTauri()) return mockQueryResult()
-  return tauriInvoke<QueryResult>('db_table_preview', { connId, schema, table, limit, offset })
+  if (!isTauri() && !isServer()) return mockQueryResult()
+  return rpc<QueryResult>('db_table_preview', { connId, schema, table, limit, offset })
 }
 
 /**
@@ -312,8 +307,8 @@ export async function tableQuery(
   whereClause: string | undefined, orderBy: string | undefined,
   limit: number, offset: number,
 ): Promise<QueryResult> {
-  if (!isTauri()) return mockQueryResult()
-  return tauriInvoke<QueryResult>('db_table_query', {
+  if (!isTauri() && !isServer()) return mockQueryResult()
+  return rpc<QueryResult>('db_table_query', {
     connId, schema, table, whereClause, orderBy, limit, offset,
   })
 }
@@ -324,8 +319,8 @@ export async function tableQuery(
  * No-op outside Tauri — the caller keeps the Blob-download fallback for the demo.
  */
 export async function exportFile(path: string, contents: string): Promise<void> {
-  if (!isTauri()) return
-  return tauriInvoke('export_file', { path, contents })
+  if (!isTauri() && !isServer()) return
+  return rpc('export_file', { path, contents })
 }
 
 /**
@@ -335,8 +330,8 @@ export async function exportFile(path: string, contents: string): Promise<void> 
 export async function exportXlsx(args: {
   columns: string[]; rows: unknown[][]; sheetName?: string; path: string
 }): Promise<void> {
-  if (!isTauri()) throw new Error('exportXlsx requires the Tauri runtime')
-  return tauriInvoke('db_export_xlsx', {
+  if (!isTauri() && !isServer()) throw new Error('exportXlsx requires the Tauri runtime')
+  return rpc('db_export_xlsx', {
     columns: args.columns, rows: args.rows, sheetName: args.sheetName, path: args.path,
   })
 }
@@ -351,8 +346,8 @@ export async function exportDatabaseSql(args: {
   tableDdls: Record<string, string>; includeStructure: boolean; includeData: boolean;
   batchSize?: number; rowLimit?: number;
 }): Promise<string> {
-  if (!isTauri()) throw new Error('exportDatabaseSql requires the Tauri runtime')
-  return tauriInvoke<string>('db_export_database', args)
+  if (!isTauri() && !isServer()) throw new Error('exportDatabaseSql requires the Tauri runtime')
+  return rpc<string>('db_export_database', args)
 }
 
 // ---- 表数据导入（CSV/TSV/JSON → 批量 INSERT）----
@@ -375,8 +370,8 @@ export interface ImportSummary { rowsImported: number; totalRows: number }
 
 /** 读取并预览导入文件（解析在后端 table_import，纯函数已单测）。 */
 export async function importPreview(filePath: string): Promise<ImportPreview> {
-  if (!isTauri()) throw new Error('importPreview requires the Tauri runtime')
-  return tauriInvoke<ImportPreview>('db_import_preview', { filePath })
+  if (!isTauri() && !isServer()) throw new Error('importPreview requires the Tauri runtime')
+  return rpc<ImportPreview>('db_import_preview', { filePath })
 }
 
 /** 按列映射把文件导入目标表。mode: 'append' | 'truncate'。 */
@@ -384,8 +379,8 @@ export async function importTable(args: {
   connId: string; schema?: string; table: string; filePath: string;
   mappings: ImportColumnMapping[]; mode: 'append' | 'truncate'; batchSize?: number;
 }): Promise<ImportSummary> {
-  if (!isTauri()) throw new Error('importTable requires the Tauri runtime')
-  return tauriInvoke<ImportSummary>('db_import_table', args)
+  if (!isTauri() && !isServer()) throw new Error('importTable requires the Tauri runtime')
+  return rpc<ImportSummary>('db_import_table', args)
 }
 
 // ---- 跨库/跨表数据迁移（源表 → 列映射 → 按模式写目标表）----
@@ -410,8 +405,8 @@ export async function transferTable(args: {
   /** Overwrite（破坏性，会清空目标表）须显式确认后置 true，否则后端拒绝执行。 */
   allowDestructive?: boolean
 }): Promise<TransferSummary> {
-  if (!isTauri()) throw new Error('transferTable requires the Tauri runtime')
-  return tauriInvoke<TransferSummary>('db_transfer_table', args)
+  if (!isTauri() && !isServer()) throw new Error('transferTable requires the Tauri runtime')
+  return rpc<TransferSummary>('db_transfer_table', args)
 }
 
 // ---- SQL 文件批量执行（选文件 → 后端按方言切分 → 逐句执行 + 进度/错误恢复 + 取消）----
@@ -423,8 +418,8 @@ export interface SqlFilePreview { fileName: string; sizeBytes: number; statement
 
 /** 读 SQL 文件并按目标连接方言切分，返回预览（文件名/大小/语句数）。 */
 export async function sqlFilePreview(connId: string, filePath: string): Promise<SqlFilePreview> {
-  if (!isTauri()) throw new Error('sqlFilePreview requires the Tauri runtime')
-  return tauriInvoke<SqlFilePreview>('db_sql_file_preview', { connId, filePath })
+  if (!isTauri() && !isServer()) throw new Error('sqlFilePreview requires the Tauri runtime')
+  return rpc<SqlFilePreview>('db_sql_file_preview', { connId, filePath })
 }
 
 /**
@@ -434,16 +429,20 @@ export async function sqlFilePreview(connId: string, filePath: string): Promise<
 export async function runSqlFile(args: {
   executionId: string; connId: string; filePath: string; continueOnError: boolean
 }): Promise<void> {
-  if (!isTauri()) throw new Error('runSqlFile requires the Tauri runtime')
-  return tauriInvoke<void>('db_run_sql_file', { req: args })
+  if (!isTauri() && !isServer()) throw new Error('runSqlFile requires the Tauri runtime')
+  return rpc<void>('db_run_sql_file', { req: args })
 }
 
 /** 取消正在执行的 SQL 文件批量任务。 */
 export async function cancelSqlFile(executionId: string): Promise<void> {
-  return tauriInvoke<void>('db_cancel_sql_file', { executionId })
+  return rpc<void>('db_cancel_sql_file', { executionId })
 }
 
-/** 监听 SQL 文件执行进度事件（返回 unlisten；非 Tauri 下 no-op）。 */
+/**
+ * 监听 SQL 文件执行进度事件（返回 unlisten；非 Tauri 下 no-op）。
+ * 仍走 Tauri `listen`：SQL 文件批量执行是 server head 暂未暴露的命令，其事件流将随
+ * M3 的 `subscribe()`/WebSocket 一并迁移，故此处保持 server 模式下 no-op（仅 isTauri 放行）。
+ */
 export async function onSqlFileProgress(cb: (p: SqlFileProgress) => void): Promise<() => void> {
   if (!isTauri()) return () => { /* no-op outside Tauri */ }
   const { listen } = await import('@tauri-apps/api/event')
@@ -454,11 +453,11 @@ export async function onSqlFileProgress(cb: (p: SqlFileProgress) => void): Promi
 
 /** Execution history for a connection (most-recent first). Falls back to mock outside Tauri. */
 export async function getHistory(connId: string): Promise<HistoryItem[]> {
-  if (!isTauri()) return DATA.history
+  if (!isTauri() && !isServer()) return DATA.history
   // The backend stores `when` as unix-epoch seconds (a string). Convert it to a
   // sortable `ts` and a readable time-of-day so DB rows interleave with the SSH
   // command history in the unified panel.
-  const raw = await tauriInvoke<HistoryItem[]>('db_history', { connId })
+  const raw = await rpc<HistoryItem[]>('db_history', { connId })
   return raw.map(h => {
     const secs = Number(h.when)
     return Number.isFinite(secs) && secs > 0
@@ -469,40 +468,40 @@ export async function getHistory(connId: string): Promise<HistoryItem[]> {
 
 /** Clear the persisted DB query history. No-op outside Tauri. */
 export async function clearDbHistory(): Promise<void> {
-  if (!isTauri()) return
-  return tauriInvoke('db_clear_history')
+  if (!isTauri() && !isServer()) return
+  return rpc('db_clear_history')
 }
 
 /** Delete a single persisted DB history entry by id. No-op outside Tauri. */
 export async function deleteDbHistory(id: string): Promise<void> {
-  if (!isTauri()) return
-  return tauriInvoke('db_delete_history', { id })
+  if (!isTauri() && !isServer()) return
+  return rpc('db_delete_history', { id })
 }
 
 /** Delete all persisted DB history for a saved profile (on profile delete). No-op outside Tauri. */
 export async function deleteDbHistoryForProfile(profileId: string): Promise<void> {
-  if (!isTauri()) return
-  return tauriInvoke('db_delete_history_for_profile', { profileId })
+  if (!isTauri() && !isServer()) return
+  return rpc('db_delete_history_for_profile', { profileId })
 }
 
 /** Saved SQL snippets. Falls back to mock outside Tauri. */
 export async function getSnippets(): Promise<Snippet[]> {
-  if (!isTauri()) return DATA.snippets
-  return tauriInvoke<Snippet[]>('db_snippets')
+  if (!isTauri() && !isServer()) return DATA.snippets
+  return rpc<Snippet[]>('db_snippets')
 }
 
 /** Persist a snippet (append, or update by id). No-op outside Tauri. */
 export async function saveSnippet(snippet: Snippet): Promise<void> {
-  if (!isTauri()) return
-  return tauriInvoke('db_save_snippet', { snippet })
+  if (!isTauri() && !isServer()) return
+  return rpc('db_save_snippet', { snippet })
 }
 
 // ---- Schema introspection ----
 
 export async function getSchema(connId: string): Promise<Schema> {
-  if (!isTauri()) return DATA.schema
+  if (!isTauri() && !isServer()) return DATA.schema
   // Backend returns [schemaName, tables][] — adapt to frontend Schema shape
-  const raw = await tauriInvoke<Array<[string, Array<{ name: string; kind: string }>]>>('db_schema', { connId })
+  const raw = await rpc<Array<[string, Array<{ name: string; kind: string }>]>>('db_schema', { connId })
   const schemas = raw.map(([name, tables]) => ({
     name,
     open: false,
@@ -525,13 +524,13 @@ export async function getSchema(connId: string): Promise<Schema> {
  * so the demo stays pixel-identical.
  */
 export async function tableStructure(connId: string, schema: string, table: string): Promise<TableStructure> {
-  if (!isTauri()) return DATA.tableStructures[table] ?? DATA.tableStructures['orders']
+  if (!isTauri() && !isServer()) return DATA.tableStructures[table] ?? DATA.tableStructures['orders']
   // The Rust db_table_structure returns a slightly different shape (typeName, index
   // `columns`, fk `column`/`references`) — map it onto the frontend TableStructure
   // so StructureView renders the real data. The backend now carries column- and
   // table-level `comment` (empty for engines without native comments); thread it
   // through so the 备注 column and table comment actually show real values.
-  const raw = await tauriInvoke<{
+  const raw = await rpc<{
     comment?: string
     columns: { name: string; typeName: string; nullable: boolean; default: string | null; key: string; comment?: string }[]
     indexes: { name: string; columns: string; unique: boolean; method: string }[]
@@ -559,8 +558,8 @@ export async function tableStructure(connId: string, schema: string, table: stri
  * (the mock path derives columns from DATA.tableStructures instead).
  */
 export async function schemaColumns(connId: string, schema: string): Promise<[string, string[]][]> {
-  if (!isTauri()) return []
-  return tauriInvoke<[string, string[]][]>('db_schema_columns', { connId, schema })
+  if (!isTauri() && !isServer()) return []
+  return rpc<[string, string[]][]>('db_schema_columns', { connId, schema })
 }
 
 /**
@@ -568,8 +567,8 @@ export async function schemaColumns(connId: string, schema: string): Promise<[st
  * browser's "Functions" section. Outside Tauri returns `[]`.
  */
 export async function schemaFunctions(connId: string, schema: string): Promise<string[]> {
-  if (!isTauri()) return []
-  return tauriInvoke<string[]>('db_schema_functions', { connId, schema })
+  if (!isTauri() && !isServer()) return []
+  return rpc<string[]>('db_schema_functions', { connId, schema })
 }
 
 /** One key-type bucket in a Redis keyspace overview (mirrors Rust KeyspaceType). */
@@ -583,8 +582,8 @@ export interface KeyspaceInfo { totalKeys: number; sampled: number; types: Keysp
  * Tauri returns an empty overview.
  */
 export async function keyspaceInfo(connId: string, schema: string): Promise<KeyspaceInfo> {
-  if (!isTauri()) return { totalKeys: 0, sampled: 0, types: [] }
-  return tauriInvoke<KeyspaceInfo>('db_keyspace_info', { connId, schema })
+  if (!isTauri() && !isServer()) return { totalKeys: 0, sampled: 0, types: [] }
+  return rpc<KeyspaceInfo>('db_keyspace_info', { connId, schema })
 }
 
 /**
@@ -595,8 +594,8 @@ export async function keyspaceInfo(connId: string, schema: string): Promise<Keys
  * 抛错——编辑需要真实连接。
  */
 export async function redisEdit(connId: string, edit: RedisEdit, confirm = false): Promise<number> {
-  if (!isTauri()) throw new Error('Redis 编辑仅在桌面应用内可用')
-  return tauriInvoke<number>('db_redis_edit', { connId, edit, confirm })
+  if (!isTauri() && !isServer()) throw new Error('Redis 编辑仅在桌面应用内可用')
+  return rpc<number>('db_redis_edit', { connId, edit, confirm })
 }
 
 /**
@@ -605,8 +604,8 @@ export async function redisEdit(connId: string, edit: RedisEdit, confirm = false
  * (the viewer shows a "no definition" state on the mock/demo path).
  */
 export async function objectSource(connId: string, schema: string, name: string, kind: 'view' | 'function' | 'procedure'): Promise<string> {
-  if (!isTauri()) return ''
-  return tauriInvoke<string>('db_object_source', { connId, schema, name, kind })
+  if (!isTauri() && !isServer()) return ''
+  return rpc<string>('db_object_source', { connId, schema, name, kind })
 }
 
 /**
@@ -616,8 +615,8 @@ export async function objectSource(connId: string, schema: string, name: string,
  * most DDL). Throws outside Tauri (save needs a live connection).
  */
 export async function saveObjectSource(connId: string, schema: string, name: string, kind: 'view' | 'function' | 'procedure', source: string): Promise<number> {
-  if (!isTauri()) throw new Error('保存对象源码需要 Tauri 运行时')
-  return tauriInvoke<number>('db_save_object_source', { connId, schema, name, kind, source })
+  if (!isTauri() && !isServer()) throw new Error('保存对象源码需要 Tauri 运行时')
+  return rpc<number>('db_save_object_source', { connId, schema, name, kind, source })
 }
 
 /**
@@ -627,6 +626,6 @@ export async function saveObjectSource(connId: string, schema: string, name: str
  * pixel-identical.
  */
 export async function erRelations(connId: string, schema: string): Promise<ErRelation[]> {
-  if (!isTauri()) return DATA.erModel.relations
-  return tauriInvoke<ErRelation[]>('db_er_model', { connId, schema })
+  if (!isTauri() && !isServer()) return DATA.erModel.relations
+  return rpc<ErRelation[]>('db_er_model', { connId, schema })
 }

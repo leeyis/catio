@@ -264,7 +264,9 @@ pub async fn db_er_model(conn_id: String, schema: String,
 }
 
 /// Translate an EditRequest into a SQL string, with guards against degenerate inputs.
-fn build_sql(db: crate::db::DatabaseType, req: &EditRequest) -> Result<String, DbError> {
+/// `pub(crate)` so the web-server head (`server.rs`) reuses the identical preview/apply
+/// gating instead of duplicating it.
+pub(crate) fn build_sql(db: crate::db::DatabaseType, req: &EditRequest) -> Result<String, DbError> {
     let cells: Vec<CellEdit> = req.cells.iter()
         .map(|(c, v)| CellEdit { column: c.clone(), new_value: v.clone() }).collect();
     Ok(match req.kind.as_str() {
@@ -351,7 +353,7 @@ pub async fn db_exec_batch(conn_id: String, statements: Vec<String>,
 /// 危险操作的统一前置：取连接、确认可写引擎。对象管理（DROP/RENAME/TRUNCATE/复制
 /// 表结构）都要改写数据库结构，只读引擎一律拒绝；具体引擎的能力差异由 db_admin_sql
 /// 的纯函数兜底（返回 Unsupported）。
-async fn writable_drv(conn_id: &str, mgr: &ConnManager)
+pub(crate) async fn writable_drv(conn_id: &str, mgr: &ConnManager)
     -> Result<std::sync::Arc<dyn driver::Driver>, DbError> {
     let drv = mgr.get(conn_id).await.ok_or_else(|| DbError::NotFound(conn_id.to_string()))?;
     if !drv.capabilities().writable {
@@ -367,7 +369,7 @@ async fn writable_drv(conn_id: &str, mgr: &ConnManager)
 /// 加 IF EXISTS。删除/重试或竞态下目标已不存在时，后端会抛出裸的「does not exist」类
 /// DB 错误，前端无法与真实失败区分。这里在命令层把这类错误吞掉、当作幂等成功返回，
 /// 真实失败（权限/语法/连接等）仍照常上抛。
-fn drop_or_absent(result: Result<QueryResult, DbError>) -> Result<u64, DbError> {
+pub(crate) fn drop_or_absent(result: Result<QueryResult, DbError>) -> Result<u64, DbError> {
     match result {
         Ok(r) => Ok(r.rows_affected.unwrap_or(0)),
         Err(DbError::QueryFailed(msg)) if is_object_absent_error(&msg) => Ok(0),
@@ -590,7 +592,7 @@ fn resolve_schema_qualifier(schema: &str) -> Option<&str> {
 /// schemas=false(MySQL 库即 schema、无独立命名空间),导致用户选中的非默认库被丢弃,
 /// `qualified_table` 生成裸表名 → 落连接默认库报「默认库.表 不存在」。正确语义与
 /// `MysqlDriver::table_data` / 整库导出一致:只要选了非空 schema 就限定,空才回落默认库。
-fn table_query_should_qualify(schema: Option<&str>) -> bool {
+pub(crate) fn table_query_should_qualify(schema: Option<&str>) -> bool {
     schema.is_some_and(|s| !s.trim().is_empty())
 }
 
