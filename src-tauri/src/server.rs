@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::{
     extract::{Json, State},
@@ -62,9 +62,20 @@ pub struct AppState {
     pub history_lock: Arc<std::sync::Mutex<()>>,
     /// User store (argon2-hashed accounts) backing M2 access control.
     pub auth: Arc<AuthDb>,
-    /// In-memory session token → user. A restart logs everyone out (acceptable Phase 1).
-    pub sessions: Arc<std::sync::Mutex<HashMap<String, User>>>,
+    /// In-memory session token → (user, expiry). A restart logs everyone out (acceptable Phase
+    /// 1). Expired entries are pruned on lookup and on every login, bounding growth and stopping
+    /// a leaked-but-expired token from being replayed until process restart.
+    pub sessions: Arc<std::sync::Mutex<HashMap<String, Session>>>,
 }
+
+/// A live session: which user, and when it stops being valid (server-side enforced TTL).
+pub struct Session {
+    pub user: User,
+    pub expires_at: Instant,
+}
+
+/// Session lifetime — mirrors the cookie `Max-Age` (7 days).
+const SESSION_TTL: Duration = Duration::from_secs(604_800);
 
 impl AppState {
     /// Construct with a fresh ConnManager + locks, opening the auth DB under `data_dir`.
@@ -130,7 +141,7 @@ struct InvokeReq {
 
 async fn invoke(State(st): State<AppState>, headers: HeaderMap, Json(req): Json<InvokeReq>) -> Response {
     let token = session_token(&headers);
-    let user = token.as_ref().and_then(|t| st.sessions.lock().unwrap().get(t).cloned());
+    let user = token.as_ref().and_then(|t| resolve_session(&st, t));
 
     // Public / cookie-managing auth commands — reachable WITHOUT a session.
     match req.cmd.as_str() {
@@ -174,12 +185,50 @@ fn session_token(headers: &HeaderMap) -> Option<String> {
     })
 }
 
-/// Build a JSON `{ user }` response that also (re)sets the session cookie. HttpOnly keeps it out
-/// of JS; SameSite=Strict blocks cross-site sends (defense-in-depth atop the same-origin setup).
+/// Resolve a token to its user, enforcing the server-side TTL: an expired entry is pruned and
+/// treated as logged-out (so a leaked-but-stale token stops working without a restart).
+fn resolve_session(st: &AppState, token: &str) -> Option<User> {
+    let mut map = st.sessions.lock().unwrap();
+    match map.get(token) {
+        Some(s) if s.expires_at > Instant::now() => Some(s.user.clone()),
+        Some(_) => { map.remove(token); None }
+        None => None,
+    }
+}
+
+/// Mint a session for `user`, opportunistically pruning expired entries so the map can't grow
+/// without bound across repeated logins. Returns the new token.
+fn create_session(st: &AppState, user: User) -> String {
+    let token = new_session_token();
+    let now = Instant::now();
+    let mut map = st.sessions.lock().unwrap();
+    map.retain(|_, s| s.expires_at > now);
+    map.insert(token.clone(), Session { user, expires_at: now + SESSION_TTL });
+    token
+}
+
+/// Invalidate every session belonging to `user_id` — used when a user is deleted so their live
+/// cookie stops working immediately (the session cached a clone of the user, incl. is_admin).
+fn purge_user_sessions(st: &AppState, user_id: i64) {
+    st.sessions.lock().unwrap().retain(|_, s| s.user.id != user_id);
+}
+
+/// Build the session cookie. `Secure` is added when CATIO_COOKIE_SECURE is truthy — set it when a
+/// reverse proxy terminates TLS, but leave it off for a bare-HTTP LAN where the browser would
+/// otherwise refuse to send the cookie.
+fn session_cookie(token: &str, max_age: u32) -> String {
+    let secure = std::env::var("CATIO_COOKIE_SECURE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let mut c = format!("catio_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={max_age}");
+    if secure { c.push_str("; Secure"); }
+    c
+}
+
+/// JSON `{ user }` response that (re)sets the session cookie.
 fn login_response(user: &User, token: &str) -> Response {
     let mut resp = Json(json!({ "user": user })).into_response();
-    let cookie = format!("catio_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=604800");
-    if let Ok(v) = HeaderValue::from_str(&cookie) {
+    if let Ok(v) = HeaderValue::from_str(&session_cookie(token, 604_800)) {
         resp.headers_mut().insert(header::SET_COOKIE, v);
     }
     resp
@@ -190,8 +239,7 @@ async fn auth_login(st: &AppState, args: &Value) -> Response {
     let password = args.get("password").and_then(Value::as_str).unwrap_or("");
     match st.auth.verify_login(username, password) {
         Ok(user) => {
-            let token = new_session_token();
-            st.sessions.lock().unwrap().insert(token.clone(), user.clone());
+            let token = create_session(st, user.clone());
             login_response(&user, &token)
         }
         Err(e) => (StatusCode::UNAUTHORIZED, Json(json!({ "error": e }))).into_response(),
@@ -203,29 +251,22 @@ fn auth_logout(st: &AppState, token: Option<String>) -> Response {
         st.sessions.lock().unwrap().remove(&t);
     }
     let mut resp = Json(json!({ "ok": true })).into_response();
-    if let Ok(v) = HeaderValue::from_str("catio_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0") {
+    if let Ok(v) = HeaderValue::from_str(&session_cookie("", 0)) {
         resp.headers_mut().insert(header::SET_COOKIE, v);
     }
     resp
 }
 
-/// First-run: create the initial admin from the browser when no users exist yet, then auto-login.
+/// First-run: atomically create the initial admin when no users exist, then auto-login.
 async fn auth_bootstrap(st: &AppState, args: &Value) -> Response {
-    match st.auth.user_count() {
-        Ok(0) => {
-            let username = args.get("username").and_then(Value::as_str).unwrap_or("");
-            let password = args.get("password").and_then(Value::as_str).unwrap_or("");
-            match st.auth.create_user(username, password, true) {
-                Ok(user) => {
-                    let token = new_session_token();
-                    st.sessions.lock().unwrap().insert(token.clone(), user.clone());
-                    login_response(&user, &token)
-                }
-                Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
-            }
+    let username = args.get("username").and_then(Value::as_str).unwrap_or("");
+    let password = args.get("password").and_then(Value::as_str).unwrap_or("");
+    match st.auth.bootstrap_admin(username, password) {
+        Ok(user) => {
+            let token = create_session(st, user.clone());
+            login_response(&user, &token)
         }
-        Ok(_) => (StatusCode::BAD_REQUEST, Json(json!({ "error": "已存在用户,无法重复初始化" }))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
     }
 }
 
@@ -247,7 +288,12 @@ fn user_delete(st: &AppState, args: &Value, actor: &User) -> Response {
         return (StatusCode::BAD_REQUEST, Json(json!({ "error": "`id` required" }))).into_response();
     };
     match st.auth.delete_user(id) {
-        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Ok(()) => {
+            // Invalidate the deleted user's live sessions so their cookie stops working now,
+            // not just on next restart (the session cached their User incl. is_admin).
+            purge_user_sessions(st, id);
+            Json(json!({ "ok": true })).into_response()
+        }
         Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
     }
 }

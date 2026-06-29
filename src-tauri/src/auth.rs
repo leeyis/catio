@@ -89,6 +89,35 @@ impl AuthDb {
         Ok(User { id: c.last_insert_rowid(), username: username.to_string(), is_admin, created_at: now })
     }
 
+    /// Atomically create the FIRST admin. Holds the connection lock across BOTH the count check
+    /// and the insert, so two concurrent first-run requests on a multi-threaded runtime cannot
+    /// both succeed (a `user_count()` then `create_user()` TOCTOU would let two admins through —
+    /// the UNIQUE(username) constraint only blocks identical names, not "two different admins").
+    pub fn bootstrap_admin(&self, username: &str, password: &str) -> Result<User, String> {
+        let username = username.trim();
+        if username.is_empty() {
+            return Err("用户名不能为空".into());
+        }
+        if password.len() < 6 {
+            return Err("口令至少 6 位".into());
+        }
+        // Hash before taking the lock (argon2 is deliberately slow); we don't want to serialize
+        // every concurrent attempt on the hash.
+        let hash = hash_password(password)?;
+        let now = now_secs();
+        let c = self.conn.lock().unwrap();
+        let count: i64 = c.query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+        if count != 0 {
+            return Err("已存在用户,无法重复初始化".into());
+        }
+        c.execute(
+            "INSERT INTO users (username, password_hash, is_admin, created_at) VALUES (?1, ?2, 1, ?3)",
+            rusqlite::params![username, hash, now],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(User { id: c.last_insert_rowid(), username: username.to_string(), is_admin: true, created_at: now })
+    }
+
     /// Verify username + password. Returns the user on success; a single generic error on any
     /// failure (no username/password oracle).
     pub fn verify_login(&self, username: &str, password: &str) -> Result<User, String> {
@@ -224,6 +253,16 @@ mod tests {
         db.delete_user(admin.id).unwrap();
         assert_eq!(db.list_users().unwrap().len(), 1);
         assert_eq!(db.list_users().unwrap()[0].id, admin2.id);
+    }
+
+    #[test]
+    fn bootstrap_admin_is_first_only() {
+        let db = AuthDb::open_in_memory().unwrap();
+        let a = db.bootstrap_admin("admin", "secret123").unwrap();
+        assert!(a.is_admin);
+        // A second bootstrap is refused once any user exists (atomic count-then-insert).
+        assert!(db.bootstrap_admin("admin2", "secret123").is_err());
+        assert_eq!(db.user_count().unwrap(), 1);
     }
 
     #[test]

@@ -122,3 +122,41 @@ async fn user_management_is_admin_gated() {
     let (_, body) = invoke(&admin, &base, "user_list", json!({})).await;
     assert_eq!(body.as_array().unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn concurrent_bootstrap_creates_exactly_one_admin() {
+    let base = start().await;
+    let cl1 = jar_client();
+    let cl2 = jar_client();
+    // Two first-run requests race with DIFFERENT usernames (UNIQUE(username) cannot save us).
+    let f1 = invoke(&cl1, &base, "auth_bootstrap", json!({ "username": "admin1", "password": "secret123" }));
+    let f2 = invoke(&cl2, &base, "auth_bootstrap", json!({ "username": "admin2", "password": "secret123" }));
+    let ((s1, _), (s2, _)) = tokio::join!(f1, f2);
+    // Exactly one wins; the other is rejected.
+    assert!((s1 == 200) ^ (s2 == 200), "exactly one bootstrap must succeed, got {s1}/{s2}");
+    // The winner sees exactly ONE user — no "double first admin".
+    let winner = if s1 == 200 { &cl1 } else { &cl2 };
+    let (_, body) = invoke(winner, &base, "user_list", json!({})).await;
+    assert_eq!(body.as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn deleting_a_user_invalidates_their_live_session() {
+    let base = start().await;
+    let admin = jar_client();
+    invoke(&admin, &base, "auth_bootstrap", json!({ "username": "admin", "password": "secret123" })).await;
+    let (_, body) = invoke(&admin, &base, "user_create",
+        json!({ "username": "bob", "password": "secret123", "isAdmin": false })).await;
+    let bob_id = body["id"].as_i64().expect("id");
+
+    // Bob logs in on his own client and can use a gated command.
+    let bob = jar_client();
+    invoke(&bob, &base, "auth_login", json!({ "username": "bob", "password": "secret123" })).await;
+    let (st, _) = invoke(&bob, &base, "user_list", json!({})).await;
+    assert_eq!(st, 200);
+
+    // Admin deletes Bob — his existing cookie must stop working immediately, not at restart.
+    invoke(&admin, &base, "user_delete", json!({ "id": bob_id })).await;
+    let (st, _) = invoke(&bob, &base, "user_list", json!({})).await;
+    assert_eq!(st, 401, "deleted user's session must be invalidated");
+}
