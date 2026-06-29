@@ -41,6 +41,7 @@ import {
 } from './state/dbConnections'
 import { sshConnect, sshDisconnect, sshTrustHost, isTauri, onHistory, sshSysinfo, sshDetectOs, importSshConfig, tunnelOpen, rdpLaunch } from './services/ssh'
 import { isServer } from './services/transport'
+import { useServerAuth } from './components/auth/ServerAuthGate'
 import { useTunnelConnections, saveTunnelConnection, removeTunnelConnection, generateTunnelId } from './state/tunnelConnections'
 import { useRdpConnections, saveRdpConnection, removeRdpConnection, generateRdpId } from './state/rdpConnections'
 import { useVncConnections, saveVncConnection, removeVncConnection, generateVncId } from './state/vncConnections'
@@ -73,6 +74,7 @@ import type { Attachment } from './components/panels/AIPanel'
 
 export default function App() {
   const D = useData()
+  const serverAuth = useServerAuth()
   const dbProfiles = useDbConnections()
   const tunnelProfiles = useTunnelConnections()
   const rdpProfiles = useRdpConnections()
@@ -368,12 +370,21 @@ export default function App() {
   }
 
   // ---- encrypted connection-secret cache (auth-gated) ----
-  // Recall a cached secret only when auth is on AND the vault is unlocked.
+  // Server mode: the vault auto-unlocks on login (keyed by the server user), so secrets are
+  // remembered + recalled without the desktop's manual enable-auth flow. Desktop: gated on the
+  // local auth/vault being on + unlocked.
   async function cachedSecret(profileId: string): Promise<string | null> {
+    if (isServer()) {
+      return serverAuth.user && isVaultUnlocked() ? recallSecret(serverAuth.user.username, profileId) : null
+    }
     if (!authEnabled || !sessionUser || sessionUser === '__open' || !isVaultUnlocked()) return null
     return recallSecret(sessionUser, profileId)
   }
   function rememberConnSecret(profileId: string, secret: string) {
+    if (isServer()) {
+      if (serverAuth.user && isVaultUnlocked() && secret) void rememberSecret(serverAuth.user.username, profileId, secret)
+      return
+    }
     if (authEnabled && sessionUser && sessionUser !== '__open' && isVaultUnlocked() && secret) {
       void rememberSecret(sessionUser, profileId, secret)
     }

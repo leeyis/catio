@@ -6,6 +6,7 @@ import { Btn, IconBtn, Segmented, Toggle, ConnGlyph } from '../atoms'
 import { useData } from '../../state/DataContext'
 import type { AuthMethod, SshConnectArgs, SshTestResult } from '../../services/ssh'
 import { sshTest, serialListPorts } from '../../services/ssh'
+import { isServer } from '../../services/transport'
 import { dbConnect, testConnection, dbErrMsg } from '../../services/db'
 import { enginesByGroup, findEngine, matchEngineId } from '../../services/dbEngines'
 import { jdbcDriverStatus, downloadJdbcDriver, openJdbcDriversDir, importJdbcDriver, JDBC_DOWNLOADABLE, type JdbcDriverStatus } from '../../services/jdbcDrivers'
@@ -135,12 +136,15 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onO
   const portRef = useRef<HTMLInputElement>(null)
   const serialPortRef = useRef<HTMLInputElement>(null)
   const userRef = useRef<HTMLInputElement>(null)
-  const PROTOS = [
+  const ALL_PROTOS = [
     { id: 'ssh', label: 'SSH' }, { id: 'mosh', label: 'Mosh' },
     { id: 'telnet', label: 'Telnet' }, { id: 'serial', label: 'Serial' },
     { id: 'vnc', label: 'VNC' }, { id: 'rdp', label: 'RDP' },
     { id: 'local', label: t('modals.protoLocal') },
   ]
+  // Browser deploy: RDP is disabled (no desktop to launch), and Serial / Local terminals are
+  // host-machine hardware/shells that don't translate to a remote server — hide them.
+  const PROTOS = isServer() ? ALL_PROTOS.filter(p => !['rdp', 'local', 'serial'].includes(p.id)) : ALL_PROTOS
   // Edit mode opens on the tab matching the profile kind; otherwise the sidebar tab.
   const [kind, setKind] = useState<string>(isEdit ? (editDb ? 'db' : 'host') : initialKind)
   // `engine` is a catalog id (e.g. "cockroachdb"), NOT a bare DbType — it resolves

@@ -17,6 +17,7 @@ import { mcpStart, mcpStop, mcpStatus } from '../../services/mcp'
 import type { McpInfo } from '../../services/mcp'
 import { exportConfig, importConfig } from '../../services/configSync'
 import { ServerAccountBlock } from '../auth/ServerAccountBlock'
+import { useServerAuth } from '../auth/ServerAuthGate'
 
 // ---- Prop types ----
 
@@ -746,8 +747,13 @@ function AboutSettings() {
 
 export function SettingsView({ theme, onTheme, onClose, authEnabled, users, currentUser, ownerUser, onEnableAuth, onDisableAuth, onLock, onRemoveUser, initialSection, onImportSshConfig }: SettingsViewProps) {
   const { t } = useTranslation()
+  const serverAuth = useServerAuth()
   // 'theme' is folded into 'appearance' — normalise any legacy section id.
   const [nav, setNav] = React.useState(initialSection === 'theme' ? 'appearance' : (initialSection || 'appearance'))
+  // Server mode: connection-defaults + MCP are admin-only (MCP is desktop-only regardless).
+  const navItems = SETTINGS_NAV.filter(n =>
+    !(serverAuth.enabled && !serverAuth.user?.isAdmin && (n.id === 'connections' || n.id === 'mcp')),
+  )
   return (
     <div className="body fade-in" style={{ flex: 1 }}>
       {/* left nav */}
@@ -757,7 +763,7 @@ export function SettingsView({ theme, onTheme, onClose, authEnabled, users, curr
           <IconBtn name="x" size={15} variant="bare" onClick={onClose} />
         </div>
         <div className="col" style={{ gap: 2 }}>
-          {SETTINGS_NAV.map(n => {
+          {navItems.map(n => {
             const active = nav === n.id
             return (
               <button key={n.id} onClick={() => setNav(n.id)}

@@ -8,6 +8,12 @@ import { PanelEmpty } from './PanelEmpty'
 import { monitorStart, monitorStop, listen } from '../../services/ssh'
 
 // Mirror the Tauri guard used in SftpPanel / TerminalPane.
+// Live monitor engages in the desktop app AND the browser deploy (server mode), where the
+// monitor:// stream rides the WebSocket.
+function isServerEnv(): boolean {
+  return typeof window !== 'undefined' && '__CATIO_SERVER__' in window &&
+    (window as unknown as Record<string, unknown>).__CATIO_SERVER__ === true
+}
 function isTauriEnv(): boolean {
   return (
     typeof window !== 'undefined' &&
@@ -182,7 +188,7 @@ export function MonitorPanel({ onClose, conn: _conn, sessionId }: MonitorPanelPr
   const [mon, setMon] = useState<Monitor>(EMPTY_MONITOR)
 
   useEffect(() => {
-    if (!sessionId || !isTauriEnv()) {
+    if (!sessionId || (!isTauriEnv() && !isServerEnv())) {
       setMon(EMPTY_MONITOR)
       return
     }
@@ -209,7 +215,7 @@ export function MonitorPanel({ onClose, conn: _conn, sessionId }: MonitorPanelPr
 
   // Refresh button: in live mode restart the polling interval; in demo mode no-op.
   function handleRefresh() {
-    if (sessionId && isTauriEnv()) {
+    if (sessionId && (isTauriEnv() || isServerEnv())) {
       monitorStart(sessionId, 2000).catch(() => {})
     }
   }

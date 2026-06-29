@@ -92,6 +92,34 @@ async fn login_wrong_password_401_correct_200_and_cookie_gates_access() {
 }
 
 #[tokio::test]
+async fn change_password_is_self_service_and_gated() {
+    let base = start().await;
+    let cl = jar_client();
+    invoke(&cl, &base, "auth_bootstrap", json!({ "username": "admin", "password": "secret123" })).await;
+
+    // Wrong old password → 400 (rejected).
+    let (st, _) = invoke(&cl, &base, "auth_change_password",
+        json!({ "oldPassword": "wrong", "newPassword": "newsecret" })).await;
+    assert_eq!(st, 400);
+
+    // Correct old password → 200; re-login with the new password works, old no longer does.
+    let (st, body) = invoke(&cl, &base, "auth_change_password",
+        json!({ "oldPassword": "secret123", "newPassword": "newsecret" })).await;
+    assert_eq!(st, 200, "{body}");
+    invoke(&cl, &base, "auth_logout", json!({})).await;
+    let (st, _) = invoke(&cl, &base, "auth_login", json!({ "username": "admin", "password": "secret123" })).await;
+    assert_eq!(st, 401);
+    let (st, body) = invoke(&cl, &base, "auth_login", json!({ "username": "admin", "password": "newsecret" })).await;
+    assert_eq!(st, 200, "{body}");
+
+    // Unauthenticated change is rejected at the gate (401).
+    let anon = jar_client();
+    let (st, _) = invoke(&anon, &base, "auth_change_password",
+        json!({ "oldPassword": "x", "newPassword": "yyyyyy" })).await;
+    assert_eq!(st, 401);
+}
+
+#[tokio::test]
 async fn user_management_is_admin_gated() {
     let base = start().await;
     let admin = jar_client();

@@ -1,20 +1,15 @@
 import type { DbType } from './db'
+import { rpc, isServer, subscribe, wsCmd } from './transport'
 
 // ---- Tauri guard（与 src/services/ssh.ts 对齐：守卫 + 动态 import）----
 const isTauri = (): boolean =>
   typeof window !== 'undefined' &&
   ('__TAURI_INTERNALS__' in window || '__TAURI__' in window)
 
-async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  const { invoke } = await import('@tauri-apps/api/core')
-  return invoke<T>(cmd, args)
-}
-
-// 返回 unlisten 回调；非 Tauri 下返回 no-op。
+// Event subscription routed through the transport: Tauri `listen` on desktop, the WebSocket
+// subscription in server mode (the scan runs on the server and streams scan:// topics), no-op in dev.
 async function tauriListen<T>(event: string, cb: (payload: T) => void): Promise<() => void> {
-  if (!isTauri()) return () => { /* no-op outside Tauri */ }
-  const { listen } = await import('@tauri-apps/api/event')
-  return listen<T>(event, e => cb(e.payload))
+  return subscribe(event, p => cb(p as T))
 }
 
 // ---- 类型契约 ----
@@ -90,15 +85,19 @@ export interface ScanLog {
 
 // ---- 命令 ----
 
-/** 启动扫描，返回 scanId。非 Tauri 环境抛错。 */
+/** 启动扫描，返回 scanId。Server 模式经 WS(扫描跑在服务器、scan:// 帧经 hub 推送);
+ *  桌面经 Tauri invoke;dev/test 抛错。 */
 export async function scanStart(args: ScanArgs): Promise<string> {
+  if (isServer()) return wsCmd<string>('scan_start', { args })
   if (!isTauri()) throw new Error('scanStart 仅在 Tauri 环境可用')
-  return tauriInvoke<string>('scan_start', { args })
+  return rpc<string>('scan_start', { args })
 }
 
 /** 取消指定扫描。 */
 export async function scanCancel(scanId: string): Promise<void> {
-  return tauriInvoke<void>('scan_cancel', { scanId })
+  if (isServer()) { await wsCmd('scan_cancel', { scanId }); return }
+  if (!isTauri()) return
+  await rpc('scan_cancel', { scanId })
 }
 
 // ---- 事件监听（返回 unlisten；非 Tauri 下 no-op）----

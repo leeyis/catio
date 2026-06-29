@@ -6,8 +6,9 @@ import React, { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn } from '../atoms'
-import { useServerAuth } from './ServerAuthGate'
-import { userList, userCreate, userDelete, type ServerUser } from '../../services/auth'
+import { useServerAuth, PW_KEY } from './ServerAuthGate'
+import { ensureServerVault } from '../../state/vault'
+import { userList, userCreate, userDelete, authChangePassword, type ServerUser } from '../../services/auth'
 
 export function ServerAccountBlock() {
   const { t } = useTranslation()
@@ -18,8 +19,30 @@ export function ServerAccountBlock() {
   const [np, setNp] = useState('')
   const [nAdmin, setNAdmin] = useState(false)
   const [busy, setBusy] = useState(false)
+  // Self-service password change (any role).
+  const [oldPw, setOldPw] = useState('')
+  const [newPw, setNewPw] = useState('')
+  const [pwMsg, setPwMsg] = useState('')
 
   const isAdmin = !!user?.isAdmin
+
+  async function changePw() {
+    setPwMsg('')
+    if (newPw.length < 6) { setPwMsg(t('serverAuth.errPassTooShort')); return }
+    setBusy(true)
+    try {
+      await authChangePassword(oldPw, newPw)
+      // Re-key the vault stash to the new password so a reload still unlocks (the old stashed
+      // password would no longer match the login). Secrets remembered under the old key become
+      // unrecallable and are re-prompted once — acceptable for a password change.
+      if (user) {
+        try { sessionStorage.setItem(PW_KEY, newPw) } catch { /* ignore */ }
+        await ensureServerVault(user.username, newPw)
+      }
+      setOldPw(''); setNewPw('')
+      setPwMsg(t('serverAuth.pwChanged'))
+    } catch (e) { setPwMsg(e instanceof Error ? e.message : String(e)) } finally { setBusy(false) }
+  }
 
   const reload = async () => {
     try { setUsers(await userList()) } catch (e) { setErr(e instanceof Error ? e.message : String(e)) }
@@ -63,6 +86,17 @@ export function ServerAccountBlock() {
           </div>
         </div>
         <Btn variant="secondary" size="sm" onClick={() => void logout()}>{t('serverAuth.logout')}</Btn>
+      </div>
+
+      {/* change own password (any role) */}
+      <div className="col" style={{ borderTop: '1px solid var(--border-hairline)', padding: '12px 16px', gap: 8 }}>
+        <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.3px', textTransform: 'uppercase', color: 'var(--text-faint)' }}>{t('serverAuth.changePassword')}</span>
+        <div className="row gap6" style={{ flexWrap: 'wrap', alignItems: 'center' }}>
+          <input type="password" value={oldPw} onChange={e => setOldPw(e.target.value)} placeholder={t('serverAuth.currentPassword')} style={{ ...field, flex: 1, minWidth: 130 }} />
+          <input type="password" value={newPw} onChange={e => setNewPw(e.target.value)} placeholder={t('serverAuth.newPassword')} style={{ ...field, flex: 1, minWidth: 130 }} />
+          <Btn variant="secondary" size="sm" disabled={busy} onClick={() => void changePw()}>{t('serverAuth.changePassword')}</Btn>
+        </div>
+        {pwMsg && <span style={{ fontSize: 11.5, color: 'var(--text-secondary)' }}>{pwMsg}</span>}
       </div>
 
       {/* admin: user management */}

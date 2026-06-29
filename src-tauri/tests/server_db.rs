@@ -245,3 +245,15 @@ async fn disconnect_then_query_is_error() {
     assert_eq!(st, 400);
     assert!(body["error"].is_string(), "{body}");
 }
+
+#[tokio::test]
+async fn export_xlsx_bytes_returns_a_zip_workbook() {
+    // Server mode builds the .xlsx server-side and returns base64 bytes for the browser to save.
+    let (cl, base) = authed().await;
+    let (st, body) = invoke(&cl, &base, "db_export_xlsx_bytes",
+        json!({ "columns": ["id", "name"], "rows": [[1, "alice"], [2, "bob"]], "sheetName": "t" })).await;
+    assert_eq!(st, 200, "{body}");
+    let b64 = body.as_str().expect("base64 string");
+    // .xlsx is a ZIP container → first bytes "PK\x03\x04" → base64 begins "UEsD".
+    assert!(b64.starts_with("UEsD"), "not a zip workbook: {}", &b64[..b64.len().min(12)]);
+}

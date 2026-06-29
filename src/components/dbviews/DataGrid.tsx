@@ -3,7 +3,8 @@ import { useState, useMemo, useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn, IconBtn } from '../atoms'
-import { previewDml, applyEdits, queryPage, tablePreview, tableQuery, exportFile, exportXlsx, dbErrMsg, type EditRequest } from '../../services/db'
+import { previewDml, applyEdits, queryPage, tablePreview, tableQuery, exportFile, exportXlsx, exportXlsxBytes, dbErrMsg, type EditRequest } from '../../services/db'
+import { isServer } from '../../services/transport'
 import type { ResultColumn } from '../../services/types'
 import { reduceCellSelection, reduceRowSelection, isCellInRange, normalizeRange, cellsInRange, type GridSelection } from './gridSelection'
 import { filterRows, filterModeNeedsValue, type FilterRule, type FilterMode } from './gridFilter'
@@ -536,6 +537,23 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
     setExportErr(null)
     // XLSX 是二进制:由后端构建字节并写盘,不把字节当字符串过 IPC。
     if (format === 'xlsx') {
+      // Server mode: build bytes server-side and download via the browser.
+      if (isServer()) {
+        try {
+          const displayRows = pageRows.map(({ row }) => row)
+          const bytes = await exportXlsxBytes({ columns: columns.map(c => c.name), rows: displayRows, sheetName: table })
+          const blob = new Blob([bytes.buffer as ArrayBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+          const url = URL.createObjectURL(blob)
+          const a = document.createElement('a')
+          a.href = url
+          a.download = `${table || 'export'}.xlsx`
+          a.click()
+          URL.revokeObjectURL(url)
+        } catch (e) {
+          setExportErr(t('dbviews.applyError', { message: dbErrMsg(e) }))
+        }
+        return
+      }
       if (!isTauri()) {
         setExportErr(t('dbviews.applyError', { message: 'XLSX export requires the desktop app' }))
         return

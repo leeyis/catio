@@ -8,13 +8,14 @@
 //!   `ChannelMsg::Eof | Close`（`ExitStatus` 可能早于末批 stdout 到达，不作结束信号）。
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 use std::time::Duration;
 
 use russh::client::Handle;
 use russh::ChannelMsg;
 use serde::Serialize;
-use tauri::Emitter;
 
+use crate::events::EventSink;
 use crate::ssh::conn::ClientHandler;
 use crate::ssh::manager::SessionManager;
 use crate::ssh::parse::{
@@ -251,6 +252,18 @@ pub async fn monitor_start(
     app: tauri::AppHandle,
     mgr: tauri::State<'_, SessionManager>,
 ) -> Result<(), SshError> {
+    monitor_start_core(session_id, interval_ms, Arc::new(crate::events::TauriSink(app)), &mgr).await
+}
+
+/// Transport-agnostic monitor loop — emits `monitor://{sessionId}` frames through an `EventSink`
+/// (Tauri bus on desktop, WebSocket hub on the web head). Shared so the sampling/window logic
+/// isn't duplicated.
+pub async fn monitor_start_core(
+    session_id: String,
+    interval_ms: u64,
+    sink: Arc<dyn EventSink>,
+    mgr: &SessionManager,
+) -> Result<(), SshError> {
     let sess = mgr
         .get(&session_id)
         .await
@@ -310,7 +323,7 @@ pub async fn monitor_start(
                 procs: snap.procs,
             };
 
-            let _ = app.emit(&evt, &monitor);
+            sink.emit(&evt, serde_json::to_value(&monitor).unwrap_or(serde_json::Value::Null));
         }
     });
 
@@ -342,6 +355,11 @@ pub async fn ssh_sysinfo(
     session_id: String,
     mgr: tauri::State<'_, SessionManager>,
 ) -> Result<String, SshError> {
+    ssh_sysinfo_core(session_id, &mgr).await
+}
+
+/// Transport-agnostic host summary — shared by the Tauri command and the web dispatch.
+pub async fn ssh_sysinfo_core(session_id: String, mgr: &SessionManager) -> Result<String, SshError> {
     let sess = mgr
         .get(&session_id)
         .await
@@ -388,6 +406,11 @@ pub async fn ssh_detect_os(
     session_id: String,
     mgr: tauri::State<'_, SessionManager>,
 ) -> Result<String, SshError> {
+    ssh_detect_os_core(session_id, &mgr).await
+}
+
+/// Transport-agnostic OS detection — shared by the Tauri command and the web dispatch.
+pub async fn ssh_detect_os_core(session_id: String, mgr: &SessionManager) -> Result<String, SshError> {
     let sess = mgr
         .get(&session_id)
         .await

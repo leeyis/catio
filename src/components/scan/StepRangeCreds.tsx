@@ -33,6 +33,24 @@ export function StepRangeCreds(props: StepRangeCredsProps) {
     try {
       const isTauri = typeof window !== 'undefined'
         && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window)
+      const isServer = typeof window !== 'undefined' && '__CATIO_SERVER__' in window
+        && (window as unknown as Record<string, unknown>).__CATIO_SERVER__ === true
+      // Server (browser) mode: read the picked files client-side via the File API (the dictionary
+      // is on the user's machine, not the server) and append the text to the existing dict.
+      if (isServer) {
+        const input = document.createElement('input')
+        input.type = 'file'
+        input.multiple = true
+        input.accept = '.txt,.lst,.dic,.csv'
+        input.onchange = async () => {
+          const files = input.files ? Array.from(input.files) : []
+          const texts = await Promise.all(files.map(f => f.text()))
+          const appended = texts.join('\n').trim()
+          if (appended) onDictTextChange(dictText ? `${dictText.replace(/\s*$/, '')}\n${appended}` : appended)
+        }
+        input.click()
+        return
+      }
       if (!isTauri) return
       const { open } = await import('@tauri-apps/plugin-dialog')
       const { invoke } = await import('@tauri-apps/api/core')

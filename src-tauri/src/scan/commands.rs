@@ -14,8 +14,9 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use russh::client::Handle;
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 use std::time::Duration;
+use crate::events::EventSink;
 use tokio::net::lookup_host;
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
@@ -232,22 +233,23 @@ impl Counters {
     }
 }
 
-fn emit_progress(app: &AppHandle, scan_id: &str, counters: &Counters) {
-    let _ = app.emit("scan://progress", counters.snapshot(scan_id));
+fn emit_progress(sink: &dyn EventSink, scan_id: &str, counters: &Counters) {
+    sink.emit("scan://progress", serde_json::to_value(counters.snapshot(scan_id)).unwrap_or(serde_json::Value::Null));
 }
 
-fn emit_found(app: &AppHandle, found: &ScanFound) {
-    let _ = app.emit("scan://found", found.clone());
+fn emit_found(sink: &dyn EventSink, found: &ScanFound) {
+    sink.emit("scan://found", serde_json::to_value(found.clone()).unwrap_or(serde_json::Value::Null));
 }
 
-fn emit_log(app: &AppHandle, scan_id: &str, level: &str, message: String) {
-    let _ = app.emit(
+fn emit_log(sink: &dyn EventSink, scan_id: &str, level: &str, message: String) {
+    sink.emit(
         "scan://log",
-        ScanLog {
+        serde_json::to_value(ScanLog {
             scan_id: scan_id.to_string(),
             level: level.to_string(),
             message,
-        },
+        })
+        .unwrap_or(serde_json::Value::Null),
     );
 }
 
@@ -308,6 +310,16 @@ pub async fn scan_start(
     app: AppHandle,
     state: tauri::State<'_, ScanState>,
 ) -> Result<String, ScanError> {
+    scan_start_core(args, Arc::new(crate::events::TauriSink(app)), state.inner().clone()).await
+}
+
+/// Transport-agnostic scan launch — streams `scan://*` events through an `EventSink` (Tauri bus
+/// on desktop, WebSocket hub on the web head, where the scan runs on the server's network).
+pub async fn scan_start_core(
+    args: ScanArgs,
+    sink: Arc<dyn EventSink>,
+    state: ScanState,
+) -> Result<String, ScanError> {
     if args.mode != "host" && args.mode != "db" {
         return Err(ScanError::BadArgs(format!("unknown mode: {}", args.mode)));
     }
@@ -318,11 +330,9 @@ pub async fn scan_start(
     let scan_id = format!("scan-{}", SCAN_SEQ.fetch_add(1, Ordering::Relaxed));
     let token = state.register(scan_id.clone()).await;
 
-    let state = state.inner().clone();
-    let app_bg = app.clone();
     let sid = scan_id.clone();
     tauri::async_runtime::spawn(async move {
-        run_scan(app_bg, sid.clone(), args, token).await;
+        run_scan(sink, sid.clone(), args, token).await;
         state.remove(&sid).await;
     });
 
@@ -349,7 +359,7 @@ pub async fn scan_read_text_file(path: String) -> Result<String, ScanError> {
 
 // ─── 扫描主流程 ─────────────────────────────────────────────────────────────────
 
-async fn run_scan(app: AppHandle, scan_id: String, args: ScanArgs, token: CancellationToken) {
+async fn run_scan(sink: Arc<dyn EventSink>, scan_id: String, args: ScanArgs, token: CancellationToken) {
     let (ips, dns_failed) = resolve_targets(&args.ranges).await;
 
     // host 模式：端口集来自 args.ports（空则不可扫——但前端会传默认端口）。
@@ -377,7 +387,7 @@ async fn run_scan(app: AppHandle, scan_id: String, args: ScanArgs, token: Cancel
     let engines = Arc::new(args.engines);
 
     emit_log(
-        &app,
+        sink.as_ref(),
         &scan_id,
         "info",
         format!(
@@ -395,7 +405,7 @@ async fn run_scan(app: AppHandle, scan_id: String, args: ScanArgs, token: Cancel
     );
     if creds.is_empty() && (is_db || keys.is_empty()) {
         emit_log(
-            &app,
+            sink.as_ref(),
             &scan_id,
             "warn",
             "未提供任何凭证/私钥：主机模式将无可登录结果，数据库模式仅识别（标记需要认证）".into(),
@@ -411,7 +421,7 @@ async fn run_scan(app: AppHandle, scan_id: String, args: ScanArgs, token: Cancel
         if is_db {
             for engine in engines.iter().cloned() {
                 let permit_sem = sem.clone();
-                let app = app.clone();
+                let sink = sink.clone();
                 let scan_id = scan_id.clone();
                 let counters = counters.clone();
                 let creds = creds.clone();
@@ -424,15 +434,15 @@ async fn run_scan(app: AppHandle, scan_id: String, args: ScanArgs, token: Cancel
                     if token.is_cancelled() {
                         return;
                     }
-                    scan_db_target(&app, &scan_id, ip, &engine, &creds, &counters).await;
+                    scan_db_target(sink.as_ref(), &scan_id, ip, &engine, &creds, &counters).await;
                     counters.scanned.fetch_add(1, Ordering::Relaxed);
-                    emit_progress(&app, &scan_id, &counters);
+                    emit_progress(sink.as_ref(), &scan_id, &counters);
                 }));
             }
         } else {
             for port in args.ports.iter().copied() {
                 let permit_sem = sem.clone();
-                let app = app.clone();
+                let sink = sink.clone();
                 let scan_id = scan_id.clone();
                 let counters = counters.clone();
                 let creds = creds.clone();
@@ -448,11 +458,11 @@ async fn run_scan(app: AppHandle, scan_id: String, args: ScanArgs, token: Cancel
                         return;
                     }
                     scan_host_target(
-                        &app, &scan_id, ip, port, &creds, &keys, &key_users, &counters,
+                        sink.as_ref(), &scan_id, ip, port, &creds, &keys, &key_users, &counters,
                     )
                     .await;
                     counters.scanned.fetch_add(1, Ordering::Relaxed);
-                    emit_progress(&app, &scan_id, &counters);
+                    emit_progress(sink.as_ref(), &scan_id, &counters);
                 }));
             }
         }
@@ -463,15 +473,15 @@ async fn run_scan(app: AppHandle, scan_id: String, args: ScanArgs, token: Cancel
     }
 
     // 收尾：补发一次终态进度 + done。
-    emit_progress(&app, &scan_id, &counters);
-    let _ = app.emit("scan://done", ScanDone { scan_id: scan_id.clone() });
+    emit_progress(sink.as_ref(), &scan_id, &counters);
+    sink.emit("scan://done", serde_json::to_value(ScanDone { scan_id: scan_id.clone() }).unwrap_or(serde_json::Value::Null));
 }
 
 // ─── host 目标 ───────────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
 async fn scan_host_target(
-    app: &AppHandle,
+    app: &dyn EventSink,
     scan_id: &str,
     ip: IpAddr,
     port: u16,
@@ -621,7 +631,7 @@ async fn scan_host_target(
 // ─── db 目标 ──────────────────────────────────────────────────────────────────
 
 async fn scan_db_target(
-    app: &AppHandle,
+    app: &dyn EventSink,
     scan_id: &str,
     ip: IpAddr,
     engine: &ProbeEngine,

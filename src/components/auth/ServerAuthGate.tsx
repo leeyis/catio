@@ -10,8 +10,22 @@ import React, { createContext, useContext, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { isServer } from '../../services/transport'
 import { authMe, authLogin, authBootstrap, authLogout, type ServerUser } from '../../services/auth'
+import { ensureServerVault, lockVault } from '../../state/vault'
+
 import { Icon } from '../Icon'
 import { BrandMark } from '../BrandMark'
+
+// Login password is kept in sessionStorage (per-tab, cleared on tab close / logout) so the vault
+// re-unlocks after a page reload while the session cookie is still valid. Trusted-LAN tradeoff.
+export const PW_KEY = 'catio-server-pw'
+
+/** Drop the stashed login password and lock the in-memory vault. Call on any path that ends the
+ *  authenticated session (logout, expiry, deletion, network error) so a stale credential can't
+ *  linger for the next person on this browser. */
+export function clearServerVaultCreds(): void {
+  try { sessionStorage.removeItem(PW_KEY) } catch { /* ignore */ }
+  lockVault()
+}
 
 interface ServerAuthCtx {
   /** Signed-in user, or null in desktop/dev (where there is no server auth). */
@@ -45,10 +59,21 @@ function ServerAuthGateImpl({ children }: { children: React.ReactNode }) {
   const refresh = async () => {
     try {
       const s = await authMe()
-      if (s.user) { setUser(s.user); setPhase('ready') }
-      else { setUser(null); setPhase(s.needsBootstrap ? 'bootstrap' : 'login') }
+      if (s.user) {
+        setUser(s.user)
+        setPhase('ready')
+        // Cookie-resumed session: re-unlock the vault from the stashed password so remembered
+        // connection secrets keep working after a reload.
+        const pw = sessionStorage.getItem(PW_KEY)
+        if (pw) await ensureServerVault(s.user.username, pw)
+      } else {
+        // Not logged in (expired/deleted/first-run): drop any stale stashed password + vault key.
+        clearServerVaultCreds()
+        setUser(null); setPhase(s.needsBootstrap ? 'bootstrap' : 'login')
+      }
     } catch {
-      // If auth_me itself fails (network), fall back to the login screen.
+      // If auth_me itself fails (network), fall back to the login screen and clear creds.
+      clearServerVaultCreds()
       setUser(null); setPhase('login')
     }
   }
@@ -56,7 +81,11 @@ function ServerAuthGateImpl({ children }: { children: React.ReactNode }) {
   useEffect(() => { void refresh() }, [])
 
   const logout = async () => {
-    try { await authLogout() } finally { setUser(null); setPhase('login') }
+    try { await authLogout() } finally {
+      clearServerVaultCreds()
+      setUser(null)
+      setPhase('login')
+    }
   }
 
   if (phase === 'ready' && user) {
@@ -103,6 +132,10 @@ function AuthForm({ mode, onDone }: { mode: 'login' | 'bootstrap'; onDone: () =>
     try {
       if (init) await authBootstrap(u.trim(), p)
       else await authLogin(u.trim(), p)
+      // Unlock the per-user secret vault from the login password + stash it (per-tab) so
+      // connection passwords are remembered without a separate enable-auth step.
+      sessionStorage.setItem(PW_KEY, p)
+      await ensureServerVault(u.trim(), p)
       await onDone()
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))

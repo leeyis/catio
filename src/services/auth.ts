@@ -55,3 +55,8 @@ export async function userCreate(username: string, password: string, isAdmin: bo
 export async function userDelete(id: number): Promise<void> {
   await rpc('user_delete', { id })
 }
+
+/** Change the CURRENT user's own password (any role). Verifies the old password server-side. */
+export async function authChangePassword(oldPassword: string, newPassword: string): Promise<void> {
+  await rpc('auth_change_password', { oldPassword, newPassword })
+}

@@ -339,6 +339,19 @@ export async function exportXlsx(args: {
 }
 
 /**
+ * Server mode: build the .xlsx server-side and return its bytes (base64-decoded) so the browser
+ * can save it via a Blob download — the desktop path writes to a server-side path, which is
+ * meaningless for a remote browser.
+ */
+export async function exportXlsxBytes(args: { columns: string[]; rows: unknown[][]; sheetName?: string }): Promise<Uint8Array> {
+  const b64 = await rpc<string>('db_export_xlsx_bytes', { columns: args.columns, rows: args.rows, sheetName: args.sheetName })
+  const bin = atob(b64)
+  const bytes = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+  return bytes
+}
+
+/**
  * Whole-database SQL export: DDL (supplied per table) + data INSERT batches.
  * The frontend gathers the per-table DDL (its structure-panel logic) and passes
  * it as `tableDdls`; the backend pages through rows and assembles the script.

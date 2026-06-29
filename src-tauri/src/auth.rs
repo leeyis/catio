@@ -143,6 +143,24 @@ impl AuthDb {
         Ok(User { id, username: uname, is_admin: is_admin != 0, created_at })
     }
 
+    /// Change a user's own password: verify the old password, then store a new argon2 hash.
+    pub fn change_password(&self, user_id: i64, old_password: &str, new_password: &str) -> Result<(), String> {
+        if new_password.len() < 6 {
+            return Err("口令至少 6 位".into());
+        }
+        let new_hash = hash_password(new_password)?;
+        let c = self.conn.lock().unwrap();
+        let hash: Option<String> = c
+            .query_row("SELECT password_hash FROM users WHERE id = ?1", rusqlite::params![user_id], |r| r.get(0))
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let hash = hash.ok_or("用户不存在")?;
+        verify_password(old_password, &hash).map_err(|_| "当前密码错误".to_string())?;
+        c.execute("UPDATE users SET password_hash = ?1 WHERE id = ?2", rusqlite::params![new_hash, user_id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     pub fn list_users(&self) -> Result<Vec<User>, String> {
         let c = self.conn.lock().unwrap();
         let mut stmt = c
@@ -263,6 +281,20 @@ mod tests {
         // A second bootstrap is refused once any user exists (atomic count-then-insert).
         assert!(db.bootstrap_admin("admin2", "secret123").is_err());
         assert_eq!(db.user_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn change_password_verifies_old_then_updates() {
+        let db = AuthDb::open_in_memory().unwrap();
+        let u = db.create_user("bob", "secret123", false).unwrap();
+        // Wrong old password is rejected.
+        assert!(db.change_password(u.id, "wrong", "newsecret").is_err());
+        // Correct old password updates; new password now logs in, old no longer does.
+        db.change_password(u.id, "secret123", "newsecret").unwrap();
+        assert!(db.verify_login("bob", "newsecret").is_ok());
+        assert!(db.verify_login("bob", "secret123").is_err());
+        // New password must meet the length rule.
+        assert!(db.change_password(u.id, "newsecret", "123").is_err());
     }
 
     #[test]

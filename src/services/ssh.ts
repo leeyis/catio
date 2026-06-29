@@ -387,10 +387,13 @@ export async function getMonitor(sessionId?: string): Promise<Monitor> {
 }
 
 export async function monitorStart(sessionId: string, intervalMs = 2000): Promise<void> {
+  // Server mode: drive over the WS so monitor://{sessionId} frames stream through the hub.
+  if (isServer()) { await wsCmd('monitor_start', { sessionId, intervalMs }); return }
   return tauriInvoke('monitor_start', { sessionId, intervalMs })
 }
 
 export async function monitorStop(sessionId: string): Promise<void> {
+  if (isServer()) { await wsCmd('monitor_stop', { sessionId }); return }
   return tauriInvoke('monitor_stop', { sessionId })
 }
 
@@ -401,15 +404,15 @@ export async function multiexecRun(sessionIds: string[], cmd: string): Promise<s
 /** Gather a compact host summary (OS/time/CPU/mem/disk/GPU) via SSH.
  *  Returns an empty string outside Tauri (no SSH stack available). */
 export async function sshSysinfo(sessionId: string): Promise<string> {
-  if (!isTauri()) return ''
-  return tauriInvoke<string>('ssh_sysinfo', { sessionId })
+  if (!isTauri() && !isServer()) return ''
+  return rpc<string>('ssh_sysinfo', { sessionId })
 }
 
 /** Detect the remote OS id (ubuntu/debian/alpine/centos/fedora/arch/rhel/macos/linux)
- *  so the sidebar glyph can show the real OS logo. Empty string outside Tauri. */
+ *  so the sidebar glyph can show the real OS logo. Empty string outside Tauri/server. */
 export async function sshDetectOs(sessionId: string): Promise<string> {
-  if (!isTauri()) return ''
-  return tauriInvoke<string>('ssh_detect_os', { sessionId })
+  if (!isTauri() && !isServer()) return ''
+  return rpc<string>('ssh_detect_os', { sessionId })
 }
 
 export async function getTermBuffer(_id: string): Promise<TermLine[]> {

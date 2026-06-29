@@ -901,7 +901,11 @@
     "isAdmin": "Admin",
     "delete": "Delete",
     "createUserTitle": "Create new user",
-    "confirmDeleteUser": "Delete this user?"
+    "confirmDeleteUser": "Delete this user?",
+    "changePassword": "Change password",
+    "currentPassword": "Current password",
+    "newPassword": "New password",
+    "pwChanged": "Password changed"
   },
   "auth": {
     "initTitle": "Initialize workspace",

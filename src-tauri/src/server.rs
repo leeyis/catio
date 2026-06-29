@@ -81,6 +81,9 @@ pub struct AppState {
     pub ws: Arc<WsHub>,
     /// Shared VNC session manager (M5). Like `ssh`, one workspace for now.
     pub vnc: Arc<VncManager>,
+    /// Network-scan cancellation registry — the scan runs on the server's network and streams
+    /// `scan://*` events through the WS hub (already Arc-backed internally, so a cheap clone).
+    pub scan: crate::scan::ScanState,
 }
 
 /// A live session: which user, and when it stops being valid (server-side enforced TTL).
@@ -107,6 +110,7 @@ impl AppState {
             ssh: Arc::new(SessionManager::default()),
             ws: Arc::new(WsHub::default()),
             vnc: Arc::new(VncManager::default()),
+            scan: crate::scan::ScanState::default(),
         })
     }
 }
@@ -192,11 +196,20 @@ async fn invoke(State(st): State<AppState>, headers: HeaderMap, Json(req): Json<
         return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "未登录" }))).into_response();
     };
 
-    // User administration. Listing is allowed for any logged-in user; mutations are admin-only.
+    // User administration. Listing is allowed for any logged-in user; mutations are admin-only;
+    // changing your OWN password is self-service (any role).
     match req.cmd.as_str() {
         "user_list" => return json_or_err(st.auth.list_users()),
         "user_create" => return user_create(&st, &req.args, &user),
         "user_delete" => return user_delete(&st, &req.args, &user),
+        "auth_change_password" => {
+            let old = req.args.get("oldPassword").and_then(Value::as_str).unwrap_or("");
+            let new = req.args.get("newPassword").and_then(Value::as_str).unwrap_or("");
+            return match st.auth.change_password(user.id, old, new) {
+                Ok(()) => Json(json!({ "ok": true })).into_response(),
+                Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+            };
+        }
         _ => {}
     }
 
@@ -577,6 +590,23 @@ async fn dispatch(st: &AppState, cmd: &str, args: Value) -> Result<Value, String
             Ok(Value::String(sql))
         }
 
+        // ── Whole-grid .xlsx export → bytes (server mode downloads in the browser) ───
+        "db_export_xlsx_bytes" => {
+            use base64::{engine::general_purpose::STANDARD as B64, Engine};
+            let columns: Vec<String> = serde_json::from_value(args.get("columns").cloned().unwrap_or(json!([]))).map_err(estr)?;
+            let rows: Vec<Vec<Value>> = serde_json::from_value(args.get("rows").cloned().unwrap_or(json!([]))).map_err(estr)?;
+            // Bound the in-memory workbook build (whole sheet held in RAM + base64'd into JSON).
+            const MAX_XLSX_CELLS: usize = 5_000_000;
+            if rows.len().saturating_mul(columns.len().max(1)) > MAX_XLSX_CELLS {
+                return Err("导出数据过大,请缩小范围后重试".into());
+            }
+            let sheet_name = args.get("sheetName").and_then(Value::as_str).map(str::to_string);
+            let bytes = crate::db::xlsx_export::build_xlsx_workbook(&crate::db::xlsx_export::XlsxWorksheetData {
+                sheet_name, columns, rows,
+            }).map_err(estr)?;
+            Ok(Value::String(B64.encode(&bytes)))
+        }
+
         // ── Object administration (drop / rename / truncate / duplicate / source) ─
         "db_drop_object" => {
             let drv = commands::writable_drv(require(&args, "connId")?, conns).await.map_err(estr)?;
@@ -735,6 +765,15 @@ async fn dispatch(st: &AppState, cmd: &str, args: Value) -> Result<Value, String
             Ok(Value::Null)
         }
 
+        // ── Host info (request/response): live monitor frames ride the WS, but these one-shot
+        //    queries (host summary + OS glyph) go over /api/invoke. ──
+        "ssh_sysinfo" => Ok(Value::String(
+            crate::ssh::monitor::ssh_sysinfo_core(require(&args, "sessionId")?.to_string(), &st.ssh).await.map_err(estr)?,
+        )),
+        "ssh_detect_os" => Ok(Value::String(
+            crate::ssh::monitor::ssh_detect_os_core(require(&args, "sessionId")?.to_string(), &st.ssh).await.map_err(estr)?,
+        )),
+
         // ── SFTP browse + file ops (request/response; download/upload are separate routes) ──
         "sftp_list" => serde_json::to_value(
             crate::ssh::sftp::list_directory(&st.ssh, require(&args, "sessionId")?, require(&args, "path")?).await.map_err(estr)?,
@@ -796,6 +835,11 @@ async fn dispatch(st: &AppState, cmd: &str, args: Value) -> Result<Value, String
 const MAX_WS_CONNECTIONS: usize = 128;
 /// Cap on VNC sessions one WS connection may open (each spins a reader/writer/ticker + 20fps refresh).
 const MAX_VNC_PER_CONN: usize = 8;
+/// Cap on concurrent network scans one WS connection may run (each spins a bounded task pool).
+const MAX_SCANS_PER_CONN: usize = 2;
+/// Upper bound on a scan's requested concurrency (0 still means "use the default"); stops a client
+/// from asking the server to open thousands of simultaneous sockets.
+const MAX_SCAN_CONCURRENCY: u32 = 256;
 
 /// `GET /ws` — the single streaming channel. Gated by the SAME session cookie as `/api/invoke`
 /// plus a same-origin Origin check (browsers always send Origin on a WS handshake, so this blocks
@@ -815,6 +859,16 @@ async fn ws_handler(State(st): State<AppState>, headers: HeaderMap, ws: WebSocke
         return (StatusCode::SERVICE_UNAVAILABLE, "too many connections").into_response();
     }
     ws.on_upgrade(move |socket| handle_ws(socket, st, token))
+}
+
+/// Topics that carry per-session/per-user data (terminal output, VNC frames, host monitor, scan
+/// results with hit credentials, command history). The server subscribes the owning connection to
+/// these inside the relevant cmd handler; clients must not be able to `sub` to them directly.
+fn is_protected_topic(topic: &str) -> bool {
+    const PREFIXES: [&str; 7] = [
+        "term://", "history://", "vnc-init://", "vnc-rect://", "vnc-closed://", "monitor://", "scan://",
+    ];
+    PREFIXES.iter().any(|p| topic.starts_with(p))
 }
 
 /// Allow same-origin requests and Origin-absent ones (non-browser tools, e.g. the test client);
@@ -837,6 +891,10 @@ async fn handle_ws(socket: WebSocket, st: AppState, token: String) {
     // disconnect so a dropped browser tab doesn't leak remote shells / VNC streams.
     let opened: Arc<std::sync::Mutex<Vec<(String, String)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
     let opened_vnc: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    // Scan ids + monitor session_ids started on THIS connection — cancelled/stopped on disconnect
+    // so a dropped tab doesn't leave the server scanning the LAN or polling a host forever.
+    let opened_scans: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let opened_monitors: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
 
     let writer = tokio::spawn(async move {
         while let Some(env) = rx.recv().await {
@@ -852,7 +910,14 @@ async fn handle_ws(socket: WebSocket, st: AppState, token: String) {
                 let Ok(env) = serde_json::from_str::<Value>(&t) else { continue };
                 match env.get("type").and_then(Value::as_str) {
                     Some("sub") => if let Some(topic) = env.get("topic").and_then(Value::as_str) {
-                        st.ws.subscribe(conn_id, topic);
+                        // Sensitive streams (terminal output, VNC framebuffer, host monitor, scan
+                        // results incl. hit credentials, command history) are subscribed SERVER-side
+                        // by their cmd handlers for the originating connection only. Refusing
+                        // client-driven `sub` to these prefixes stops one logged-in user from
+                        // eavesdropping on another's session by guessing/replaying a topic id.
+                        if !is_protected_topic(topic) {
+                            st.ws.subscribe(conn_id, topic);
+                        }
                     },
                     Some("unsub") => if let Some(topic) = env.get("topic").and_then(Value::as_str) {
                         st.ws.unsubscribe(conn_id, topic);
@@ -861,10 +926,11 @@ async fn handle_ws(socket: WebSocket, st: AppState, token: String) {
                     Some("cmd") => {
                         // Re-validate on every command — an upgrade-time check alone would leave an
                         // established socket as a long-lived SSH control channel after logout.
-                        if resolve_session(&st, &token).is_none() {
+                        let Some(actor) = resolve_session(&st, &token) else {
                             let _ = tx.try_send(json!({ "type": "reply", "id": env.get("id").cloned().unwrap_or(Value::Null), "ok": false, "error": "会话已失效,请重新登录" }));
                             break;
-                        }
+                        };
+                        let actor_admin = actor.is_admin;
                         let cmd = env.get("cmd").and_then(Value::as_str).unwrap_or("").to_string();
                         let id = env.get("id").cloned().unwrap_or(Value::Null);
                         let cmd_args = env.get("args").cloned().unwrap_or_else(|| json!({}));
@@ -872,12 +938,12 @@ async fn handle_ws(socket: WebSocket, st: AppState, token: String) {
                         // ~25s) — run them OFF the reader loop so other cmds / ping / close on this
                         // same (singleton) socket aren't frozen while a host connects.
                         if matches!(cmd.as_str(), "vnc_connect" | "term_open") {
-                            let (st2, tx2, op2, opv2) = (st.clone(), tx.clone(), opened.clone(), opened_vnc.clone());
+                            let (st2, tx2, op2, opv2, ops2, opm2) = (st.clone(), tx.clone(), opened.clone(), opened_vnc.clone(), opened_scans.clone(), opened_monitors.clone());
                             tokio::spawn(async move {
-                                handle_ws_cmd(&st2, conn_id, &tx2, &cmd, id, &cmd_args, &op2, &opv2).await;
+                                handle_ws_cmd(&st2, conn_id, actor_admin, &tx2, &cmd, id, &cmd_args, &op2, &opv2, &ops2, &opm2).await;
                             });
                         } else {
-                            handle_ws_cmd(&st, conn_id, &tx, &cmd, id, &cmd_args, &opened, &opened_vnc).await;
+                            handle_ws_cmd(&st, conn_id, actor_admin, &tx, &cmd, id, &cmd_args, &opened, &opened_vnc, &opened_scans, &opened_monitors).await;
                         }
                     }
                     _ => {}
@@ -898,6 +964,15 @@ async fn handle_ws(socket: WebSocket, st: AppState, token: String) {
     for sid in vncs {
         let _ = vnc_close_core(&st.vnc, &sid);
     }
+    // Cancel any scans this connection started, and stop any host monitors it was driving.
+    let scans = opened_scans.lock().unwrap().clone();
+    for scan_id in scans {
+        st.scan.cancel(&scan_id).await;
+    }
+    let monitors = opened_monitors.lock().unwrap().clone();
+    for session_id in monitors {
+        st.ssh.remove_monitor(&session_id).await;
+    }
 }
 
 /// Handle a `cmd` envelope (the streaming commands that don't fit request/response), replying
@@ -908,12 +983,15 @@ async fn handle_ws(socket: WebSocket, st: AppState, token: String) {
 async fn handle_ws_cmd(
     st: &AppState,
     conn_id: u64,
+    actor_admin: bool,
     tx: &tokio::sync::mpsc::Sender<Value>,
     cmd: &str,
     id: Value,
     args: &Value,
     opened: &std::sync::Mutex<Vec<(String, String)>>,
     opened_vnc: &std::sync::Mutex<Vec<String>>,
+    opened_scans: &std::sync::Mutex<Vec<String>>,
+    opened_monitors: &std::sync::Mutex<Vec<String>>,
 ) {
     let sid = || args.get("sessionId").and_then(Value::as_str).unwrap_or("").to_string();
     let cid = || args.get("chanId").and_then(Value::as_str).unwrap_or("").to_string();
@@ -988,6 +1066,57 @@ async fn handle_ws_cmd(
             st.ws.unsubscribe(conn_id, &format!("vnc-rect://{s}"));
             st.ws.unsubscribe(conn_id, &format!("vnc-closed://{s}"));
             vnc_close_core(&st.vnc, &s).map(|_| Value::Null).map_err(|e| e.to_string())
+        }
+
+        // ── System monitor over WS (M3+): subscribe the live frames topic, then start the loop ──
+        "monitor_start" => {
+            let session_id = sid();
+            let interval_ms = args.get("intervalMs").and_then(Value::as_u64).unwrap_or(2000);
+            st.ws.subscribe(conn_id, &format!("monitor://{session_id}"));
+            // Track so a dropped tab's monitor loop is stopped on disconnect (no orphan polling).
+            { let mut m = opened_monitors.lock().unwrap(); if !m.contains(&session_id) { m.push(session_id.clone()); } }
+            let sink: Arc<dyn EventSink> = st.ws.clone();
+            crate::ssh::monitor::monitor_start_core(session_id, interval_ms, sink, &st.ssh)
+                .await.map(|_| Value::Null).map_err(|e| e.to_string())
+        }
+        "monitor_stop" => {
+            let session_id = sid();
+            st.ws.unsubscribe(conn_id, &format!("monitor://{session_id}"));
+            opened_monitors.lock().unwrap().retain(|s| s != &session_id);
+            st.ssh.remove_monitor(&session_id).await;
+            Ok(Value::Null)
+        }
+
+        // ── Network scan over WS (admin-only): scanning the server's LAN + brute-forcing creds is
+        //    a privileged server-side network operation, so a non-admin must not start it. ──
+        "scan_start" if !actor_admin => Err("仅管理员可发起网络扫描".to_string()),
+        "scan_start" if opened_scans.lock().unwrap().len() >= MAX_SCANS_PER_CONN =>
+            Err("并发扫描数已达上限".to_string()),
+        "scan_start" => {
+            for topic in ["scan://progress", "scan://found", "scan://log", "scan://done"] {
+                st.ws.subscribe(conn_id, topic);
+            }
+            let sink: Arc<dyn EventSink> = st.ws.clone();
+            match serde_json::from_value::<crate::scan::commands::ScanArgs>(args.get("args").cloned().unwrap_or(Value::Null)) {
+                Ok(mut a) => {
+                    a.concurrency = a.concurrency.min(MAX_SCAN_CONCURRENCY); // 0 = default; clamp the upper bound
+                    match crate::scan::commands::scan_start_core(a, sink, st.scan.clone()).await {
+                        Ok(scan_id) => {
+                            opened_scans.lock().unwrap().push(scan_id.clone());
+                            Ok(Value::String(scan_id))
+                        }
+                        Err(e) => Err(e.to_string()),
+                    }
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        }
+        "scan_cancel" if !actor_admin => Err("仅管理员可操作网络扫描".to_string()),
+        "scan_cancel" => {
+            let scan_id = args.get("scanId").and_then(Value::as_str).unwrap_or("");
+            st.scan.cancel(scan_id).await;
+            opened_scans.lock().unwrap().retain(|s| s != scan_id);
+            Ok(Value::Null)
         }
 
         other => Err(format!("ws command not supported: {other}")),

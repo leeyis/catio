@@ -7,6 +7,8 @@ import { IconBtn, ConnGlyph, Segmented } from '../atoms'
 import { useData } from '../../state/DataContext'
 import { useGroups, addGroup, removeGroup } from '../../state/groups'
 import type { Connection } from '../../services/types'
+import { isServer } from '../../services/transport'
+import { useServerAuth } from '../auth/ServerAuthGate'
 
 // ---- Prop types ----
 
@@ -114,6 +116,7 @@ const onClose = () => winAction('close')
 
 export function TitleBar({ theme, onToggleTheme, onOpenSettings, settingsActive }: TitleBarProps) {
   const { t } = useTranslation()
+  const serverAuth = useServerAuth()
 
   // Detect macOS — default false so plain-browser / jsdom always shows Windows-style buttons.
   // Only set true when positively detected (navigator.platform contains 'Mac').
@@ -144,7 +147,12 @@ export function TitleBar({ theme, onToggleTheme, onOpenSettings, settingsActive 
           <Icon name="settings" size={17} />
         </button>
         <div className="tb-divider" />
-        {!isMac && (
+        {isServer() ? (
+          // Browser deploy: no OS window to minimize/maximize; the close button logs out.
+          <div className="win-controls">
+            <button className="win-btn close" title={t('serverAuth.logout')} onClick={() => { void serverAuth.logout() }}><Icon name="x" size={16} /></button>
+          </div>
+        ) : !isMac && (
           <div className="win-controls">
             <button className="win-btn" title={t('shell.minimize')} onClick={() => { void onMin() }}><Icon name="minus" size={15} /></button>
             <button className="win-btn" title={t('shell.maximize')} onClick={() => { void onMax() }}><svg width="11" height="11" viewBox="0 0 11 11"><rect x="1.2" y="1.2" width="8.6" height="8.6" rx="1.6" fill="none" stroke="currentColor" strokeWidth="1.3"/></svg></button>
@@ -160,6 +168,7 @@ export function TitleBar({ theme, onToggleTheme, onOpenSettings, settingsActive 
 
 export function Sidebar({ activeId, onOpen, onDetail, collapsed, onToggleCollapse, conns: vaultConns, currentUser, authEnabled, onLock, onEnableAuth, filter: filterProp, onFilterChange, onBatchMove, onBatchDelete }: SidebarProps) {
   const { t } = useTranslation()
+  const serverAuth = useServerAuth()
   const D = useData()
   const groups = useGroups()
   const allConns = vaultConns || D.connections
@@ -404,9 +413,19 @@ export function Sidebar({ activeId, onOpen, onDetail, collapsed, onToggleCollaps
       {/* footer status */}
       <div className="row" style={{ padding: '10px 12px', borderTop: '1px solid var(--border-hairline)', gap: 8 }}>
         <div className="icon-badge" style={{ width: 26, height: 26, borderRadius: 8, background: 'var(--accent-soft)', color: 'var(--accent-primary)' }}>
-          <Icon name={authEnabled ? 'user' : 'shield'} size={14} />
+          <Icon name={(serverAuth.enabled || authEnabled) ? 'user' : 'shield'} size={14} />
         </div>
-        {authEnabled ? (
+        {serverAuth.enabled && serverAuth.user ? (
+          // Browser deploy: show the logged-in server account + a logout button (the desktop
+          // local-lock affordance below doesn't apply — the server session IS the identity).
+          <>
+            <div className="col grow" style={{ lineHeight: 1.2, minWidth: 0 }}>
+              <span className="ell" style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>{serverAuth.user.username}</span>
+              <span style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{serverAuth.user.isAdmin ? t('serverAuth.isAdmin') : t('serverAuth.account')}</span>
+            </div>
+            <button className="icon-btn bare" title={t('serverAuth.logout')} onClick={() => { void serverAuth.logout() }}><Icon name="x" size={15} /></button>
+          </>
+        ) : authEnabled ? (
           <>
             <div className="col grow" style={{ lineHeight: 1.2, minWidth: 0 }}>
               <span className="ell" style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>{currentUser}</span>
