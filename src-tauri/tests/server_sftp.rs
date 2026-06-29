@@ -83,22 +83,21 @@ async fn sftp_upload_requires_auth() {
 
 #[tokio::test]
 async fn sftp_upload_body_limit_is_disabled_for_streaming() {
-    // A 5 MiB body far exceeds axum's default 2 MiB body limit. The streaming upload route disables
-    // that limit, so the request must REACH the handler (which then fails on the bogus SFTP session)
-    // rather than being rejected at the body-size layer — proving large (multi-GB) uploads aren't
-    // capped. Without `DefaultBodyLimit::disable()` this would be 413.
+    // Send a 3 MiB `remotePath` field — a field the handler reads to completion via field.text().
+    // With axum's default 2 MiB body limit that read errors → the handler reports "multipart 解析
+    // 失败". With the streaming route's DefaultBodyLimit::disable(), the 3 MiB field is read fully
+    // and (no "file" field follows) the handler returns "缺少文件". So a "缺少文件" reply — NOT a
+    // multipart/size error — proves the limit is actually lifted (the >2 MiB body was consumed).
     let host = start().await;
     let cl = authed(&host).await;
-    let big = vec![0u8; 5 * 1024 * 1024];
+    let big_path = format!("/tmp/{}", "a".repeat(3 * 1024 * 1024));
     let form = reqwest::multipart::Form::new()
         .text("sessionId", "nope")
-        .text("remotePath", "/tmp/big.bin")
-        .part("file", reqwest::multipart::Part::bytes(big).file_name("big.bin"));
+        .text("remotePath", big_path);
     let res = cl.post(format!("http://{host}/api/sftp/upload")).multipart(form).send().await.unwrap();
-    assert_eq!(res.status().as_u16(), 400, "should reach handler, not 413");
-    let body = res.json::<Value>().await.unwrap_or(Value::Null);
-    let err = body["error"].as_str().unwrap_or("");
-    assert!(!err.contains("too large") && !err.contains("过大"), "must not be a size-limit rejection: {err}");
+    assert_eq!(res.status().as_u16(), 400);
+    let err = res.json::<Value>().await.unwrap_or(Value::Null)["error"].as_str().unwrap_or("").to_string();
+    assert!(err.contains("缺少文件"), "the 3 MiB field must be read fully (limit disabled); got: {err}");
 }
 
 #[tokio::test]

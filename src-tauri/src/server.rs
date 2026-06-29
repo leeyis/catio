@@ -88,6 +88,10 @@ pub struct AppState {
     /// vault at rest (web head). `None` when the env var is unset → secret storage is disabled
     /// (the browser falls back to prompting each connect).
     pub secret_key: Option<[u8; 32]>,
+    /// Optional ceiling on a single SFTP upload (bytes), from `CATIO_MAX_UPLOAD_BYTES`. `None` =
+    /// unlimited (the default; the remote host's disk is the bound). Operators on a shared host can
+    /// set it to cap a single transfer.
+    pub max_upload_bytes: Option<u64>,
 }
 
 /// A live session: which user, and when it stops being valid (server-side enforced TTL).
@@ -118,6 +122,9 @@ impl AppState {
             secret_key: std::env::var("CATIO_MASTER_KEY").ok()
                 .filter(|k| !k.is_empty())
                 .map(|k| crate::secrets::derive_key(&k)),
+            max_upload_bytes: std::env::var("CATIO_MAX_UPLOAD_BYTES").ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .filter(|&n| n > 0),
         })
     }
 }
@@ -1272,7 +1279,7 @@ async fn sftp_upload_handler(State(st): State<AppState>, headers: HeaderMap, mut
                 }
                 use futures_util::StreamExt;
                 let stream = field.map(|r| r.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string())));
-                return match crate::ssh::sftp::write_remote_stream(&st.ssh, &session_id, &remote_path, stream).await {
+                return match crate::ssh::sftp::write_remote_stream(&st.ssh, &session_id, &remote_path, stream, st.max_upload_bytes).await {
                     Ok(n) => Json(json!({ "ok": true, "bytes": n })).into_response(),
                     Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
                 };

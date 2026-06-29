@@ -1125,7 +1125,7 @@ pub async fn write_remote_bytes(mgr: &SessionManager, session_id: &str, path: &s
 /// Stream an upload to the remote file CHUNK BY CHUNK (atomic temp + `mv`), without ever holding
 /// the whole file in memory — so multi-GB uploads work and don't OOM the server. No size cap (the
 /// remote disk is the bound), matching the desktop SFTP path. Returns the total bytes written.
-pub async fn write_remote_stream<S, B>(mgr: &SessionManager, session_id: &str, path: &str, mut stream: S) -> Result<u64, SshError>
+pub async fn write_remote_stream<S, B>(mgr: &SessionManager, session_id: &str, path: &str, mut stream: S, max_bytes: Option<u64>) -> Result<u64, SshError>
 where
     S: futures_util::Stream<Item = Result<B, std::io::Error>> + Unpin,
     B: AsRef<[u8]>,
@@ -1135,25 +1135,33 @@ where
     use tokio::io::AsyncWriteExt;
     let sftp = crate::ssh::sftp_transfer::open_sftp(mgr, session_id).await?;
     let tmp = format!("{path}.catio.upload.tmp");
-    let mut total: u64 = 0;
-    {
+    // Stream into the temp file inside an inner scope so the file handle `f` is dropped (closed)
+    // before any cleanup remove_file — several SFTP servers refuse to delete a still-open file, and
+    // this way EVERY error path (write / stream / shutdown / cap-exceeded) cleans up uniformly.
+    let written: Result<u64, SshError> = async {
         let mut f = sftp
             .open_with_flags(tmp.as_str(), OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE)
             .await
             .map_err(|e| SshError::Sftp(e.to_string()))?;
+        let mut total: u64 = 0;
         while let Some(item) = stream.next().await {
-            let chunk = match item {
-                Ok(c) => c,
-                Err(e) => { let _ = sftp.remove_file(tmp.as_str()).await; return Err(SshError::Io(e.to_string())); }
-            };
-            if let Err(e) = f.write_all(chunk.as_ref()).await {
-                let _ = sftp.remove_file(tmp.as_str()).await;
-                return Err(SshError::Sftp(e.to_string()));
-            }
+            let chunk = item.map_err(|e| SshError::Io(e.to_string()))?;
             total += chunk.as_ref().len() as u64;
+            if let Some(max) = max_bytes {
+                if total > max {
+                    return Err(SshError::Io(format!("上传超出服务器上限({max} 字节)")));
+                }
+            }
+            f.write_all(chunk.as_ref()).await.map_err(|e| SshError::Sftp(e.to_string()))?;
         }
         f.shutdown().await.map_err(|e| SshError::Sftp(e.to_string()))?;
+        Ok(total)
     }
+    .await; // `f` dropped here (scope end), so the temp file is closed before any remove below.
+    let total = match written {
+        Ok(t) => t,
+        Err(e) => { let _ = sftp.remove_file(tmp.as_str()).await; return Err(e); }
+    };
     let mv = format!("mv -f -- {} {}", shell_escape(&tmp), shell_escape(path));
     if let Err(e) = exec(mgr, session_id, &mv).await {
         let _ = sftp.remove_file(tmp.as_str()).await;
