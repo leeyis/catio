@@ -6,8 +6,7 @@ import React, { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn } from '../atoms'
-import { useServerAuth, PW_KEY } from './ServerAuthGate'
-import { ensureServerVault } from '../../state/vault'
+import { useServerAuth } from './ServerAuthGate'
 import { userList, userCreate, userDelete, authChangePassword, type ServerUser } from '../../services/auth'
 
 export function ServerAccountBlock() {
@@ -31,14 +30,9 @@ export function ServerAccountBlock() {
     if (newPw.length < 6) { setPwMsg(t('serverAuth.errPassTooShort')); return }
     setBusy(true)
     try {
+      // Server-side secret vault is keyed by user id, not the login password, so connection
+      // secrets survive a password change with no re-keying needed.
       await authChangePassword(oldPw, newPw)
-      // Re-key the vault stash to the new password so a reload still unlocks (the old stashed
-      // password would no longer match the login). Secrets remembered under the old key become
-      // unrecallable and are re-prompted once — acceptable for a password change.
-      if (user) {
-        try { sessionStorage.setItem(PW_KEY, newPw) } catch { /* ignore */ }
-        await ensureServerVault(user.username, newPw)
-      }
       setOldPw(''); setNewPw('')
       setPwMsg(t('serverAuth.pwChanged'))
     } catch (e) { setPwMsg(e instanceof Error ? e.message : String(e)) } finally { setBusy(false) }

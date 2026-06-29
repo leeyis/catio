@@ -54,6 +54,13 @@ impl AuthDb {
                 password_hash TEXT NOT NULL,
                 is_admin INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS conn_secrets (
+                user_id INTEGER NOT NULL,
+                profile_id TEXT NOT NULL,
+                nonce BLOB NOT NULL,
+                ciphertext BLOB NOT NULL,
+                PRIMARY KEY (user_id, profile_id)
             );",
         )
         .map_err(|e| e.to_string())?;
@@ -161,6 +168,41 @@ impl AuthDb {
         Ok(())
     }
 
+    // ── Per-user connection-secret vault (web head). Stores already-encrypted blobs; the AES-GCM
+    //    seal/open with the master key happens in the command layer (see secrets.rs). ──
+
+    /// Upsert the encrypted secret for (user, profile).
+    pub fn store_secret(&self, user_id: i64, profile_id: &str, nonce: &[u8], ciphertext: &[u8]) -> Result<(), String> {
+        let c = self.conn.lock().unwrap();
+        c.execute(
+            "INSERT INTO conn_secrets (user_id, profile_id, nonce, ciphertext) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(user_id, profile_id) DO UPDATE SET nonce = excluded.nonce, ciphertext = excluded.ciphertext",
+            rusqlite::params![user_id, profile_id, nonce, ciphertext],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Load the encrypted (nonce, ciphertext) for (user, profile), or None if absent.
+    pub fn load_secret(&self, user_id: i64, profile_id: &str) -> Result<Option<(Vec<u8>, Vec<u8>)>, String> {
+        let c = self.conn.lock().unwrap();
+        c.query_row(
+            "SELECT nonce, ciphertext FROM conn_secrets WHERE user_id = ?1 AND profile_id = ?2",
+            rusqlite::params![user_id, profile_id],
+            |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())
+    }
+
+    /// Delete one stored secret (no error if it didn't exist).
+    pub fn delete_secret(&self, user_id: i64, profile_id: &str) -> Result<(), String> {
+        let c = self.conn.lock().unwrap();
+        c.execute("DELETE FROM conn_secrets WHERE user_id = ?1 AND profile_id = ?2", rusqlite::params![user_id, profile_id])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     pub fn list_users(&self) -> Result<Vec<User>, String> {
         let c = self.conn.lock().unwrap();
         let mut stmt = c
@@ -196,7 +238,12 @@ impl AuthDb {
                 return Err("不能删除最后一个管理员".into());
             }
         }
-        c.execute("DELETE FROM users WHERE id = ?1", rusqlite::params![id]).map_err(|e| e.to_string())?;
+        // Delete the user AND their stored connection secrets atomically — either both go or
+        // neither, so a mid-failure can't leave orphaned encrypted secrets behind.
+        let tx = c.unchecked_transaction().map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM users WHERE id = ?1", rusqlite::params![id]).map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM conn_secrets WHERE user_id = ?1", rusqlite::params![id]).map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
         Ok(())
     }
 }

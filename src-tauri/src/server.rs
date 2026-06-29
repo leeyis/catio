@@ -84,6 +84,10 @@ pub struct AppState {
     /// Network-scan cancellation registry — the scan runs on the server's network and streams
     /// `scan://*` events through the WS hub (already Arc-backed internally, so a cheap clone).
     pub scan: crate::scan::ScanState,
+    /// AES-256 key derived from `CATIO_MASTER_KEY`, encrypting the per-user connection-secret
+    /// vault at rest (web head). `None` when the env var is unset → secret storage is disabled
+    /// (the browser falls back to prompting each connect).
+    pub secret_key: Option<[u8; 32]>,
 }
 
 /// A live session: which user, and when it stops being valid (server-side enforced TTL).
@@ -111,6 +115,9 @@ impl AppState {
             ws: Arc::new(WsHub::default()),
             vnc: Arc::new(VncManager::default()),
             scan: crate::scan::ScanState::default(),
+            secret_key: std::env::var("CATIO_MASTER_KEY").ok()
+                .filter(|k| !k.is_empty())
+                .map(|k| crate::secrets::derive_key(&k)),
         })
     }
 }
@@ -210,6 +217,12 @@ async fn invoke(State(st): State<AppState>, headers: HeaderMap, Json(req): Json<
                 Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
             };
         }
+        // Per-user connection-secret vault (server-side, AES-GCM under CATIO_MASTER_KEY). Lets a
+        // browser remember saved-connection passwords without WebCrypto (unavailable over plain
+        // HTTP). All keyed by the SESSION user, so users can't read each other's secrets.
+        "secret_remember" => return secret_remember(&st, &req.args, &user),
+        "secret_recall" => return secret_recall(&st, &req.args, &user),
+        "secret_forget" => return secret_forget(&st, &req.args, &user),
         _ => {}
     }
 
@@ -338,6 +351,46 @@ fn user_delete(st: &AppState, args: &Value, actor: &User) -> Response {
         }
         Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
     }
+}
+
+/// Encrypt + store a connection secret for the CURRENT user (keyed by their session id).
+fn secret_remember(st: &AppState, args: &Value, actor: &User) -> Response {
+    let Some(key) = st.secret_key.as_ref() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "服务器未配置 CATIO_MASTER_KEY,无法保存连接密码" }))).into_response();
+    };
+    let profile_id = args.get("profileId").and_then(Value::as_str).unwrap_or("");
+    let secret = args.get("secret").and_then(Value::as_str).unwrap_or("");
+    if profile_id.is_empty() || secret.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "profileId 与 secret 必填" }))).into_response();
+    }
+    let aad = crate::secrets::secret_aad(actor.id, profile_id);
+    match crate::secrets::encrypt(key, &aad, secret.as_bytes()) {
+        Ok((nonce, ct)) => json_or_err(st.auth.store_secret(actor.id, profile_id, &nonce, &ct).map(|_| true)),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+/// Recall + decrypt the CURRENT user's secret for a profile → `{ secret: string|null }`.
+fn secret_recall(st: &AppState, args: &Value, actor: &User) -> Response {
+    let profile_id = args.get("profileId").and_then(Value::as_str).unwrap_or("");
+    let Some(key) = st.secret_key.as_ref() else {
+        return Json(json!({ "secret": Value::Null })).into_response();
+    };
+    match st.auth.load_secret(actor.id, profile_id) {
+        Ok(Some((nonce, ct))) => {
+            let aad = crate::secrets::secret_aad(actor.id, profile_id);
+            let secret = crate::secrets::decrypt(key, &aad, &nonce, &ct);
+            Json(json!({ "secret": secret })).into_response()
+        }
+        Ok(None) => Json(json!({ "secret": Value::Null })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+/// Forget the CURRENT user's stored secret for a profile.
+fn secret_forget(st: &AppState, args: &Value, actor: &User) -> Response {
+    let profile_id = args.get("profileId").and_then(Value::as_str).unwrap_or("");
+    json_or_err(st.auth.delete_secret(actor.id, profile_id).map(|_| true))
 }
 
 fn forbidden() -> Response {

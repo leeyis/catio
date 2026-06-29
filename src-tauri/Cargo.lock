@@ -859,6 +859,7 @@ dependencies = [
  "rand 0.10.1",
  "redis",
  "reqwest 0.12.28",
+ "ring",
  "rusqlite",
  "russh",
  "russh-sftp",

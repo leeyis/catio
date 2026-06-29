@@ -12,6 +12,9 @@ export interface HomeViewProps {
   onOpen: (conn: Connection) => void
   onNew: () => void
   onAutoScan: () => void
+  /** Whether the user may run asset discovery. False for non-admins in server mode (scan is
+   *  admin-only there) → the "扫描发现" button is hidden. */
+  canScan?: boolean
   owned?: boolean
   userName?: string
   /** Whether local account auth is on — greeting shows a name only when true. */
@@ -72,7 +75,7 @@ function RecentRow({ conn, ts, onOpen }: { conn: Connection; ts: number; onOpen:
   )
 }
 
-export function HomeView({ onOpen, onNew, onAutoScan, owned = true, userName = '', authEnabled = false, conns = [], recent = [] }: HomeViewProps) {
+export function HomeView({ onOpen, onNew, onAutoScan, canScan = true, owned = true, userName = '', authEnabled = false, conns = [], recent = [] }: HomeViewProps) {
   const { t, i18n } = useTranslation()
   // Real time-based greeting + live date/time (was a hardcoded mock). Name only
   // when account auth is on (otherwise there is no real user to greet).
@@ -99,7 +102,7 @@ export function HomeView({ onOpen, onNew, onAutoScan, owned = true, userName = '
           </div>
           <div className="row gap8">
             <button className="btn btn-cta lg" onClick={onNew}><Icon name="plus" size={16} /> {t('common.newConnection')}</button>
-            <button className="btn btn-secondary lg" onClick={onAutoScan}><Icon name="radar" size={16} /> {t('scan.openButton')}</button>
+            {canScan && <button className="btn btn-secondary lg" onClick={onAutoScan}><Icon name="radar" size={16} /> {t('scan.openButton')}</button>}
           </div>
           <span className="chip" style={{ background: 'color-mix(in srgb, var(--signal-green) 12%, transparent)', color: 'var(--signal-green)' }}><Icon name="shield" size={11} /> {t('home.localEncrypted')}</span>
         </div>
@@ -133,7 +136,7 @@ export function HomeView({ onOpen, onNew, onAutoScan, owned = true, userName = '
             </div>
             <div className="col gap8">
               <button className="btn btn-cta lg" onClick={onNew}><Icon name="plus" size={16} /> {t('common.newConnection')}</button>
-              <button className="btn btn-secondary lg" onClick={onAutoScan}><Icon name="radar" size={16} /> {t('scan.openButton')}</button>
+              {canScan && <button className="btn btn-secondary lg" onClick={onAutoScan}><Icon name="radar" size={16} /> {t('scan.openButton')}</button>}
             </div>
           </div>
         </div>

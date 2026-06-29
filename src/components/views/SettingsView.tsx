@@ -18,6 +18,7 @@ import type { McpInfo } from '../../services/mcp'
 import { exportConfig, importConfig } from '../../services/configSync'
 import { ServerAccountBlock } from '../auth/ServerAccountBlock'
 import { useServerAuth } from '../auth/ServerAuthGate'
+import { isServer } from '../../services/transport'
 
 // ---- Prop types ----
 
@@ -217,7 +218,9 @@ function SecuritySettings({ authEnabled, users = [], currentUser, ownerUser, onE
     <Block title={t('settings.securityTitle')} hint={t('settings.securityHint')}>
       {/* server-deploy account + user management (renders nothing in the desktop app) */}
       <ServerAccountBlock />
-      {/* multi-user identity gate */}
+      {/* multi-user identity gate — DESKTOP only: in server mode the server session already IS the
+          identity, so this local-login toggle is meaningless and is hidden. */}
+      {!isServer() && (
       <div style={{ border: `1px solid ${authEnabled ? 'var(--accent-border)' : 'var(--border-hairline)'}`, borderRadius: 14, overflow: 'hidden', marginBottom: 16, background: authEnabled ? 'var(--accent-soft-alt)' : 'var(--surface-card)' }}>
         <div className="row" style={{ justifyContent: 'space-between', gap: 16, padding: '14px 16px' }}>
           <div className="row gap12">
@@ -256,6 +259,7 @@ function SecuritySettings({ authEnabled, users = [], currentUser, ownerUser, onE
           </div>
         )}
       </div>
+      )}
 
       <SettingRow icon="trash-2" title={t('settings.clearCredentials')} desc={t('settings.clearCredentialsDesc')} danger
         control={<Btn variant="danger" size="sm" onClick={() => setConfirmClear(true)}>{t('settings.clearBtn')}</Btn>} />

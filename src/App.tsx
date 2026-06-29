@@ -42,6 +42,7 @@ import {
 import { sshConnect, sshDisconnect, sshTrustHost, isTauri, onHistory, sshSysinfo, sshDetectOs, importSshConfig, tunnelOpen, rdpLaunch } from './services/ssh'
 import { isServer } from './services/transport'
 import { useServerAuth } from './components/auth/ServerAuthGate'
+import { secretRecall, secretRemember } from './services/secrets'
 import { useTunnelConnections, saveTunnelConnection, removeTunnelConnection, generateTunnelId } from './state/tunnelConnections'
 import { useRdpConnections, saveRdpConnection, removeRdpConnection, generateRdpId } from './state/rdpConnections'
 import { useVncConnections, saveVncConnection, removeVncConnection, generateVncId } from './state/vncConnections'
@@ -370,19 +371,17 @@ export default function App() {
   }
 
   // ---- encrypted connection-secret cache (auth-gated) ----
-  // Server mode: the vault auto-unlocks on login (keyed by the server user), so secrets are
-  // remembered + recalled without the desktop's manual enable-auth flow. Desktop: gated on the
-  // local auth/vault being on + unlocked.
+  // Server mode: secrets live ON THE SERVER (encrypted with CATIO_MASTER_KEY, keyed by the logged-in
+  // user) — works over plain-HTTP LAN where browser WebCrypto is unavailable, so a saved connection
+  // opens password-free after login. Desktop: the local WebCrypto vault, gated on auth + unlock.
   async function cachedSecret(profileId: string): Promise<string | null> {
-    if (isServer()) {
-      return serverAuth.user && isVaultUnlocked() ? recallSecret(serverAuth.user.username, profileId) : null
-    }
+    if (isServer()) return serverAuth.user ? secretRecall(profileId) : null
     if (!authEnabled || !sessionUser || sessionUser === '__open' || !isVaultUnlocked()) return null
     return recallSecret(sessionUser, profileId)
   }
   function rememberConnSecret(profileId: string, secret: string) {
     if (isServer()) {
-      if (serverAuth.user && isVaultUnlocked() && secret) void rememberSecret(serverAuth.user.username, profileId, secret)
+      if (serverAuth.user && secret) void secretRemember(profileId, secret)
       return
     }
     if (authEnabled && sessionUser && sessionUser !== '__open' && isVaultUnlocked() && secret) {
@@ -1543,7 +1542,7 @@ export default function App() {
           <div className="card-surface grow col" style={{ overflow: 'hidden', position: 'relative' }}>
             {/* view body */}
             <div className="grow col" style={{ minHeight: 0 }}>
-              {view === 'home' && <HomeView onOpen={openConn} onNew={() => setShowNew(true)} onAutoScan={() => setView('scan')} owned={ownsVault} userName={authEnabled ? currentName : ''} authEnabled={authEnabled} conns={vaultConns}
+              {view === 'home' && <HomeView onOpen={openConn} onNew={() => setShowNew(true)} onAutoScan={() => setView('scan')} canScan={!isServer() || !!serverAuth.user?.isAdmin} owned={ownsVault} userName={authEnabled ? currentName : ''} authEnabled={authEnabled} conns={vaultConns}
                 recent={recentSessions.map(r => { const conn = vaultConns.find(c => c.id === r.connId); return conn ? { conn, ts: r.ts } : null }).filter((x): x is { conn: Connection; ts: number } => !!x)} />}
 
               {view === 'scan' && <ScanWizard onClose={() => setView('home')} onImported={() => { reloadProfiles() /* db 自动刷新 */ }}

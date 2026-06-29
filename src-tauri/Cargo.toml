@@ -61,6 +61,9 @@ serialport = "4"
 des = "0.8"
 # Web-head auth (M2): argon2 password hashing for the user table. Desktop binary doesn't use it.
 argon2 = "0.5"
+# Server-side secret vault (web head): AES-256-GCM (+ SHA-256 key derivation) over CATIO_MASTER_KEY
+# to encrypt connection passwords at rest in SQLite. ring is already in the tree (russh/rustls).
+ring = "0.17"
 
 [profile.release]
 panic = "abort"

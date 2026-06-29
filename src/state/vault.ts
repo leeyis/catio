@@ -16,9 +16,6 @@ const dec = new TextDecoder()
 const PBKDF2_ITERATIONS = 200_000
 const MARKER = 'catio-vault-marker-v1'
 const SECRETS_KEY = 'catio-secrets'
-// Server (browser) deploy: per-username vault credential, so the vault auto-unlocks from the
-// login password without the desktop's manual enable-auth flow.
-const SERVER_VAULT_KEY = 'catio-server-vault'
 
 // In-memory derived key — set on unlock/create, cleared on lock. Never persisted.
 let vaultKey: CryptoKey | null = null
@@ -99,24 +96,6 @@ export async function unlockVault(password: string, cred: VaultCredential): Prom
   } catch {
     return false
   }
-}
-
-/**
- * Server mode: unlock (or first-time create) the vault for `username` using the login password,
- * persisting only a per-username salt+verifier (never the password). After this, `rememberSecret`
- * / `recallSecret` for that username work — so connection passwords are remembered and auto-used
- * without the user manually enabling auth. If the password changed (unlock fails), the credential
- * is recreated; secrets encrypted under the old key simply become unrecallable (re-prompted once).
- */
-export async function ensureServerVault(username: string, password: string): Promise<void> {
-  if (typeof localStorage === 'undefined' || !password) return
-  let store: Record<string, VaultCredential> = {}
-  try { store = JSON.parse(localStorage.getItem(SERVER_VAULT_KEY) ?? '{}') as Record<string, VaultCredential> } catch { store = {} }
-  const existing = store[username]
-  if (existing && await unlockVault(password, existing)) return
-  const cred = await createVaultCredential(password)
-  store[username] = cred
-  try { localStorage.setItem(SERVER_VAULT_KEY, JSON.stringify(store)) } catch { /* ignore quota */ }
 }
 
 // ---- secret store (per user, per profile) ----
