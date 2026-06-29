@@ -65,6 +65,32 @@ describe('transport WebSocket client', () => {
     expect(await pr).toEqual({ chanId: 'chan-9' })
   })
 
+  it('buffers an event that arrives before its handler, then delivers it on subscribe', async () => {
+    const { subscribe } = await import('./transport')
+    // Open the socket (warm-up subscribe) so onmessage is wired up.
+    const p0 = subscribe('warmup', () => {})
+    const ws = lastWs()
+    ws.fireOpen()
+    await p0
+    // An event arrives for a topic with NO handler yet (the VNC vnc-init race) → buffered.
+    ws.fireMsg({ type: 'event', topic: 'vnc-init://v1', payload: { width: 800, height: 600 } })
+    // Subscribing now must immediately replay the buffered event (no lost init frame).
+    const got: unknown[] = []
+    await subscribe('vnc-init://v1', e => got.push(e))
+    expect(got).toEqual([{ width: 800, height: 600 }])
+  })
+
+  it('wsNotify sends a cmd with no id (fire-and-forget)', async () => {
+    const { wsNotify } = await import('./transport')
+    wsNotify('vnc_pointer', { sessionId: 's', mask: 1, x: 10, y: 20 })
+    const ws = lastWs()
+    ws.fireOpen()
+    await tick()
+    const cmd = frames(ws).find(m => m.cmd === 'vnc_pointer')
+    expect(cmd).toBeTruthy()
+    expect(cmd?.id).toBeUndefined()
+  })
+
   it('wsCmd rejects on an error reply', async () => {
     const { wsCmd } = await import('./transport')
     const pr = wsCmd('term_open', { sessionId: 'nope' })

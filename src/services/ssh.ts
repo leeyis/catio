@@ -24,7 +24,7 @@ async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Prom
 
 // Web transport: rpc() routes ssh_* request/response over HTTP in server mode; subscribe()/wsCmd()
 // carry the terminal stream + term_* commands over the WebSocket (M3).
-import { rpc, isServer, subscribe, wsCmd } from './transport'
+import { rpc, isServer, subscribe, wsCmd, wsNotify } from './transport'
 
 // ---- SSH session lifecycle ----
 
@@ -177,15 +177,17 @@ export async function termLocalClose(chanId: string): Promise<void> {
 // VNC: framebuffer stream (vnc-init/rect/closed) flows over the WS in server mode (via the
 // subscribe()-backed `listen` in VncPane); connect/pointer/key/close ride the WS too as `wsCmd`.
 export async function vncConnect(host: string, port: number, password: string): Promise<string> {
-  if (isServer()) return (await wsCmd<{ sessionId: string }>('vnc_connect', { host, port, password })).sessionId
+  // 30s timeout accommodates the backend's TCP-connect (10s) + handshake (15s) worst case.
+  if (isServer()) return (await wsCmd<{ sessionId: string }>('vnc_connect', { host, port, password }, 30000)).sessionId
   return tauriInvoke<string>('vnc_connect', { host, port, password })
 }
 export async function vncPointer(sessionId: string, mask: number, x: number, y: number): Promise<void> {
-  if (isServer()) { await wsCmd('vnc_pointer', { sessionId, mask, x, y }); return }
+  // Fire-and-forget: a mousemove must not pay a request/reply round-trip.
+  if (isServer()) { wsNotify('vnc_pointer', { sessionId, mask, x, y }); return }
   return tauriInvoke('vnc_pointer', { sessionId, mask, x, y })
 }
 export async function vncKey(sessionId: string, down: boolean, keysym: number): Promise<void> {
-  if (isServer()) { await wsCmd('vnc_key', { sessionId, down, keysym }); return }
+  if (isServer()) { wsNotify('vnc_key', { sessionId, down, keysym }); return }
   return tauriInvoke('vnc_key', { sessionId, down, keysym })
 }
 export async function vncClose(sessionId: string): Promise<void> {

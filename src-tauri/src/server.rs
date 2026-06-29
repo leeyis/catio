@@ -794,6 +794,8 @@ async fn dispatch(st: &AppState, cmd: &str, args: Value) -> Result<Value, String
 
 /// Cap on simultaneous WS connections — a coarse backstop against connection-flood DoS.
 const MAX_WS_CONNECTIONS: usize = 128;
+/// Cap on VNC sessions one WS connection may open (each spins a reader/writer/ticker + 20fps refresh).
+const MAX_VNC_PER_CONN: usize = 8;
 
 /// `GET /ws` — the single streaming channel. Gated by the SAME session cookie as `/api/invoke`
 /// plus a same-origin Origin check (browsers always send Origin on a WS handshake, so this blocks
@@ -866,7 +868,17 @@ async fn handle_ws(socket: WebSocket, st: AppState, token: String) {
                         let cmd = env.get("cmd").and_then(Value::as_str).unwrap_or("").to_string();
                         let id = env.get("id").cloned().unwrap_or(Value::Null);
                         let cmd_args = env.get("args").cloned().unwrap_or_else(|| json!({}));
-                        handle_ws_cmd(&st, conn_id, &tx, &cmd, id, &cmd_args, &opened, &opened_vnc).await;
+                        // Slow connect commands do blocking network I/O (TCP + handshake, up to
+                        // ~25s) — run them OFF the reader loop so other cmds / ping / close on this
+                        // same (singleton) socket aren't frozen while a host connects.
+                        if matches!(cmd.as_str(), "vnc_connect" | "term_open") {
+                            let (st2, tx2, op2, opv2) = (st.clone(), tx.clone(), opened.clone(), opened_vnc.clone());
+                            tokio::spawn(async move {
+                                handle_ws_cmd(&st2, conn_id, &tx2, &cmd, id, &cmd_args, &op2, &opv2).await;
+                            });
+                        } else {
+                            handle_ws_cmd(&st, conn_id, &tx, &cmd, id, &cmd_args, &opened, &opened_vnc).await;
+                        }
                     }
                     _ => {}
                 }
@@ -937,6 +949,9 @@ async fn handle_ws_cmd(
         }
 
         // ── VNC over WS (M5): connect streams vnc-init/rect/closed; pointer/key drive input ──
+        "vnc_connect" if opened_vnc.lock().unwrap().len() >= MAX_VNC_PER_CONN => {
+            Err("VNC 会话数已达上限".to_string())
+        }
         "vnc_connect" => {
             let host = args.get("host").and_then(Value::as_str).unwrap_or("").to_string();
             let port = args.get("port").and_then(Value::as_u64).unwrap_or(5900) as u16;
@@ -977,11 +992,15 @@ async fn handle_ws_cmd(
 
         other => Err(format!("ws command not supported: {other}")),
     };
-    let reply = match result {
-        Ok(v) => json!({ "type": "reply", "id": id, "ok": true, "result": v }),
-        Err(e) => json!({ "type": "reply", "id": id, "ok": false, "error": e }),
-    };
-    let _ = tx.try_send(reply);
+    // Fire-and-forget commands carry no `id` (vnc_pointer/key) — don't generate reply traffic for
+    // every mouse event. Commands with an id always get a reply.
+    if !id.is_null() {
+        let reply = match result {
+            Ok(v) => json!({ "type": "reply", "id": id, "ok": true, "result": v }),
+            Err(e) => json!({ "type": "reply", "id": id, "ok": false, "error": e }),
+        };
+        let _ = tx.try_send(reply);
+    }
 }
 
 // ── SFTP binary transfer endpoints (M4) ──────────────────────────────────────────────────────

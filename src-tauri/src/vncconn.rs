@@ -355,7 +355,12 @@ pub async fn vnc_connect_core(
     let id2 = id.clone();
     let (wa, ta) = (writer_abort.clone(), ticker_abort.clone());
     let mgr2 = mgr.clone();
+    // Gate the reader until the session is registered, so its natural-disconnect cleanup
+    // (`mgr2.remove`) can never run before `mgr.insert` (a multi-threaded-runtime race that would
+    // leave a stale entry).
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
     let reader = tokio::spawn(async move {
+        let _ = ready_rx.await;
         let res = pump_messages_split(&mut rd, sink.as_ref(), &id2).await;
         wa.abort();
         ta.abort();
@@ -364,6 +369,7 @@ pub async fn vnc_connect_core(
     });
 
     mgr.insert(id.clone(), VncSession { input_tx, aborts: vec![reader.abort_handle(), writer_abort, ticker_abort] });
+    let _ = ready_tx.send(());
     Ok(id)
 }
 

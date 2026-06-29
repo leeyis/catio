@@ -75,6 +75,11 @@ export async function rpc<T>(cmd: string, args?: Record<string, unknown>): Promi
 type Handler = (payload: unknown) => void
 
 const topicHandlers = new Map<string, Set<Handler>>()
+// Events that arrive for a topic before its handler is registered (e.g. the VNC `vnc-init` that
+// the server emits the instant it connects, before the client's `subscribe` runs). Buffered
+// briefly and flushed when a handler subscribes, so no early frame is lost. Bounded by the TTL.
+const earlyEvents = new Map<string, { payload: unknown; t: number }[]>()
+const EARLY_EVENT_TTL_MS = 3000
 const pendingReplies = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
 let sock: WebSocket | null = null
 let connecting: Promise<WebSocket> | null = null
@@ -130,7 +135,15 @@ function ensureSocket(): Promise<WebSocket> {
       try { env = JSON.parse(ev.data as string) } catch { return }
       if (env.type === 'event' && typeof env.topic === 'string') {
         const hs = topicHandlers.get(env.topic)
-        if (hs) for (const h of hs) h(env.payload)
+        if (hs && hs.size) {
+          for (const h of hs) h(env.payload)
+        } else {
+          // No handler yet → buffer (pruning expired) so a just-about-to-subscribe pane gets it.
+          const now = Date.now()
+          const arr = (earlyEvents.get(env.topic) ?? []).filter(e => now - e.t < EARLY_EVENT_TTL_MS)
+          arr.push({ payload: env.payload, t: now })
+          earlyEvents.set(env.topic, arr)
+        }
       } else if (env.type === 'reply') {
         const p = pendingReplies.get(String(env.id))
         if (p) {
@@ -162,6 +175,13 @@ export async function subscribe(topic: string, handler: Handler): Promise<() => 
     let set = topicHandlers.get(topic)
     if (!set) { set = new Set(); topicHandlers.set(topic, set) }
     set.add(handler)
+    // Flush any events that arrived for this topic before the handler existed (the early-frame race).
+    const buffered = earlyEvents.get(topic)
+    if (buffered) {
+      earlyEvents.delete(topic)
+      const now = Date.now()
+      for (const e of buffered) if (now - e.t < EARLY_EVENT_TTL_MS) handler(e.payload)
+    }
     void ensureSocket().then(s => s.send(JSON.stringify({ type: 'sub', topic }))).catch(() => { /* resubscribed on reconnect */ })
     return () => {
       const cur = topicHandlers.get(topic)
@@ -177,14 +197,15 @@ export async function subscribe(topic: string, handler: Handler): Promise<() => 
 }
 
 /** Send a streaming command over the WS and await its reply (server mode only). Rejects on a
- *  reply timeout so a dropped/forgotten reply can't hang the caller or leak a pending entry. */
-export async function wsCmd<T>(cmd: string, args: Record<string, unknown>): Promise<T> {
+ *  reply timeout so a dropped/forgotten reply can't hang the caller or leak a pending entry.
+ *  `timeoutMs` overrides the default for slow commands (e.g. vnc_connect's TCP+handshake). */
+export async function wsCmd<T>(cmd: string, args: Record<string, unknown>, timeoutMs = WS_CMD_TIMEOUT_MS): Promise<T> {
   const s = await ensureSocket()
   const id = `c${++cmdSeq}`
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
       if (pendingReplies.delete(id)) reject(new Error(`命令超时: ${cmd}`))
-    }, WS_CMD_TIMEOUT_MS)
+    }, timeoutMs)
     pendingReplies.set(id, {
       resolve: v => { clearTimeout(timer); resolve(v as T) },
       reject: e => { clearTimeout(timer); reject(e) },
@@ -197,4 +218,11 @@ export async function wsCmd<T>(cmd: string, args: Record<string, unknown>): Prom
       reject(e instanceof Error ? e : new Error(String(e)))
     }
   })
+}
+
+/** Fire-and-forget streaming command (no reply awaited) for high-frequency input like VNC
+ *  pointer/key — sending without an `id` tells the server not to bother replying, so there's no
+ *  per-event round-trip, pending entry, or timeout. Best-effort if the socket isn't up yet. */
+export function wsNotify(cmd: string, args: Record<string, unknown>): void {
+  void ensureSocket().then(s => s.send(JSON.stringify({ type: 'cmd', cmd, args }))).catch(() => { /* dropped if offline */ })
 }
