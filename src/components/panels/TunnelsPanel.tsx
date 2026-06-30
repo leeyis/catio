@@ -32,9 +32,11 @@ interface NewForwardFormProps {
   onSubmit: (kind: 'L' | 'R' | 'D', bind: string, target: string) => void
   onCancel: () => void
   onSaveProfile?: (kind: 'L' | 'R' | 'D', bind: string, target: string, name: string) => void
+  /** Backend failure to surface inside the form (e.g. bind in use, no SSH session). */
+  error?: string | null
 }
 
-function NewForwardForm({ onSubmit, onCancel, onSaveProfile }: NewForwardFormProps) {
+function NewForwardForm({ onSubmit, onCancel, onSaveProfile, error }: NewForwardFormProps) {
   const { t } = useTranslation()
   const [kind, setKind] = useState<'L' | 'R' | 'D'>('L')
   const [bind, setBind] = useState('')
@@ -102,6 +104,11 @@ function NewForwardForm({ onSubmit, onCancel, onSaveProfile }: NewForwardFormPro
           <input style={inputStyle} placeholder={t('panels.fwdSaveNamePlaceholder')} value={name} onChange={e => setName(e.target.value)} />
         </div>
       )}
+      {error && (
+        <span role="alert" style={{ fontSize: 11, color: 'var(--signal-red, #e5484d)', lineHeight: 1.4, wordBreak: 'break-word' }}>
+          {error}
+        </span>
+      )}
       <div className="row gap6" style={{ justifyContent: 'flex-end' }}>
         <Btn variant="ghost" size="sm" onClick={onCancel}>{t('panels.cancel')}</Btn>
         {onSaveProfile && (
@@ -145,6 +152,7 @@ export function TunnelsPanel({ onClose, sessionId, activeConnId, profiles, onSav
 
   const [tunnels, setTunnels] = useState<Tunnel[]>([])
   const [showForm, setShowForm] = useState(false)
+  const [formError, setFormError] = useState<string | null>(null)
   const overlayRef = useRef<HTMLDivElement>(null)
 
   const load = () => {
@@ -194,6 +202,9 @@ export function TunnelsPanel({ onClose, sessionId, activeConnId, profiles, onSav
     return () => document.removeEventListener('mousedown', handler)
   }, [showForm])
 
+  // A closed form starts clean next time it opens — don't carry a stale error across opens.
+  useEffect(() => { if (!showForm) setFormError(null) }, [showForm])
+
   const handleToggle = (t2: Tunnel, nowOn: boolean) => {
     if (!sessionId) return
     if (!nowOn && t2.status === 'up') {
@@ -204,11 +215,14 @@ export function TunnelsPanel({ onClose, sessionId, activeConnId, profiles, onSav
   }
 
   const handleCreate = (kind: 'L' | 'R' | 'D', bind: string, target: string) => {
-    if (!sessionId) return
-    setShowForm(false)
+    // No active SSH session → no transport to build a tunnel over. Tell the user instead of
+    // doing nothing (the original silent `return` looked like a dead button).
+    if (!sessionId) { setFormError(t('panels.noSessionHint')); return }
+    setFormError(null)
     tunnelOpen(sessionId, { kind, bind, target: kind === 'D' ? null : target || null })
-      .then(() => load())
-      .catch(() => load())
+      .then(() => { setShowForm(false); load() })
+      // Surface the backend error (bind in use, target unreachable, …) rather than swallowing it.
+      .catch((e: unknown) => { setFormError(e instanceof Error ? e.message : String(e)); load() })
   }
 
   return (
@@ -229,6 +243,7 @@ export function TunnelsPanel({ onClose, sessionId, activeConnId, profiles, onSav
           />
           {showForm && (
             <NewForwardForm
+              error={formError}
               onSubmit={handleCreate}
               onCancel={() => setShowForm(false)}
               onSaveProfile={onSaveProfile ? (kind, bind, target, name) => { setShowForm(false); onSaveProfile(kind, bind, target, name) } : undefined}

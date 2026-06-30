@@ -106,6 +106,23 @@ describe('TunnelsPanel (tunnel wiring)', () => {
     expect(h.getTunnels).toHaveBeenCalledWith('sess-1')
   })
 
+  it('surfaces a tunnelOpen failure instead of silently doing nothing', async () => {
+    h.tunnelOpen.mockRejectedValue(new Error('tcpip_forward 127.0.0.1:8080: address already in use'))
+    wrap(<TunnelsPanel onClose={() => {}} sessionId="sess-1" />)
+    await waitFor(() => expect(screen.getByText('prod-orders')).toBeTruthy())
+
+    // Open the new-forward overlay (the "+" action carries the localized "新建转发" title).
+    fireEvent.click(screen.getByTitle('新建转发'))
+    // Fill bind + target, then submit.
+    fireEvent.change(screen.getByPlaceholderText('localhost:8080'), { target: { value: '127.0.0.1:8080' } })
+    fireEvent.change(screen.getByPlaceholderText('10.0.4.2:5432'), { target: { value: '10.0.4.2:5432' } })
+    fireEvent.click(screen.getByText('添加'))
+
+    // The backend error must be shown to the user (the original bug swallowed it).
+    await waitFor(() => expect(screen.getByText(/address already in use/)).toBeTruthy())
+    expect(h.tunnelOpen).toHaveBeenCalled()
+  })
+
   it('calls tunnelClose with the tunnel id when toggled OFF', async () => {
     wrap(<TunnelsPanel onClose={() => {}} sessionId="sess-1" />)
     await waitFor(() => expect(screen.getByText('prod-orders')).toBeTruthy())
