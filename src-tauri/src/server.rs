@@ -92,6 +92,22 @@ pub struct AppState {
     /// unlimited (the default; the remote host's disk is the bound). Operators on a shared host can
     /// set it to cap a single transfer.
     pub max_upload_bytes: Option<u64>,
+    /// Web-only ownership maps: live resource id → owner user id. The shared managers (`conns`,
+    /// `ssh`, `vnc`) stay single-workspace (so the desktop is untouched); these side maps let the
+    /// web head enforce "a user may only use their OWN live connection/session (admins: any)".
+    pub conn_owners: Arc<std::sync::Mutex<HashMap<String, i64>>>,
+    pub ssh_owners: Arc<std::sync::Mutex<HashMap<String, i64>>>,
+    pub vnc_owners: Arc<std::sync::Mutex<HashMap<String, i64>>>,
+}
+
+/// True if `actor` may use the live resource `id`: admins may use any; others only their own.
+/// An id absent from the map (never connected, or someone else's that they're guessing) → denied
+/// for non-admins, so a crafted `connId: "conn-1"` can't reach another user's connection.
+fn owns_resource(map: &std::sync::Mutex<HashMap<String, i64>>, id: &str, actor: &User) -> bool {
+    if actor.is_admin {
+        return true;
+    }
+    map.lock().unwrap().get(id).is_some_and(|&owner| owner == actor.id)
 }
 
 /// A live session: which user, and when it stops being valid (server-side enforced TTL).
@@ -125,6 +141,9 @@ impl AppState {
             max_upload_bytes: std::env::var("CATIO_MAX_UPLOAD_BYTES").ok()
                 .and_then(|s| s.parse::<u64>().ok())
                 .filter(|&n| n > 0),
+            conn_owners: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            ssh_owners: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            vnc_owners: Arc::new(std::sync::Mutex::new(HashMap::new())),
         })
     }
 }
@@ -230,10 +249,16 @@ async fn invoke(State(st): State<AppState>, headers: HeaderMap, Json(req): Json<
         "secret_remember" => return secret_remember(&st, &req.args, &user),
         "secret_recall" => return secret_recall(&st, &req.args, &user),
         "secret_forget" => return secret_forget(&st, &req.args, &user),
+        // Per-user data layer (connections / groups / snippets / history / tunnels). A normal user
+        // only ever touches their own items; an admin sees + can target any user's (via ownerId).
+        "store_list" => return store_list(&st, &req.args, &user),
+        "store_set" => return store_set(&st, &req.args, &user),
+        "store_delete" => return store_delete(&st, &req.args, &user),
+        "store_clear" => return store_clear(&st, &req.args, &user),
         _ => {}
     }
 
-    match dispatch(&st, &req.cmd, req.args).await {
+    match dispatch(&st, &user, &req.cmd, req.args).await {
         Ok(v) => Json(v).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
     }
@@ -400,6 +425,53 @@ fn secret_forget(st: &AppState, args: &Value, actor: &User) -> Response {
     json_or_err(st.auth.delete_secret(actor.id, profile_id).map(|_| true))
 }
 
+// ── Per-user data store handlers (connections / groups / snippets / history / tunnels) ──
+
+/// Which user a write targets: a normal user always writes their OWN items; an admin may target
+/// any user's row by passing `ownerId` (so admins can manage everyone's connections).
+fn store_owner(args: &Value, actor: &User) -> i64 {
+    if actor.is_admin {
+        args.get("ownerId").and_then(Value::as_i64).unwrap_or(actor.id)
+    } else {
+        actor.id
+    }
+}
+
+fn store_list(st: &AppState, args: &Value, actor: &User) -> Response {
+    let store = args.get("store").and_then(Value::as_str).unwrap_or("");
+    if store.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "store 必填" }))).into_response();
+    }
+    json_or_err(st.auth.store_list(store, actor.id, actor.is_admin))
+}
+
+fn store_set(st: &AppState, args: &Value, actor: &User) -> Response {
+    let store = args.get("store").and_then(Value::as_str).unwrap_or("");
+    let item_id = args.get("itemId").and_then(Value::as_str).unwrap_or("");
+    if store.is_empty() || item_id.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "store/itemId 必填" }))).into_response();
+    }
+    // Strip the server-injected owner tags before persisting; they're re-added on list.
+    let mut payload = args.get("payload").cloned().unwrap_or(Value::Null);
+    if let Value::Object(ref mut m) = payload {
+        m.remove("__ownerId");
+        m.remove("__ownerName");
+    }
+    let payload_str = serde_json::to_string(&payload).unwrap_or_else(|_| "null".into());
+    json_or_err(st.auth.store_set(store_owner(args, actor), store, item_id, &payload_str).map(|_| true))
+}
+
+fn store_delete(st: &AppState, args: &Value, actor: &User) -> Response {
+    let store = args.get("store").and_then(Value::as_str).unwrap_or("");
+    let item_id = args.get("itemId").and_then(Value::as_str).unwrap_or("");
+    json_or_err(st.auth.store_delete(store_owner(args, actor), store, item_id).map(|_| true))
+}
+
+fn store_clear(st: &AppState, args: &Value, actor: &User) -> Response {
+    let store = args.get("store").and_then(Value::as_str).unwrap_or("");
+    json_or_err(st.auth.store_clear(store_owner(args, actor), store).map(|_| true))
+}
+
 fn forbidden() -> Response {
     (StatusCode::FORBIDDEN, Json(json!({ "error": "需要管理员权限" }))).into_response()
 }
@@ -436,8 +508,16 @@ fn now_stamp() -> String {
 
 /// Best-effort: record a DB query in the persisted history (never fails the query). The
 /// `history_lock` serializes the load-modify-save so concurrent requests don't drop entries.
-fn record_history(st: &AppState, conn_id: &str, sql: &str, dur: String, args: &Value) {
-    let dir: &Path = st.data_dir.as_ref();
+/// Per-user data subdir (web multi-user): query history / snippets / known_hosts live here, keyed
+/// by the owner's user id, so one user can't see or clear another's. Admins still call with their
+/// own id for these (per-user history is personal); cross-user visibility is only for connections.
+fn user_data_dir(st: &AppState, actor: &User) -> PathBuf {
+    st.data_dir.join("users").join(actor.id.to_string())
+}
+
+fn record_history(st: &AppState, actor: &User, conn_id: &str, sql: &str, dur: String, args: &Value) {
+    let dir = user_data_dir(st, actor);
+    let dir: &Path = dir.as_ref();
     if std::fs::create_dir_all(dir).is_err() { return; }
     let _guard = st.history_lock.lock().unwrap_or_else(|e| e.into_inner());
     let entry = HistoryEntry {
@@ -456,8 +536,22 @@ fn record_history(st: &AppState, conn_id: &str, sql: &str, dur: String, args: &V
 }
 
 /// Dispatch one `invoke(cmd, args)` to the shared core. Mirrors the Tauri command bodies.
-async fn dispatch(st: &AppState, cmd: &str, args: Value) -> Result<Value, String> {
+async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result<Value, String> {
     let conns = st.conns.as_ref();
+    // ── Ownership gate ──────────────────────────────────────────────────────────────
+    // Any command that references a live `connId`/`sessionId` must be issued by the OWNER of that
+    // resource (admins may use any). Centralized here so every db/ssh/sftp op is covered uniformly
+    // and a crafted id (the ids are guessable counters) can't reach another user's connection.
+    if let Some(conn_id) = args.get("connId").and_then(Value::as_str) {
+        if !owns_resource(&st.conn_owners, conn_id, actor) {
+            return Err("connection not found".into());
+        }
+    }
+    if let Some(session_id) = args.get("sessionId").and_then(Value::as_str) {
+        if !owns_resource(&st.ssh_owners, session_id, actor) {
+            return Err("session not found".into());
+        }
+    }
     match cmd {
         // ── Connection lifecycle ────────────────────────────────────────────────
         "db_connect" => {
@@ -467,6 +561,7 @@ async fn dispatch(st: &AppState, cmd: &str, args: Value) -> Result<Value, String
             let caps = drv.capabilities();
             let id = WEB_CONN_IDS.next();
             conns.insert(id.clone(), drv).await;
+            st.conn_owners.lock().unwrap().insert(id.clone(), actor.id); // record owner for the gate
             serde_json::to_value(ConnectResult { conn_id: id, version, capabilities: caps }).map_err(estr)
         }
         "db_test_connection" => {
@@ -477,7 +572,9 @@ async fn dispatch(st: &AppState, cmd: &str, args: Value) -> Result<Value, String
             Ok(json!({ "version": version, "latencyMs": started.elapsed().as_millis() as u64 }))
         }
         "db_disconnect" => {
-            if conns.remove(require(&args, "connId")?).await { Ok(Value::Null) }
+            let conn_id = require(&args, "connId")?;
+            st.conn_owners.lock().unwrap().remove(conn_id);
+            if conns.remove(conn_id).await { Ok(Value::Null) }
             else { Err("connection not found".into()) }
         }
 
@@ -490,7 +587,7 @@ async fn dispatch(st: &AppState, cmd: &str, args: Value) -> Result<Value, String
             let ns = opt_str(&args, "defaultNamespace");
             let started = Instant::now();
             let result = drv.query_with_default_namespace(sql, max_rows, ns).await.map_err(estr)?;
-            record_history(st, conn_id, sql, format!("{}ms", started.elapsed().as_millis()), &args);
+            record_history(st, actor, conn_id, sql, format!("{}ms", started.elapsed().as_millis()), &args);
             serde_json::to_value(result).map_err(estr)
         }
         "db_query_page" => {
@@ -737,44 +834,48 @@ async fn dispatch(st: &AppState, cmd: &str, args: Value) -> Result<Value, String
             Ok(json!(r.rows_affected.unwrap_or(0)))
         }
 
-        // ── History / snippets (persisted under the data volume) ─────────────────
+        // ── History / snippets (per-user under the data volume: users/{id}/) ──────
         "db_history" => {
-            Ok(serde_json::to_value(history::load_history(st.data_dir.as_ref())).map_err(estr)?)
+            Ok(serde_json::to_value(history::load_history(&user_data_dir(st, actor))).map_err(estr)?)
         }
         "db_clear_history" => {
+            let dir = user_data_dir(st, actor);
             let _guard = st.history_lock.lock().unwrap_or_else(|e| e.into_inner());
-            history::save_history(st.data_dir.as_ref(), &[]).map_err(estr)?;
+            history::save_history(&dir, &[]).map_err(estr)?;
             Ok(Value::Null)
         }
         "db_delete_history" => {
             let id = require(&args, "id")?;
+            let dir = user_data_dir(st, actor);
             let _guard = st.history_lock.lock().unwrap_or_else(|e| e.into_inner());
-            let list: Vec<HistoryEntry> = history::load_history(st.data_dir.as_ref())
+            let list: Vec<HistoryEntry> = history::load_history(&dir)
                 .into_iter().filter(|h| h.id != id).collect();
-            history::save_history(st.data_dir.as_ref(), &list).map_err(estr)?;
+            history::save_history(&dir, &list).map_err(estr)?;
             Ok(Value::Null)
         }
         "db_delete_history_for_profile" => {
             let pid = require(&args, "profileId")?;
+            let dir = user_data_dir(st, actor);
             let _guard = st.history_lock.lock().unwrap_or_else(|e| e.into_inner());
-            let list: Vec<HistoryEntry> = history::load_history(st.data_dir.as_ref())
+            let list: Vec<HistoryEntry> = history::load_history(&dir)
                 .into_iter().filter(|h| h.profile_id.as_deref() != Some(pid)).collect();
-            history::save_history(st.data_dir.as_ref(), &list).map_err(estr)?;
+            history::save_history(&dir, &list).map_err(estr)?;
             Ok(Value::Null)
         }
         "db_snippets" => {
-            Ok(serde_json::to_value(history::load_snippets(st.data_dir.as_ref())).map_err(estr)?)
+            Ok(serde_json::to_value(history::load_snippets(&user_data_dir(st, actor))).map_err(estr)?)
         }
         "db_save_snippet" => {
             let mut snippet: SnippetEntry = from_arg(&args, "snippet")?;
             if snippet.id.is_empty() { snippet.id = WEB_SNIPPET_IDS.next(); }
+            let dir = user_data_dir(st, actor);
             let _guard = st.history_lock.lock().unwrap_or_else(|e| e.into_inner());
-            let mut list = history::load_snippets(st.data_dir.as_ref());
+            let mut list = history::load_snippets(&dir);
             match list.iter_mut().find(|s| s.id == snippet.id) {
                 Some(existing) => *existing = snippet,
                 None => list.push(snippet),
             }
-            history::save_snippets(st.data_dir.as_ref(), &list).map_err(estr)?;
+            history::save_snippets(&dir, &list).map_err(estr)?;
             Ok(Value::Null)
         }
 
@@ -785,8 +886,8 @@ async fn dispatch(st: &AppState, cmd: &str, args: Value) -> Result<Value, String
         }
         "ssh_connect" => {
             let a: SshConnectArgs = from_arg(&args, "args")?;
-            let dir = st.data_dir.as_ref();
-            let _ = std::fs::create_dir_all(dir);
+            let dir = user_data_dir(st, actor); // per-user known_hosts
+            let _ = std::fs::create_dir_all(&dir);
             let (handle, fingerprint, forwarded, jump, host_key_trusted) =
                 connect_checked(&a, Some(dir.as_path())).await.map_err(estr)?;
             let session_id = WEB_SSH_IDS.next();
@@ -798,6 +899,7 @@ async fn dispatch(st: &AppState, cmd: &str, args: Value) -> Result<Value, String
                 forwarded,
                 _jump: jump,
             }).await;
+            st.ssh_owners.lock().unwrap().insert(session_id.clone(), actor.id); // record owner
             Ok(json!({
                 "sessionId": session_id,
                 "hostKeyFingerprint": fingerprint,
@@ -806,6 +908,7 @@ async fn dispatch(st: &AppState, cmd: &str, args: Value) -> Result<Value, String
         }
         "ssh_disconnect" => {
             let session_id = require(&args, "sessionId")?;
+            st.ssh_owners.lock().unwrap().remove(session_id);
             st.ssh.remove_monitor(session_id).await;
             let sess = st.ssh.remove(session_id).await.ok_or("session not found")?;
             sess.lock().await.handle
@@ -815,8 +918,8 @@ async fn dispatch(st: &AppState, cmd: &str, args: Value) -> Result<Value, String
         "ssh_trust_host" => {
             let host_port = require(&args, "hostPort")?.to_string();
             let fingerprint = require(&args, "fingerprint")?.to_string();
-            let dir = st.data_dir.as_ref();
-            let _ = std::fs::create_dir_all(dir);
+            let dir = user_data_dir(st, actor); // per-user known_hosts
+            let _ = std::fs::create_dir_all(&dir);
             let path = dir.join("known_hosts");
             let mut map = std::fs::read_to_string(&path)
                 .map(|s| crate::ssh::knownhosts::parse(&s)).unwrap_or_default();
@@ -990,7 +1093,6 @@ async fn handle_ws(socket: WebSocket, st: AppState, token: String) {
                             let _ = tx.try_send(json!({ "type": "reply", "id": env.get("id").cloned().unwrap_or(Value::Null), "ok": false, "error": "会话已失效,请重新登录" }));
                             break;
                         };
-                        let actor_admin = actor.is_admin;
                         let cmd = env.get("cmd").and_then(Value::as_str).unwrap_or("").to_string();
                         let id = env.get("id").cloned().unwrap_or(Value::Null);
                         let cmd_args = env.get("args").cloned().unwrap_or_else(|| json!({}));
@@ -998,12 +1100,12 @@ async fn handle_ws(socket: WebSocket, st: AppState, token: String) {
                         // ~25s) — run them OFF the reader loop so other cmds / ping / close on this
                         // same (singleton) socket aren't frozen while a host connects.
                         if matches!(cmd.as_str(), "vnc_connect" | "term_open") {
-                            let (st2, tx2, op2, opv2, ops2, opm2) = (st.clone(), tx.clone(), opened.clone(), opened_vnc.clone(), opened_scans.clone(), opened_monitors.clone());
+                            let (st2, tx2, op2, opv2, ops2, opm2, actor2) = (st.clone(), tx.clone(), opened.clone(), opened_vnc.clone(), opened_scans.clone(), opened_monitors.clone(), actor.clone());
                             tokio::spawn(async move {
-                                handle_ws_cmd(&st2, conn_id, actor_admin, &tx2, &cmd, id, &cmd_args, &op2, &opv2, &ops2, &opm2).await;
+                                handle_ws_cmd(&st2, conn_id, &actor2, &tx2, &cmd, id, &cmd_args, &op2, &opv2, &ops2, &opm2).await;
                             });
                         } else {
-                            handle_ws_cmd(&st, conn_id, actor_admin, &tx, &cmd, id, &cmd_args, &opened, &opened_vnc, &opened_scans, &opened_monitors).await;
+                            handle_ws_cmd(&st, conn_id, &actor, &tx, &cmd, id, &cmd_args, &opened, &opened_vnc, &opened_scans, &opened_monitors).await;
                         }
                     }
                     _ => {}
@@ -1022,6 +1124,7 @@ async fn handle_ws(socket: WebSocket, st: AppState, token: String) {
     }
     let vncs = opened_vnc.lock().unwrap().clone();
     for sid in vncs {
+        st.vnc_owners.lock().unwrap().remove(&sid);
         let _ = vnc_close_core(&st.vnc, &sid);
     }
     // Cancel any scans this connection started, and stop any host monitors it was driving.
@@ -1043,7 +1146,7 @@ async fn handle_ws(socket: WebSocket, st: AppState, token: String) {
 async fn handle_ws_cmd(
     st: &AppState,
     conn_id: u64,
-    actor_admin: bool,
+    actor: &User,
     tx: &tokio::sync::mpsc::Sender<Value>,
     cmd: &str,
     id: Value,
@@ -1053,9 +1156,20 @@ async fn handle_ws_cmd(
     opened_scans: &std::sync::Mutex<Vec<String>>,
     opened_monitors: &std::sync::Mutex<Vec<String>>,
 ) {
+    let actor_admin = actor.is_admin;
     let sid = || args.get("sessionId").and_then(Value::as_str).unwrap_or("").to_string();
     let cid = || args.get("chanId").and_then(Value::as_str).unwrap_or("").to_string();
-    let result: Result<Value, String> = match cmd {
+    // Ownership gate (WS): terminal/monitor commands act on an SSH `sessionId`; vnc pointer/key/close
+    // act on a VNC `sessionId`. The owner (or an admin) only — same rule as the HTTP dispatch gate.
+    let ws_owned = match cmd {
+        "term_open" | "term_write" | "term_resize" | "term_close" | "monitor_start" | "monitor_stop" =>
+            owns_resource(&st.ssh_owners, &sid(), actor),
+        "vnc_pointer" | "vnc_key" | "vnc_close" => owns_resource(&st.vnc_owners, &sid(), actor),
+        _ => true,
+    };
+    let result: Result<Value, String> = if !ws_owned {
+        Err("资源不存在或无权访问".to_string())
+    } else { match cmd {
         "term_open" => {
             let session_id = sid();
             let cols = u32_or(args, "cols", 80);
@@ -1103,6 +1217,7 @@ async fn handle_ws_cmd(
             }).await {
                 Ok(vid) => {
                     opened_vnc.lock().unwrap().push(vid.clone());
+                    st.vnc_owners.lock().unwrap().insert(vid.clone(), actor.id); // record owner
                     Ok(json!({ "sessionId": vid }))
                 }
                 Err(e) => Err(e.to_string()),
@@ -1122,6 +1237,7 @@ async fn handle_ws_cmd(
         "vnc_close" => {
             let s = sid();
             opened_vnc.lock().unwrap().retain(|x| x != &s);
+            st.vnc_owners.lock().unwrap().remove(&s);
             st.ws.unsubscribe(conn_id, &format!("vnc-init://{s}"));
             st.ws.unsubscribe(conn_id, &format!("vnc-rect://{s}"));
             st.ws.unsubscribe(conn_id, &format!("vnc-closed://{s}"));
@@ -1180,7 +1296,7 @@ async fn handle_ws_cmd(
         }
 
         other => Err(format!("ws command not supported: {other}")),
-    };
+    } };
     // Fire-and-forget commands carry no `id` (vnc_pointer/key) — don't generate reply traffic for
     // every mouse event. Commands with an id always get a reply.
     if !id.is_null() {
@@ -1194,10 +1310,10 @@ async fn handle_ws_cmd(
 
 // ── SFTP binary transfer endpoints (M4) ──────────────────────────────────────────────────────
 
-/// True when the request carries a valid session cookie. Shared by the SFTP routes (which, like
-/// /api/invoke, must be gated).
-fn authed(st: &AppState, headers: &HeaderMap) -> bool {
-    session_token(headers).as_deref().and_then(|t| resolve_session(st, t)).is_some()
+/// Resolve the caller's user from the session cookie, or None. Shared by the SFTP binary routes
+/// (which, like /api/invoke, must be gated AND ownership-checked against the SSH session).
+fn authed_user(st: &AppState, headers: &HeaderMap) -> Option<User> {
+    session_token(headers).as_deref().and_then(|t| resolve_session(st, t))
 }
 
 /// Build an RFC 6266 `Content-Disposition: attachment` value with both an ASCII `filename=`
@@ -1229,8 +1345,11 @@ struct DownloadQuery {
 /// `GET /api/sftp/download?sessionId=&path=` — read the remote file and stream it to the browser
 /// as an attachment (the browser's own download UI shows progress). Buffers fully (Phase-1 LAN).
 async fn sftp_download_handler(State(st): State<AppState>, headers: HeaderMap, Query(q): Query<DownloadQuery>) -> Response {
-    if !authed(&st, &headers) {
+    let Some(user) = authed_user(&st, &headers) else {
         return (StatusCode::UNAUTHORIZED, "未登录").into_response();
+    };
+    if !owns_resource(&st.ssh_owners, &q.session_id, &user) {
+        return (StatusCode::BAD_REQUEST, "session not found").into_response();
     }
     match crate::ssh::sftp::read_remote_bytes(&st.ssh, &q.session_id, &q.path).await {
         Ok(bytes) => {
@@ -1255,9 +1374,9 @@ fn upload_field_err(e: axum::extract::multipart::MultipartError) -> Response {
 /// file and write it to the remote path over SFTP (the HTML5 upload that replaces Tauri's native
 /// drag-drop / local-path upload).
 async fn sftp_upload_handler(State(st): State<AppState>, headers: HeaderMap, mut multipart: Multipart) -> Response {
-    if !authed(&st, &headers) {
+    let Some(user) = authed_user(&st, &headers) else {
         return (StatusCode::UNAUTHORIZED, "未登录").into_response();
-    }
+    };
     let (mut session_id, mut remote_path) = (String::new(), String::new());
     loop {
         // Surface a multipart parse error as 400 rather than silently stopping with a half-read
@@ -1276,6 +1395,9 @@ async fn sftp_upload_handler(State(st): State<AppState>, headers: HeaderMap, mut
             Some("file") => {
                 if session_id.is_empty() || remote_path.is_empty() {
                     return (StatusCode::BAD_REQUEST, Json(json!({ "error": "file 字段需在 sessionId/remotePath 之后" }))).into_response();
+                }
+                if !owns_resource(&st.ssh_owners, &session_id, &user) {
+                    return (StatusCode::BAD_REQUEST, Json(json!({ "error": "session not found" }))).into_response();
                 }
                 use futures_util::StreamExt;
                 let stream = field.map(|r| r.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string())));

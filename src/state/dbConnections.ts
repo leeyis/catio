@@ -1,7 +1,9 @@
 import { useSyncExternalStore } from 'react'
 import type { DbConnectArgs, DbConnectResult, DbCapabilities } from '../services/db'
 import type { Connection } from '../services/types'
+import { storeLoad, storeUpsert, storeRemove, onStoresChanged, type StoreItem } from '../services/userStore'
 
+const STORE = 'db-connections'
 const KEY = 'catio-db-connections'
 
 /** Real saved DB connections are ungrouped by default — they surface under the
@@ -21,7 +23,7 @@ export function generateProfileId(): string {
 // ---- Persisted connection profiles (localStorage) ----
 
 /** Connection profile = connect args minus the secret (never persisted). */
-export type DbProfile = Omit<DbConnectArgs, 'secret'> & {
+export type DbProfile = Omit<DbConnectArgs, 'secret'> & StoreItem & {
   id: string
   name: string
   /** Optional vault group id; defaults to DEFAULT_DB_GROUP when rendered. */
@@ -37,25 +39,16 @@ export type DbProfile = Omit<DbConnectArgs, 'secret'> & {
 }
 
 export function listDbConnections(): DbProfile[] {
-  if (typeof localStorage === 'undefined') return []
-  try {
-    return JSON.parse(localStorage.getItem(KEY) ?? '[]') as DbProfile[]
-  } catch {
-    return []
-  }
+  return storeLoad<DbProfile>(STORE, KEY)
 }
 
 export function saveDbConnection(p: DbProfile): void {
-  if (typeof localStorage === 'undefined') return
-  const all = listDbConnections().filter(x => x.id !== p.id)
-  all.push(p)
-  localStorage.setItem(KEY, JSON.stringify(all))
+  storeUpsert(STORE, KEY, p)
   notify()
 }
 
-export function removeDbConnection(id: string): void {
-  if (typeof localStorage === 'undefined') return
-  localStorage.setItem(KEY, JSON.stringify(listDbConnections().filter(x => x.id !== id)))
+export function removeDbConnection(id: string, ownerId?: number): void {
+  storeRemove<DbProfile>(STORE, KEY, id, ownerId)
   notify()
 }
 
@@ -81,6 +74,7 @@ function notify(): void {
   _snapshot = listDbConnections()
   _listeners.forEach(fn => fn())
 }
+onStoresChanged(notify) // refresh when the server stores are (re)hydrated on login/logout
 
 /** React hook: the current list of saved DB connection profiles, reactive to
  *  save/remove. Returns a stable array reference between mutations. */

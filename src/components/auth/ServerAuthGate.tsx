@@ -10,6 +10,7 @@ import React, { createContext, useContext, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { isServer } from '../../services/transport'
 import { authMe, authLogin, authBootstrap, authLogout, type ServerUser } from '../../services/auth'
+import { hydrateUserStores, clearUserStores, USER_STORES } from '../../services/userStore'
 
 import { Icon } from '../Icon'
 import { BrandMark } from '../BrandMark'
@@ -50,8 +51,17 @@ function ServerAuthGateImpl({ children }: { children: React.ReactNode }) {
   const refresh = async () => {
     try {
       const s = await authMe()
-      if (s.user) { setUser(s.user); setPhase('ready') }
-      else { setUser(null); setPhase(s.needsBootstrap ? 'bootstrap' : 'login') }
+      if (s.user) {
+        // Load THIS user's connections/groups/snippets/history/tunnels from the server BEFORE
+        // showing the workbench, so the list starts with their own data (admins: everyone's) and
+        // never the previous user's. Failure is non-fatal — the workbench still opens (empty).
+        try { await hydrateUserStores([...USER_STORES]) } catch { /* show workbench anyway */ }
+        setUser(s.user)
+        setPhase('ready')
+      } else {
+        clearUserStores()
+        setUser(null); setPhase(s.needsBootstrap ? 'bootstrap' : 'login')
+      }
     } catch {
       // If auth_me itself fails (network), fall back to the login screen.
       setUser(null); setPhase('login')
@@ -62,6 +72,7 @@ function ServerAuthGateImpl({ children }: { children: React.ReactNode }) {
 
   const logout = async () => {
     try { await authLogout() } finally {
+      clearUserStores() // drop the previous user's data so the next login starts clean
       setUser(null)
       setPhase('login')
     }

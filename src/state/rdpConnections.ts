@@ -3,8 +3,9 @@
  * Mirrors the reactive pub/sub of dbConnections so the sidebar updates on save/remove.
  * (No password stored — the RDP client prompts for credentials.) */
 import { useSyncExternalStore } from 'react'
+import { storeLoad, storeUpsert, storeRemove, onStoresChanged, type StoreItem } from '../services/userStore'
 
-export interface RdpProfile {
+export interface RdpProfile extends StoreItem {
   id: string
   name: string
   host: string
@@ -13,6 +14,7 @@ export interface RdpProfile {
   group?: string
 }
 
+const STORE = 'rdp-connections'
 const KEY = 'catio-rdp-connections'
 
 export function generateRdpId(): string {
@@ -21,26 +23,16 @@ export function generateRdpId(): string {
 }
 
 export function listRdpConnections(): RdpProfile[] {
-  if (typeof localStorage === 'undefined') return []
-  try {
-    const list = JSON.parse(localStorage.getItem(KEY) ?? '[]')
-    return Array.isArray(list) ? (list as RdpProfile[]) : []
-  } catch {
-    return []
-  }
+  return storeLoad<RdpProfile>(STORE, KEY)
 }
 
 export function saveRdpConnection(p: RdpProfile): void {
-  if (typeof localStorage === 'undefined') return
-  const all = listRdpConnections().filter(x => x.id !== p.id)
-  all.push(p)
-  localStorage.setItem(KEY, JSON.stringify(all))
+  storeUpsert(STORE, KEY, p)
   notify()
 }
 
-export function removeRdpConnection(id: string): void {
-  if (typeof localStorage === 'undefined') return
-  localStorage.setItem(KEY, JSON.stringify(listRdpConnections().filter(x => x.id !== id)))
+export function removeRdpConnection(id: string, ownerId?: number): void {
+  storeRemove<RdpProfile>(STORE, KEY, id, ownerId)
   notify()
 }
 
@@ -58,6 +50,7 @@ function notify(): void {
   _snapshot = listRdpConnections()
   _listeners.forEach(fn => fn())
 }
+onStoresChanged(notify)
 
 export function useRdpConnections(): RdpProfile[] {
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot)

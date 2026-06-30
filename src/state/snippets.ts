@@ -1,24 +1,19 @@
 import type { Snippet } from '../services/types'
+import { storeLoad, storeUpsert, storeRemove } from '../services/userStore'
 
+const STORE = 'snippets'
 const KEY = 'catio-snippets'
 
 export function loadSnippets(): Snippet[] {
-  try {
-    const r = localStorage.getItem(KEY)
-    return r ? (JSON.parse(r) as Snippet[]) : []
-  } catch {
-    return []
-  }
+  return storeLoad<Snippet>(STORE, KEY)
 }
 
 export function saveSnippet(s: Snippet): void {
-  const l = loadSnippets().filter(x => x.id !== s.id)
-  l.unshift(s)
-  localStorage.setItem(KEY, JSON.stringify(l))
+  storeUpsert(STORE, KEY, s)
 }
 
-export function deleteSnippet(id: string): void {
-  localStorage.setItem(KEY, JSON.stringify(loadSnippets().filter(x => x.id !== id)))
+export function deleteSnippet(id: string, ownerId?: number): void {
+  storeRemove<Snippet>(STORE, KEY, id, ownerId)
 }
 
 let __n = 0

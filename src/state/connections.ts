@@ -1,4 +1,5 @@
 import type { AuthMethod } from '../services/ssh'
+import { storeLoad, storeUpsert, storeRemove, type StoreItem } from '../services/userStore'
 
 /** Non-secret jump/bastion host config stored with the profile. Secret is NEVER persisted. */
 export interface JumpProfile {
@@ -8,7 +9,7 @@ export interface JumpProfile {
   auth: AuthMethod
 }
 
-export interface ConnectionProfile {
+export interface ConnectionProfile extends StoreItem {
   id: string
   name: string
   host: string
@@ -24,23 +25,17 @@ export interface ConnectionProfile {
   os?: string
 }
 
+const STORE = 'connections'
 const KEY = 'catio-connections'
 
 export function loadProfiles(): ConnectionProfile[] {
-  try {
-    const raw = localStorage.getItem(KEY)
-    return raw ? (JSON.parse(raw) as ConnectionProfile[]) : []
-  } catch {
-    return []
-  }
+  return storeLoad<ConnectionProfile>(STORE, KEY)
 }
 
 export function saveProfile(p: ConnectionProfile): void {
-  const list = loadProfiles().filter(x => x.id !== p.id)
-  list.push(p)
-  localStorage.setItem(KEY, JSON.stringify(list))
+  storeUpsert(STORE, KEY, p)
 }
 
-export function deleteProfile(id: string): void {
-  localStorage.setItem(KEY, JSON.stringify(loadProfiles().filter(x => x.id !== id)))
+export function deleteProfile(id: string, ownerId?: number): void {
+  storeRemove<ConnectionProfile>(STORE, KEY, id, ownerId)
 }

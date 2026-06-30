@@ -61,7 +61,19 @@ impl AuthDb {
                 nonce BLOB NOT NULL,
                 ciphertext BLOB NOT NULL,
                 PRIMARY KEY (user_id, profile_id)
-            );",
+            );
+            -- Per-user data layer (web multi-user): connections / groups / snippets / history /
+            -- tunnels. `store` names the collection, `item_id` the item's frontend id, `payload`
+            -- the item JSON. Owned by a user; admins can see/manage all (see store_* methods).
+            CREATE TABLE IF NOT EXISTS user_store (
+                owner_user_id INTEGER NOT NULL,
+                store TEXT NOT NULL,
+                item_id TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (owner_user_id, store, item_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_user_store_store ON user_store(store);",
         )
         .map_err(|e| e.to_string())?;
         Ok(AuthDb { conn: Mutex::new(conn) })
@@ -203,6 +215,73 @@ impl AuthDb {
         Ok(())
     }
 
+    // ── Per-user data store (connections / groups / snippets / history / tunnels) ──
+    // Access rule: a normal user sees/edits only their own items; an admin sees/manages ALL
+    // (each returned item carries `__ownerId`/`__ownerName` so the UI can show + target the owner).
+
+    /// List a store's items: admin → every user's; normal user → only their own. Each item is its
+    /// stored JSON with `__ownerId`/`__ownerName` injected.
+    pub fn store_list(&self, store: &str, caller_id: i64, is_admin: bool) -> Result<Vec<serde_json::Value>, String> {
+        let c = self.conn.lock().unwrap();
+        let mut out = Vec::new();
+        let mut push = |owner_id: i64, owner_name: String, payload: String| {
+            let mut v: serde_json::Value = serde_json::from_str(&payload).unwrap_or(serde_json::Value::Null);
+            if let serde_json::Value::Object(ref mut m) = v {
+                m.insert("__ownerId".into(), serde_json::json!(owner_id));
+                m.insert("__ownerName".into(), serde_json::json!(owner_name));
+            }
+            out.push(v);
+        };
+        if is_admin {
+            let mut stmt = c.prepare(
+                "SELECT s.owner_user_id, u.username, s.payload FROM user_store s \
+                 JOIN users u ON u.id = s.owner_user_id WHERE s.store = ?1 ORDER BY s.updated_at",
+            ).map_err(|e| e.to_string())?;
+            let rows = stmt.query_map(rusqlite::params![store], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
+                .map_err(|e| e.to_string())?;
+            for row in rows { let (a, b, d) = row.map_err(|e| e.to_string())?; push(a, b, d); }
+        } else {
+            let mut stmt = c.prepare(
+                "SELECT s.owner_user_id, u.username, s.payload FROM user_store s \
+                 JOIN users u ON u.id = s.owner_user_id WHERE s.store = ?1 AND s.owner_user_id = ?2 ORDER BY s.updated_at",
+            ).map_err(|e| e.to_string())?;
+            let rows = stmt.query_map(rusqlite::params![store, caller_id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
+                .map_err(|e| e.to_string())?;
+            for row in rows { let (a, b, d) = row.map_err(|e| e.to_string())?; push(a, b, d); }
+        }
+        Ok(out)
+    }
+
+    /// Upsert one item into `(owner, store)`. The caller layer decides `owner` (self, or any user
+    /// when an admin targets someone else's row).
+    pub fn store_set(&self, owner_user_id: i64, store: &str, item_id: &str, payload: &str) -> Result<(), String> {
+        let c = self.conn.lock().unwrap();
+        c.execute(
+            "INSERT INTO user_store (owner_user_id, store, item_id, payload, updated_at) VALUES (?1, ?2, ?3, ?4, ?5) \
+             ON CONFLICT(owner_user_id, store, item_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at",
+            rusqlite::params![owner_user_id, store, item_id, payload, now_secs()],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Delete one item from `(owner, store)` (no error if absent).
+    pub fn store_delete(&self, owner_user_id: i64, store: &str, item_id: &str) -> Result<(), String> {
+        let c = self.conn.lock().unwrap();
+        c.execute(
+            "DELETE FROM user_store WHERE owner_user_id = ?1 AND store = ?2 AND item_id = ?3",
+            rusqlite::params![owner_user_id, store, item_id],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Delete ALL of `(owner, store)` (e.g. "clear history").
+    pub fn store_clear(&self, owner_user_id: i64, store: &str) -> Result<(), String> {
+        let c = self.conn.lock().unwrap();
+        c.execute("DELETE FROM user_store WHERE owner_user_id = ?1 AND store = ?2", rusqlite::params![owner_user_id, store])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     pub fn list_users(&self) -> Result<Vec<User>, String> {
         let c = self.conn.lock().unwrap();
         let mut stmt = c
@@ -243,6 +322,7 @@ impl AuthDb {
         let tx = c.unchecked_transaction().map_err(|e| e.to_string())?;
         tx.execute("DELETE FROM users WHERE id = ?1", rusqlite::params![id]).map_err(|e| e.to_string())?;
         tx.execute("DELETE FROM conn_secrets WHERE user_id = ?1", rusqlite::params![id]).map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM user_store WHERE owner_user_id = ?1", rusqlite::params![id]).map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
         Ok(())
     }

@@ -4,8 +4,9 @@
  * vault is unlocked) the encrypted vault, like other connection credentials.
  * Mirrors the reactive pub/sub of dbConnections. */
 import { useSyncExternalStore } from 'react'
+import { storeLoad, storeUpsert, storeRemove, onStoresChanged, type StoreItem } from '../services/userStore'
 
-export interface VncProfile {
+export interface VncProfile extends StoreItem {
   id: string
   name: string
   host: string
@@ -13,6 +14,7 @@ export interface VncProfile {
   group?: string
 }
 
+const STORE = 'vnc-connections'
 const KEY = 'catio-vnc-connections'
 
 export function generateVncId(): string {
@@ -21,26 +23,16 @@ export function generateVncId(): string {
 }
 
 export function listVncConnections(): VncProfile[] {
-  if (typeof localStorage === 'undefined') return []
-  try {
-    const list = JSON.parse(localStorage.getItem(KEY) ?? '[]')
-    return Array.isArray(list) ? (list as VncProfile[]) : []
-  } catch {
-    return []
-  }
+  return storeLoad<VncProfile>(STORE, KEY)
 }
 
 export function saveVncConnection(p: VncProfile): void {
-  if (typeof localStorage === 'undefined') return
-  const all = listVncConnections().filter(x => x.id !== p.id)
-  all.push(p)
-  localStorage.setItem(KEY, JSON.stringify(all))
+  storeUpsert(STORE, KEY, p)
   notify()
 }
 
-export function removeVncConnection(id: string): void {
-  if (typeof localStorage === 'undefined') return
-  localStorage.setItem(KEY, JSON.stringify(listVncConnections().filter(x => x.id !== id)))
+export function removeVncConnection(id: string, ownerId?: number): void {
+  storeRemove<VncProfile>(STORE, KEY, id, ownerId)
   notify()
 }
 
@@ -58,6 +50,7 @@ function notify(): void {
   _snapshot = listVncConnections()
   _listeners.forEach(fn => fn())
 }
+onStoresChanged(notify)
 
 export function useVncConnections(): VncProfile[] {
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot)

@@ -9,7 +9,9 @@
 
 import { useSyncExternalStore } from 'react'
 import type { Group } from '../services/types'
+import { storeLoad, storeUpsert, storeRemove, onStoresChanged } from '../services/userStore'
 
+const STORE = 'groups'
 const KEY = 'catio-groups'
 
 // Palette for new groups — cycles as the user adds more. Theme-aware CSS vars.
@@ -23,18 +25,7 @@ const PALETTE = [
 ]
 
 export function loadGroups(): Group[] {
-  if (typeof localStorage === 'undefined') return []
-  try {
-    return JSON.parse(localStorage.getItem(KEY) ?? '[]') as Group[]
-  } catch {
-    return []
-  }
-}
-
-function persist(list: Group[]): void {
-  if (typeof localStorage === 'undefined') return
-  localStorage.setItem(KEY, JSON.stringify(list))
-  notify()
+  return storeLoad<Group>(STORE, KEY)
 }
 
 /** Generate a collision-resistant group id. */
@@ -51,16 +42,21 @@ export function addGroup(name: string): Group {
   const list = loadGroups()
   const color = PALETTE[list.length % PALETTE.length]
   const g: Group = { id: generateGroupId(), name: name.trim() || 'New group', color }
-  persist([...list, g])
+  storeUpsert(STORE, KEY, g)
+  notify()
   return g
 }
 
 export function renameGroup(id: string, name: string): void {
-  persist(loadGroups().map(g => (g.id === id ? { ...g, name: name.trim() || g.name } : g)))
+  const g = loadGroups().find(x => x.id === id)
+  if (!g) return
+  storeUpsert(STORE, KEY, { ...g, name: name.trim() || g.name })
+  notify()
 }
 
-export function removeGroup(id: string): void {
-  persist(loadGroups().filter(g => g.id !== id))
+export function removeGroup(id: string, ownerId?: number): void {
+  storeRemove<Group>(STORE, KEY, id, ownerId)
+  notify()
 }
 
 // ---- Reactive layer ----
@@ -81,6 +77,7 @@ function notify(): void {
   _snapshot = loadGroups()
   _listeners.forEach(fn => fn())
 }
+onStoresChanged(notify)
 
 /** React hook: reactive list of user-defined groups. */
 export function useGroups(): Group[] {
