@@ -98,6 +98,10 @@ pub struct AppState {
     pub conn_owners: Arc<std::sync::Mutex<HashMap<String, i64>>>,
     pub ssh_owners: Arc<std::sync::Mutex<HashMap<String, i64>>>,
     pub vnc_owners: Arc<std::sync::Mutex<HashMap<String, i64>>>,
+    /// 端口转发隧道的 owner 映射:隧道 id → 用户 id。隧道注册表挂在共享的 `ssh`
+    /// (SessionManager)上,全局可见;此 side map 让 web head 据此过滤 tunnel_list、门控
+    /// tunnel_close,使一个用户看不到也关不掉别人的隧道(admin 可见可关全部)。
+    pub tunnel_owners: Arc<std::sync::Mutex<HashMap<String, i64>>>,
 }
 
 /// True if `actor` may use the live resource `id`: admins may use any; others only their own.
@@ -144,6 +148,7 @@ impl AppState {
             conn_owners: Arc::new(std::sync::Mutex::new(HashMap::new())),
             ssh_owners: Arc::new(std::sync::Mutex::new(HashMap::new())),
             vnc_owners: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            tunnel_owners: Arc::new(std::sync::Mutex::new(HashMap::new())),
         })
     }
 }
@@ -978,6 +983,40 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
                 args.get("mode").and_then(Value::as_u64).map(|m| m as u32),
             ).await.map_err(estr)?;
             Ok(json!(mt))
+        }
+
+        // ── 端口转发 / 隧道(L/R/D)。隧道注册表挂在共享 SessionManager 上;字节计数经 WS
+        //    hub 以 `tunnel://{id}` 广播给订阅者。owner 隔离:tunnel_open 记录 owner、
+        //    tunnel_list 按 owner 过滤、tunnel_close 校验 owner。tunnel_open 的 sessionId 已被
+        //    顶部 owner 门控覆盖。 ──
+        "tunnel_open" => {
+            let session_id = require(&args, "sessionId")?.to_string();
+            let spec: crate::ssh::tunnel::TunnelSpec = from_arg(&args, "spec")?;
+            let sink: Arc<dyn EventSink> = st.ws.clone();
+            let id = crate::ssh::tunnel::tunnel_open_core(session_id, spec, sink, &st.ssh)
+                .await
+                .map_err(estr)?;
+            st.tunnel_owners.lock().unwrap().insert(id.clone(), actor.id); // record owner for the gate
+            Ok(Value::String(id))
+        }
+        "tunnel_close" => {
+            let tunnel_id = require(&args, "tunnelId")?.to_string();
+            if !owns_resource(&st.tunnel_owners, &tunnel_id, actor) {
+                return Err("tunnel not found".into());
+            }
+            st.ssh.remove_tunnel(&tunnel_id).await;
+            st.tunnel_owners.lock().unwrap().remove(&tunnel_id);
+            Ok(Value::Null)
+        }
+        "tunnel_list" => {
+            let all = st.ssh.tunnel_status_list().await;
+            let owners = st.tunnel_owners.lock().unwrap();
+            // 非 admin 只见自己的隧道;admin 见全部(管理视角)。
+            let visible: Vec<_> = all
+                .into_iter()
+                .filter(|t| actor.is_admin || owners.get(&t.id).is_some_and(|&o| o == actor.id))
+                .collect();
+            serde_json::to_value(visible).map_err(estr)
         }
 
         // Not exposed over web in M1 — the frontend degrades on this error (it keeps the
