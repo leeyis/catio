@@ -73,7 +73,17 @@ impl AuthDb {
                 updated_at INTEGER NOT NULL,
                 PRIMARY KEY (owner_user_id, store, item_id)
             );
-            CREATE INDEX IF NOT EXISTS idx_user_store_store ON user_store(store);",
+            CREATE INDEX IF NOT EXISTS idx_user_store_store ON user_store(store);
+            -- Per-user MCP access token (P3a server mode). One token per user (PRIMARY KEY
+            -- user_id); `enabled` gates the SSE routes without rotating the token; the token is a
+            -- 256-bit hex secret stored PLAINTEXT (CATIO_MASTER_KEY encryption is optional future
+            -- hardening). Regenerate = upsert a fresh token (the old one instantly stops resolving).
+            CREATE TABLE IF NOT EXISTS mcp_tokens (
+                user_id    INTEGER PRIMARY KEY,
+                token      TEXT NOT NULL,
+                enabled    INTEGER NOT NULL DEFAULT 1,
+                created_at INTEGER NOT NULL
+            );",
         )
         .map_err(|e| e.to_string())?;
         Ok(AuthDb { conn: Mutex::new(conn) })
@@ -282,6 +292,58 @@ impl AuthDb {
         Ok(())
     }
 
+    // ── Per-user MCP access token (P3a server mode) ──
+    // One token per user; the SSE routes self-authenticate on `?token=` (no cookie), so
+    // `mcp_token_resolve` maps a plaintext token back to its owner + enabled flag.
+
+    /// Current token + enabled for a user, or None if they have never created one.
+    pub fn mcp_token_get(&self, user_id: i64) -> Result<Option<(String, bool)>, String> {
+        let c = self.conn.lock().unwrap();
+        c.query_row(
+            "SELECT token, enabled FROM mcp_tokens WHERE user_id = ?1",
+            rusqlite::params![user_id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())
+    }
+
+    /// Insert (enabled=1, created_at=now) or rotate the token on conflict, PRESERVING enabled and
+    /// created_at. Used for both first creation and regeneration.
+    pub fn mcp_token_upsert(&self, user_id: i64, token: &str) -> Result<(), String> {
+        let c = self.conn.lock().unwrap();
+        c.execute(
+            "INSERT INTO mcp_tokens (user_id, token, enabled, created_at) VALUES (?1, ?2, 1, ?3)
+             ON CONFLICT(user_id) DO UPDATE SET token = excluded.token",
+            rusqlite::params![user_id, token, now_secs()],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Enable/disable WITHOUT rotating the token (no-op-safe if the row is absent).
+    pub fn mcp_token_set_enabled(&self, user_id: i64, enabled: bool) -> Result<(), String> {
+        let c = self.conn.lock().unwrap();
+        c.execute(
+            "UPDATE mcp_tokens SET enabled = ?2 WHERE user_id = ?1",
+            rusqlite::params![user_id, enabled as i64],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Reverse lookup for route auth: plaintext token → (user_id, enabled), or None.
+    pub fn mcp_token_resolve(&self, token: &str) -> Result<Option<(i64, bool)>, String> {
+        let c = self.conn.lock().unwrap();
+        c.query_row(
+            "SELECT user_id, enabled FROM mcp_tokens WHERE token = ?1",
+            rusqlite::params![token],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? != 0)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())
+    }
+
     pub fn list_users(&self) -> Result<Vec<User>, String> {
         let c = self.conn.lock().unwrap();
         let mut stmt = c
@@ -323,6 +385,7 @@ impl AuthDb {
         tx.execute("DELETE FROM users WHERE id = ?1", rusqlite::params![id]).map_err(|e| e.to_string())?;
         tx.execute("DELETE FROM conn_secrets WHERE user_id = ?1", rusqlite::params![id]).map_err(|e| e.to_string())?;
         tx.execute("DELETE FROM user_store WHERE owner_user_id = ?1", rusqlite::params![id]).map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM mcp_tokens WHERE user_id = ?1", rusqlite::params![id]).map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
         Ok(())
     }
@@ -422,6 +485,70 @@ mod tests {
         assert!(db.verify_login("bob", "secret123").is_err());
         // New password must meet the length rule.
         assert!(db.change_password(u.id, "newsecret", "123").is_err());
+    }
+
+    #[test]
+    fn mcp_token_create_and_get() {
+        let db = AuthDb::open_in_memory().unwrap();
+        let u = db.create_user("alice", "secret123", false).unwrap();
+        // No token before first creation.
+        assert!(db.mcp_token_get(u.id).unwrap().is_none());
+        let tok = new_session_token();
+        db.mcp_token_upsert(u.id, &tok).unwrap();
+        let (got, enabled) = db.mcp_token_get(u.id).unwrap().unwrap();
+        assert_eq!(got, tok);
+        assert!(enabled, "a freshly created token is enabled");
+    }
+
+    #[test]
+    fn mcp_token_regenerate_rotates_and_invalidates_old() {
+        let db = AuthDb::open_in_memory().unwrap();
+        let u = db.create_user("alice", "secret123", false).unwrap();
+        let old = new_session_token();
+        db.mcp_token_upsert(u.id, &old).unwrap();
+        // Disable first so we can prove enabled is PRESERVED across regeneration.
+        db.mcp_token_set_enabled(u.id, false).unwrap();
+        let new = new_session_token();
+        db.mcp_token_upsert(u.id, &new).unwrap();
+        // The old token no longer resolves; the new one does.
+        assert!(db.mcp_token_resolve(&old).unwrap().is_none());
+        let (uid, enabled) = db.mcp_token_resolve(&new).unwrap().unwrap();
+        assert_eq!(uid, u.id);
+        assert!(!enabled, "regeneration preserves the disabled flag");
+    }
+
+    #[test]
+    fn mcp_token_resolve_respects_enabled() {
+        let db = AuthDb::open_in_memory().unwrap();
+        let u = db.create_user("alice", "secret123", false).unwrap();
+        let tok = new_session_token();
+        db.mcp_token_upsert(u.id, &tok).unwrap();
+        // Enabled by default.
+        assert_eq!(db.mcp_token_resolve(&tok).unwrap(), Some((u.id, true)));
+        // Disabling flips the flag WITHOUT changing the token.
+        db.mcp_token_set_enabled(u.id, false).unwrap();
+        assert_eq!(db.mcp_token_resolve(&tok).unwrap(), Some((u.id, false)));
+        assert_eq!(db.mcp_token_get(u.id).unwrap().unwrap().0, tok);
+        // Re-enabling works too.
+        db.mcp_token_set_enabled(u.id, true).unwrap();
+        assert_eq!(db.mcp_token_resolve(&tok).unwrap(), Some((u.id, true)));
+        // An unknown token never resolves.
+        assert!(db.mcp_token_resolve("deadbeef").unwrap().is_none());
+    }
+
+    #[test]
+    fn delete_user_cascades_mcp_token() {
+        let db = AuthDb::open_in_memory().unwrap();
+        let admin = db.create_user("admin", "secret123", true).unwrap();
+        let bob = db.create_user("bob", "secret123", false).unwrap();
+        let tok = new_session_token();
+        db.mcp_token_upsert(bob.id, &tok).unwrap();
+        assert!(db.mcp_token_resolve(&tok).unwrap().is_some());
+        db.delete_user(bob.id).unwrap();
+        // Token row is gone with the user.
+        assert!(db.mcp_token_get(bob.id).unwrap().is_none());
+        assert!(db.mcp_token_resolve(&tok).unwrap().is_none());
+        let _ = admin; // second admin kept the delete legal
     }
 
     #[test]

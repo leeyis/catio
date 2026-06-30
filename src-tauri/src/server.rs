@@ -102,6 +102,14 @@ pub struct AppState {
     /// (SessionManager)上,全局可见;此 side map 让 web head 据此过滤 tunnel_list、门控
     /// tunnel_close,使一个用户看不到也关不掉别人的隧道(admin 可见可关全部)。
     pub tunnel_owners: Arc<std::sync::Mutex<HashMap<String, i64>>>,
+    /// MCP display-name metadata (server-mode MCP). The owner maps above only know id→user; these
+    /// add the friendly name + engine/host so `list_connections`/`list_hosts` render them. Keyed by
+    /// the same live id, written on connect / removed on disconnect alongside the owner maps.
+    pub conn_meta: Arc<std::sync::Mutex<HashMap<String, (String, String)>>>, // connId    -> (name, dbType)
+    pub ssh_meta: Arc<std::sync::Mutex<HashMap<String, (String, String)>>>,  // sessionId -> (name, host)
+    /// SSE response routing for the server-mode MCP: sessionId → sender. `/mcp/sse` registers a
+    /// channel here; `/mcp/messages` pushes the JSON-RPC reply onto the matching one.
+    pub mcp_sessions: Arc<std::sync::Mutex<HashMap<String, tokio::sync::mpsc::UnboundedSender<String>>>>,
 }
 
 /// True if `actor` may use the live resource `id`: admins may use any; others only their own.
@@ -149,6 +157,9 @@ impl AppState {
             ssh_owners: Arc::new(std::sync::Mutex::new(HashMap::new())),
             vnc_owners: Arc::new(std::sync::Mutex::new(HashMap::new())),
             tunnel_owners: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            conn_meta: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            ssh_meta: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            mcp_sessions: Arc::new(std::sync::Mutex::new(HashMap::new())),
         })
     }
 }
@@ -173,6 +184,11 @@ pub fn build_router(state: AppState) -> Router {
             "/api/sftp/upload",
             post(sftp_upload_handler).layer(DefaultBodyLimit::disable()),
         )
+        // Server-mode MCP (P3a): external agents self-authenticate on `?token=` (NO cookie gate),
+        // so these are NOT part of /api/invoke. The per-user token scopes them to the user's own
+        // live connections/sessions (see server_mcp::ServerTargets).
+        .route("/mcp/sse", get(crate::server_mcp::mcp_sse_handler))
+        .route("/mcp/messages", post(crate::server_mcp::mcp_messages_handler))
         .fallback(spa)
         .with_state(state)
 }
@@ -260,6 +276,11 @@ async fn invoke(State(st): State<AppState>, headers: HeaderMap, Json(req): Json<
         "store_set" => return store_set(&st, &req.args, &user),
         "store_delete" => return store_delete(&st, &req.args, &user),
         "store_clear" => return store_clear(&st, &req.args, &user),
+        // Per-user MCP access token (server-mode). Owner-scoped to the SESSION user; desktop never
+        // calls these. `get` lazily mints one so the settings page always has a token to show.
+        "mcp_token_get" => return mcp_token_get(&st, &user),
+        "mcp_token_regenerate" => return mcp_token_regenerate(&st, &user),
+        "mcp_token_set_enabled" => return mcp_token_set_enabled(&st, &req.args, &user),
         _ => {}
     }
 
@@ -477,6 +498,48 @@ fn store_clear(st: &AppState, args: &Value, actor: &User) -> Response {
     json_or_err(st.auth.store_clear(store_owner(args, actor), store).map(|_| true))
 }
 
+// ── Per-user MCP access token (server-mode MCP) ──
+// All owner-scoped to the SESSION user; the SSE routes self-authenticate on the resulting token.
+
+/// Current `{ token, enabled }` for the user, lazily minting one (enabled) on first call so the
+/// settings page always has a token to display. The endpoint URL is built client-side.
+fn mcp_token_get(st: &AppState, actor: &User) -> Response {
+    match st.auth.mcp_token_get(actor.id) {
+        Ok(Some((token, enabled))) => Json(json!({ "token": token, "enabled": enabled })).into_response(),
+        Ok(None) => {
+            let token = new_session_token();
+            match st.auth.mcp_token_upsert(actor.id, &token) {
+                Ok(()) => Json(json!({ "token": token, "enabled": true })).into_response(),
+                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
+            }
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+/// Rotate the token (fresh secret), PRESERVING the enabled flag. The OLD token immediately fails
+/// `mcp_token_resolve`, so existing SSE URLs 401 at once.
+fn mcp_token_regenerate(st: &AppState, actor: &User) -> Response {
+    let token = new_session_token();
+    match st.auth.mcp_token_upsert(actor.id, &token) {
+        Ok(()) => {
+            let enabled = st.auth.mcp_token_get(actor.id).ok().flatten().map(|(_, e)| e).unwrap_or(true);
+            Json(json!({ "token": token, "enabled": enabled })).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+/// Enable/disable the token WITHOUT rotating it. Disabled → `mcp_token_resolve` reports
+/// `enabled=false` → the /mcp routes 401, while the token value is preserved.
+fn mcp_token_set_enabled(st: &AppState, args: &Value, actor: &User) -> Response {
+    let enabled = args.get("enabled").and_then(Value::as_bool).unwrap_or(false);
+    match st.auth.mcp_token_set_enabled(actor.id, enabled) {
+        Ok(()) => Json(json!({ "enabled": enabled })).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
 fn forbidden() -> Response {
     (StatusCode::FORBIDDEN, Json(json!({ "error": "需要管理员权限" }))).into_response()
 }
@@ -567,6 +630,11 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
             let id = WEB_CONN_IDS.next();
             conns.insert(id.clone(), drv).await;
             st.conn_owners.lock().unwrap().insert(id.clone(), actor.id); // record owner for the gate
+            // MCP meta: the display name is a top-level sibling of `args` (sent only by the server
+            // frontend; desktop ignores it); the engine string comes from the inner ConnectArgs.
+            let name = args.get("name").and_then(Value::as_str).unwrap_or("");
+            let db_type = args.get("args").and_then(|a| a.get("dbType")).and_then(Value::as_str).unwrap_or("");
+            st.conn_meta.lock().unwrap().insert(id.clone(), (name.to_string(), db_type.to_string()));
             serde_json::to_value(ConnectResult { conn_id: id, version, capabilities: caps }).map_err(estr)
         }
         "db_test_connection" => {
@@ -579,6 +647,7 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
         "db_disconnect" => {
             let conn_id = require(&args, "connId")?;
             st.conn_owners.lock().unwrap().remove(conn_id);
+            st.conn_meta.lock().unwrap().remove(conn_id);
             if conns.remove(conn_id).await { Ok(Value::Null) }
             else { Err("connection not found".into()) }
         }
@@ -905,6 +974,9 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
                 _jump: jump,
             }).await;
             st.ssh_owners.lock().unwrap().insert(session_id.clone(), actor.id); // record owner
+            // MCP meta: display name is the top-level sibling of `args`; host from the ConnectArgs.
+            let name = args.get("name").and_then(Value::as_str).unwrap_or("");
+            st.ssh_meta.lock().unwrap().insert(session_id.clone(), (name.to_string(), a.host.clone()));
             Ok(json!({
                 "sessionId": session_id,
                 "hostKeyFingerprint": fingerprint,
@@ -914,6 +986,7 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
         "ssh_disconnect" => {
             let session_id = require(&args, "sessionId")?;
             st.ssh_owners.lock().unwrap().remove(session_id);
+            st.ssh_meta.lock().unwrap().remove(session_id);
             st.ssh.remove_monitor(session_id).await;
             let sess = st.ssh.remove(session_id).await.ok_or("session not found")?;
             sess.lock().await.handle

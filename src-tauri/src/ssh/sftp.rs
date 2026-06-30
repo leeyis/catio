@@ -20,6 +20,7 @@ use russh::{Channel, ChannelMsg};
 use serde::Serialize;
 use tauri::{Emitter, Manager};
 
+use crate::events::EventSink;
 use crate::ssh::manager::SessionManager;
 use crate::ssh::monitor::run_cmd;
 use crate::ssh::SshError;
@@ -262,7 +263,7 @@ async fn open_exec_channel(
 /// 返回 `Ok(true)` 表示被取消，`Ok(false)` 表示正常完成。
 ///
 /// `on_progress(done)` 在起始（0）、每跨 `PROGRESS_STEP` 字节、末尾（total）各回调一次，
-/// 与 SFTP 引擎的回调约定一致；调用方负责把字节进度转成事件（见 `progress_emitter`）。
+/// 与 SFTP 引擎的回调约定一致；调用方负责把字节进度转成事件（见 `progress_sink_emitter`）。
 pub async fn upload_stream<F>(
     mut channel: Channel<Msg>,
     local_path: &str,
@@ -439,7 +440,7 @@ where
 #[allow(clippy::too_many_arguments)]
 async fn upload_dispatch_or_fallback(
     mgr: &SessionManager,
-    app: &tauri::AppHandle,
+    sink: &Arc<dyn EventSink>,
     session_id: &str,
     local_path: &str,
     remote_path: &str,
@@ -450,7 +451,7 @@ async fn upload_dispatch_or_fallback(
 ) -> Result<bool, SshError> {
     match crate::ssh::sftp_transfer::open_sftp(mgr, session_id).await {
         Ok(sftp) => {
-            let on_progress = progress_emitter(app, transfer_id, filename, total_bytes);
+            let on_progress = progress_sink_emitter(sink, transfer_id, filename, total_bytes);
             crate::ssh::sftp_transfer::upload_dispatch(
                 Arc::new(sftp),
                 local_path,
@@ -465,7 +466,7 @@ async fn upload_dispatch_or_fallback(
         Err(_) => {
             let cmd = format!("base64 -d > {}", shell_escape(remote_path));
             let channel = open_exec_channel(mgr, session_id, &cmd).await?;
-            let on_progress = progress_emitter(app, transfer_id, filename, total_bytes);
+            let on_progress = progress_sink_emitter(sink, transfer_id, filename, total_bytes);
             upload_stream(channel, local_path, total_bytes, cancel, on_progress).await
         }
     }
@@ -476,7 +477,7 @@ async fn upload_dispatch_or_fallback(
 #[allow(clippy::too_many_arguments)]
 async fn download_dispatch_or_fallback(
     mgr: &SessionManager,
-    app: &tauri::AppHandle,
+    sink: &Arc<dyn EventSink>,
     session_id: &str,
     remote_path: &str,
     local_path: &str,
@@ -487,7 +488,7 @@ async fn download_dispatch_or_fallback(
 ) -> Result<bool, SshError> {
     match crate::ssh::sftp_transfer::open_sftp(mgr, session_id).await {
         Ok(sftp) => {
-            let on_progress = progress_emitter(app, transfer_id, filename, total_bytes);
+            let on_progress = progress_sink_emitter(sink, transfer_id, filename, total_bytes);
             crate::ssh::sftp_transfer::download_dispatch(
                 Arc::new(sftp),
                 remote_path,
@@ -501,7 +502,7 @@ async fn download_dispatch_or_fallback(
         Err(_) => {
             let cmd = format!("base64 {}", shell_escape(remote_path));
             let channel = open_exec_channel(mgr, session_id, &cmd).await?;
-            let on_progress = progress_emitter(app, transfer_id, filename, total_bytes);
+            let on_progress = progress_sink_emitter(sink, transfer_id, filename, total_bytes);
             download_stream(channel, local_path, cancel, on_progress).await
         }
     }
@@ -509,16 +510,35 @@ async fn download_dispatch_or_fallback(
 
 /// 构造一个把 SFTP 引擎的字节进度回调转成 `transfer-progress-{id}` 事件的闭包。
 /// 满足 `upload_dispatch`/`download_dispatch` 要求的 `Fn(u64) + Send + Sync + 'static`。
-fn progress_emitter(
-    app: &tauri::AppHandle,
+/// 走 transport-agnostic 的 [`EventSink`]：桌面端传 `TauriSink`（`emit` 即 `app.emit`，事件载荷
+/// 字节级一致），server 端传 no-op sink（P3a 不发，P3b 接 WS hub）。
+fn progress_sink_emitter(
+    sink: &Arc<dyn EventSink>,
     transfer_id: &str,
     filename: &str,
     total: u64,
 ) -> impl Fn(u64) + Send + Sync + 'static {
-    let app = app.clone();
+    let sink = sink.clone();
     let transfer_id = transfer_id.to_string();
     let filename = filename.to_string();
-    move |done| emit_progress(&app, &transfer_id, &filename, done, total)
+    move |done| {
+        let percent = if total > 0 {
+            (done as f64 / total as f64 * 100.0).min(100.0)
+        } else {
+            100.0
+        };
+        sink.emit(
+            &format!("transfer-progress-{}", transfer_id),
+            serde_json::to_value(TransferProgress {
+                id: transfer_id.clone(),
+                filename: filename.clone(),
+                bytes_transferred: done,
+                total_bytes: total,
+                percent,
+            })
+            .unwrap_or_default(),
+        );
+    }
 }
 
 // ─── 阻塞式传输（供 MCP 等非 UI 调用方：等待完成、不发进度事件）─────────────
@@ -529,7 +549,7 @@ pub async fn upload_blocking(
     session_id: &str,
     local_path: &str,
     remote_path: &str,
-    app: &tauri::AppHandle,
+    sink: &Arc<dyn EventSink>,
 ) -> Result<u64, SshError> {
     let total_bytes = tokio::fs::metadata(local_path)
         .await
@@ -544,7 +564,7 @@ pub async fn upload_blocking(
     let cancel = Arc::new(AtomicBool::new(false));
     let cancelled = upload_dispatch_or_fallback(
         mgr,
-        app,
+        sink,
         session_id,
         local_path,
         remote_path,
@@ -566,7 +586,7 @@ pub async fn download_blocking(
     session_id: &str,
     remote_path: &str,
     local_path: &str,
-    app: &tauri::AppHandle,
+    sink: &Arc<dyn EventSink>,
 ) -> Result<u64, SshError> {
     let stat_cmd = format!(
         "stat -c%s {p} 2>/dev/null || stat -f%z {p} 2>/dev/null",
@@ -584,7 +604,7 @@ pub async fn download_blocking(
     let cancel = Arc::new(AtomicBool::new(false));
     let cancelled = download_dispatch_or_fallback(
         mgr,
-        app,
+        sink,
         session_id,
         remote_path,
         local_path,
@@ -641,30 +661,6 @@ async fn wait_exit(channel: &mut Channel<Msg>) -> Result<(), SshError> {
     Ok(())
 }
 
-fn emit_progress(
-    app: &tauri::AppHandle,
-    id: &str,
-    filename: &str,
-    done: u64,
-    total: u64,
-) {
-    let percent = if total > 0 {
-        (done as f64 / total as f64 * 100.0).min(100.0)
-    } else {
-        100.0
-    };
-    let _ = app.emit(
-        &format!("transfer-progress-{}", id),
-        TransferProgress {
-            id: id.to_string(),
-            filename: filename.to_string(),
-            bytes_transferred: done,
-            total_bytes: total,
-            percent,
-        },
-    );
-}
-
 // ─── Tauri 命令 ──────────────────────────────────────────────────────────────
 
 /// 列出远端目录。
@@ -719,9 +715,11 @@ pub async fn sftp_upload(
     let tid = id.clone();
     tauri::async_runtime::spawn(async move {
         let mgr = app.state::<SessionManager>();
+        // TauriSink::emit == app.emit, so `transfer-progress-{id}` + payload are byte-identical.
+        let sink: Arc<dyn EventSink> = Arc::new(crate::events::TauriSink(app.clone()));
         let result = upload_dispatch_or_fallback(
             &mgr,
-            &app,
+            &sink,
             &session_id,
             &local_path,
             &remote_path,
@@ -773,9 +771,11 @@ pub async fn sftp_download(
     let tid = id.clone();
     tauri::async_runtime::spawn(async move {
         let mgr = app.state::<SessionManager>();
+        // TauriSink::emit == app.emit, so `transfer-progress-{id}` + payload are byte-identical.
+        let sink: Arc<dyn EventSink> = Arc::new(crate::events::TauriSink(app.clone()));
         let result = download_dispatch_or_fallback(
             &mgr,
-            &app,
+            &sink,
             &session_id,
             &remote_path,
             &local_path,

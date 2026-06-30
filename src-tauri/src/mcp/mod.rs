@@ -15,6 +15,13 @@
 //!
 //! Intentionally hand-rolled over tokio (no extra HTTP framework) to keep the
 //! binary small.
+//!
+//! The 12 tools themselves live in the transport/identity-agnostic [`core`] module so
+//! the desktop (here) and server (`crate::server_mcp`) heads share ONE implementation;
+//! this module keeps the desktop-specific HTTP/SSE transport, file logging, `mcp://log`
+//! emit, IP whitelist, and Tauri commands, and injects a [`DesktopTargets`] visible set.
+
+pub mod core;
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -408,7 +415,7 @@ async fn handle_message(stream: &mut TcpStream, ctx: &ServerCtx, query: &str, bo
     }
 }
 
-// ---- JSON-RPC dispatch ----
+// ---- JSON-RPC dispatch (desktop-specific: file log + mcp://log emit gate) ----
 
 async fn dispatch(ctx: &ServerCtx, req: &Value, client_ip: &str) -> Option<Value> {
     let id = req.get("id").cloned();
@@ -431,7 +438,7 @@ async fn dispatch(ctx: &ServerCtx, req: &Value, client_ip: &str) -> Option<Value
         "tools/list" => {
             log_event("tools/list", client_ip, &json!({}));
             emit_log(ctx, "tools/list", client_ip, json!({}));
-            id.map(|id| json!({ "jsonrpc": "2.0", "id": id, "result": { "tools": tools_list() } }))
+            id.map(|id| json!({ "jsonrpc": "2.0", "id": id, "result": { "tools": core::tools_list() } }))
         }
         "tools/call" => {
             let id = id?;
@@ -457,374 +464,67 @@ async fn dispatch(ctx: &ServerCtx, req: &Value, client_ip: &str) -> Option<Value
     }
 }
 
-fn tools_list() -> Value {
-    json!([
-        {
-            "name": "list_connections",
-            "description": "List the database connections currently active in Catio (name, engine, id).",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "list_schemas",
-            "description": "List databases/schemas available on a connected database. Use the `connection` arg (call list_connections first to get a valid name/id).",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "connection": { "type": "string", "description": "Connection name or id" } },
-                "required": ["connection"]
-            }
-        },
-        {
-            "name": "list_tables",
-            "description": "List tables and views in a connected database. Use the `connection` arg (call list_connections first); optionally pass a `schema` (defaults to the first).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "connection": { "type": "string", "description": "Connection name or id" },
-                    "schema": { "type": "string", "description": "Schema name (optional)" }
-                },
-                "required": ["connection"]
-            }
-        },
-        {
-            "name": "get_ddl",
-            "description": "Get the DDL / structure of a table or view (columns, types, keys, indexes, foreign keys; or the view source). Use the `connection` arg (call list_connections first). SQL engines only; not supported on MongoDB / Redis / Elasticsearch.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "connection": { "type": "string", "description": "Connection name or id" },
-                    "table": { "type": "string", "description": "Table or view name" },
-                    "schema": { "type": "string", "description": "Schema name (optional)" }
-                },
-                "required": ["connection", "table"]
-            }
-        },
-        {
-            "name": "query_sql",
-            "description": "Execute a read query (SELECT/SHOW/…) and return rows. Use the `connection` arg (call list_connections first). `maxRows` defaults to 200. SQL engines only; not supported on MongoDB / Redis / Elasticsearch.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "connection": { "type": "string", "description": "Connection name or id" },
-                    "sql": { "type": "string", "description": "Read SQL to execute" },
-                    "maxRows": { "type": "number", "description": "Row cap (default 200)" }
-                },
-                "required": ["connection", "sql"]
-            }
-        },
-        {
-            "name": "insert_sql",
-            "description": "Execute an INSERT statement. Returns rows affected. Use the `connection` arg (call list_connections first). SQL engines only; not supported on MongoDB / Redis / Elasticsearch.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "connection": { "type": "string", "description": "Connection name or id" },
-                    "sql": { "type": "string", "description": "INSERT statement" }
-                },
-                "required": ["connection", "sql"]
-            }
-        },
-        {
-            "name": "update_sql",
-            "description": "Execute an UPDATE statement. Returns rows affected. Use the `connection` arg (call list_connections first). SQL engines only; not supported on MongoDB / Redis / Elasticsearch.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "connection": { "type": "string", "description": "Connection name or id" },
-                    "sql": { "type": "string", "description": "UPDATE statement" }
-                },
-                "required": ["connection", "sql"]
-            }
-        },
-        {
-            "name": "delete_sql",
-            "description": "Execute a DELETE statement. Returns rows affected. Use the `connection` arg (call list_connections first). SQL engines only; not supported on MongoDB / Redis / Elasticsearch.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "connection": { "type": "string", "description": "Connection name or id" },
-                    "sql": { "type": "string", "description": "DELETE statement" }
-                },
-                "required": ["connection", "sql"]
-            }
-        },
-        {
-            "name": "list_hosts",
-            "description": "List the SSH host connections currently active in Catio (name, host, session id).",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "execute_command",
-            "description": "Execute a command on a connected SSH host and return the output. Use the `connectionName` arg (call list_hosts first; defaults to the only active host).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "cmdString": { "type": "string", "description": "Command to execute" },
-                    "directory": { "type": "string", "description": "Working directory for command execution" },
-                    "connectionName": { "type": "string", "description": "SSH connection name (optional; defaults to the only active host)" },
-                    "timeout": { "type": "number", "description": "Command timeout in milliseconds (optional, default 30000)" }
-                },
-                "required": ["cmdString"]
-            }
-        },
-        {
-            "name": "upload_file",
-            "description": "Upload a local file to a connected SSH host. Use the `connectionName` arg (call list_hosts first).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "localPath": { "type": "string", "description": "Local path" },
-                    "remotePath": { "type": "string", "description": "Remote path" },
-                    "connectionName": { "type": "string", "description": "SSH connection name (optional)" }
-                },
-                "required": ["localPath", "remotePath"]
-            }
-        },
-        {
-            "name": "download_file",
-            "description": "Download a file from a connected SSH host. Use the `connectionName` arg (call list_hosts first).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "remotePath": { "type": "string", "description": "Remote path" },
-                    "localPath": { "type": "string", "description": "Local path" },
-                    "connectionName": { "type": "string", "description": "SSH connection name (optional)" }
-                },
-                "required": ["remotePath", "localPath"]
-            }
-        }
-    ])
+// ---- desktop McpTargets + tool entry (delegates the 12 tools to the shared core) ----
+
+/// Desktop visible set — backs the frontend-synced `conns`/`hosts` registries (single user),
+/// mirroring the old `resolve_conn_id`/`resolve_host` + list helpers verbatim.
+struct DesktopTargets {
+    conns: Arc<StdMutex<Vec<ConnMeta>>>,
+    hosts: Arc<StdMutex<Vec<HostMeta>>>,
 }
 
-async fn call_tool(ctx: &ServerCtx, name: &str, args: &Value) -> Result<String, String> {
-    match name {
-        // ---- database ----
-        "list_connections" => Ok(tool_list_connections(ctx)),
-        "list_schemas" => tool_list_schemas(ctx, args).await,
-        "list_tables" => tool_list_tables(ctx, args).await,
-        "get_ddl" => tool_get_ddl(ctx, args).await,
-        "query_sql" => tool_query_sql(ctx, args).await,
-        "insert_sql" => tool_write_sql(ctx, args, "INSERT").await,
-        "update_sql" => tool_write_sql(ctx, args, "UPDATE").await,
-        "delete_sql" => tool_write_sql(ctx, args, "DELETE").await,
-        // ---- host ----
-        "list_hosts" => Ok(tool_list_hosts(ctx)),
-        "execute_command" => tool_execute_command(ctx, args).await,
-        "upload_file" => tool_upload_file(ctx, args).await,
-        "download_file" => tool_download_file(ctx, args).await,
-        other => Err(format!("unknown tool: {other}")),
-    }
-}
-
-// ---- database tools ----
-
-fn resolve_conn_id(ctx: &ServerCtx, key: &str) -> Option<String> {
-    let conns = ctx.conns.lock().unwrap();
-    conns.iter().find(|c| c.name == key || c.conn_id == key).map(|c| c.conn_id.clone())
-}
-
-// Reads the in-memory ctx.conns registry (synced from the frontend via mcp_sync_targets). No driver call.
-fn tool_list_connections(ctx: &ServerCtx) -> String {
-    let conns = ctx.conns.lock().unwrap();
-    let arr: Vec<Value> = conns
-        .iter()
-        .map(|c| json!({ "name": c.name, "connId": c.conn_id, "dbType": c.db_type }))
-        .collect();
-    serde_json::to_string_pretty(&json!({ "connections": arr })).unwrap_or_default()
-}
-
-async fn driver_for(ctx: &ServerCtx, conn: &str) -> Result<Arc<dyn crate::db::driver::Driver>, String> {
-    let conn_id = resolve_conn_id(ctx, conn).ok_or_else(|| format!("connection not found: {conn}"))?;
-    ctx.app
-        .state::<crate::db::manager::ConnManager>()
-        .get(&conn_id)
-        .await
-        .ok_or_else(|| format!("no active connection: {conn}"))
-}
-
-fn conn_arg<'a>(args: &'a Value) -> Result<&'a str, String> {
-    args.get("connection").and_then(Value::as_str).ok_or_else(|| "missing 'connection'".to_string())
-}
-
-async fn first_schema(driver: &Arc<dyn crate::db::driver::Driver>, args: &Value) -> Result<String, String> {
-    match args.get("schema").and_then(Value::as_str) {
-        Some(s) => Ok(s.to_string()),
-        None => Ok(driver
-            .list_schemas()
-            .await
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .next()
-            .unwrap_or_default()),
-    }
-}
-
-// → driver.list_schemas(). All engines (non-SQL return their database/keyspace list).
-async fn tool_list_schemas(ctx: &ServerCtx, args: &Value) -> Result<String, String> {
-    let driver = driver_for(ctx, conn_arg(args)?).await?;
-    let schemas = driver.list_schemas().await.map_err(|e| e.to_string())?;
-    Ok(serde_json::to_string_pretty(&json!({ "schemas": schemas })).unwrap_or_default())
-}
-
-// → driver.list_tables(schema); schema defaults to the first via first_schema().
-//   All engines (non-SQL return collections/indices/keyspaces).
-async fn tool_list_tables(ctx: &ServerCtx, args: &Value) -> Result<String, String> {
-    let driver = driver_for(ctx, conn_arg(args)?).await?;
-    let schema = first_schema(&driver, args).await?;
-    let tables = driver.list_tables(&schema).await.map_err(|e| e.to_string())?;
-    let arr: Vec<Value> = tables
-        .iter()
-        .map(|t| json!({ "name": t.name, "kind": t.kind, "rowsEstimate": t.rows_estimate }))
-        .collect();
-    Ok(serde_json::to_string_pretty(&json!({ "schema": schema, "tables": arr })).unwrap_or_default())
-}
-
-// → heuristic: driver.object_source(schema, table, "view") (empty string when the
-//   engine has no DDL introspection, never errors), else driver.table_structure().
-//   SQL engines only — MongoDB/Redis/Elasticsearch have no DDL/view concept.
-async fn tool_get_ddl(ctx: &ServerCtx, args: &Value) -> Result<String, String> {
-    let driver = driver_for(ctx, conn_arg(args)?).await?;
-    if matches!(driver.db_type(), crate::db::DatabaseType::Mongodb | crate::db::DatabaseType::Redis | crate::db::DatabaseType::Elasticsearch) {
-        return Err("get_ddl 仅支持 SQL 引擎".into());
-    }
-    let table = args.get("table").and_then(Value::as_str).ok_or("missing 'table'")?;
-    let schema = first_schema(&driver, args).await?;
-    // View-detection heuristic: a non-empty object_source(…, "view") means it's a view;
-    // object_source returns "" for engines/objects without source, so stored procedures
-    // and functions fall through to the table-structure branch below (known limitation).
-    if let Ok(src) = driver.object_source(&schema, table, "view").await {
-        if !src.trim().is_empty() {
-            return Ok(serde_json::to_string_pretty(&json!({ "schema": schema, "name": table, "kind": "view", "ddl": src })).unwrap_or_default());
-        }
-    }
-    let st = driver.table_structure(&schema, table).await.map_err(|e| e.to_string())?;
-    Ok(serde_json::to_string_pretty(&json!({
-        "schema": schema, "name": table, "kind": "table",
-        "columns": st.columns, "indexes": st.indexes, "foreignKeys": st.fks
-    })).unwrap_or_default())
-}
-
-// → driver.query(sql, maxRows) (maxRows default 200). SQL engines only —
-//   guarded against MongoDB/Redis/Elasticsearch (no raw-SQL query path).
-async fn tool_query_sql(ctx: &ServerCtx, args: &Value) -> Result<String, String> {
-    let sql = args.get("sql").and_then(Value::as_str).ok_or("missing 'sql'")?;
-    let max_rows = args.get("maxRows").and_then(Value::as_u64).unwrap_or(200) as u32;
-    let driver = driver_for(ctx, conn_arg(args)?).await?;
-    if matches!(driver.db_type(), crate::db::DatabaseType::Mongodb | crate::db::DatabaseType::Redis | crate::db::DatabaseType::Elasticsearch) {
-        return Err("query_sql 仅支持 SQL 引擎".into());
-    }
-    let res = driver.query(sql, max_rows).await.map_err(|e| e.to_string())?;
-    let cols: Vec<&str> = res.columns.iter().map(|c| c.name.as_str()).collect();
-    Ok(serde_json::to_string_pretty(&json!({
-        "columns": cols, "rows": res.rows, "rowsAffected": res.rows_affected, "truncated": res.truncated
-    })).unwrap_or_default())
-}
-
-// insert_sql / update_sql / delete_sql → keyword-checks the first token, then
-// driver.query(sql, 0); returns rowsAffected. Guarded: read-only engine
-// (capabilities().writable) + non-SQL engines (MongoDB/Redis/Elasticsearch) rejected —
-// Redis edits go through web head's db_redis_edit, not SQL DML.
-async fn tool_write_sql(ctx: &ServerCtx, args: &Value, keyword: &str) -> Result<String, String> {
-    let sql = args.get("sql").and_then(Value::as_str).ok_or("missing 'sql'")?;
-    let first = sql.trim_start().split_whitespace().next().unwrap_or("").to_ascii_uppercase();
-    if first != keyword {
-        return Err(format!("this tool only runs {keyword} statements (got '{first}')"));
-    }
-    let driver = driver_for(ctx, conn_arg(args)?).await?;
-    if !driver.capabilities().writable {
-        return Err("read-only engine".into());
-    }
-    if matches!(driver.db_type(), crate::db::DatabaseType::Mongodb | crate::db::DatabaseType::Redis | crate::db::DatabaseType::Elasticsearch) {
-        return Err("editing via SQL DML is not supported for this engine".into());
-    }
-    let res = driver.query(sql, 0).await.map_err(|e| e.to_string())?;
-    Ok(serde_json::to_string_pretty(&json!({ "rowsAffected": res.rows_affected })).unwrap_or_default())
-}
-
-// ---- host tools ----
-
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-fn resolve_host(ctx: &ServerCtx, name: Option<&str>) -> Result<String, String> {
-    let hosts = ctx.hosts.lock().unwrap();
-    match name {
-        Some(n) if !n.is_empty() && n != "default" => hosts
+impl core::McpTargets for DesktopTargets {
+    fn list_connections(&self) -> Vec<core::ConnEntry> {
+        self.conns
+            .lock()
+            .unwrap()
             .iter()
-            .find(|h| h.name == n || h.session_id == n)
-            .map(|h| h.session_id.clone())
-            .ok_or_else(|| format!("host not found: {n}")),
-        _ => {
-            if hosts.len() == 1 {
-                Ok(hosts[0].session_id.clone())
-            } else if hosts.is_empty() {
-                Err("no active SSH host connections".into())
-            } else {
-                Err("multiple hosts active; specify connectionName".into())
+            .map(|c| core::ConnEntry { conn_id: c.conn_id.clone(), name: c.name.clone(), db_type: c.db_type.clone() })
+            .collect()
+    }
+    fn resolve_db(&self, key: &str) -> Option<String> {
+        let conns = self.conns.lock().unwrap();
+        conns.iter().find(|c| c.name == key || c.conn_id == key).map(|c| c.conn_id.clone())
+    }
+    fn list_hosts(&self) -> Vec<core::HostEntry> {
+        self.hosts
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|h| core::HostEntry { session_id: h.session_id.clone(), name: h.name.clone(), host: h.host.clone() })
+            .collect()
+    }
+    fn resolve_host(&self, key: Option<&str>) -> Result<String, String> {
+        let hosts = self.hosts.lock().unwrap();
+        match key {
+            Some(n) if !n.is_empty() && n != "default" => hosts
+                .iter()
+                .find(|h| h.name == n || h.session_id == n)
+                .map(|h| h.session_id.clone())
+                .ok_or_else(|| format!("host not found: {n}")),
+            _ => {
+                if hosts.len() == 1 {
+                    Ok(hosts[0].session_id.clone())
+                } else if hosts.is_empty() {
+                    Err("no active SSH host connections".into())
+                } else {
+                    Err("multiple hosts active; specify connectionName".into())
+                }
             }
         }
     }
 }
 
-// Reads the in-memory ctx.hosts registry (synced via mcp_sync_targets). No SSH call.
-fn tool_list_hosts(ctx: &ServerCtx) -> String {
-    let hosts = ctx.hosts.lock().unwrap();
-    let arr: Vec<Value> = hosts
-        .iter()
-        .map(|h| json!({ "name": h.name, "host": h.host, "sessionId": h.session_id }))
-        .collect();
-    serde_json::to_string_pretty(&json!({ "hosts": arr })).unwrap_or_default()
-}
-
-// → ssh::multiexec::run_on; optional `directory` runs as `cd <dir> && <cmd>`;
-//   `timeout` default 30000ms; host picked via `connectionName` (defaults to sole active host).
-async fn tool_execute_command(ctx: &ServerCtx, args: &Value) -> Result<String, String> {
-    let cmd = args.get("cmdString").and_then(Value::as_str).ok_or("missing 'cmdString'")?;
-    let conn = args.get("connectionName").and_then(Value::as_str);
-    let directory = args.get("directory").and_then(Value::as_str);
-    let timeout_ms = args.get("timeout").and_then(Value::as_u64).unwrap_or(30_000);
-    let sid = resolve_host(ctx, conn)?;
-    let sess = ctx
-        .app
-        .state::<crate::ssh::manager::SessionManager>()
-        .get(&sid)
-        .await
-        .ok_or_else(|| format!("session not found: {sid}"))?;
-    let full = match directory {
-        Some(d) if !d.is_empty() => format!("cd {} && {}", shell_quote(d), cmd),
-        _ => cmd.to_string(),
-    };
-    let out = tokio::time::timeout(Duration::from_millis(timeout_ms), crate::ssh::multiexec::run_on(sess, &full))
-        .await
-        .map_err(|_| "command timed out".to_string())?
-        .map_err(|e| e.to_string())?;
-    Ok(out)
-}
-
-// → ssh::sftp::upload_blocking. Host picked via `connectionName` (defaults to sole active host).
-async fn tool_upload_file(ctx: &ServerCtx, args: &Value) -> Result<String, String> {
-    let local = args.get("localPath").and_then(Value::as_str).ok_or("missing 'localPath'")?;
-    let remote = args.get("remotePath").and_then(Value::as_str).ok_or("missing 'remotePath'")?;
-    let conn = args.get("connectionName").and_then(Value::as_str);
-    let sid = resolve_host(ctx, conn)?;
-    let mgr = ctx.app.state::<crate::ssh::manager::SessionManager>();
-    let n = crate::ssh::sftp::upload_blocking(mgr.inner(), &sid, local, remote, &ctx.app)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(format!("Uploaded {n} bytes to {remote}"))
-}
-
-// → ssh::sftp::download_blocking. Host picked via `connectionName` (defaults to sole active host).
-async fn tool_download_file(ctx: &ServerCtx, args: &Value) -> Result<String, String> {
-    let remote = args.get("remotePath").and_then(Value::as_str).ok_or("missing 'remotePath'")?;
-    let local = args.get("localPath").and_then(Value::as_str).ok_or("missing 'localPath'")?;
-    let conn = args.get("connectionName").and_then(Value::as_str);
-    let sid = resolve_host(ctx, conn)?;
-    let mgr = ctx.app.state::<crate::ssh::manager::SessionManager>();
-    let n = crate::ssh::sftp::download_blocking(mgr.inner(), &sid, remote, local, &ctx.app)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(format!("Downloaded {n} bytes to {local}"))
+/// Desktop tool entry: assemble the live managers + a Tauri progress sink over this server's
+/// frontend-synced visible set, then hand off to the shared `core::call_tool`. Behavior is
+/// byte-identical to the pre-core desktop path — the SFTP id stays "mcp" → `transfer-progress-mcp`
+/// (verified UNCONSUMED by the frontend, which only listens on the returned xfer-N id).
+async fn call_tool(ctx: &ServerCtx, name: &str, args: &Value) -> Result<String, String> {
+    let cm = ctx.app.state::<crate::db::manager::ConnManager>();
+    let sm = ctx.app.state::<crate::ssh::manager::SessionManager>();
+    let targets = DesktopTargets { conns: ctx.conns.clone(), hosts: ctx.hosts.clone() };
+    let sink: Arc<dyn crate::events::EventSink> = Arc::new(crate::events::TauriSink(ctx.app.clone()));
+    core::call_tool(&targets, cm.inner(), sm.inner(), &sink, name, args).await
 }
 
 // ---- logging (UTC, per-day file, ≤2MB rolling, 7-day retention) ----
