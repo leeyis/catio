@@ -17,9 +17,9 @@
 //! binary small.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 
@@ -30,12 +30,65 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::watch;
 
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const PREFERRED_PORT: u16 = 8765;
 const MAX_LOG_BYTES: usize = 2 * 1024 * 1024;
 const LOG_RETENTION_DAYS: i64 = 7;
+
+// ---- IP whitelist (network-layer gate, additive to the token) ----
+
+/// One whitelist entry: an IPv4 base address + prefix length (single IP = /32).
+#[derive(Clone, Copy)]
+struct WhitelistRule {
+    base: u32,
+    prefix: u8,
+}
+
+impl WhitelistRule {
+    /// Parse "a.b.c.d" (=> /32) or "a.b.c.d/n" (n in 0..=32). None on any malformed input.
+    fn parse(s: &str) -> Option<Self> {
+        let s = s.trim();
+        let (ip_part, prefix) = match s.split_once('/') {
+            Some((ip, n)) => {
+                let n: u8 = n.parse().ok()?;
+                if n > 32 {
+                    return None;
+                }
+                (ip, n)
+            }
+            None => (s, 32u8),
+        };
+        let addr: Ipv4Addr = ip_part.parse().ok()?; // rejects bad octets / non-IPv4
+        Some(WhitelistRule { base: u32::from(addr), prefix })
+    }
+
+    /// True if `ip` (an IPv4) falls inside this rule, comparing the high `prefix` bits.
+    fn matches(&self, ip: Ipv4Addr) -> bool {
+        if self.prefix == 0 {
+            return true;
+        }
+        // Special-case 32 to avoid the `u32::MAX >> 32` (>>) overflow.
+        let mask: u32 = if self.prefix == 32 { u32::MAX } else { !(u32::MAX >> self.prefix) };
+        (u32::from(ip) & mask) == (self.base & mask)
+    }
+}
+
+/// 127.0.0.1 and ::1 are always allowed; otherwise the IPv4 must match a rule.
+/// Non-loopback IPv6 has no rules => denied. Unparseable client_ip => denied.
+fn ip_allowed(client_ip: &str, rules: &[WhitelistRule]) -> bool {
+    match client_ip.parse::<IpAddr>() {
+        Ok(IpAddr::V4(v4)) => {
+            if v4.is_loopback() {
+                return true; // 127.0.0.0/8
+            }
+            rules.iter().any(|r| r.matches(v4))
+        }
+        Ok(IpAddr::V6(v6)) => v6.is_loopback(), // ::1 only
+        Err(_) => false,
+    }
+}
 
 // ---- managed state ----
 
@@ -63,6 +116,11 @@ pub struct McpState {
     running: StdMutex<Option<RunningServer>>,
     conns: Arc<StdMutex<Vec<ConnMeta>>>,
     hosts: Arc<StdMutex<Vec<HostMeta>>>,
+    /// Allowed non-loopback sources. Shared (Arc) so running ServerCtx tasks gate
+    /// new connections against the latest list without a restart.
+    whitelist: Arc<StdMutex<Vec<WhitelistRule>>>,
+    /// Whether to emit the `mcp://log` live-log event. File logging is unaffected.
+    live_log_enabled: Arc<AtomicBool>,
 }
 
 impl Default for McpState {
@@ -71,6 +129,8 @@ impl Default for McpState {
             running: StdMutex::new(None),
             conns: Arc::new(StdMutex::new(Vec::new())),
             hosts: Arc::new(StdMutex::new(Vec::new())),
+            whitelist: Arc::new(StdMutex::new(Vec::new())),
+            live_log_enabled: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -81,6 +141,8 @@ pub struct McpInfo {
     pub running: bool,
     pub url: Option<String>,
     pub port: Option<u16>,
+    /// True iff the running server is bound to 0.0.0.0 (LAN-exposed). UI shows a warning.
+    pub exposed: bool,
 }
 
 impl McpInfo {
@@ -89,10 +151,11 @@ impl McpInfo {
             running: true,
             url: Some(format!("http://{addr}/sse?token={token}")),
             port: Some(addr.port()),
+            exposed: addr.ip().is_unspecified(), // true iff bound to 0.0.0.0
         }
     }
     fn stopped() -> Self {
-        Self { running: false, url: None, port: None }
+        Self { running: false, url: None, port: None, exposed: false }
     }
 }
 
@@ -105,6 +168,10 @@ struct ServerCtx {
     hosts: Arc<StdMutex<Vec<HostMeta>>>,
     sessions: Arc<StdMutex<HashMap<String, UnboundedSender<String>>>>,
     token: String,
+    /// Shared with McpState; gates each new connection's source IP in real time.
+    whitelist: Arc<StdMutex<Vec<WhitelistRule>>>,
+    /// Shared with McpState; gates whether live-log events are emitted.
+    live_log: Arc<AtomicBool>,
 }
 
 fn gen_session_id() -> String {
@@ -197,6 +264,26 @@ async fn handle_conn(mut stream: TcpStream, ctx: ServerCtx, client_ip: String) {
     // Token gate (everything except health/preflight).
     let token_ok = query_param(&query, "token").as_deref() == Some(ctx.token.as_str());
 
+    // IP whitelist gate (network-layer, additive to the token). Loopback (127.0.0.1/::1)
+    // is always allowed; non-loopback must match a rule, else 403 + denied log/emit.
+    // OPTIONS/health stay open (CORS preflight + liveness); everything else is gated.
+    let authed_route = matches!(
+        (method.as_str(), path.as_str()),
+        ("GET", "/sse") | ("GET", "/") | ("POST", "/messages") | ("POST", "/message")
+    );
+    if authed_route {
+        let allowed = {
+            let rules = ctx.whitelist.lock().unwrap();
+            ip_allowed(&client_ip, &rules)
+        };
+        if !allowed {
+            log_event("denied", &client_ip, &json!({ "path": path }));
+            emit_log(&ctx, "denied", &client_ip, json!({ "path": path }));
+            let _ = write_simple(&mut stream, 403, "Forbidden", "text/plain", "forbidden").await;
+            return;
+        }
+    }
+
     match (method.as_str(), path.as_str()) {
         ("OPTIONS", _) => {
             let _ = write_simple(&mut stream, 204, "No Content", "", "").await;
@@ -207,6 +294,7 @@ async fn handle_conn(mut stream: TcpStream, ctx: ServerCtx, client_ip: String) {
         ("GET", "/sse") | ("GET", "/") => {
             if !token_ok {
                 log_event("denied", &client_ip, &json!({ "path": path }));
+                emit_log(&ctx, "denied", &client_ip, json!({ "path": path }));
                 let _ = write_simple(&mut stream, 401, "Unauthorized", "text/plain", "invalid token").await;
                 return;
             }
@@ -215,6 +303,7 @@ async fn handle_conn(mut stream: TcpStream, ctx: ServerCtx, client_ip: String) {
         ("POST", "/messages") | ("POST", "/message") => {
             if !token_ok {
                 log_event("denied", &client_ip, &json!({ "path": path }));
+                emit_log(&ctx, "denied", &client_ip, json!({ "path": path }));
                 let _ = write_simple(&mut stream, 401, "Unauthorized", "text/plain", "invalid token").await;
                 return;
             }
@@ -255,6 +344,7 @@ async fn handle_sse(mut stream: TcpStream, ctx: ServerCtx, client_ip: String) {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     ctx.sessions.lock().unwrap().insert(session_id.clone(), tx);
     log_event("connect", &client_ip, &json!({ "sessionId": session_id }));
+    emit_log(&ctx, "connect", &client_ip, json!({ "sessionId": session_id }));
 
     let headers = "HTTP/1.1 200 OK\r\n\
         Content-Type: text/event-stream\r\n\
@@ -340,6 +430,7 @@ async fn dispatch(ctx: &ServerCtx, req: &Value, client_ip: &str) -> Option<Value
         "ping" => id.map(|id| json!({ "jsonrpc": "2.0", "id": id, "result": {} })),
         "tools/list" => {
             log_event("tools/list", client_ip, &json!({}));
+            emit_log(ctx, "tools/list", client_ip, json!({}));
             id.map(|id| json!({ "jsonrpc": "2.0", "id": id, "result": { "tools": tools_list() } }))
         }
         "tools/call" => {
@@ -347,11 +438,14 @@ async fn dispatch(ctx: &ServerCtx, req: &Value, client_ip: &str) -> Option<Value
             let name = params.get("name").and_then(Value::as_str).unwrap_or("").to_string();
             let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
             log_event("tools/call", client_ip, &json!({ "tool": name, "arguments": args }));
+            // Event payload uses `args` (per contract); the file log keeps `arguments`.
+            emit_log(ctx, "tools/call", client_ip, json!({ "tool": name, "args": args }));
             let (text, is_error) = match call_tool(ctx, &name, &args).await {
                 Ok(t) => (t, false),
                 Err(t) => (t, true),
             };
             log_event("tools/result", client_ip, &json!({ "tool": name, "isError": is_error, "output": text }));
+            emit_log(ctx, "tools/result", client_ip, json!({ "tool": name, "isError": is_error, "output": text }));
             Some(json!({
                 "jsonrpc": "2.0", "id": id,
                 "result": { "content": [{ "type": "text", "text": text }], "isError": is_error }
@@ -781,6 +875,48 @@ fn log_guard() -> &'static StdMutex<String> {
     G.get_or_init(|| StdMutex::new(String::new()))
 }
 
+/// One live-log entry pushed to the frontend over the `mcp://log` Tauri event.
+/// Optional fields are omitted when absent so each kind only carries what applies.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct McpLogEntry {
+    ts: String,
+    kind: String,
+    ip: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    args: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    is_error: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+}
+
+/// Emit one structured live-log entry to the frontend — gated on live_log.
+/// File logging is separate and unconditional (done by log_event).
+fn emit_log(ctx: &ServerCtx, kind: &str, ip: &str, detail: Value) {
+    if !ctx.live_log.load(Ordering::Relaxed) {
+        return;
+    }
+    let entry = McpLogEntry {
+        ts: fmt_datetime(now_epoch()),
+        kind: kind.to_string(),
+        ip: ip.to_string(),
+        session_id: detail.get("sessionId").and_then(Value::as_str).map(String::from),
+        tool: detail.get("tool").and_then(Value::as_str).map(String::from),
+        args: detail.get("args").cloned(),
+        output: detail.get("output").and_then(Value::as_str).map(String::from),
+        is_error: detail.get("isError").and_then(Value::as_bool),
+        path: detail.get("path").and_then(Value::as_str).map(String::from),
+    };
+    let _ = ctx.app.emit("mcp://log", entry);
+}
+
 fn log_event(kind: &str, client_ip: &str, detail: &Value) {
     let now = now_epoch();
     let date = fmt_date(now);
@@ -874,9 +1010,20 @@ pub async fn mcp_start(app: AppHandle, state: State<'_, McpState>) -> Result<Mcp
         }
     }
 
-    let listener = match TcpListener::bind(("127.0.0.1", PREFERRED_PORT)).await {
+    // Bind 0.0.0.0 iff the whitelist contains any non-loopback rule; else stay 127.0.0.1.
+    // A rule is "loopback-only" when it sits inside 127.0.0.0/8 (prefix >= 8, first octet 127).
+    let expose = {
+        let wl = state.whitelist.lock().unwrap();
+        wl.iter().any(|r| !(r.prefix >= 8 && (r.base >> 24) == 127))
+    };
+    let bind_ip: Ipv4Addr = if expose {
+        Ipv4Addr::UNSPECIFIED // 0.0.0.0 — exposed to the LAN
+    } else {
+        Ipv4Addr::LOCALHOST // 127.0.0.1 — loopback only
+    };
+    let listener = match TcpListener::bind((bind_ip, PREFERRED_PORT)).await {
         Ok(l) => l,
-        Err(_) => TcpListener::bind(("127.0.0.1", 0)).await.map_err(|e| e.to_string())?,
+        Err(_) => TcpListener::bind((bind_ip, 0)).await.map_err(|e| e.to_string())?,
     };
     let addr = listener.local_addr().map_err(|e| e.to_string())?;
     let token = gen_token();
@@ -889,6 +1036,8 @@ pub async fn mcp_start(app: AppHandle, state: State<'_, McpState>) -> Result<Mcp
         hosts: state.hosts.clone(),
         sessions: Arc::new(StdMutex::new(HashMap::new())),
         token: token.clone(),
+        whitelist: state.whitelist.clone(),
+        live_log: state.live_log_enabled.clone(),
     };
     tokio::spawn(serve(listener, ctx, sh_rx));
 
@@ -926,4 +1075,21 @@ pub fn mcp_sync_targets(
         .into_iter()
         .map(|h| HostMeta { session_id: h.session_id, name: h.name, host: h.host })
         .collect();
+}
+
+/// Replace the IP whitelist wholesale. Entries that fail to parse are silently
+/// dropped (non-fatal — the UI already validated). Mutates the shared Arc, so a
+/// running server gates new connections against the new rules immediately; only
+/// the 0.0.0.0-vs-127.0.0.1 listen address waits for the next mcp_start.
+#[tauri::command]
+pub fn mcp_set_whitelist(state: State<'_, McpState>, entries: Vec<String>) {
+    let rules: Vec<WhitelistRule> = entries.iter().filter_map(|e| WhitelistRule::parse(e)).collect();
+    *state.whitelist.lock().unwrap() = rules;
+}
+
+/// Toggle whether `mcp://log` live-log events are emitted. File logging is
+/// unconditional and unaffected; takes effect on the next emit, no restart.
+#[tauri::command]
+pub fn mcp_set_live_log(state: State<'_, McpState>, enabled: bool) {
+    state.live_log_enabled.store(enabled, Ordering::Relaxed);
 }
