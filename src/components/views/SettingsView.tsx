@@ -13,8 +13,8 @@ import type { UiFontKey, MonoFontKey, Density } from '../../state/preferences'
 import { fetchModels, testModel } from '../../services'
 import type { ModelTestResult } from '../../services'
 import { isTauri } from '../../services/ssh'
-import { mcpStart, mcpStop, mcpStatus } from '../../services/mcp'
-import type { McpInfo } from '../../services/mcp'
+import { mcpStart, mcpStop, mcpStatus, mcpSetWhitelist, mcpSetLiveLog, onMcpLog } from '../../services/mcp'
+import type { McpInfo, McpLogEntry } from '../../services/mcp'
 import { exportConfig, importConfig } from '../../services/configSync'
 import { ServerAccountBlock } from '../auth/ServerAccountBlock'
 import { useServerAuth } from '../auth/ServerAuthGate'
@@ -637,30 +637,159 @@ function ConfigSyncBlock() {
   )
 }
 
+// IPv4 single-address or a.b.c.d/n CIDR. Octets 0-255, prefix 0-32.
+const IPV4_CIDR_RE = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(\/(\d{1,2}))?$/
+
+function isValidWhitelistEntry(s: string): boolean {
+  const m = IPV4_CIDR_RE.exec(s)
+  if (!m) return false
+  for (let i = 1; i <= 4; i++) { if (Number(m[i]) > 255) return false }
+  if (m[6] !== undefined) { const p = Number(m[6]); if (p < 0 || p > 32) return false }
+  return true
+}
+
+// A rule is loopback-only when its address sits in 127.0.0.0/8.
+function isLoopbackEntry(s: string): boolean {
+  return s.split('/')[0].startsWith('127.')
+}
+
+// In-memory log row: the wire payload plus a stable client id for expand state.
+type LogRow = McpLogEntry & { _id: number }
+
+const LOG_RING = 200
+const FIELD_TRUNC = 160
+
+function logKindStyle(kind: string, isError?: boolean): { fg: string; bg: string } {
+  if (kind === 'denied' || isError) return { fg: 'var(--danger-fg)', bg: 'color-mix(in srgb, var(--danger-fg) 13%, transparent)' }
+  if (kind === 'tools/result') return { fg: 'var(--signal-green)', bg: 'color-mix(in srgb, var(--signal-green) 13%, transparent)' }
+  if (kind === 'tools/call' || kind === 'connect') return { fg: 'var(--accent-primary)', bg: 'var(--accent-soft)' }
+  return { fg: 'var(--text-tertiary)', bg: 'var(--surface-sunken)' }
+}
+
 function MCPSettings() {
   const { t } = useTranslation()
   const tauri = isTauri()
-  const [info, setInfo] = useState<McpInfo>({ running: false, url: null, port: null })
+  const { prefs, update } = usePrefs()
+  const [info, setInfo] = useState<McpInfo>({ running: false, url: null, port: null, exposed: false })
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [copied, setCopied] = useState(false)
 
+  // Whitelist editor.
+  const [wlInput, setWlInput] = useState('')
+  const [wlError, setWlError] = useState('')
+  const whitelist = prefs.mcpWhitelist
+  const hasNonLoopback = whitelist.some(e => !isLoopbackEntry(e))
+
+  // Live log panel.
+  const [log, setLog] = useState<LogRow[]>([])
+  const [paused, setPaused] = useState(false)
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const idRef = useRef(0)
+  const scrollRef = useRef<HTMLDivElement>(null)
+
+  // On mount: read status and push the persisted whitelist to the backend. The live-log
+  // gate is owned by the subscribe effect below (only on while this panel is mounted).
   useEffect(() => {
     void mcpStatus().then(setInfo).catch(() => {})
+    void mcpSetWhitelist(prefs.mcpWhitelist)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // Subscribe to mcp://log only while the live log is enabled. The backend emit gate is
+  // turned on here and OFF on cleanup (toggle-off OR panel unmount), so the backend never
+  // serializes events to a panel that isn't listening.
+  useEffect(() => {
+    if (!prefs.mcpLiveLog) return
+    let active = true
+    let un: (() => void) | undefined
+    void mcpSetLiveLog(true)
+    void onMcpLog(e => {
+      setLog(prev => {
+        const row: LogRow = { ...e, _id: idRef.current++ }
+        const next = [...prev, row]
+        return next.length > LOG_RING ? next.slice(next.length - LOG_RING) : next
+      })
+    }).then(u => { if (active) un = u; else u() })
+    return () => { active = false; if (un) un(); void mcpSetLiveLog(false) }
+  }, [prefs.mcpLiveLog])
+
+  // Autoscroll to the newest row unless the user paused.
+  useEffect(() => {
+    if (!paused && scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+  }, [log, paused])
+
+  // Drop expand state for rows that have been evicted from the ring buffer, so the
+  // `expanded` set can't accumulate stale keys across a long session.
+  useEffect(() => {
+    setExpanded(prev => {
+      if (prev.size === 0) return prev
+      const live = new Set(log.map(r => r._id))
+      let changed = false
+      const next = new Set<string>()
+      prev.forEach(k => {
+        if (live.has(Number(k.split(':')[0]))) next.add(k)
+        else changed = true
+      })
+      return changed ? next : prev
+    })
+  }, [log])
 
   async function toggleServer() {
     if (busy) return
     setBusy(true)
     setError('')
     try {
-      const next = info.running ? await mcpStop() : await mcpStart()
+      let next: McpInfo
+      if (info.running) {
+        next = await mcpStop()
+      } else {
+        // Push the whitelist before binding so the listen address reflects it.
+        await mcpSetWhitelist(prefs.mcpWhitelist)
+        next = await mcpStart()
+      }
       setInfo(next)
     } catch (err) {
       setError(t('settings.mcpStartError', { message: (err as { message?: string } | null)?.message ?? String(err) }))
     } finally {
       setBusy(false)
     }
+  }
+
+  function addWhitelist() {
+    const v = wlInput.trim()
+    if (!v || !isValidWhitelistEntry(v)) { setWlError(t('settings.mcpWhitelistInvalid')); return }
+    if (whitelist.includes(v)) { setWlError(t('settings.mcpWhitelistDuplicate')); return }
+    const next = [...whitelist, v]
+    update({ mcpWhitelist: next })
+    void mcpSetWhitelist(next)
+    setWlInput('')
+    setWlError('')
+  }
+
+  function removeWhitelist(entry: string) {
+    const next = whitelist.filter(e => e !== entry)
+    update({ mcpWhitelist: next })
+    void mcpSetWhitelist(next)
+  }
+
+  function toggleLiveLog(on: boolean) {
+    // The subscribe effect owns the backend emit gate (keyed on prefs.mcpLiveLog), so we
+    // only flip the pref here and let the effect turn the gate on/off.
+    update({ mcpLiveLog: on })
+  }
+
+  function toggleExpand(key: string) {
+    setExpanded(prev => {
+      const n = new Set(prev)
+      if (n.has(key)) n.delete(key); else n.add(key)
+      return n
+    })
+  }
+
+  function clearLog() {
+    setLog([])
+    setExpanded(new Set())
   }
 
   // The token-bearing SSE endpoint (only present while running).
@@ -681,9 +810,30 @@ function MCPSettings() {
     }
   }
 
+  const cardStyle: React.CSSProperties = { padding: 16, border: '1px solid var(--border-hairline)', borderRadius: 14, background: 'var(--surface-subtle)', marginBottom: 12 }
+  const wlInputStyle: React.CSSProperties = { height: 34, padding: '0 10px', borderRadius: 8, fontSize: 13, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', color: 'var(--text-primary)', outline: 'none', boxSizing: 'border-box', flex: 1 }
+  const linkBtnStyle: React.CSSProperties = { background: 'none', border: 'none', padding: 0, color: 'var(--accent-primary)', fontSize: 10.5, fontWeight: 600, cursor: 'pointer' }
+
+  // One truncatable args/output block with click-to-expand.
+  function logField(rowId: number, name: 'args' | 'output', label: string, value: string, isError?: boolean) {
+    const key = `${rowId}:${name}`
+    const open = expanded.has(key)
+    const long = value.length > FIELD_TRUNC
+    const shown = open || !long ? value : value.slice(0, FIELD_TRUNC) + '…'
+    return (
+      <div className="col gap4" style={{ marginTop: 6 }}>
+        <div className="row gap6" style={{ alignItems: 'center' }}>
+          <span style={{ fontSize: 10.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{label}</span>
+          {long && <button onClick={() => toggleExpand(key)} style={linkBtnStyle}>{open ? t('settings.mcpLogCollapse') : t('settings.mcpLogExpand')}</button>}
+        </div>
+        <code className="mono" style={{ padding: '6px 8px', background: 'var(--term-bg)', color: isError ? 'var(--danger-fg)' : 'var(--term-fg)', borderRadius: 6, fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-all', lineHeight: 1.45 }}>{shown}</code>
+      </div>
+    )
+  }
+
   return (
     <Block title={t('settings.mcpTitle')} hint={t('settings.mcpHint')}>
-      <div style={{ padding: 16, border: '1px solid var(--border-hairline)', borderRadius: 14, background: 'var(--surface-subtle)', marginBottom: 12 }}>
+      <div style={cardStyle}>
         <div className="row gap8" style={{ marginBottom: 10 }}>
           <Icon name="command" size={15} style={{ color: 'var(--accent-primary)' }} />
           <span style={{ fontSize: 13, fontWeight: 600 }}>{t('settings.mcpServerLabel')}</span>
@@ -724,6 +874,118 @@ function MCPSettings() {
           </>
         )}
       </div>
+
+      {tauri && (
+        <>
+          {/* IP whitelist manager */}
+          <div style={cardStyle}>
+            <div className="col gap4" style={{ marginBottom: 10 }}>
+              <span className="row gap8" style={{ alignItems: 'center' }}>
+                <Icon name="shield" size={15} style={{ color: 'var(--accent-primary)' }} />
+                <span style={{ fontSize: 13, fontWeight: 600 }}>{t('settings.mcpWhitelistTitle')}</span>
+              </span>
+              <span style={{ fontSize: 11.5, color: 'var(--text-faint)', lineHeight: 1.5 }}>{t('settings.mcpWhitelistDesc')}</span>
+            </div>
+
+            <div className="row gap6" style={{ alignItems: 'center', marginBottom: wlError ? 6 : 10 }}>
+              <input
+                value={wlInput}
+                placeholder={t('settings.mcpWhitelistPlaceholder')}
+                onChange={e => { setWlInput(e.target.value); if (wlError) setWlError('') }}
+                onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addWhitelist() } }}
+                style={wlInputStyle}
+              />
+              <Btn variant="primary" size="sm" icon="plus" disabled={!wlInput.trim()} onClick={addWhitelist}>{t('settings.mcpWhitelistAdd')}</Btn>
+            </div>
+            {wlError && <div className="row gap6" style={{ fontSize: 11.5, color: 'var(--danger-fg)', marginBottom: 10 }}><Icon name="alert-triangle" size={12} /> {wlError}</div>}
+
+            {whitelist.length === 0 ? (
+              <div className="row gap6" style={{ fontSize: 11.5, color: 'var(--text-faint)' }}>
+                <Icon name="info" size={12} /> {t('settings.mcpWhitelistEmpty')}
+              </div>
+            ) : (
+              <div className="col" style={{ gap: 6 }}>
+                {whitelist.map(entry => (
+                  <div key={entry} className="row" style={{ justifyContent: 'space-between', alignItems: 'center', gap: 10, padding: '8px 10px', border: '1px solid var(--border-hairline)', borderRadius: 10, background: 'var(--surface-card)' }}>
+                    <code className="mono" style={{ fontSize: 12, color: 'var(--text-primary)' }}>{entry}</code>
+                    <Btn variant="ghost" size="sm" icon="trash-2" onClick={() => removeWhitelist(entry)}>{t('settings.mcpWhitelistRemove')}</Btn>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {hasNonLoopback && (
+              <div className="row gap6" style={{ marginTop: 12, padding: '8px 10px', borderRadius: 10, background: 'color-mix(in srgb, var(--danger-fg) 10%, transparent)', color: 'var(--danger-fg)', fontSize: 11.5, lineHeight: 1.5 }}>
+                <Icon name="alert-triangle" size={13} style={{ flex: 'none', marginTop: 1 }} /> {t('settings.mcpExposeWarning')}
+              </div>
+            )}
+            {info.running && (
+              <div className="row gap6" style={{ marginTop: 8, fontSize: 11, color: 'var(--text-faint)' }}>
+                <Icon name="info" size={12} /> {t('settings.mcpRestartHint')}
+              </div>
+            )}
+          </div>
+
+          {/* Realtime log */}
+          <div style={cardStyle}>
+            <SettingRow
+              icon="activity"
+              title={t('settings.mcpLiveLogLabel')}
+              desc={t('settings.mcpLiveLogDesc')}
+              control={<Toggle on={prefs.mcpLiveLog} onChange={toggleLiveLog} accent />}
+            />
+
+            {prefs.mcpLiveLog && (
+              <div className="col" style={{ gap: 8, marginTop: 4 }}>
+                <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ fontSize: 12, fontWeight: 600 }}>{t('settings.mcpLogPanelTitle')}</span>
+                  <div className="row gap6">
+                    <Btn variant="ghost" size="sm" icon={paused ? 'play' : 'square'} onClick={() => setPaused(p => !p)}>{paused ? t('settings.mcpLogResume') : t('settings.mcpLogPause')}</Btn>
+                    <Btn variant="ghost" size="sm" icon="broom" disabled={log.length === 0} onClick={clearLog}>{t('settings.mcpLogClear')}</Btn>
+                  </div>
+                </div>
+
+                <div ref={scrollRef} className="col" style={{ gap: 6, maxHeight: 320, overflowY: 'auto', padding: 8, border: '1px solid var(--border-hairline)', borderRadius: 10, background: 'var(--surface-sunken)' }}>
+                  {log.length === 0 ? (
+                    <div className="row gap6" style={{ fontSize: 11.5, color: 'var(--text-faint)', padding: '8px 4px' }}>
+                      <Icon name="info" size={12} /> {t('settings.mcpLogEmpty')}
+                    </div>
+                  ) : (
+                    log.map(row => {
+                      const ks = logKindStyle(row.kind, row.isError)
+                      const argsStr = row.args !== undefined ? (typeof row.args === 'string' ? row.args : JSON.stringify(row.args)) : ''
+                      return (
+                        <div key={row._id} className="col" style={{ gap: 2, padding: '8px 10px', border: '1px solid var(--border-hairline)', borderRadius: 8, background: 'var(--surface-card)' }}>
+                          <div className="row gap6" style={{ alignItems: 'center', flexWrap: 'wrap' }}>
+                            <code className="mono" style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{row.ts.length >= 19 ? row.ts.slice(11, 19) : row.ts}</code>
+                            <span className="chip" style={{ background: ks.bg, color: ks.fg, fontSize: 10 }}>{row.kind}</span>
+                            <span className="row gap4" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+                              <span className="mono">{row.ip}</span>
+                              {row.sessionId && <span className="mono" style={{ color: 'var(--text-faint)' }}>· {row.sessionId}</span>}
+                            </span>
+                            {row.tool && (
+                              <span className="row gap4" style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text-secondary)' }}>
+                                <span style={{ color: 'var(--text-faint)' }}>{t('settings.mcpLogTool')}</span>
+                                <span className="mono" style={{ fontWeight: 600 }}>{row.tool}</span>
+                              </span>
+                            )}
+                          </div>
+                          {row.path && (
+                            <code className="mono" style={{ fontSize: 11, color: 'var(--danger-fg)', marginTop: 4, wordBreak: 'break-all' }}>{row.path}</code>
+                          )}
+                          {argsStr && logField(row._id, 'args', t('settings.mcpLogArgs'), argsStr)}
+                          {row.output !== undefined && logField(row._id, 'output', row.isError ? t('settings.mcpLogError') : t('settings.mcpLogOutput'), row.output, row.isError)}
+                        </div>
+                      )
+                    })
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
       <div className="row gap6" style={{ fontSize: 11, color: 'var(--text-faint)', padding: '0 2px' }}>
         <Icon name="shield" size={12} /> {t('settings.mcpTokenNote')}
       </div>

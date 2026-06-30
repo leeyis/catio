@@ -19,6 +19,10 @@ export interface Prefs {
   termBufferEnabled: boolean
   /** How many trailing terminal lines to include when termBufferEnabled. */
   termBufferLines: number
+  /** MCP server IP whitelist (CIDR/IP entries); empty means allow all. */
+  mcpWhitelist: string[]
+  /** Stream MCP access events to the live-log panel over `mcp://log`. */
+  mcpLiveLog: boolean
 }
 
 interface FontOption<K> { key: K; label: string; stack: string }
@@ -49,6 +53,8 @@ export const DEFAULT_PREFS: Prefs = {
   density: 'comfortable',
   termBufferEnabled: true,
   termBufferLines: 50,
+  mcpWhitelist: [],
+  mcpLiveLog: false,
 }
 
 const STORAGE_KEY = 'catio-prefs'
