@@ -6,11 +6,22 @@ use std::sync::atomic::Ordering;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
+use catio_lib::events::EventSink;
 use catio_lib::ssh::conn::{connect_authenticated, AuthMethod, ConnectArgs};
 use catio_lib::ssh::manager::{Session, SessionManager, TunnelEntry};
-use catio_lib::ssh::tunnel::{open_dynamic_forward, open_local_forward, open_remote_forward};
+use catio_lib::ssh::tunnel::{
+    open_dynamic_forward, open_local_forward, open_remote_forward, tunnel_open_core, TunnelSpec,
+};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+/// 捕获型 EventSink：把所有 emit 的 (topic, payload) 存进 Vec，供断言。
+struct CapturingSink(std::sync::Mutex<Vec<(String, serde_json::Value)>>);
+impl EventSink for CapturingSink {
+    fn emit(&self, topic: &str, payload: serde_json::Value) {
+        self.0.lock().unwrap().push((topic.to_string(), payload));
+    }
+}
 
 /// 连接测试 server 并把会话存入一个新建的 SessionManager，返回 (mgr, session_id)。
 async fn connect_into_manager() -> (SessionManager, String) {
@@ -38,6 +49,44 @@ async fn connect_into_manager() -> (SessionManager, String) {
     )
     .await;
     (mgr, "sess-test".into())
+}
+
+/// transport-agnostic 核心 `tunnel_open_core`：用一个 EventSink（而非 Tauri AppHandle）。
+/// 验证它 (1) 返回隧道 id，(2) 登记进 SessionManager 注册表，(3) 周期发射器经 sink
+/// 发出 `tunnel://{id}` 帧——这是 server（web）模式复用同一核心的关键。
+#[tokio::test]
+async fn tunnel_open_core_registers_and_emits_through_sink() {
+    let (mgr, session_id) = connect_into_manager().await;
+    let sink = Arc::new(CapturingSink(std::sync::Mutex::new(Vec::new())));
+
+    let spec = TunnelSpec {
+        kind: 'L',
+        bind: "127.0.0.1:0".into(),
+        target: Some("echo:9".into()),
+    };
+    let id = tunnel_open_core(session_id, spec, sink.clone(), &mgr)
+        .await
+        .unwrap();
+
+    // (2) 已登记到注册表。
+    let list = mgr.tunnel_status_list().await;
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].id, id);
+    assert_eq!(list[0].kind, "L");
+
+    // (3) 周期发射器经 sink 发出 tunnel://{id} 帧（轮询，避免脆弱固定睡眠）。
+    let topic = format!("tunnel://{id}");
+    let mut emitted = false;
+    for _ in 0..50 {
+        if sink.0.lock().unwrap().iter().any(|(t, _)| t == &topic) {
+            emitted = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(emitted, "emitter must emit tunnel://{id} frames through the sink");
+
+    mgr.remove_tunnel(&id).await;
 }
 
 /// L 转发往返：通过本地监听器写字节 → direct-tcpip → server echo → 读回。

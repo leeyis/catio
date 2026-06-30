@@ -41,8 +41,8 @@ use tokio::sync::Mutex;
 use tokio::task::AbortHandle;
 
 use serde::Deserialize;
-use tauri::Emitter;
 
+use crate::events::EventSink;
 use crate::ssh::ids::IdGen;
 use crate::ssh::manager::{Session, SessionManager, TunnelEntry};
 use crate::ssh::SshError;
@@ -480,8 +480,9 @@ fn parse_bind(bind: &str) -> Result<(String, u32), SshError> {
 }
 
 /// 启动周期性 `tunnel://{id}` 发射器（约每 500ms 发一次累计字节），返回其 AbortHandle。
+/// 经 `EventSink` 发出，桌面端落到 Tauri 事件总线、web 端广播给 WebSocket 订阅者。
 fn spawn_byte_emitter(
-    app: tauri::AppHandle,
+    sink: Arc<dyn EventSink>,
     id: &str,
     up: Arc<AtomicU64>,
     down: Arc<AtomicU64>,
@@ -491,7 +492,7 @@ fn spawn_byte_emitter(
         let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
         loop {
             tick.tick().await;
-            let _ = app.emit(
+            sink.emit(
                 &evt,
                 serde_json::json!({
                     "bytesUp": up.load(Ordering::Relaxed),
@@ -503,16 +504,30 @@ fn spawn_byte_emitter(
     emitter.abort_handle()
 }
 
-/// 打开一条隧道。L → 本地转发；R → 远程/反向转发；D 暂未实现（C3）。
+/// 打开一条隧道（Tauri 命令薄封装）。L → 本地转发；R → 远程/反向转发；D → 动态 SOCKS5。
 ///
-/// 成功后登记到 manager 隧道注册表，并启动一个周期发射器（约每 500ms）将
-/// up/down 计数经 `tunnel://{id}` 事件发出 `{ bytesUp, bytesDown }`。返回隧道 id。
+/// 实际逻辑在 transport-agnostic 的 [`tunnel_open_core`] 中，桌面端用 `TauriSink`、
+/// web（server）端用 WebSocket hub 作为 `EventSink`，共享同一份隧道建立逻辑。
 #[tauri::command]
 pub async fn tunnel_open(
     session_id: String,
     spec: TunnelSpec,
     app: tauri::AppHandle,
     mgr: tauri::State<'_, SessionManager>,
+) -> Result<String, SshError> {
+    tunnel_open_core(session_id, spec, Arc::new(crate::events::TauriSink(app)), &mgr).await
+}
+
+/// 打开一条隧道（transport-agnostic 核心）。L → 本地转发；R → 远程/反向转发；D → 动态 SOCKS5。
+///
+/// 成功后登记到 manager 隧道注册表，并启动一个周期发射器（约每 500ms）将
+/// up/down 计数经 `sink` 以 `tunnel://{id}` 主题发出 `{ bytesUp, bytesDown }`。返回隧道 id。
+/// `sink` 在桌面端是 Tauri 事件总线、在 web 端是 WebSocket 广播 hub。
+pub async fn tunnel_open_core(
+    session_id: String,
+    spec: TunnelSpec,
+    sink: Arc<dyn EventSink>,
+    mgr: &SessionManager,
 ) -> Result<String, SshError> {
     let session = mgr
         .get(&session_id)
@@ -529,7 +544,7 @@ pub async fn tunnel_open(
             let fwd = open_local_forward(session, &spec.bind, &target).await?;
             let id = fwd.id.clone();
             let emitter_abort =
-                spawn_byte_emitter(app, &id, fwd.up.clone(), fwd.down.clone());
+                spawn_byte_emitter(sink, &id, fwd.up.clone(), fwd.down.clone());
 
             mgr.insert_tunnel(
                 id.clone(),
@@ -567,7 +582,7 @@ pub async fn tunnel_open(
             .await?;
 
             let id = TUN_IDS.next();
-            let emitter_abort = spawn_byte_emitter(app, &id, up.clone(), down.clone());
+            let emitter_abort = spawn_byte_emitter(sink, &id, up.clone(), down.clone());
 
             mgr.insert_tunnel(
                 id.clone(),
@@ -592,7 +607,7 @@ pub async fn tunnel_open(
                 open_dynamic_forward(session, &spec.bind, up.clone(), down.clone()).await?;
 
             let id = TUN_IDS.next();
-            let emitter_abort = spawn_byte_emitter(app, &id, up.clone(), down.clone());
+            let emitter_abort = spawn_byte_emitter(sink, &id, up.clone(), down.clone());
 
             mgr.insert_tunnel(
                 id.clone(),
