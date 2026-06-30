@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 const invokeMock = vi.fn()
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invokeMock(...a) }))
@@ -60,5 +60,58 @@ describe('services/ssh', () => {
     expect(invokeMock).toHaveBeenCalledWith('ssh_sysinfo', { sessionId: 'sess-2' })
     expect(result).toBe('## OS\nUbuntu 22.04')
     delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
+})
+
+// Port-forwarding (tunnels) must route over the HTTP transport in server (web) mode — the original
+// bug was these three calling Tauri `invoke` directly, so in the browser they rejected silently.
+describe('services/ssh — tunnels route over HTTP in server mode', () => {
+  const fetchMock = vi.fn()
+  const okJson = (data: unknown) => ({ ok: true, status: 200, text: async () => JSON.stringify(data) })
+
+  beforeEach(() => {
+    invokeMock.mockReset()
+    fetchMock.mockReset()
+    ;(globalThis as unknown as Record<string, unknown>).fetch = fetchMock
+    ;(window as unknown as Record<string, unknown>).__CATIO_SERVER__ = true
+  })
+  afterEach(() => {
+    delete (window as unknown as Record<string, unknown>).__CATIO_SERVER__
+  })
+
+  it('tunnelOpen POSTs tunnel_open through /api/invoke (not Tauri invoke)', async () => {
+    fetchMock.mockResolvedValue(okJson('tun-1'))
+    const { tunnelOpen } = await import('./ssh')
+    const id = await tunnelOpen('sess-1', { kind: 'L', bind: '127.0.0.1:8080', target: '10.0.4.2:5432' })
+    expect(id).toBe('tun-1')
+    expect(invokeMock).not.toHaveBeenCalled()
+    expect(fetchMock).toHaveBeenCalledWith('/api/invoke', expect.objectContaining({ method: 'POST' }))
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body)
+    expect(body).toEqual({
+      cmd: 'tunnel_open',
+      args: { sessionId: 'sess-1', spec: { kind: 'L', bind: '127.0.0.1:8080', target: '10.0.4.2:5432' } },
+    })
+  })
+
+  it('getTunnels lists tunnel_list and maps the wire shape', async () => {
+    fetchMock.mockResolvedValue(okJson([
+      { id: 'tun-1', kind: 'L', bind: '127.0.0.1:8080', target: '10.0.4.2:5432', bytesUp: 1024, bytesDown: 0, status: 'up' },
+    ]))
+    const { getTunnels } = await import('./ssh')
+    const list = await getTunnels('sess-1')
+    expect(invokeMock).not.toHaveBeenCalled()
+    expect(list.length).toBe(1)
+    expect(list[0]).toMatchObject({ id: 'tun-1', type: 'L', local: '127.0.0.1:8080', remote: '10.0.4.2:5432', status: 'up' })
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body)
+    expect(body.cmd).toBe('tunnel_list')
+  })
+
+  it('tunnelClose closes through /api/invoke', async () => {
+    fetchMock.mockResolvedValue(okJson(null))
+    const { tunnelClose } = await import('./ssh')
+    await tunnelClose('tun-1')
+    expect(invokeMock).not.toHaveBeenCalled()
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body)
+    expect(body).toEqual({ cmd: 'tunnel_close', args: { tunnelId: 'tun-1' } })
   })
 })

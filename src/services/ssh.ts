@@ -373,8 +373,8 @@ function wireTunnelToFrontend(w: TunnelStatusWire): Tunnel {
 }
 
 export async function getTunnels(sessionId?: string): Promise<Tunnel[]> {
-  if (isTauri() && sessionId) {
-    const list = await tauriInvoke<TunnelStatusWire[]>('tunnel_list')
+  if ((isTauri() || isServer()) && sessionId) {
+    const list = await rpc<TunnelStatusWire[]>('tunnel_list')
     return list.map(wireTunnelToFrontend)
   }
   return []
@@ -384,11 +384,11 @@ export async function tunnelOpen(
   sessionId: string,
   spec: { kind: 'L' | 'R' | 'D'; bind: string; target?: string | null },
 ): Promise<string> {
-  return tauriInvoke<string>('tunnel_open', { sessionId, spec })
+  return rpc<string>('tunnel_open', { sessionId, spec })
 }
 
 export async function tunnelClose(tunnelId: string): Promise<void> {
-  return tauriInvoke('tunnel_close', { tunnelId })
+  return rpc('tunnel_close', { tunnelId })
 }
 
 const EMPTY_MONITOR: Monitor = {
