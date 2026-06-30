@@ -35,7 +35,7 @@ import { buildAgentSystemPrompt } from './services/agentPrompt'
 import { useData } from './state/DataContext'
 import { dbConnect, dbConnectArgsFromProfile, dbDisconnect, getHistory as getDbHistory, clearDbHistory, deleteDbHistory, deleteDbHistoryForProfile, dbErrMsg } from './services/db'
 import {
-  useDbConnections, dbProfileToConnection, listActiveDbConnections,
+  useDbConnections, useActiveDbConnections, dbProfileToConnection, listActiveDbConnections,
   setActiveDbConnection, removeDbConnection, removeActiveDbConnection, saveDbConnection,
   type DbProfile,
 } from './state/dbConnections'
@@ -77,6 +77,9 @@ export default function App() {
   const D = useData()
   const serverAuth = useServerAuth()
   const dbProfiles = useDbConnections()
+  // 订阅活跃 DB 连接(useSyncExternalStore):连接/断开会触发重渲染,
+  // 从而驱动下方 syncMcpTargets 的 effect 重跑,使后端 MCP 注册表实时同步。
+  const activeDbConns = useActiveDbConnections()
   const tunnelProfiles = useTunnelConnections()
   const rdpProfiles = useRdpConnections()
   const vncProfiles = useVncConnections()
@@ -420,7 +423,7 @@ export default function App() {
   useEffect(() => {
     syncMcpTargets()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dbProfiles, sessionMap, liveConns])
+  }, [dbProfiles, sessionMap, liveConns, activeDbConns])
 
   const theme_ = tweaks.theme
   const aiForm = tweaks.aiForm
