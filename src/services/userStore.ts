@@ -39,14 +39,24 @@ export function storeLoad<T extends StoreItem>(store: string, lsKey: string): T[
   try { return JSON.parse(localStorage.getItem(lsKey) ?? '[]') as T[] } catch { return [] }
 }
 
-/** Insert/replace one item by id. Server mode updates the cache + writes through (fire-and-forget);
- *  if the item carries `__ownerId` (an admin editing someone else's), that owner is targeted. */
+/** The owner of an already-cached item (server mode), so edit/delete preserve ownership without
+ *  every caller threading it — an ADMIN editing another user's item auto-targets that user; a
+ *  normal user only has their own items, so it resolves to themselves. */
+function cachedOwner(store: string, id: string): { id?: number; name?: string } {
+  const it = (mem[store] ?? []).find(x => x.id === id)
+  return { id: it?.__ownerId, name: it?.__ownerName }
+}
+
+/** Insert/replace one item by id. Server mode writes through to the OWNER's row (the item's
+ *  `__ownerId`, or the cached item's owner for an edit) and keeps the owner tags on the cache so an
+ *  admin's list keeps showing whose item it is. */
 export function storeUpsert<T extends StoreItem>(store: string, lsKey: string, item: T): void {
   if (isServer()) {
-    const list = ((mem[store] as T[] | undefined) ?? []).filter(x => x.id !== item.id)
-    list.push(item)
-    mem[store] = list
-    const ownerId = item.__ownerId
+    const prev = cachedOwner(store, item.id)
+    const ownerId = item.__ownerId ?? prev.id
+    const ownerName = item.__ownerName ?? prev.name
+    const cached = { ...item, ...(ownerId !== undefined ? { __ownerId: ownerId } : {}), ...(ownerName ? { __ownerName: ownerName } : {}) }
+    mem[store] = [...((mem[store] as T[] | undefined) ?? []).filter(x => x.id !== item.id), cached as unknown as StoreItem]
     void rpc('store_set', { store, itemId: item.id, payload: item, ...(ownerId !== undefined ? { ownerId } : {}) })
       .catch(e => console.warn(`[userStore] 保存到服务器失败(${store}):`, e))
   } else {
@@ -56,11 +66,13 @@ export function storeUpsert<T extends StoreItem>(store: string, lsKey: string, i
   }
 }
 
-/** Remove one item by id. `ownerId` lets an admin target another user's item. */
+/** Remove one item by id. The owner is taken from `ownerId` or the cached item, so an admin can
+ *  delete another user's item and a normal user only ever deletes their own. */
 export function storeRemove<T extends StoreItem>(store: string, lsKey: string, id: string, ownerId?: number): void {
   if (isServer()) {
+    const oid = ownerId ?? cachedOwner(store, id).id
     mem[store] = ((mem[store] as T[] | undefined) ?? []).filter(x => x.id !== id)
-    void rpc('store_delete', { store, itemId: id, ...(ownerId !== undefined ? { ownerId } : {}) })
+    void rpc('store_delete', { store, itemId: id, ...(oid !== undefined ? { ownerId: oid } : {}) })
       .catch(e => console.warn(`[userStore] 删除失败(${store}):`, e))
   } else {
     localStorage.setItem(lsKey, JSON.stringify(storeLoad<T>(store, lsKey).filter(x => x.id !== id)))

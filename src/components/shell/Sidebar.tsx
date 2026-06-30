@@ -485,6 +485,13 @@ export function ConnRow({ conn, active, onOpen, onDetail, nested, selectable, se
               <Icon name="lock" size={9} /> {t('vault.needsAuth')}
             </span>
           )}
+          {conn.ownerName && (
+            // Admin viewing another user's connection — shows whose it is. Absent for own.
+            <span className="chip" title={t('shell.ownedBy', { name: conn.ownerName })}
+              style={{ flexShrink: 0, height: 16, fontSize: 9.5, gap: 3, color: 'var(--text-tertiary)' }}>
+              <Icon name="user" size={9} /> {conn.ownerName}
+            </span>
+          )}
         </div>
         <span className="ell mono" style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{nested ? (D.engineMeta[conn.engine ?? ''] || {}).label : conn.sub}</span>
       </div>

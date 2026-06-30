@@ -25,6 +25,9 @@ export interface Connection {
   sub: string
   icon: string
   status: ConnStatus
+  /** Web multi-user: the owning user's name, set only when an ADMIN is viewing someone else's
+   *  connection (so the sidebar can badge "owned by X"). Absent for one's own connections. */
+  ownerName?: string
   tags?: string[]
   lastUsed?: string
   proto?: 'ssh' | 'telnet' | 'local' | 'serial' | 'mosh' | 'vnc'

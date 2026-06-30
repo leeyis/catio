@@ -3,6 +3,7 @@
     "newConnection": "新建连接"
   },
   "shell": {
+    "ownedBy": "属于用户 {{name}}",
     "toggleTheme": "切换主题",
     "notifications": "通知",
     "settings": "设置",

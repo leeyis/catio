@@ -264,6 +264,10 @@ export default function App() {
   // Vault = real saved SSH host profiles + real saved DB connections (reactive).
   // Mock DB connections are excluded — only real saved profiles drive DB rows now.
   // Real saved SSH host profiles (localStorage) → host Connection rows.
+  // The logged-in server user's name — used to badge connections OWNED BY SOMEONE ELSE (only an
+  // admin ever sees those; for a normal user every item is their own, so no badge).
+  const selfName = serverAuth.user?.username
+  const ownerTag = (p: { __ownerName?: string }) => (p.__ownerName && p.__ownerName !== selfName ? { ownerName: p.__ownerName } : {})
   const profileConns: Connection[] = profiles.map(p => ({
     id: p.id,
     group: p.group ?? '',
@@ -274,10 +278,11 @@ export default function App() {
     status: 'idle',
     proto: 'ssh',
     ...(p.os ? { os: p.os } : {}),
+    ...ownerTag(p),
   }))
   // Real saved DB connections (reactive) → db Connection rows.
   const activeProfileIds = new Set(listActiveDbConnections().map(a => a.profileId))
-  const realDbConns = dbProfiles.map(p => dbProfileToConnection(p, activeProfileIds.has(p.id)))
+  const realDbConns = dbProfiles.map(p => ({ ...dbProfileToConnection(p, activeProfileIds.has(p.id)), ...ownerTag(p) }))
   // Saved port-forward connections (C2) → tunnel Connection rows.
   const tunnelConns: Connection[] = tunnelProfiles.map(p => ({
     id: p.id,
@@ -287,6 +292,7 @@ export default function App() {
     sub: p.kind === 'D' ? `SOCKS · ${p.bind}` : `${p.kind} · ${p.bind} → ${p.target ?? ''}`,
     icon: 'git-branch',
     status: 'idle',
+    ...ownerTag(p),
   }))
   // Saved RDP connections → rdp Connection rows (open = launch system RDP client).
   const rdpConns: Connection[] = rdpProfiles.map(p => ({
@@ -300,6 +306,7 @@ export default function App() {
     host: p.host,
     port: p.port,
     ...(p.user ? { user: p.user } : {}),
+    ...ownerTag(p),
   }))
   // Saved VNC connections → vnc Connection rows (open = embedded VNC session).
   const vncConns: Connection[] = vncProfiles.map(p => ({
@@ -312,6 +319,7 @@ export default function App() {
     status: 'idle',
     host: p.host,
     port: p.port,
+    ...ownerTag(p),
   }))
   const vaultConns = ownsVault ? [...profileConns, ...realDbConns, ...tunnelConns, ...rdpConns, ...vncConns] : []
   const currentName = authEnabled && sessionUser && sessionUser !== '__open' ? sessionUser : 'skyler'

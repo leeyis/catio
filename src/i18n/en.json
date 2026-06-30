@@ -3,6 +3,7 @@
     "newConnection": "New connection"
   },
   "shell": {
+    "ownedBy": "Owned by {{name}}",
     "toggleTheme": "Toggle theme",
     "notifications": "Notifications",
     "settings": "Settings",
