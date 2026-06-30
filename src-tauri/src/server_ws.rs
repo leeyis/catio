@@ -69,6 +69,14 @@ impl WsHub {
     pub fn conn_count(&self) -> usize {
         self.conns.lock().unwrap().len()
     }
+
+    /// True iff at least one currently-registered connection is subscribed to `topic`. Pure read
+    /// (no mutation), locking the same `conns` mutex as `emit`. The server-mode MCP realtime-log
+    /// path uses this as its emit gate (replacing the desktop's `live_log` AtomicBool): no
+    /// subscriber → no log payload is built or emitted.
+    pub fn has_subscriber(&self, topic: &str) -> bool {
+        self.conns.lock().unwrap().values().any(|c| c.topics.contains(topic))
+    }
 }
 
 impl EventSink for WsHub {

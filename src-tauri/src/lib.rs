@@ -7,6 +7,7 @@ pub mod auth;
 pub mod secrets;
 pub mod events;
 pub mod mcp;
+pub mod netmatch;
 pub mod scan;
 pub mod localterm;
 pub mod vnc;

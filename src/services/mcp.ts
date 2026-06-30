@@ -1,6 +1,6 @@
 // Frontend bridge to the embedded local MCP server (Rust backend).
 import { isTauri } from './ssh'
-import { rpc, isServer } from './transport'
+import { rpc, isServer, subscribe } from './transport'
 
 async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const { invoke } = await import('@tauri-apps/api/core')
@@ -27,6 +27,11 @@ export interface McpLogEntry {
   output?: string
   isError?: boolean
   path?: string
+  // Server-mode additions (P3b). Desktop's `mcp://log` payload never sets these, so they stay
+  // undefined on the desktop head and the shared panel renders the desktop shape unchanged.
+  userId?: number
+  username?: string
+  transfer?: { filename: string; bytesTransferred: number; totalBytes: number; percent: number }
 }
 
 export interface McpConnMeta {
@@ -114,4 +119,13 @@ export async function onMcpLog(cb: (e: McpLogEntry) => void): Promise<() => void
   const { listen } = await import('@tauri-apps/api/event')
   const un = await listen<McpLogEntry>('mcp://log', (ev) => cb(ev.payload))
   return un
+}
+
+// Server-mode live-log stream over the shared WebSocket. `scope` is either the caller's own user
+// id (their own MCP activity) or the string 'all' (admin-only — every user's activity). The server
+// authorizes the subscription itself, so a non-admin can never read 'all' or another user's id.
+// Returns an unsubscribe fn; no-op outside server mode. Desktop uses onMcpLog instead.
+export async function onMcpServerLog(scope: number | 'all', cb: (e: McpLogEntry) => void): Promise<() => void> {
+  if (!isServer()) return () => {}
+  return subscribe('mcp-log://' + scope, p => cb(p as McpLogEntry))
 }

@@ -110,6 +110,15 @@ pub struct AppState {
     /// SSE response routing for the server-mode MCP: sessionId → sender. `/mcp/sse` registers a
     /// channel here; `/mcp/messages` pushes the JSON-RPC reply onto the matching one.
     pub mcp_sessions: Arc<std::sync::Mutex<HashMap<String, tokio::sync::mpsc::UnboundedSender<String>>>>,
+    /// Network-layer IP allowlist for the `/mcp` routes, parsed ONCE from `CATIO_MCP_IP_ALLOWLIST`
+    /// (comma-separated IPv4/CIDR). EMPTY ⇒ gate disabled (the token stays the sole gate), so every
+    /// existing `build_router`-based test — which never sets the env — is unaffected. Loopback is
+    /// always allowed by `ip_allowed`.
+    pub mcp_ip_allowlist: Arc<Vec<crate::netmatch::WhitelistRule>>,
+    /// When true (`CATIO_TRUST_PROXY` truthy), the `/mcp` IP gate trusts the leftmost
+    /// `X-Forwarded-For` entry as the client IP (reverse-proxy deployments); otherwise it uses the
+    /// raw peer IP from `ConnectInfo`.
+    pub mcp_trust_proxy: bool,
 }
 
 /// True if `actor` may use the live resource `id`: admins may use any; others only their own.
@@ -160,6 +169,17 @@ impl AppState {
             conn_meta: Arc::new(std::sync::Mutex::new(HashMap::new())),
             ssh_meta: Arc::new(std::sync::Mutex::new(HashMap::new())),
             mcp_sessions: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            mcp_ip_allowlist: Arc::new(
+                std::env::var("CATIO_MCP_IP_ALLOWLIST").ok().unwrap_or_default()
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .filter_map(crate::netmatch::WhitelistRule::parse)
+                    .collect(),
+            ),
+            mcp_trust_proxy: std::env::var("CATIO_TRUST_PROXY")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
         })
     }
 }
@@ -200,7 +220,11 @@ pub async fn run_server(addr: SocketAddr, static_dir: PathBuf) -> std::io::Resul
     bootstrap_admin_from_env(&state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("catio-server listening on http://{addr}");
-    axum::serve(listener, build_router(state)).await
+    // `with_connect_info` makes the peer `SocketAddr` available to the `/mcp` handlers (via
+    // `ConnectInfo<SocketAddr>`) for the IP allowlist gate. Integration tests call
+    // `axum::serve(listener, build_router(state))` directly (no connect-info), so their handlers
+    // see `Option<ConnectInfo<_>> == None` — fine, since they never set the allowlist env.
+    axum::serve(listener, build_router(state).into_make_service_with_connect_info::<SocketAddr>()).await
 }
 
 /// First-run admin: if there are no users yet and CATIO_ADMIN_USER / CATIO_ADMIN_PASSWORD are
@@ -1185,12 +1209,22 @@ async fn handle_ws(socket: WebSocket, st: AppState, token: String) {
                 let Ok(env) = serde_json::from_str::<Value>(&t) else { continue };
                 match env.get("type").and_then(Value::as_str) {
                     Some("sub") => if let Some(topic) = env.get("topic").and_then(Value::as_str) {
-                        // Sensitive streams (terminal output, VNC framebuffer, host monitor, scan
-                        // results incl. hit credentials, command history) are subscribed SERVER-side
-                        // by their cmd handlers for the originating connection only. Refusing
-                        // client-driven `sub` to these prefixes stops one logged-in user from
-                        // eavesdropping on another's session by guessing/replaying a topic id.
-                        if !is_protected_topic(topic) {
+                        // `mcp-log://<scope>` realtime-log streams are client-subscribable but
+                        // AUTHORIZED here (not by client trust): resolve the session and allow only
+                        // the owner to sub their OWN id, or an admin to sub `all` / any user's id.
+                        // A non-admin thus can't eavesdrop on `mcp-log://all` or another user's id.
+                        if let Some(scope) = topic.strip_prefix("mcp-log://") {
+                            if let Some(actor) = resolve_session(&st, &token) {
+                                if actor.is_admin || scope == actor.id.to_string() {
+                                    st.ws.subscribe(conn_id, topic);
+                                }
+                            }
+                        } else if !is_protected_topic(topic) {
+                            // Sensitive streams (terminal output, VNC framebuffer, host monitor, scan
+                            // results incl. hit credentials, command history) are subscribed SERVER-side
+                            // by their cmd handlers for the originating connection only. Refusing
+                            // client-driven `sub` to these prefixes stops one logged-in user from
+                            // eavesdropping on another's session by guessing/replaying a topic id.
                             st.ws.subscribe(conn_id, topic);
                         }
                     },

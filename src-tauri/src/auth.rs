@@ -332,13 +332,16 @@ impl AuthDb {
         Ok(())
     }
 
-    /// Reverse lookup for route auth: plaintext token → (user_id, enabled), or None.
-    pub fn mcp_token_resolve(&self, token: &str) -> Result<Option<(i64, bool)>, String> {
+    /// Reverse lookup for route auth: plaintext token → (user_id, enabled, username), or None.
+    /// The username (JOIN on users) lets the server-mode MCP stamp every realtime-log entry with
+    /// the owner without a second query.
+    pub fn mcp_token_resolve(&self, token: &str) -> Result<Option<(i64, bool, String)>, String> {
         let c = self.conn.lock().unwrap();
         c.query_row(
-            "SELECT user_id, enabled FROM mcp_tokens WHERE token = ?1",
+            "SELECT t.user_id, t.enabled, u.username FROM mcp_tokens t \
+             JOIN users u ON u.id = t.user_id WHERE t.token = ?1",
             rusqlite::params![token],
-            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? != 0)),
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? != 0, r.get::<_, String>(2)?)),
         )
         .optional()
         .map_err(|e| e.to_string())
@@ -512,8 +515,9 @@ mod tests {
         db.mcp_token_upsert(u.id, &new).unwrap();
         // The old token no longer resolves; the new one does.
         assert!(db.mcp_token_resolve(&old).unwrap().is_none());
-        let (uid, enabled) = db.mcp_token_resolve(&new).unwrap().unwrap();
+        let (uid, enabled, name) = db.mcp_token_resolve(&new).unwrap().unwrap();
         assert_eq!(uid, u.id);
+        assert_eq!(name, "alice");
         assert!(!enabled, "regeneration preserves the disabled flag");
     }
 
@@ -524,14 +528,14 @@ mod tests {
         let tok = new_session_token();
         db.mcp_token_upsert(u.id, &tok).unwrap();
         // Enabled by default.
-        assert_eq!(db.mcp_token_resolve(&tok).unwrap(), Some((u.id, true)));
+        assert_eq!(db.mcp_token_resolve(&tok).unwrap(), Some((u.id, true, "alice".to_string())));
         // Disabling flips the flag WITHOUT changing the token.
         db.mcp_token_set_enabled(u.id, false).unwrap();
-        assert_eq!(db.mcp_token_resolve(&tok).unwrap(), Some((u.id, false)));
+        assert_eq!(db.mcp_token_resolve(&tok).unwrap(), Some((u.id, false, "alice".to_string())));
         assert_eq!(db.mcp_token_get(u.id).unwrap().unwrap().0, tok);
         // Re-enabling works too.
         db.mcp_token_set_enabled(u.id, true).unwrap();
-        assert_eq!(db.mcp_token_resolve(&tok).unwrap(), Some((u.id, true)));
+        assert_eq!(db.mcp_token_resolve(&tok).unwrap(), Some((u.id, true, "alice".to_string())));
         // An unknown token never resolves.
         assert!(db.mcp_token_resolve("deadbeef").unwrap().is_none());
     }

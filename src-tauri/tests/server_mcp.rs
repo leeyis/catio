@@ -8,21 +8,54 @@
 //! cookie-gated `/api/invoke` calls go through `reqwest` as in the other server tests.
 
 use std::net::SocketAddr;
+use std::sync::Mutex;
 
 use catio_lib::server::{build_router, AppState};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-async fn start() -> (String, SocketAddr) {
-    let tmp = tempfile::tempdir().unwrap();
-    let state = AppState::new(tmp.path().to_path_buf(), tmp.path().join("data")).unwrap();
-    std::mem::forget(tmp);
+/// `AppState::new` reads process-global env (`CATIO_MCP_IP_ALLOWLIST`, `CATIO_TRUST_PROXY`). The
+/// allowlist test sets+clears those vars around one construction; this lock serializes every
+/// `AppState::new` in this (single) test binary so a concurrent `start()` can't observe them.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+/// Bind + serve an already-built state on an ephemeral loopback port. No `into_make_service_with_
+/// connect_info`, so handlers see `Option<ConnectInfo<_>> == None` (matches the production test seam).
+async fn serve_state(state: AppState) -> (String, SocketAddr) {
     let addr: SocketAddr = ([127, 0, 0, 1], 0).into();
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     let bound = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, build_router(state)).await.unwrap(); });
     (format!("http://{bound}"), bound)
+}
+
+async fn start() -> (String, SocketAddr) {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = {
+        let _g = ENV_LOCK.lock().unwrap();
+        AppState::new(tmp.path().to_path_buf(), tmp.path().join("data")).unwrap()
+    };
+    std::mem::forget(tmp);
+    serve_state(state).await
+}
+
+/// Build a server whose `/mcp` routes are IP-gated by `allowlist` with `CATIO_TRUST_PROXY=1` (so the
+/// client IP is taken from `X-Forwarded-For`, since the loopback peer would otherwise always pass).
+/// The env is set+read+cleared under `ENV_LOCK` so it never leaks into another test's state.
+async fn start_with_allowlist(allowlist: &str) -> (String, SocketAddr) {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::set_var("CATIO_MCP_IP_ALLOWLIST", allowlist);
+        std::env::set_var("CATIO_TRUST_PROXY", "1");
+        let s = AppState::new(tmp.path().to_path_buf(), tmp.path().join("data")).unwrap();
+        std::env::remove_var("CATIO_MCP_IP_ALLOWLIST");
+        std::env::remove_var("CATIO_TRUST_PROXY");
+        s
+    };
+    std::mem::forget(tmp);
+    serve_state(state).await
 }
 
 fn jar() -> reqwest::Client {
@@ -181,3 +214,48 @@ async fn token_list_connections_sees_only_its_own_owner() {
     let text = reply["result"]["content"][0]["text"].as_str().unwrap_or("");
     assert!(text.contains("not found"), "owner-scope denial: {text}");
 }
+
+/// `GET /mcp/sse` status with a given token + `X-Forwarded-For` (the gate's client IP under
+/// `CATIO_TRUST_PROXY`). reqwest resolves once the response head arrives, so a 200 SSE stream
+/// doesn't block — we read only the status and drop the connection.
+async fn sse_status(base: &str, token: &str, xff: &str) -> u16 {
+    reqwest::Client::new()
+        .get(format!("{base}/mcp/sse?token={token}"))
+        .header("X-Forwarded-For", xff)
+        .send().await.unwrap().status().as_u16()
+}
+
+/// `POST /mcp/messages` status with a given token + `X-Forwarded-For`.
+async fn msg_status(base: &str, token: &str, xff: &str) -> u16 {
+    reqwest::Client::new()
+        .post(format!("{base}/mcp/messages?token={token}&sessionId=x"))
+        .header("X-Forwarded-For", xff)
+        .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))
+        .send().await.unwrap().status().as_u16()
+}
+
+#[tokio::test]
+async fn ip_allowlist_blocks_off_list_even_with_valid_token() {
+    let (base, _addr) = start_with_allowlist("10.0.0.0/8").await;
+    let admin = jar();
+    invoke(&admin, &base, "auth_bootstrap", json!({ "username": "admin", "password": "secret123" })).await;
+    let (_, tok) = invoke(&admin, &base, "mcp_token_get", json!({})).await;
+    let token = tok["token"].as_str().unwrap().to_string();
+
+    // In-range XFF + valid token → allowed on both routes (SSE 200 / messages 202).
+    assert_eq!(sse_status(&base, &token, "10.1.2.3").await, 200, "in-range IP must pass the gate");
+    assert_eq!(msg_status(&base, &token, "10.1.2.3").await, 202, "in-range IP must reach dispatch");
+
+    // Out-of-range XFF with the SAME valid token → 403: the IP gate is additive to the token, so a
+    // correct token off the allowlist is still refused.
+    assert_eq!(sse_status(&base, &token, "203.0.113.7").await, 403, "off-list IP must be 403 even with a valid token");
+    assert_eq!(msg_status(&base, &token, "203.0.113.7").await, 403, "off-list IP must be 403 even with a valid token");
+
+    // The token stays the primary gate: an invalid token is 401 BEFORE the IP gate, even in-range.
+    assert_eq!(sse_status(&base, "deadbeef", "10.1.2.3").await, 401, "bad token is 401 regardless of IP");
+}
+
+// TODO(P3b): a WS-level test (tokio-tungstenite) that a non-admin's `sub` to `mcp-log://all` or
+// another user's id is rejected while their OWN `mcp-log://<id>` receives entries, exercising the
+// handle_ws sub-authorization end-to-end. Owner isolation is covered above at the route/token layer;
+// the sub gate is unit-reasoned from `resolve_session` + `is_admin`.

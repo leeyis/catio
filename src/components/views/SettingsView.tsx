@@ -1,5 +1,5 @@
 /* ported from ref-ui/_extract/blob12.txt — verbatim per plan T1-T7 */
-import React, { useState, useRef, useEffect } from 'react'
+import React, { useState, useRef, useEffect, useCallback } from 'react'
 import { Trans, useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { BrandMark } from '../BrandMark'
@@ -13,7 +13,7 @@ import type { UiFontKey, MonoFontKey, Density } from '../../state/preferences'
 import { fetchModels, testModel } from '../../services'
 import type { ModelTestResult } from '../../services'
 import { isTauri } from '../../services/ssh'
-import { mcpStart, mcpStop, mcpStatus, mcpSetWhitelist, mcpSetLiveLog, onMcpLog, mcpTokenGet, mcpTokenRegenerate, mcpTokenSetEnabled } from '../../services/mcp'
+import { mcpStart, mcpStop, mcpStatus, mcpSetWhitelist, mcpSetLiveLog, onMcpLog, onMcpServerLog, mcpTokenGet, mcpTokenRegenerate, mcpTokenSetEnabled } from '../../services/mcp'
 import type { McpInfo, McpLogEntry } from '../../services/mcp'
 import { exportConfig, importConfig } from '../../services/configSync'
 import { ServerAccountBlock } from '../auth/ServerAccountBlock'
@@ -663,7 +663,166 @@ function logKindStyle(kind: string, isError?: boolean): { fg: string; bg: string
   if (kind === 'denied' || isError) return { fg: 'var(--danger-fg)', bg: 'color-mix(in srgb, var(--danger-fg) 13%, transparent)' }
   if (kind === 'tools/result') return { fg: 'var(--signal-green)', bg: 'color-mix(in srgb, var(--signal-green) 13%, transparent)' }
   if (kind === 'tools/call' || kind === 'connect') return { fg: 'var(--accent-primary)', bg: 'var(--accent-soft)' }
+  if (kind === 'transfer') return { fg: 'var(--text-secondary)', bg: 'color-mix(in srgb, var(--accent-primary) 10%, transparent)' }
   return { fg: 'var(--text-tertiary)', bg: 'var(--surface-sunken)' }
+}
+
+// Human-readable byte size for the SFTP transfer progress bar (server-mode `transfer` rows).
+function fmtBytes(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let i = 0
+  let v = n
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++ }
+  return `${i === 0 ? v : v.toFixed(1)} ${units[i]}`
+}
+
+// Shared live-log panel: a 200-entry ring buffer with pause/clear, click-to-expand args/output,
+// and stale-key pruning. Both heads drive it through the `subscribe` prop:
+//   - desktop passes a wrapper over onMcpLog (showUser=false) — its mcp://log payloads never set
+//     userId/username/transfer, so the rendered output is identical to the pre-extraction panel.
+//   - server passes (cb) => onMcpServerLog(scope, cb); an admin viewing `all` sets showUser to
+//     render the username column, and SFTP `transfer` rows render a progress bar.
+function McpLogPanel({ subscribe, showUser }: { subscribe: (cb: (e: McpLogEntry) => void) => Promise<() => void>; showUser?: boolean }) {
+  const { t } = useTranslation()
+  const [log, setLog] = useState<LogRow[]>([])
+  const [paused, setPaused] = useState(false)
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const idRef = useRef(0)
+  const scrollRef = useRef<HTMLDivElement>(null)
+
+  // Subscribe while mounted; unsubscribe on unmount (or when `subscribe` identity changes, e.g. the
+  // server head switching scope). The `active` guard drops a unsub that resolves after teardown.
+  useEffect(() => {
+    let active = true
+    let un: (() => void) | undefined
+    void subscribe(e => {
+      setLog(prev => {
+        const row: LogRow = { ...e, _id: idRef.current++ }
+        const next = [...prev, row]
+        return next.length > LOG_RING ? next.slice(next.length - LOG_RING) : next
+      })
+    }).then(u => { if (active) un = u; else u() })
+    return () => { active = false; if (un) un() }
+  }, [subscribe])
+
+  // Autoscroll to the newest row unless the user paused.
+  useEffect(() => {
+    if (!paused && scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+  }, [log, paused])
+
+  // Drop expand state for rows evicted from the ring buffer so `expanded` can't accumulate stale keys.
+  useEffect(() => {
+    setExpanded(prev => {
+      if (prev.size === 0) return prev
+      const live = new Set(log.map(r => r._id))
+      let changed = false
+      const next = new Set<string>()
+      prev.forEach(k => {
+        if (live.has(Number(k.split(':')[0]))) next.add(k)
+        else changed = true
+      })
+      return changed ? next : prev
+    })
+  }, [log])
+
+  function toggleExpand(key: string) {
+    setExpanded(prev => {
+      const n = new Set(prev)
+      if (n.has(key)) n.delete(key); else n.add(key)
+      return n
+    })
+  }
+
+  function clearLog() {
+    setLog([])
+    setExpanded(new Set())
+  }
+
+  const linkBtnStyle: React.CSSProperties = { background: 'none', border: 'none', padding: 0, color: 'var(--accent-primary)', fontSize: 10.5, fontWeight: 600, cursor: 'pointer' }
+
+  // One truncatable args/output block with click-to-expand.
+  function logField(rowId: number, name: 'args' | 'output', label: string, value: string, isError?: boolean) {
+    const key = `${rowId}:${name}`
+    const open = expanded.has(key)
+    const long = value.length > FIELD_TRUNC
+    const shown = open || !long ? value : value.slice(0, FIELD_TRUNC) + '…'
+    return (
+      <div className="col gap4" style={{ marginTop: 6 }}>
+        <div className="row gap6" style={{ alignItems: 'center' }}>
+          <span style={{ fontSize: 10.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{label}</span>
+          {long && <button onClick={() => toggleExpand(key)} style={linkBtnStyle}>{open ? t('settings.mcpLogCollapse') : t('settings.mcpLogExpand')}</button>}
+        </div>
+        <code className="mono" style={{ padding: '6px 8px', background: 'var(--term-bg)', color: isError ? 'var(--danger-fg)' : 'var(--term-fg)', borderRadius: 6, fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-all', lineHeight: 1.45 }}>{shown}</code>
+      </div>
+    )
+  }
+
+  return (
+    <div className="col" style={{ gap: 8, marginTop: 4 }}>
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+        <span style={{ fontSize: 12, fontWeight: 600 }}>{t('settings.mcpLogPanelTitle')}</span>
+        <div className="row gap6">
+          <Btn variant="ghost" size="sm" icon={paused ? 'play' : 'square'} onClick={() => setPaused(p => !p)}>{paused ? t('settings.mcpLogResume') : t('settings.mcpLogPause')}</Btn>
+          <Btn variant="ghost" size="sm" icon="broom" disabled={log.length === 0} onClick={clearLog}>{t('settings.mcpLogClear')}</Btn>
+        </div>
+      </div>
+
+      <div ref={scrollRef} className="col" style={{ gap: 6, maxHeight: 320, overflowY: 'auto', padding: 8, border: '1px solid var(--border-hairline)', borderRadius: 10, background: 'var(--surface-sunken)' }}>
+        {log.length === 0 ? (
+          <div className="row gap6" style={{ fontSize: 11.5, color: 'var(--text-faint)', padding: '8px 4px' }}>
+            <Icon name="info" size={12} /> {t('settings.mcpLogEmpty')}
+          </div>
+        ) : (
+          log.map(row => {
+            const ks = logKindStyle(row.kind, row.isError)
+            const argsStr = row.args !== undefined ? (typeof row.args === 'string' ? row.args : JSON.stringify(row.args)) : ''
+            const isTransfer = row.kind === 'transfer'
+            return (
+              <div key={row._id} className="col" style={{ gap: 2, padding: '8px 10px', border: '1px solid var(--border-hairline)', borderRadius: 8, background: 'var(--surface-card)' }}>
+                <div className="row gap6" style={{ alignItems: 'center', flexWrap: 'wrap' }}>
+                  <code className="mono" style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{row.ts.length >= 19 ? row.ts.slice(11, 19) : row.ts}</code>
+                  <span className="chip" style={{ background: ks.bg, color: ks.fg, fontSize: 10 }}>{row.kind}</span>
+                  {showUser && row.username && (
+                    <span className="row gap4" style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+                      <span style={{ color: 'var(--text-faint)' }}>{t('settings.mcpLogUser')}</span>
+                      <span className="mono" style={{ fontWeight: 600 }}>{row.username}</span>
+                    </span>
+                  )}
+                  <span className="row gap4" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+                    {row.ip && <span className="mono">{row.ip}</span>}
+                    {row.sessionId && <span className="mono" style={{ color: 'var(--text-faint)' }}>· {row.sessionId}</span>}
+                  </span>
+                  {row.tool && (
+                    <span className="row gap4" style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text-secondary)' }}>
+                      <span style={{ color: 'var(--text-faint)' }}>{isTransfer ? t('settings.mcpLogTransfer') : t('settings.mcpLogTool')}</span>
+                      <span className="mono" style={{ fontWeight: 600 }}>{row.tool}</span>
+                    </span>
+                  )}
+                </div>
+                {row.path && (
+                  <code className="mono" style={{ fontSize: 11, color: 'var(--danger-fg)', marginTop: 4, wordBreak: 'break-all' }}>{row.path}</code>
+                )}
+                {row.transfer && (
+                  <div className="col gap4" style={{ marginTop: 6 }}>
+                    <div className="row" style={{ justifyContent: 'space-between', fontSize: 10.5, color: 'var(--text-tertiary)' }}>
+                      <span className="mono">{fmtBytes(row.transfer.bytesTransferred)} / {fmtBytes(row.transfer.totalBytes)}</span>
+                      <span className="mono" style={{ fontWeight: 600, color: 'var(--accent-primary)' }}>{row.transfer.percent}%</span>
+                    </div>
+                    <div style={{ height: 6, borderRadius: 999, background: 'var(--surface-sunken)', overflow: 'hidden' }}>
+                      <div style={{ width: `${Math.max(0, Math.min(100, row.transfer.percent))}%`, height: '100%', background: 'var(--accent-primary)', transition: 'width .2s' }} />
+                    </div>
+                  </div>
+                )}
+                {argsStr && logField(row._id, 'args', t('settings.mcpLogArgs'), argsStr)}
+                {row.output !== undefined && logField(row._id, 'output', row.isError ? t('settings.mcpLogError') : t('settings.mcpLogOutput'), row.output, row.isError)}
+              </div>
+            )
+          })
+        )}
+      </div>
+    </div>
+  )
 }
 
 // Server mode exposes a per-user token-bearing SSE endpoint; desktop keeps the embedded
@@ -678,12 +837,21 @@ function MCPSettings() {
 // live-log here — those are desktop-only embedded-server controls.
 function ServerMcpSettings() {
   const { t } = useTranslation()
+  const { user } = useServerAuth()
+  const isAdmin = !!user?.isAdmin
   const [token, setToken] = useState('')
   const [enabled, setEnabled] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [copied, setCopied] = useState(false)
   const [confirmRegen, setConfirmRegen] = useState(false)
+
+  // Live-log section: default off/collapsed. Opening it subscribes to the user's own stream;
+  // an admin can flip to the all-users stream. scope drives the topic the panel subscribes to.
+  const [logOpen, setLogOpen] = useState(false)
+  const [allUsers, setAllUsers] = useState(false)
+  const scope: number | 'all' = allUsers && isAdmin ? 'all' : (user?.id ?? 0)
+  const logSubscribe = useCallback((cb: (e: McpLogEntry) => void) => onMcpServerLog(scope, cb), [scope])
 
   // On mount: fetch (lazily minting) this user's token + enabled state.
   useEffect(() => {
@@ -789,6 +957,30 @@ function ServerMcpSettings() {
         </div>
       </div>
 
+      {/* Realtime log — closing the toggle unmounts the panel, which unsubscribes the WS topic. */}
+      <div style={cardStyle}>
+        <SettingRow
+          icon="activity"
+          title={t('settings.mcpServerLogLabel')}
+          desc={t('settings.mcpServerLogDesc')}
+          control={<Toggle on={logOpen} onChange={setLogOpen} accent />}
+        />
+        {logOpen && (
+          <div className="col" style={{ gap: 8, marginTop: 4 }}>
+            {isAdmin && (
+              <SettingRow
+                icon="globe"
+                title={t('settings.mcpLogAllUsers')}
+                desc={t('settings.mcpLogAllUsersDesc')}
+                control={<Toggle on={allUsers} onChange={setAllUsers} accent />}
+              />
+            )}
+            {/* key=scope remounts (fresh buffer + re-subscribe) when the admin flips own/all. */}
+            <McpLogPanel key={String(scope)} subscribe={logSubscribe} showUser={allUsers && isAdmin} />
+          </div>
+        )}
+      </div>
+
       <div className="row gap6" style={{ fontSize: 11, color: 'var(--text-faint)', padding: '0 2px' }}>
         <Icon name="shield" size={12} /> {t('settings.mcpServerTokenNote')}
       </div>
@@ -823,59 +1015,21 @@ function DesktopMcpSettings() {
   const whitelist = prefs.mcpWhitelist
   const hasNonLoopback = whitelist.some(e => !isLoopbackEntry(e))
 
-  // Live log panel.
-  const [log, setLog] = useState<LogRow[]>([])
-  const [paused, setPaused] = useState(false)
-  const [expanded, setExpanded] = useState<Set<string>>(new Set())
-  const idRef = useRef(0)
-  const scrollRef = useRef<HTMLDivElement>(null)
+  // Live log: the shared McpLogPanel owns the ring buffer / pause / expand / prune. Desktop drives
+  // it with onMcpLog and toggles the backend emit gate (mcpSetLiveLog) for the panel's lifetime —
+  // on when it mounts (subscribe), off on cleanup (toggle-off OR unmount) — so the backend never
+  // serializes events to a panel that isn't listening. showUser stays false (desktop is single-user).
+  const liveLogSubscribe = useCallback((cb: (e: McpLogEntry) => void) => {
+    void mcpSetLiveLog(true)
+    return onMcpLog(cb).then(un => () => { un(); void mcpSetLiveLog(false) })
+  }, [])
 
-  // On mount: read status and push the persisted whitelist to the backend. The live-log
-  // gate is owned by the subscribe effect below (only on while this panel is mounted).
+  // On mount: read status and push the persisted whitelist to the backend.
   useEffect(() => {
     void mcpStatus().then(setInfo).catch(() => {})
     void mcpSetWhitelist(prefs.mcpWhitelist)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
-
-  // Subscribe to mcp://log only while the live log is enabled. The backend emit gate is
-  // turned on here and OFF on cleanup (toggle-off OR panel unmount), so the backend never
-  // serializes events to a panel that isn't listening.
-  useEffect(() => {
-    if (!prefs.mcpLiveLog) return
-    let active = true
-    let un: (() => void) | undefined
-    void mcpSetLiveLog(true)
-    void onMcpLog(e => {
-      setLog(prev => {
-        const row: LogRow = { ...e, _id: idRef.current++ }
-        const next = [...prev, row]
-        return next.length > LOG_RING ? next.slice(next.length - LOG_RING) : next
-      })
-    }).then(u => { if (active) un = u; else u() })
-    return () => { active = false; if (un) un(); void mcpSetLiveLog(false) }
-  }, [prefs.mcpLiveLog])
-
-  // Autoscroll to the newest row unless the user paused.
-  useEffect(() => {
-    if (!paused && scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight
-  }, [log, paused])
-
-  // Drop expand state for rows that have been evicted from the ring buffer, so the
-  // `expanded` set can't accumulate stale keys across a long session.
-  useEffect(() => {
-    setExpanded(prev => {
-      if (prev.size === 0) return prev
-      const live = new Set(log.map(r => r._id))
-      let changed = false
-      const next = new Set<string>()
-      prev.forEach(k => {
-        if (live.has(Number(k.split(':')[0]))) next.add(k)
-        else changed = true
-      })
-      return changed ? next : prev
-    })
-  }, [log])
 
   async function toggleServer() {
     if (busy) return
@@ -916,22 +1070,9 @@ function DesktopMcpSettings() {
   }
 
   function toggleLiveLog(on: boolean) {
-    // The subscribe effect owns the backend emit gate (keyed on prefs.mcpLiveLog), so we
-    // only flip the pref here and let the effect turn the gate on/off.
+    // McpLogPanel only mounts while prefs.mcpLiveLog is on, and its subscribe wrapper owns the
+    // backend emit gate for that lifetime — so we just flip the pref here.
     update({ mcpLiveLog: on })
-  }
-
-  function toggleExpand(key: string) {
-    setExpanded(prev => {
-      const n = new Set(prev)
-      if (n.has(key)) n.delete(key); else n.add(key)
-      return n
-    })
-  }
-
-  function clearLog() {
-    setLog([])
-    setExpanded(new Set())
   }
 
   // The token-bearing SSE endpoint (only present while running).
@@ -954,24 +1095,6 @@ function DesktopMcpSettings() {
 
   const cardStyle: React.CSSProperties = { padding: 16, border: '1px solid var(--border-hairline)', borderRadius: 14, background: 'var(--surface-subtle)', marginBottom: 12 }
   const wlInputStyle: React.CSSProperties = { height: 34, padding: '0 10px', borderRadius: 8, fontSize: 13, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', color: 'var(--text-primary)', outline: 'none', boxSizing: 'border-box', flex: 1 }
-  const linkBtnStyle: React.CSSProperties = { background: 'none', border: 'none', padding: 0, color: 'var(--accent-primary)', fontSize: 10.5, fontWeight: 600, cursor: 'pointer' }
-
-  // One truncatable args/output block with click-to-expand.
-  function logField(rowId: number, name: 'args' | 'output', label: string, value: string, isError?: boolean) {
-    const key = `${rowId}:${name}`
-    const open = expanded.has(key)
-    const long = value.length > FIELD_TRUNC
-    const shown = open || !long ? value : value.slice(0, FIELD_TRUNC) + '…'
-    return (
-      <div className="col gap4" style={{ marginTop: 6 }}>
-        <div className="row gap6" style={{ alignItems: 'center' }}>
-          <span style={{ fontSize: 10.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{label}</span>
-          {long && <button onClick={() => toggleExpand(key)} style={linkBtnStyle}>{open ? t('settings.mcpLogCollapse') : t('settings.mcpLogExpand')}</button>}
-        </div>
-        <code className="mono" style={{ padding: '6px 8px', background: 'var(--term-bg)', color: isError ? 'var(--danger-fg)' : 'var(--term-fg)', borderRadius: 6, fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-all', lineHeight: 1.45 }}>{shown}</code>
-      </div>
-    )
-  }
 
   return (
     <Block title={t('settings.mcpTitle')} hint={t('settings.mcpHint')}>
@@ -1077,53 +1200,7 @@ function DesktopMcpSettings() {
               control={<Toggle on={prefs.mcpLiveLog} onChange={toggleLiveLog} accent />}
             />
 
-            {prefs.mcpLiveLog && (
-              <div className="col" style={{ gap: 8, marginTop: 4 }}>
-                <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span style={{ fontSize: 12, fontWeight: 600 }}>{t('settings.mcpLogPanelTitle')}</span>
-                  <div className="row gap6">
-                    <Btn variant="ghost" size="sm" icon={paused ? 'play' : 'square'} onClick={() => setPaused(p => !p)}>{paused ? t('settings.mcpLogResume') : t('settings.mcpLogPause')}</Btn>
-                    <Btn variant="ghost" size="sm" icon="broom" disabled={log.length === 0} onClick={clearLog}>{t('settings.mcpLogClear')}</Btn>
-                  </div>
-                </div>
-
-                <div ref={scrollRef} className="col" style={{ gap: 6, maxHeight: 320, overflowY: 'auto', padding: 8, border: '1px solid var(--border-hairline)', borderRadius: 10, background: 'var(--surface-sunken)' }}>
-                  {log.length === 0 ? (
-                    <div className="row gap6" style={{ fontSize: 11.5, color: 'var(--text-faint)', padding: '8px 4px' }}>
-                      <Icon name="info" size={12} /> {t('settings.mcpLogEmpty')}
-                    </div>
-                  ) : (
-                    log.map(row => {
-                      const ks = logKindStyle(row.kind, row.isError)
-                      const argsStr = row.args !== undefined ? (typeof row.args === 'string' ? row.args : JSON.stringify(row.args)) : ''
-                      return (
-                        <div key={row._id} className="col" style={{ gap: 2, padding: '8px 10px', border: '1px solid var(--border-hairline)', borderRadius: 8, background: 'var(--surface-card)' }}>
-                          <div className="row gap6" style={{ alignItems: 'center', flexWrap: 'wrap' }}>
-                            <code className="mono" style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{row.ts.length >= 19 ? row.ts.slice(11, 19) : row.ts}</code>
-                            <span className="chip" style={{ background: ks.bg, color: ks.fg, fontSize: 10 }}>{row.kind}</span>
-                            <span className="row gap4" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
-                              <span className="mono">{row.ip}</span>
-                              {row.sessionId && <span className="mono" style={{ color: 'var(--text-faint)' }}>· {row.sessionId}</span>}
-                            </span>
-                            {row.tool && (
-                              <span className="row gap4" style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text-secondary)' }}>
-                                <span style={{ color: 'var(--text-faint)' }}>{t('settings.mcpLogTool')}</span>
-                                <span className="mono" style={{ fontWeight: 600 }}>{row.tool}</span>
-                              </span>
-                            )}
-                          </div>
-                          {row.path && (
-                            <code className="mono" style={{ fontSize: 11, color: 'var(--danger-fg)', marginTop: 4, wordBreak: 'break-all' }}>{row.path}</code>
-                          )}
-                          {argsStr && logField(row._id, 'args', t('settings.mcpLogArgs'), argsStr)}
-                          {row.output !== undefined && logField(row._id, 'output', row.isError ? t('settings.mcpLogError') : t('settings.mcpLogOutput'), row.output, row.isError)}
-                        </div>
-                      )
-                    })
-                  )}
-                </div>
-              </div>
-            )}
+            {prefs.mcpLiveLog && <McpLogPanel subscribe={liveLogSubscribe} />}
           </div>
         </>
       )}
