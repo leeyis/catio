@@ -54,6 +54,11 @@ function NewForwardForm({ onSubmit, onCancel, onSaveProfile, error }: NewForward
     border: '1px solid var(--border-default)', background: 'var(--surface-sunken)',
     color: 'var(--text-primary)', outline: 'none', width: '100%', boxSizing: 'border-box',
   }
+  const hintStyle: React.CSSProperties = { fontSize: 10.5, color: 'var(--text-faint)', lineHeight: 1.4 }
+
+  // Per-mode copy + example placeholders so first-time users know what each field expects.
+  const bindPlaceholder = kind === 'D' ? 'localhost:1080' : kind === 'R' ? '0.0.0.0:9000' : 'localhost:8080'
+  const targetPlaceholder = kind === 'R' ? 'localhost:3000' : '10.0.4.2:5432'
 
   return (
     <form onSubmit={handleSubmit}
@@ -77,25 +82,31 @@ function NewForwardForm({ onSubmit, onCancel, onSaveProfile, error }: NewForward
         value={kind}
         onChange={v => setKind(v as 'L' | 'R' | 'D')}
       />
+      {/* Mode explainer — switches with the selected tab so users know what they're building. */}
+      <div style={{ ...hintStyle, padding: '7px 9px', borderRadius: 8, background: 'var(--surface-sunken)', border: '1px solid var(--border-hairline, var(--border-default))' }}>
+        {t(`panels.fwdHelp${kind}`)}
+      </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
         <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>{t('panels.fwdBind')}</span>
         <input
           style={inputStyle}
-          placeholder="localhost:8080"
+          placeholder={bindPlaceholder}
           value={bind}
           onChange={e => setBind(e.target.value)}
           autoFocus
         />
+        <span style={hintStyle}>{t(`panels.fwdBindHint${kind}`)}</span>
       </div>
       {kind !== 'D' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
           <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>{t('panels.fwdTarget')}</span>
           <input
             style={inputStyle}
-            placeholder="10.0.4.2:5432"
+            placeholder={targetPlaceholder}
             value={target}
             onChange={e => setTarget(e.target.value)}
           />
+          <span style={hintStyle}>{t(`panels.fwdTargetHint${kind}`)}</span>
         </div>
       )}
       {onSaveProfile && (
