@@ -372,7 +372,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "list_schemas",
-            "description": "List databases/schemas available on a connected database.",
+            "description": "List databases/schemas available on a connected database. Use the `connection` arg (call list_connections first to get a valid name/id).",
             "inputSchema": {
                 "type": "object",
                 "properties": { "connection": { "type": "string", "description": "Connection name or id" } },
@@ -381,7 +381,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "list_tables",
-            "description": "List tables and views in a connected database. Optionally pass a schema (defaults to the first).",
+            "description": "List tables and views in a connected database. Use the `connection` arg (call list_connections first); optionally pass a `schema` (defaults to the first).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -393,7 +393,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "get_ddl",
-            "description": "Get the DDL / structure of a table or view (columns, types, keys, indexes, foreign keys; or the view source).",
+            "description": "Get the DDL / structure of a table or view (columns, types, keys, indexes, foreign keys; or the view source). Use the `connection` arg (call list_connections first). SQL engines only; not supported on MongoDB / Redis / Elasticsearch.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -406,7 +406,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "query_sql",
-            "description": "Execute a read query (SELECT/SHOW/…) and return rows.",
+            "description": "Execute a read query (SELECT/SHOW/…) and return rows. Use the `connection` arg (call list_connections first). `maxRows` defaults to 200. SQL engines only; not supported on MongoDB / Redis / Elasticsearch.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -419,7 +419,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "insert_sql",
-            "description": "Execute an INSERT statement. Returns rows affected.",
+            "description": "Execute an INSERT statement. Returns rows affected. Use the `connection` arg (call list_connections first). SQL engines only; not supported on MongoDB / Redis / Elasticsearch.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -431,7 +431,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "update_sql",
-            "description": "Execute an UPDATE statement. Returns rows affected.",
+            "description": "Execute an UPDATE statement. Returns rows affected. Use the `connection` arg (call list_connections first). SQL engines only; not supported on MongoDB / Redis / Elasticsearch.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -443,7 +443,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "delete_sql",
-            "description": "Execute a DELETE statement. Returns rows affected.",
+            "description": "Execute a DELETE statement. Returns rows affected. Use the `connection` arg (call list_connections first). SQL engines only; not supported on MongoDB / Redis / Elasticsearch.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -460,7 +460,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "execute_command",
-            "description": "Execute a command on a connected SSH host and return the output.",
+            "description": "Execute a command on a connected SSH host and return the output. Use the `connectionName` arg (call list_hosts first; defaults to the only active host).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -474,7 +474,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "upload_file",
-            "description": "Upload a local file to a connected SSH host.",
+            "description": "Upload a local file to a connected SSH host. Use the `connectionName` arg (call list_hosts first).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -487,7 +487,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "download_file",
-            "description": "Download a file from a connected SSH host.",
+            "description": "Download a file from a connected SSH host. Use the `connectionName` arg (call list_hosts first).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -528,6 +528,7 @@ fn resolve_conn_id(ctx: &ServerCtx, key: &str) -> Option<String> {
     conns.iter().find(|c| c.name == key || c.conn_id == key).map(|c| c.conn_id.clone())
 }
 
+// Reads the in-memory ctx.conns registry (synced from the frontend via mcp_sync_targets). No driver call.
 fn tool_list_connections(ctx: &ServerCtx) -> String {
     let conns = ctx.conns.lock().unwrap();
     let arr: Vec<Value> = conns
@@ -563,12 +564,15 @@ async fn first_schema(driver: &Arc<dyn crate::db::driver::Driver>, args: &Value)
     }
 }
 
+// → driver.list_schemas(). All engines (non-SQL return their database/keyspace list).
 async fn tool_list_schemas(ctx: &ServerCtx, args: &Value) -> Result<String, String> {
     let driver = driver_for(ctx, conn_arg(args)?).await?;
     let schemas = driver.list_schemas().await.map_err(|e| e.to_string())?;
     Ok(serde_json::to_string_pretty(&json!({ "schemas": schemas })).unwrap_or_default())
 }
 
+// → driver.list_tables(schema); schema defaults to the first via first_schema().
+//   All engines (non-SQL return collections/indices/keyspaces).
 async fn tool_list_tables(ctx: &ServerCtx, args: &Value) -> Result<String, String> {
     let driver = driver_for(ctx, conn_arg(args)?).await?;
     let schema = first_schema(&driver, args).await?;
@@ -580,11 +584,19 @@ async fn tool_list_tables(ctx: &ServerCtx, args: &Value) -> Result<String, Strin
     Ok(serde_json::to_string_pretty(&json!({ "schema": schema, "tables": arr })).unwrap_or_default())
 }
 
+// → heuristic: driver.object_source(schema, table, "view") (empty string when the
+//   engine has no DDL introspection, never errors), else driver.table_structure().
+//   SQL engines only — MongoDB/Redis/Elasticsearch have no DDL/view concept.
 async fn tool_get_ddl(ctx: &ServerCtx, args: &Value) -> Result<String, String> {
     let driver = driver_for(ctx, conn_arg(args)?).await?;
+    if matches!(driver.db_type(), crate::db::DatabaseType::Mongodb | crate::db::DatabaseType::Redis | crate::db::DatabaseType::Elasticsearch) {
+        return Err("get_ddl 仅支持 SQL 引擎".into());
+    }
     let table = args.get("table").and_then(Value::as_str).ok_or("missing 'table'")?;
     let schema = first_schema(&driver, args).await?;
-    // Views (and routines) expose their source directly.
+    // View-detection heuristic: a non-empty object_source(…, "view") means it's a view;
+    // object_source returns "" for engines/objects without source, so stored procedures
+    // and functions fall through to the table-structure branch below (known limitation).
     if let Ok(src) = driver.object_source(&schema, table, "view").await {
         if !src.trim().is_empty() {
             return Ok(serde_json::to_string_pretty(&json!({ "schema": schema, "name": table, "kind": "view", "ddl": src })).unwrap_or_default());
@@ -597,10 +609,15 @@ async fn tool_get_ddl(ctx: &ServerCtx, args: &Value) -> Result<String, String> {
     })).unwrap_or_default())
 }
 
+// → driver.query(sql, maxRows) (maxRows default 200). SQL engines only —
+//   guarded against MongoDB/Redis/Elasticsearch (no raw-SQL query path).
 async fn tool_query_sql(ctx: &ServerCtx, args: &Value) -> Result<String, String> {
     let sql = args.get("sql").and_then(Value::as_str).ok_or("missing 'sql'")?;
     let max_rows = args.get("maxRows").and_then(Value::as_u64).unwrap_or(200) as u32;
     let driver = driver_for(ctx, conn_arg(args)?).await?;
+    if matches!(driver.db_type(), crate::db::DatabaseType::Mongodb | crate::db::DatabaseType::Redis | crate::db::DatabaseType::Elasticsearch) {
+        return Err("query_sql 仅支持 SQL 引擎".into());
+    }
     let res = driver.query(sql, max_rows).await.map_err(|e| e.to_string())?;
     let cols: Vec<&str> = res.columns.iter().map(|c| c.name.as_str()).collect();
     Ok(serde_json::to_string_pretty(&json!({
@@ -608,6 +625,10 @@ async fn tool_query_sql(ctx: &ServerCtx, args: &Value) -> Result<String, String>
     })).unwrap_or_default())
 }
 
+// insert_sql / update_sql / delete_sql → keyword-checks the first token, then
+// driver.query(sql, 0); returns rowsAffected. Guarded: read-only engine
+// (capabilities().writable) + non-SQL engines (MongoDB/Redis/Elasticsearch) rejected —
+// Redis edits go through web head's db_redis_edit, not SQL DML.
 async fn tool_write_sql(ctx: &ServerCtx, args: &Value, keyword: &str) -> Result<String, String> {
     let sql = args.get("sql").and_then(Value::as_str).ok_or("missing 'sql'")?;
     let first = sql.trim_start().split_whitespace().next().unwrap_or("").to_ascii_uppercase();
@@ -615,6 +636,12 @@ async fn tool_write_sql(ctx: &ServerCtx, args: &Value, keyword: &str) -> Result<
         return Err(format!("this tool only runs {keyword} statements (got '{first}')"));
     }
     let driver = driver_for(ctx, conn_arg(args)?).await?;
+    if !driver.capabilities().writable {
+        return Err("read-only engine".into());
+    }
+    if matches!(driver.db_type(), crate::db::DatabaseType::Mongodb | crate::db::DatabaseType::Redis | crate::db::DatabaseType::Elasticsearch) {
+        return Err("editing via SQL DML is not supported for this engine".into());
+    }
     let res = driver.query(sql, 0).await.map_err(|e| e.to_string())?;
     Ok(serde_json::to_string_pretty(&json!({ "rowsAffected": res.rows_affected })).unwrap_or_default())
 }
@@ -645,6 +672,7 @@ fn resolve_host(ctx: &ServerCtx, name: Option<&str>) -> Result<String, String> {
     }
 }
 
+// Reads the in-memory ctx.hosts registry (synced via mcp_sync_targets). No SSH call.
 fn tool_list_hosts(ctx: &ServerCtx) -> String {
     let hosts = ctx.hosts.lock().unwrap();
     let arr: Vec<Value> = hosts
@@ -654,6 +682,8 @@ fn tool_list_hosts(ctx: &ServerCtx) -> String {
     serde_json::to_string_pretty(&json!({ "hosts": arr })).unwrap_or_default()
 }
 
+// → ssh::multiexec::run_on; optional `directory` runs as `cd <dir> && <cmd>`;
+//   `timeout` default 30000ms; host picked via `connectionName` (defaults to sole active host).
 async fn tool_execute_command(ctx: &ServerCtx, args: &Value) -> Result<String, String> {
     let cmd = args.get("cmdString").and_then(Value::as_str).ok_or("missing 'cmdString'")?;
     let conn = args.get("connectionName").and_then(Value::as_str);
@@ -677,6 +707,7 @@ async fn tool_execute_command(ctx: &ServerCtx, args: &Value) -> Result<String, S
     Ok(out)
 }
 
+// → ssh::sftp::upload_blocking. Host picked via `connectionName` (defaults to sole active host).
 async fn tool_upload_file(ctx: &ServerCtx, args: &Value) -> Result<String, String> {
     let local = args.get("localPath").and_then(Value::as_str).ok_or("missing 'localPath'")?;
     let remote = args.get("remotePath").and_then(Value::as_str).ok_or("missing 'remotePath'")?;
@@ -689,6 +720,7 @@ async fn tool_upload_file(ctx: &ServerCtx, args: &Value) -> Result<String, Strin
     Ok(format!("Uploaded {n} bytes to {remote}"))
 }
 
+// → ssh::sftp::download_blocking. Host picked via `connectionName` (defaults to sole active host).
 async fn tool_download_file(ctx: &ServerCtx, args: &Value) -> Result<String, String> {
     let remote = args.get("remotePath").and_then(Value::as_str).ok_or("missing 'remotePath'")?;
     let local = args.get("localPath").and_then(Value::as_str).ok_or("missing 'localPath'")?;
