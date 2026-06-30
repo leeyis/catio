@@ -761,6 +761,8 @@
     "fwdBindHintD": "本机 SOCKS5 监听地址",
     "fwdTargetHintL": "需从 SSH 服务器可达,例:内网数据库地址",
     "fwdTargetHintR": "需从你本机可达,例:本机服务地址",
+    "fwdEmptyTitle": "还没有端口转发",
+    "fwdEmptyHint": "点右上角 + 新建一条。三种模式:",
     "fwdAdd": "添加",
     "noSessionHint": "无活动会话 · 从 Vault 连接一个主机后这里显示实时数据"
   },

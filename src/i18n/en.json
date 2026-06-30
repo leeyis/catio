@@ -761,6 +761,8 @@
     "fwdBindHintD": "Local SOCKS5 listen address",
     "fwdTargetHintL": "Must be reachable FROM the SSH server, e.g. an internal DB address",
     "fwdTargetHintR": "Must be reachable FROM your machine, e.g. a local service",
+    "fwdEmptyTitle": "No port forwards yet",
+    "fwdEmptyHint": "Click + (top right) to create one. Three modes:",
     "fwdAdd": "Add",
     "noSessionHint": "No active session · connect a host from the Vault to see live data here"
   },

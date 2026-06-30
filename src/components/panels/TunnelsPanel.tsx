@@ -286,6 +286,25 @@ export function TunnelsPanel({ onClose, sessionId, activeConnId, profiles, onSav
             </div>
           )}
           <div className="grow" style={{ overflowY: 'auto', padding: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {/* Empty state: explain the feature + the three modes so first-time users aren't stuck. */}
+            {tunnels.length === 0 && (
+              <div className="col" style={{ gap: 10, padding: '6px 2px' }}>
+                <div className="col" style={{ gap: 3 }}>
+                  <span style={{ fontSize: 12.5, fontWeight: 600 }}>{t('panels.fwdEmptyTitle')}</span>
+                  <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>{t('panels.fwdEmptyHint')}</span>
+                </div>
+                <div className="col" style={{ gap: 6 }}>
+                  {(['L', 'R', 'D'] as const).map(k => (
+                    <div key={k} className="col" style={{ gap: 2, padding: '8px 10px', borderRadius: 8, background: 'var(--surface-sunken)', border: '1px solid var(--border-hairline)' }}>
+                      <span style={{ fontSize: 11.5, fontWeight: 700, color: 'var(--accent-primary)' }}>
+                        {t(k === 'L' ? 'panels.fwdLocal' : k === 'R' ? 'panels.fwdRemote' : 'panels.fwdDynamic')}
+                      </span>
+                      <span style={{ fontSize: 10.5, color: 'var(--text-tertiary)', lineHeight: 1.45 }}>{t(`panels.fwdHelp${k}`)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
             {tunnels.map(t2 => (
               <div key={t2.id} className="col" style={{ border: '1px solid var(--border-hairline)', borderRadius: 12, padding: 11, gap: 8, background: 'var(--surface-card)' }}>
                 <div className="row" style={{ justifyContent: 'space-between' }}>

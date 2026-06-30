@@ -179,8 +179,9 @@ describe('TunnelsPanel — jump chain', () => {
       />
     )
     await waitFor(() => {
-      // Local node
-      expect(screen.getByText('本地')).toBeTruthy()
+      // Local node (the ProxyJump chain node is a .mono span — scope to it so the
+      // empty-state "本地" mode label doesn't make this ambiguous)
+      expect(screen.getByText('本地', { selector: '.mono' })).toBeTruthy()
       // Jump node
       expect(screen.getByText('bastion.example.com')).toBeTruthy()
       // Target node
@@ -198,8 +199,8 @@ describe('TunnelsPanel — jump chain', () => {
       />
     )
     await waitFor(() => {
-      // Local node
-      expect(screen.getByText('本地')).toBeTruthy()
+      // Local node (scope to the .mono ProxyJump span; empty-state also shows a "本地" label)
+      expect(screen.getByText('本地', { selector: '.mono' })).toBeTruthy()
       // Target node
       expect(screen.getByText('direct-host')).toBeTruthy()
     })
