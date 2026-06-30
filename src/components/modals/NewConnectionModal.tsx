@@ -516,7 +516,7 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onO
     saveDbConnection(profile)
     // Attempt live connection (only works in Tauri runtime; throws outside)
     try {
-      const result = await dbConnect({ ...profile, secret: dbSecret || undefined })
+      const result = await dbConnect({ ...profile, secret: dbSecret || undefined }, profile.name)
       // Store connId + capabilities for D3 (capabilities-gated UI) to consume
       setActiveDbConnection(result, profile)
       const usedSecret = dbSecret

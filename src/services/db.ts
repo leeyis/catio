@@ -74,9 +74,12 @@ export interface DbConnectResult {
 
 // ---- Connection lifecycle ----
 
-export async function dbConnect(args: DbConnectArgs): Promise<DbConnectResult> {
+// `name` is the profile display name, threaded through as a top-level sibling of `args` so the
+// server head can label the connection (for the per-user MCP tools' list_connections). Additive:
+// desktop ignores the extra kwarg; callers (sidebar/home/modal connect) pass the display name.
+export async function dbConnect(args: DbConnectArgs, name?: string): Promise<DbConnectResult> {
   if (!isTauri() && !isServer()) throw new Error('dbConnect requires the Tauri runtime')
-  return rpc<DbConnectResult>('db_connect', { args })
+  return rpc<DbConnectResult>('db_connect', { args, name })
 }
 
 /** The non-secret subset of DbConnectArgs a saved profile carries (id/name etc. omitted). */

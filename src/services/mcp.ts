@@ -1,5 +1,6 @@
 // Frontend bridge to the embedded local MCP server (Rust backend).
 import { isTauri } from './ssh'
+import { rpc, isServer } from './transport'
 
 async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const { invoke } = await import('@tauri-apps/api/core')
@@ -76,6 +77,35 @@ export async function mcpSetWhitelist(entries: string[]): Promise<void> {
 export async function mcpSetLiveLog(enabled: boolean): Promise<void> {
   if (!isTauri()) return
   return tauriInvoke('mcp_set_live_log', { enabled })
+}
+
+// ---- Server-mode per-user MCP token (P3a) ----
+// Desktop never calls these (the desktop server self-auths via its per-run URL token); they are
+// the server head's per-user SSE endpoint controls. The token + enabled state live in the backend
+// `mcp_tokens` table, keyed by the logged-in user; the endpoint URL is composed client-side from
+// `location.origin`.
+
+export interface McpToken {
+  token: string
+  enabled: boolean
+}
+
+// Current user's token + enabled state (lazily minted server-side on first call so the settings
+// page always has one to display). Returns an empty/disabled token outside server mode.
+export async function mcpTokenGet(): Promise<McpToken> {
+  if (!isServer()) return { token: '', enabled: false }
+  return rpc<McpToken>('mcp_token_get')
+}
+
+// Rotate the token: the old SSE URL stops working immediately (the prior token 401s). Preserves
+// the enabled state.
+export async function mcpTokenRegenerate(): Promise<McpToken> {
+  return rpc<McpToken>('mcp_token_regenerate')
+}
+
+// Enable/disable MCP access WITHOUT rotating the token. Disabled -> the endpoint URL 401s.
+export async function mcpTokenSetEnabled(enabled: boolean): Promise<{ enabled: boolean }> {
+  return rpc<{ enabled: boolean }>('mcp_token_set_enabled', { enabled })
 }
 
 // Subscribe to live-log entries. Returns an unsubscribe fn; no-op outside Tauri.

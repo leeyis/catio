@@ -59,8 +59,11 @@ export interface SshTestResult {
   error?: string
 }
 
-export async function sshConnect(args: SshConnectArgs): Promise<SshConnectResult> {
-  return rpc<SshConnectResult>('ssh_connect', { args })
+// `name` is the SSH profile display name, threaded through as a top-level sibling of `args` so the
+// server head can label the host (for the per-user MCP tools' list_hosts). Additive: desktop
+// ignores the extra kwarg; callers pass the display name.
+export async function sshConnect(args: SshConnectArgs, name?: string): Promise<SshConnectResult> {
+  return rpc<SshConnectResult>('ssh_connect', { args, name })
 }
 
 // Real connection test: connect+auth then disconnect, returning latency.

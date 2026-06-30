@@ -13,7 +13,7 @@ import type { UiFontKey, MonoFontKey, Density } from '../../state/preferences'
 import { fetchModels, testModel } from '../../services'
 import type { ModelTestResult } from '../../services'
 import { isTauri } from '../../services/ssh'
-import { mcpStart, mcpStop, mcpStatus, mcpSetWhitelist, mcpSetLiveLog, onMcpLog } from '../../services/mcp'
+import { mcpStart, mcpStop, mcpStatus, mcpSetWhitelist, mcpSetLiveLog, onMcpLog, mcpTokenGet, mcpTokenRegenerate, mcpTokenSetEnabled } from '../../services/mcp'
 import type { McpInfo, McpLogEntry } from '../../services/mcp'
 import { exportConfig, importConfig } from '../../services/configSync'
 import { ServerAccountBlock } from '../auth/ServerAccountBlock'
@@ -666,7 +666,149 @@ function logKindStyle(kind: string, isError?: boolean): { fg: string; bg: string
   return { fg: 'var(--text-tertiary)', bg: 'var(--surface-sunken)' }
 }
 
+// Server mode exposes a per-user token-bearing SSE endpoint; desktop keeps the embedded
+// start/stop/whitelist/live-log server. Dispatch on the runtime so each head renders its own UI
+// (and only calls its own hooks).
 function MCPSettings() {
+  return isServer() ? <ServerMcpSettings /> : <DesktopMcpSettings />
+}
+
+// Server head: per-user MCP access. The user toggles their endpoint on/off, copies the
+// token-bearing SSE URL into their MCP client, and can rotate the token. No start/stop/whitelist/
+// live-log here — those are desktop-only embedded-server controls.
+function ServerMcpSettings() {
+  const { t } = useTranslation()
+  const [token, setToken] = useState('')
+  const [enabled, setEnabled] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [copied, setCopied] = useState(false)
+  const [confirmRegen, setConfirmRegen] = useState(false)
+
+  // On mount: fetch (lazily minting) this user's token + enabled state.
+  useEffect(() => {
+    void mcpTokenGet().then(tk => { setToken(tk.token); setEnabled(tk.enabled) }).catch(() => {})
+  }, [])
+
+  // The token-bearing SSE endpoint, composed client-side from the page origin.
+  const endpoint = token ? `${location.origin}/mcp/sse?token=${token}` : ''
+  const claudeCmd = `claude mcp add --transport sse catio ${endpoint}`
+  const clientJson = `{
+  "mcpServers": {
+    "catio": { "url": "${endpoint}" }
+  }
+}`
+
+  async function toggleEnabled(on: boolean) {
+    if (busy) return
+    setBusy(true)
+    setError('')
+    try {
+      const r = await mcpTokenSetEnabled(on)
+      setEnabled(r.enabled)
+    } catch (err) {
+      setError((err as { message?: string } | null)?.message ?? String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function regenerate() {
+    setConfirmRegen(false)
+    if (busy) return
+    setBusy(true)
+    setError('')
+    try {
+      const tk = await mcpTokenRegenerate()
+      setToken(tk.token)
+      setEnabled(tk.enabled)
+    } catch (err) {
+      setError((err as { message?: string } | null)?.message ?? String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function copy(text: string) {
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(text).then(() => {
+        setCopied(true)
+        setTimeout(() => setCopied(false), 1500)
+      }).catch(() => {})
+    }
+  }
+
+  const cardStyle: React.CSSProperties = { padding: 16, border: '1px solid var(--border-hairline)', borderRadius: 14, background: 'var(--surface-subtle)', marginBottom: 12 }
+
+  return (
+    <Block title={t('settings.mcpTitle')} hint={t('settings.mcpHint')}>
+      <div style={cardStyle}>
+        <div className="row gap8" style={{ marginBottom: 10 }}>
+          <Icon name="command" size={15} style={{ color: 'var(--accent-primary)' }} />
+          <span style={{ fontSize: 13, fontWeight: 600 }}>{t('settings.mcpServerLabel')}</span>
+          <span className="chip" style={{ marginLeft: 'auto', background: enabled ? 'color-mix(in srgb, var(--signal-green) 13%, transparent)' : 'var(--surface-sunken)', color: enabled ? 'var(--signal-green)' : 'var(--text-faint)' }}>
+            <span className="dot" style={{ background: enabled ? 'var(--signal-green)' : 'var(--text-faint)' }} /> {enabled ? t('settings.mcpEnabled') : t('settings.mcpDisabled')}
+          </span>
+        </div>
+        <p style={{ margin: '0 0 12px', fontSize: 12, color: 'var(--text-tertiary)', lineHeight: 1.5 }}>{t('settings.mcpServerDesc')}</p>
+
+        <SettingRow
+          icon="plug"
+          title={t('settings.mcpEnableLabel')}
+          desc={t('settings.mcpEnableDesc')}
+          control={<Toggle on={enabled} onChange={on => { void toggleEnabled(on) }} accent />}
+        />
+        {error && <div className="row gap6" style={{ fontSize: 11.5, color: 'var(--danger-fg)', marginTop: 4 }}><Icon name="alert-triangle" size={12} /> {error}</div>}
+
+        {enabled ? (
+          <div className="col" style={{ gap: 8, marginTop: 12 }}>
+            <span style={{ fontSize: 11.5, color: 'var(--text-tertiary)', lineHeight: 1.5 }}>{t('settings.mcpServerEndpointHint')}</span>
+            <div className="col gap4">
+              <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('settings.mcpEndpoint')}</span>
+              <div className="row gap6" style={{ alignItems: 'center' }}>
+                <code className="mono" style={{ flex: 1, padding: '8px 10px', background: 'var(--term-bg)', color: 'var(--term-fg)', borderRadius: 8, fontSize: 11.5, overflow: 'auto' }}>{endpoint}</code>
+                <Btn variant="secondary" size="sm" icon={copied ? 'check' : 'copy'} onClick={() => copy(endpoint)}>{copied ? t('settings.mcpCopied') : t('settings.mcpCopy')}</Btn>
+              </div>
+            </div>
+            <div className="col gap4">
+              <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('settings.mcpConfigHint')}</span>
+              <pre className="mono" style={{ margin: 0, padding: '10px 12px', background: 'var(--term-bg)', color: 'var(--term-fg)', borderRadius: 8, fontSize: 11.5, overflow: 'auto' }}>{`# Claude Code\n${claudeCmd}\n\n# Cursor / Windsurf (mcp.json)\n${clientJson}`}</pre>
+            </div>
+          </div>
+        ) : (
+          <div className="row gap6" style={{ marginTop: 12, fontSize: 11.5, color: 'var(--text-faint)' }}>
+            <Icon name="info" size={12} /> {t('settings.mcpDisabledHint')}
+          </div>
+        )}
+
+        <div className="col gap4" style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid var(--border-hairline)' }}>
+          <div className="row gap8" style={{ alignItems: 'center' }}>
+            <Btn variant="secondary" size="sm" icon="refresh-cw" disabled={busy || !token} onClick={() => setConfirmRegen(true)}>{t('settings.mcpRegenerate')}</Btn>
+            <span style={{ fontSize: 11, color: 'var(--text-faint)', lineHeight: 1.4 }}>{t('settings.mcpRegenerateHint')}</span>
+          </div>
+        </div>
+      </div>
+
+      <div className="row gap6" style={{ fontSize: 11, color: 'var(--text-faint)', padding: '0 2px' }}>
+        <Icon name="shield" size={12} /> {t('settings.mcpServerTokenNote')}
+      </div>
+
+      {confirmRegen && (
+        <ConfirmModal
+          title={t('settings.mcpRegenerate')}
+          message={t('settings.mcpRegenerateConfirm')}
+          confirmLabel={t('settings.mcpRegenerate')}
+          danger
+          onConfirm={() => { void regenerate() }}
+          onCancel={() => setConfirmRegen(false)}
+        />
+      )}
+    </Block>
+  )
+}
+
+// Desktop head: the embedded local MCP server with start/stop, IP whitelist, and live log.
+function DesktopMcpSettings() {
   const { t } = useTranslation()
   const tauri = isTauri()
   const { prefs, update } = usePrefs()
@@ -1016,9 +1158,10 @@ export function SettingsView({ theme, onTheme, onClose, authEnabled, users, curr
   const serverAuth = useServerAuth()
   // 'theme' is folded into 'appearance' — normalise any legacy section id.
   const [nav, setNav] = React.useState(initialSection === 'theme' ? 'appearance' : (initialSection || 'appearance'))
-  // Server mode: connection-defaults + MCP are admin-only (MCP is desktop-only regardless).
+  // Server mode: connection-defaults stay admin-only, but MCP access is per-user — every logged-in
+  // user gets their own token-bearing endpoint, so the `mcp` item is shown to all of them.
   const navItems = SETTINGS_NAV.filter(n =>
-    !(serverAuth.enabled && !serverAuth.user?.isAdmin && (n.id === 'connections' || n.id === 'mcp')),
+    !(serverAuth.enabled && !serverAuth.user?.isAdmin && n.id === 'connections'),
   )
   return (
     <div className="body fade-in" style={{ flex: 1 }}>

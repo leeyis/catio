@@ -696,7 +696,7 @@ export default function App() {
     // Immediate feedback: show the connecting overlay before the (1–2s) await.
     setConnecting(name)
     try {
-      const result = await sshConnect({ ...args, secret, jump: args.jump })
+      const result = await sshConnect({ ...args, secret, jump: args.jump }, name)
       // Auth succeeded → the secret is valid; cache it (when auth + vault allow).
       if (profileId) rememberConnSecret(profileId, secret)
       if (result.hostKeyTrusted === false) {
@@ -896,7 +896,7 @@ export default function App() {
     const cached = await cachedSecret(profile.id)
     if (!cached) return 'needs-auth'
     try {
-      const result = await sshConnect({ ...args, secret: cached })
+      const result = await sshConnect({ ...args, secret: cached }, profile.name)
       // 首次信任未建立 → 静默路径不能弹信任框：断开并返回 'needs-auth'。
       if (result.hostKeyTrusted === false) {
         sshDisconnect(result.sessionId).catch(() => { /* best-effort */ })
@@ -1103,7 +1103,7 @@ export default function App() {
     // directConnection/authSource or a protocol-family variant connects as the base),
     // AND the SSL/TLS config (ssl/sslMode/caCertPath/sslRejectUnauthorized) — without
     // it the sidebar/home direct-connect path silently dropped TLS.
-    const result = await dbConnect(dbConnectArgsFromProfile(profile, secret || undefined))
+    const result = await dbConnect(dbConnectArgsFromProfile(profile, secret || undefined), profile.name)
     setActiveDbConnection(result, profile)
     // Auth succeeded → cache the secret (when auth + vault allow).
     rememberConnSecret(profile.id, secret)
