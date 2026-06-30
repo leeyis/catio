@@ -96,8 +96,17 @@ export function clearUserStores(): void {
   fireRefreshers()
 }
 
-/** The canonical list of store names (must match the backend `store` strings + each module). */
+/** The canonical list of per-user collections (must match the backend `store` strings + modules). */
 export const USER_STORES = [
   'connections', 'db-connections', 'vnc-connections', 'rdp-connections',
-  'tunnel-connections', 'groups', 'snippets', 'history',
+  'tunnel-connections', 'groups', 'snippets', 'history', 'conversations',
 ] as const
+
+/** Ephemeral per-browser UI blobs (open tabs, recent sessions) that are NOT per-item collections.
+ *  In server mode they must be wiped on user switch so the next user can't see the previous user's
+ *  open-tab / recent-connection metadata. */
+const EPHEMERAL_LS_KEYS = ['catio-open-tabs', 'catio-recent-sessions']
+export function clearEphemeralServerState(): void {
+  if (!isServer() || typeof localStorage === 'undefined') return
+  for (const k of EPHEMERAL_LS_KEYS) { try { localStorage.removeItem(k) } catch { /* ignore */ } }
+}

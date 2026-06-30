@@ -10,7 +10,7 @@ import React, { createContext, useContext, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { isServer } from '../../services/transport'
 import { authMe, authLogin, authBootstrap, authLogout, type ServerUser } from '../../services/auth'
-import { hydrateUserStores, clearUserStores, USER_STORES } from '../../services/userStore'
+import { hydrateUserStores, clearUserStores, clearEphemeralServerState, USER_STORES } from '../../services/userStore'
 
 import { Icon } from '../Icon'
 import { BrandMark } from '../BrandMark'
@@ -52,9 +52,10 @@ function ServerAuthGateImpl({ children }: { children: React.ReactNode }) {
     try {
       const s = await authMe()
       if (s.user) {
-        // Load THIS user's connections/groups/snippets/history/tunnels from the server BEFORE
-        // showing the workbench, so the list starts with their own data (admins: everyone's) and
-        // never the previous user's. Failure is non-fatal — the workbench still opens (empty).
+        // Wipe the previous user's ephemeral per-browser UI state (open tabs / recent sessions),
+        // then load THIS user's connections/groups/snippets/history/conversations/tunnels from the
+        // server BEFORE showing the workbench — so nothing of the previous user is ever visible.
+        clearEphemeralServerState()
         try { await hydrateUserStores([...USER_STORES]) } catch { /* show workbench anyway */ }
         setUser(s.user)
         setPhase('ready')
@@ -73,6 +74,7 @@ function ServerAuthGateImpl({ children }: { children: React.ReactNode }) {
   const logout = async () => {
     try { await authLogout() } finally {
       clearUserStores() // drop the previous user's data so the next login starts clean
+      clearEphemeralServerState() // + open-tabs / recent-sessions
       setUser(null)
       setPhase('login')
     }

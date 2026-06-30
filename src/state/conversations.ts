@@ -8,7 +8,9 @@ export interface ConvMessage {
   content: string
 }
 
-export interface Conversation {
+import { storeLoad, storeUpsert, storeRemove, type StoreItem } from '../services/userStore'
+
+export interface Conversation extends StoreItem {
   id: string
   hostKey: string
   title: string
@@ -17,6 +19,7 @@ export interface Conversation {
   updatedAt: number
 }
 
+const STORE = 'conversations'
 const KEY = 'catio-conversations'
 
 /** Trim/normalize a derived title from the first user message. */
@@ -28,18 +31,7 @@ function deriveTitle(messages: ConvMessage[]): string {
 }
 
 export function loadConversations(): Conversation[] {
-  try {
-    const raw = localStorage.getItem(KEY)
-    return raw ? (JSON.parse(raw) as Conversation[]) : []
-  } catch {
-    return []
-  }
-}
-
-function writeAll(list: Conversation[]): void {
-  try {
-    localStorage.setItem(KEY, JSON.stringify(list))
-  } catch { /* ignore quota errors */ }
+  return storeLoad<Conversation>(STORE, KEY)
 }
 
 // Monotonic clock: guarantees strictly-increasing updatedAt even for multiple
@@ -56,18 +48,15 @@ function nextTimestamp(): number {
  * empty, derives one from the first user message.
  */
 export function saveConversation(c: Conversation): void {
-  const next: Conversation = {
+  storeUpsert(STORE, KEY, {
     ...c,
     title: c.title || deriveTitle(c.messages),
     updatedAt: nextTimestamp(),
-  }
-  const list = loadConversations().filter(x => x.id !== next.id)
-  list.push(next)
-  writeAll(list)
+  })
 }
 
-export function deleteConversation(id: string): void {
-  writeAll(loadConversations().filter(x => x.id !== id))
+export function deleteConversation(id: string, ownerId?: number): void {
+  storeRemove<Conversation>(STORE, KEY, id, ownerId)
 }
 
 /** Conversations for a host, newest-updated first. */
