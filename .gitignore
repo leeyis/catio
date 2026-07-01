@@ -33,6 +33,10 @@ deploy/
 
 # misc local tooling state
 .nezha/
+.xagent/
 
 # local server runtime data (SQLite auth/secret/store DB + per-user dirs) — never commit
 .catio-run-data/
+
+# local docker image export (deployment artifact, regenerable)
+catio-server.tar.gz
