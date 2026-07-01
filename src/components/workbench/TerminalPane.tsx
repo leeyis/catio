@@ -132,6 +132,14 @@ function base64ToBytes(b64: string): Uint8Array {
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
   return out
 }
+function pastedTextForDirectWrite(s: string): string {
+  return s.replace(/\r?\n/g, '\r')
+}
+function isEditableOutsideTerminal(target: EventTarget | null, terminalHost: HTMLElement): boolean {
+  if (!(target instanceof Element)) return false
+  if (terminalHost.contains(target)) return false
+  return !!target.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"], [contenteditable="plaintext-only"]')
+}
 
 // Dump the full xterm scrollback + viewport to plain text (newline-joined),
 // trimming trailing blank lines. Used to feed the Catio Agent recent output.
@@ -219,6 +227,11 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
   // Mutable ref tracking the active channel id; nulled on server-initiated close to
   // prevent double-termClose and dead-channel keystroke writes.
   const chanIdRef = useRef<string | null>(null)
+  const lastPasteAtRef = useRef(0)
+  const activeRef = useRef(active)
+  activeRef.current = active
+  const isFocusedRef = useRef(isFocused)
+  isFocusedRef.current = isFocused
   // Keep the latest onChannel in a ref so the xterm lifecycle effect (which depends
   // only on session identity) always calls the current closure without re-running.
   const onChannelRef = useRef<TerminalPaneProps['onChannel']>(onChannel)
@@ -623,10 +636,66 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
       setGhost(gpos ? { text: ghostSuffix as string, left: gpos.left, top: gpos.top } : null)
     }
 
+    const scheduleInputRefresh = () => {
+      if (!inputMarkerRef.current) return
+      if (extractTimer) clearTimeout(extractTimer)
+      extractTimer = setTimeout(() => { extractTimer = null; refreshSuggest() }, 40)
+    }
+
     // 把字符写入 PTY(补全用)。沿用 onData 的 base64 编码路径。
     const termWrite0 = (s: string) => {
       if (live && sessionId && chanIdRef.current) termWrite(sessionId, chanIdRef.current, bytesToBase64(s))
     }
+
+    const canHandleTerminalPaste = (target: EventTarget | null): boolean =>
+      !!(live && sessionId && chanIdRef.current && activeRef.current !== false && isFocusedRef.current)
+      && !isEditableOutsideTerminal(target, hostEl)
+
+    const pasteText = (text: string): boolean => {
+      if (!text || !live || !sessionId || !chanIdRef.current) return false
+      try {
+        // Prefer xterm's own paste path so newline/bracketed-paste handling stays identical to
+        // native paste. Tests/mock terminals may not implement it, so keep a direct PTY fallback.
+        if (typeof term.paste === 'function') term.paste(text)
+        else {
+          termWrite(sessionId, chanIdRef.current, bytesToBase64(pastedTextForDirectWrite(text)))
+          scheduleInputRefresh()
+        }
+        try { term.focus() } catch { /* best-effort */ }
+        return true
+      } catch {
+        return false
+      }
+    }
+
+    const onWindowPaste = (ev: ClipboardEvent) => {
+      if (!canHandleTerminalPaste(ev.target)) return
+      const text = ev.clipboardData?.getData('text/plain') || ev.clipboardData?.getData('text') || ''
+      if (!text) return
+      ev.preventDefault()
+      ev.stopPropagation()
+      if (pasteText(text)) lastPasteAtRef.current = Date.now()
+    }
+    const onWindowKeyDown = (ev: KeyboardEvent) => {
+      if (!(ev.key === 'v' || ev.key === 'V') || (!ev.ctrlKey && !ev.metaKey) || ev.altKey) return
+      if (!canHandleTerminalPaste(ev.target)) return
+      const clip = navigator.clipboard
+      if (!clip || typeof clip.readText !== 'function') return
+      const startedAt = Date.now()
+      setTimeout(() => {
+        // A real paste event is preferred because it works on plain HTTP and carries user-granted
+        // clipboard data. This fallback only runs when no paste event arrived for the shortcut.
+        if (lastPasteAtRef.current >= startedAt) return
+        clip.readText()
+          .then(text => {
+            if (lastPasteAtRef.current >= startedAt) return
+            if (pasteText(text)) lastPasteAtRef.current = Date.now()
+          })
+          .catch(() => { /* clipboard permission denied/unavailable */ })
+      }, 0)
+    }
+    window.addEventListener('paste', onWindowPaste, true)
+    window.addEventListener('keydown', onWindowKeyDown, true)
 
     // attachCustomKeyEventHandler:候选可见时拦截 ↑/↓/Enter/Tab/Esc(在抵达 PTY 前)。
     // 测试里 xterm mock 没有这个方法 → 存在性保护。
@@ -776,10 +845,7 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
           if (!chanIdRef.current) return
           termWrite(sessionId, chanIdRef.current, bytesToBase64(d))
           // 节流(~40ms)提取当前输入并刷新候选。延迟一拍,让 PTY 回显落到缓冲区。
-          if (inputMarkerRef.current) {
-            if (extractTimer) clearTimeout(extractTimer)
-            extractTimer = setTimeout(() => { extractTimer = null; refreshSuggest() }, 40)
-          }
+          scheduleInputRefresh()
         })
         if (typeof ResizeObserver !== 'undefined') {
           ro = new ResizeObserver(() => {
@@ -816,6 +882,8 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
       if (extractTimer) clearTimeout(extractTimer)
       if (selBarTimer) clearTimeout(selBarTimer)
       clearTimeout(fontSettleTimer)
+      window.removeEventListener('paste', onWindowPaste, true)
+      window.removeEventListener('keydown', onWindowKeyDown, true)
       try { hostEl.removeEventListener('mouseup', onSelMouseUp) } catch { /* best-effort */ }
       try { inputMarkerRef.current?.marker?.dispose() } catch { /* best-effort */ }
       inputMarkerRef.current = null
