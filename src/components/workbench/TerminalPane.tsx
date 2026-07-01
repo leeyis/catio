@@ -10,6 +10,7 @@ import { Icon } from '../Icon'
 import { ConnGlyph, StatusDot } from '../atoms'
 import { useData } from '../../state/DataContext'
 import { termOpen, termWrite, termResize, termClose, listen, getTermBuffer, onHistory } from '../../services/ssh'
+import { copyTextToClipboard } from '../../services/clipboard'
 import { usePrefs, monoFontStack } from '../../state/preferences'
 import { registerTermBuffer, unregisterTermBuffer } from '../../services/termBuffers'
 import type { Connection, TermLine as TermLineType } from '../../services/types'
@@ -989,7 +990,7 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
   }, [active, isFocused, live, sessionId])
 
   function copySel() {
-    if (selBar && navigator.clipboard) navigator.clipboard.writeText(selBar.text).catch(() => {})
+    if (selBar) copyTextToClipboard(selBar.text)
     setSelBar(null)
   }
   function askSelAI() {

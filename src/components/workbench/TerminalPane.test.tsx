@@ -1,4 +1,4 @@
-import { render, waitFor, act } from '@testing-library/react'
+import { render, waitFor, act, fireEvent, screen } from '@testing-library/react'
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { LanguageProvider } from '../../state/LanguageContext'
 import { DataProvider } from '../../state/DataContext'
@@ -17,6 +17,7 @@ const h = vi.hoisted(() => ({
   xtermDispose: vi.fn(),
   dataCb: { fn: null as ((d: string) => void) | null },
   keyHandler: { fn: null as ((ev: KeyboardEvent) => boolean) | null },
+  selectionText: '',
 }))
 const { termOpen, termWrite, termResize, termClose, listen, xtermWrite, xtermPaste, xtermDispose } = h
 
@@ -41,7 +42,7 @@ vi.mock('@xterm/xterm', () => ({
     onSelectionChange() {}
     clearSelection() {}
     clear() {}
-    getSelection() { return '' }
+    getSelection() { return h.selectionText }
     getSelectionPosition() { return { start: { x: 0, y: 0 }, end: { x: 4, y: 0 } } }
     buffer = { active: { viewportY: 0 } }
     loadAddon() {}
@@ -79,6 +80,7 @@ describe('TerminalPane (xterm wiring)', () => {
     termOpen.mockClear(); termWrite.mockClear(); termResize.mockClear(); termClose.mockClear()
     listen.mockClear(); xtermWrite.mockClear(); xtermPaste.mockClear(); xtermDispose.mockClear(); h.dataCb.fn = null
     h.keyHandler.fn = null
+    h.selectionText = ''
     ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
   })
   afterEach(() => {
@@ -141,6 +143,27 @@ describe('TerminalPane (xterm wiring)', () => {
 
     expect(shouldProcess).toBe(false)
     expect(termWrite).not.toHaveBeenCalledWith('sess-1', 'chan-1', btoa('\x16'))
+  })
+
+  it('copies selected terminal text with a fallback when Clipboard API is unavailable', async () => {
+    const previousExec = document.execCommand
+    const exec = vi.fn().mockReturnValue(true)
+    Object.defineProperty(document, 'execCommand', { value: exec, configurable: true })
+    Object.defineProperty(window, 'isSecureContext', { value: false, configurable: true })
+    Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true })
+    h.selectionText = 'docker ps'
+    const { container } = wrap(<TerminalPane conn={DATA.byId['h-bastion']} sessionId="sess-1" active />)
+    await waitFor(() => expect(h.dataCb.fn).not.toBeNull())
+
+    for (const el of Array.from(container.querySelectorAll('div'))) fireEvent.mouseUp(el)
+    const copyLabel = await screen.findByText(/copy|复制/i)
+    const copyButton = copyLabel.closest('button')
+    expect(copyButton).not.toBeNull()
+    fireEvent.click(copyButton!)
+
+    expect(exec).toHaveBeenCalledWith('copy')
+    if (previousExec) Object.defineProperty(document, 'execCommand', { value: previousExec, configurable: true })
+    else Reflect.deleteProperty(document, 'execCommand')
   })
 
   it('does not hijack paste events from regular inputs outside the terminal surface', async () => {

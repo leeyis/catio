@@ -19,6 +19,7 @@ import { exportConfig, importConfig } from '../../services/configSync'
 import { ServerAccountBlock } from '../auth/ServerAccountBlock'
 import { useServerAuth } from '../auth/ServerAuthGate'
 import { isServer } from '../../services/transport'
+import { copyTextToClipboard } from '../../services/clipboard'
 
 // ---- Prop types ----
 
@@ -590,7 +591,7 @@ function ConfigSyncBlock() {
     catch (e) { setStatus({ kind: 'error', text: String((e as { message?: string } | null)?.message ?? e) }) }
     finally { setBusy(false) }
   }
-  function copyBundle() { if (bundle && navigator.clipboard) navigator.clipboard.writeText(bundle).catch(() => {}) }
+  function copyBundle() { if (bundle) copyTextToClipboard(bundle) }
   async function doImport() {
     if (!impPass || !impText.trim() || busy) return
     setBusy(true); setStatus(null)
@@ -898,11 +899,10 @@ function ServerMcpSettings() {
   }
 
   function copy(text: string) {
-    if (navigator.clipboard) {
-      navigator.clipboard.writeText(text).then(() => {
-        setCopied(true)
-        setTimeout(() => setCopied(false), 1500)
-      }).catch(() => {})
+    const ok = copyTextToClipboard(text)
+    if (ok) {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
     }
   }
 
@@ -1085,11 +1085,10 @@ function DesktopMcpSettings() {
 }`
 
   function copy(text: string) {
-    if (navigator.clipboard) {
-      navigator.clipboard.writeText(text).then(() => {
-        setCopied(true)
-        setTimeout(() => setCopied(false), 1500)
-      }).catch(() => {})
+    const ok = copyTextToClipboard(text)
+    if (ok) {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
     }
   }
 
