@@ -1,0 +1,72 @@
+name: dual-mode gates
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  frontend:
+    name: Frontend build and tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run test
+
+  rust:
+    name: Rust desktop and server checks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Tauri/Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev libssl-dev libxdo-dev pkg-config libudev-dev
+      - run: cargo check --manifest-path src-tauri/Cargo.toml --lib
+      - run: cargo check --manifest-path src-tauri/Cargo.toml --bin catio
+      - run: cargo check --manifest-path src-tauri/Cargo.toml --bin catio-server
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+
+  docker-smoke:
+    name: Docker server smoke test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build server image
+        run: DOCKER_BUILDKIT=1 docker build -t catio-server:ci .
+      - name: Start server container
+        run: |
+          docker run -d \
+            --name catio-server-ci \
+            -p 8787:8787 \
+            -e CATIO_MASTER_KEY="MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=" \
+            -e CATIO_ADMIN_USER="admin" \
+            -e CATIO_ADMIN_PASSWORD="admin123" \
+            catio-server:ci
+      - name: Verify HTTP and server-mode injection
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8787/healthz | grep -q '^ok$'; then
+              break
+            fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:8787/healthz | grep -q '^ok$'
+          curl -fsS http://127.0.0.1:8787/ | grep -q '__CATIO_SERVER__=true'
+      - name: Dump logs on failure
+        if: failure()
+        run: docker logs catio-server-ci || true
+      - name: Cleanup
+        if: always()
+        run: docker rm -f catio-server-ci || true

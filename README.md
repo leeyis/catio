@@ -6,7 +6,7 @@
 
 ### One workspace for your servers **and** your databases.
 
-A fast, native, cross‑platform desktop client that unifies **SSH / SFTP / terminals**, a **multi‑engine database studio**, **agentless monitoring**, **tunnels**, an **AI copilot**, and **one‑click network asset discovery** — built on Rust + Tauri, with a polished React UI.
+A fast, native, cross‑platform desktop client, with an optional browser-accessible Server mode, that unifies **SSH / SFTP / terminals**, a **multi‑engine database studio**, **agentless monitoring**, **tunnels**, an **AI copilot**, and **one‑click network asset discovery** — built on Rust + Tauri, with a polished React UI.
 
 <br/>
 
@@ -108,6 +108,17 @@ npm run tauri build
 ```
 Installers/binaries are emitted under `src-tauri/target/release/bundle/`.
 
+### Deploy Server mode with Docker
+```bash
+DOCKER_BUILDKIT=1 docker build -t catio-server:local .
+docker run -d \
+  --name catio-server \
+  -p 8787:8787 \
+  -v catio-data:/app/data \
+  catio-server:local
+```
+Open `http://<server-ip>:8787`. See [Server mode deployment](docs/server-mode-deployment.md) for required environment variables, binary deployment, reverse proxy guidance, and the desktop/server support matrix.
+
 ### Frontend‑only dev (browser, no native backend)
 ```bash
 npm run dev
@@ -128,20 +139,34 @@ npm run dev
 
 ---
 
+## 🚢 Deployment Modes
+
+Catio is maintained as one codebase with two release heads:
+
+| Mode | Entry point | Transport | Best for |
+|---|---|---|---|
+| Desktop client | `src-tauri/src/main.rs` / `catio` | Tauri `invoke` + native event bus | Personal workstation installs on Windows, macOS, and Linux |
+| Server mode | `src-tauri/src/bin/server.rs` / `catio-server` | HTTP `/api/invoke` + WebSocket `/ws` | LAN/team browser access through Docker or a systemd service |
+
+Server mode is intentionally not a separate fork. Shared UI and Rust core stay in sync, while runtime-specific behavior is gated by `window.__CATIO_SERVER__`.
+
+---
+
 ## 🗂️ Project Structure
 
 ```
 catio/
 ├─ src/                 # React frontend: components, services, state, i18n, styles
 │  ├─ components/       #   shell · views · panels · workbench · modals · scan · dbviews
-│  ├─ services/         #   typed wrappers around Tauri commands
+│  ├─ services/         #   typed wrappers around Tauri/server transports
 │  └─ state/            #   connection/group/vault stores
 ├─ src-tauri/           # Rust backend
 │  └─ src/
 │     ├─ ssh/           #   SSH/SFTP/tunnels/monitor (SessionManager, known hosts)
 │     ├─ db/            #   DB commands, connection manager, per‑engine drivers
 │     ├─ scan/          #   auto‑scan: range expansion · protocol probes · concurrent login
-│     └─ mcp.rs         #   Model Context Protocol integration
+│     ├─ server*.rs     #   Server mode HTTP/WebSocket/MCP bridge
+│     └─ mcp/           #   Model Context Protocol integration
 ├─ docs/                # design specs & implementation plans
 └─ deploy/test/         # docker-compose for local DB integration tests
 ```

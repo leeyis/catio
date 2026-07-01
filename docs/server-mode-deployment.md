@@ -24,6 +24,27 @@ Server 模式使用 `catio-server` 这个 Rust 二进制提供 HTTP / WebSocket 
 - JDBC 长尾数据库在 Server 模式下还不是默认可用路径。当前 Docker 镜像不带 JRE 和 JDBC plugin jar，JDBC 引擎连接会失败；优先使用原生支持的 PostgreSQL、MySQL、SQLite、SQL Server、DuckDB、MongoDB、Redis、ClickHouse 等。
 - 本地文件路径类能力在 Server 模式下语义不同：浏览器用户的本机路径不是服务器路径。涉及本机导入导出时，以界面实际可用能力为准。
 
+## 双模式支持矩阵
+
+Catio 在同一个代码库里维护桌面客户端和 Server 模式。两者共用 React UI 和 Rust 核心模块，但入口、传输层、凭据保存位置不同。
+
+| 能力 | 桌面客户端 | Server / Docker 模式 | 说明 |
+|---|---|---|---|
+| 发布入口 | `catio` Tauri 应用 | `catio-server` HTTP/WS 服务 | 两个二进制入口分别构建，不互相替代。 |
+| 前端运行时 | Tauri WebView | 浏览器 | Server 由后端注入 `window.__CATIO_SERVER__=true`。 |
+| 后端调用 | Tauri `invoke` / event | `/api/invoke` / `/ws` | `src/services/transport.ts` 负责分流。 |
+| 用户与数据隔离 | 本机单用户数据 | Server 登录、多用户数据隔离 | Server 模式需要先创建管理员账号。 |
+| SSH 连接与远程终端 | 支持 | 支持 | Server 模式终端流走 WebSocket。 |
+| 终端复制/粘贴 | 支持 | 支持 | Server 模式兼容 HTTP 下 Clipboard API 受限场景。 |
+| SFTP 浏览与基础文件操作 | 支持 | 支持 | 浏览器本机路径不等于服务器路径，涉及本机文件导入导出时以界面能力为准。 |
+| SSH Tunnel / SOCKS | 支持 | 支持 | Tunnel 在服务器进程所在机器上建立。 |
+| Agentless 监控 | 支持 | 支持 | Server 模式监控流走 WebSocket。 |
+| 原生数据库驱动 | 支持 | 支持 | PostgreSQL、MySQL、SQLite、SQL Server、DuckDB、MongoDB、Redis、ClickHouse 等优先走原生路径。 |
+| JDBC 长尾数据库 | 支持 | 默认不支持 | 当前 Docker 镜像未带 JRE 和 JDBC plugin jar；需要后续补镜像和运行时接线。 |
+| MCP | 桌面本机 MCP 服务 | Server MCP 路由与用户 token | Server 模式要配置访问地址和可选 IP 白名单。 |
+| Auto Scan | 支持 | 管理员可用 | Server 模式扫描发生在服务器网络视角。 |
+| Local terminal / Serial / RDP | 支持或依赖本机环境 | 不作为 Server 默认能力 | 这些能力依赖访问者本机或桌面环境，Server 模式会隐藏或限制入口。 |
+
 ## 部署方式选择
 
 | 方式 | 推荐场景 | 优点 | 注意事项 |
@@ -544,3 +565,36 @@ DOCKER_BUILDKIT=1 docker build -t catio-server:local .
 - 防火墙只开放必要端口。
 - 没有把 `8787` 直接暴露到公网。
 - 已记录数据备份和升级流程。
+
+## 合并 main 前的双模式门槛
+
+每次把 Server 模式相关改动合入 `main` 前，至少确认桌面客户端和 Server 入口都能构建：
+
+```bash
+npm run build
+cargo check --manifest-path src-tauri/Cargo.toml --lib
+cargo check --manifest-path src-tauri/Cargo.toml --bin catio
+cargo check --manifest-path src-tauri/Cargo.toml --bin catio-server
+cargo test --manifest-path src-tauri/Cargo.toml --lib
+```
+
+Docker 镜像也要做一次 smoke test，确认镜像能启动、`/healthz` 可用，并且首页注入了 Server 模式标记：
+
+```bash
+DOCKER_BUILDKIT=1 docker build -t catio-server:smoke .
+
+docker run -d \
+  --name catio-server-smoke \
+  -p 8787:8787 \
+  -e CATIO_MASTER_KEY="MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=" \
+  -e CATIO_ADMIN_USER="admin" \
+  -e CATIO_ADMIN_PASSWORD="admin123" \
+  catio-server:smoke
+
+curl -fsS http://127.0.0.1:8787/healthz
+curl -fsS http://127.0.0.1:8787/ | grep "__CATIO_SERVER__=true"
+
+docker rm -f catio-server-smoke
+```
+
+仓库的 `.github/workflows/dual-mode.yml` 会在 `main` 和 PR 上自动执行这些门槛。正式发版前仍建议在目标操作系统上额外跑一次 `npm run tauri build`，确认安装包签名、系统依赖和平台打包流程都正常。
