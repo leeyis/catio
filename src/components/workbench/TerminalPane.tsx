@@ -136,6 +136,30 @@ function base64ToBytes(b64: string): Uint8Array {
 function pastedTextForDirectWrite(s: string): string {
   return s.replace(/\r?\n/g, '\r')
 }
+function applyInputDelta(input: string, data: string): string {
+  let next = input
+  for (let i = 0; i < data.length; i++) {
+    const ch = data[i]
+    if (ch === '\x1b') {
+      if (data[i + 1] === '[') {
+        i += 2
+        while (i < data.length) {
+          const code = data.charCodeAt(i)
+          if (code >= 0x40 && code <= 0x7e) break
+          i += 1
+        }
+      }
+      continue
+    }
+    if (ch === '\r' || ch === '\n') { next = ''; continue }
+    if (ch === '\x7f' || ch === '\b') { next = next.slice(0, -1); continue }
+    if (ch === '\x15') { next = ''; continue }
+    if (ch === '\x17') { next = next.replace(/\s*\S+\s*$/, ''); continue }
+    const code = ch.charCodeAt(0)
+    if (code >= 0x20 && code !== 0x7f) next += ch
+  }
+  return next
+}
 function isPasteShortcut(ev: KeyboardEvent): boolean {
   return (ev.key === 'v' || ev.key === 'V') && (ev.ctrlKey || ev.metaKey) && !ev.altKey
 }
@@ -259,11 +283,14 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
   const suppressedInputRef = useRef<string | null>(null)
   // 最近一次提取到的输入,供键盘交互读取(避免闭包过期)。
   const currentInputRef = useRef<string>('')
+  // 用户已经发往 PTY 的输入快照；远端 echo / xterm buffer 可能晚于按键事件。
+  const optimisticInputRef = useRef<string>('')
   // suggest 状态镜像到 ref,供 attachCustomKeyEventHandler 在按键时同步读取。
   const suggestRef = useRef<typeof suggest>(null)
   suggestRef.current = suggest
   const suggestIndexRef = useRef(0)
   suggestIndexRef.current = suggestIndex
+  const acceptHistoryMatchRef = useRef<(sel: HistoryMatch | undefined, fallbackInput: string) => void>(() => {})
   // Multiexec run state — 每个目标的进度/状态，渲染到结果面板。
   const [mxRunState, setMxRunState] = useState<MxRunState>({})
   // The command typed into the broadcast bar (Multi-Exec).
@@ -524,6 +551,7 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
       try { inputMarkerRef.current?.marker?.dispose() } catch { /* best-effort */ }
       inputMarkerRef.current = null
       currentInputRef.current = ''
+      optimisticInputRef.current = ''
       suppressedInputRef.current = null
       setSuggest(null)
       setGhost(null)
@@ -537,6 +565,8 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
         // registerMarker(0) 锚定当前光标行;测试里 xterm 是 mock,做存在性保护。
         const marker = typeof term.registerMarker === 'function' ? term.registerMarker(0) : null
         inputMarkerRef.current = { marker, startCol }
+        currentInputRef.current = ''
+        optimisticInputRef.current = ''
         suppressedInputRef.current = null
       } catch { inputMarkerRef.current = null }
     }
@@ -652,6 +682,51 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
       if (live && sessionId && chanIdRef.current) termWrite(sessionId, chanIdRef.current, bytesToBase64(s))
     }
 
+    const recordOutboundInput = (data: string) => {
+      if (!inputMarkerRef.current) return
+      const next = applyInputDelta(optimisticInputRef.current || currentInputRef.current, data)
+      optimisticInputRef.current = next
+      currentInputRef.current = next
+    }
+
+    const syncScreenInputSnapshot = (): string | null => {
+      const screenInput = readCurrentInput()
+      if (screenInput == null) return null
+      currentInputRef.current = screenInput
+      const optimistic = optimisticInputRef.current
+      if (!optimistic || screenInput.length >= optimistic.length || !optimistic.startsWith(screenInput)) {
+        optimisticInputRef.current = screenInput
+      }
+      return screenInput
+    }
+
+    const inputForAcceptingMatch = (selectedText: string, fallbackInput: string): string | null => {
+      const screenInput = syncScreenInputSnapshot()
+      const snapshots = [
+        optimisticInputRef.current,
+        screenInput ?? '',
+        currentInputRef.current,
+        fallbackInput,
+      ].filter((v): v is string => !!v)
+      const latest = snapshots.reduce((best, next) => (next.length > best.length ? next : best), '')
+      if (latest) return selectedText.startsWith(latest) ? latest : null
+      return fallbackInput && selectedText.startsWith(fallbackInput) ? fallbackInput : null
+    }
+
+    const acceptHistoryMatch = (sel: HistoryMatch | undefined, fallbackInput: string) => {
+      if (!sel) return
+      const input = inputForAcceptingMatch(sel.text, fallbackInput)
+      if (input && sel.text.startsWith(input)) {
+        const tail = sel.text.slice(input.length)
+        if (tail) termWrite0(tail)
+        currentInputRef.current = sel.text
+        optimisticInputRef.current = sel.text
+      }
+      setSuggest(null)
+      setGhost(null)
+    }
+    acceptHistoryMatchRef.current = acceptHistoryMatch
+
     const canHandleTerminalPaste = (target: EventTarget | null): boolean =>
       !!(live && sessionId && chanIdRef.current && activeRef.current !== false && isFocusedRef.current)
       && !isEditableOutsideTerminal(target, hostEl)
@@ -663,7 +738,9 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
         // native paste. Tests/mock terminals may not implement it, so keep a direct PTY fallback.
         if (typeof term.paste === 'function') term.paste(text)
         else {
-          termWrite(sessionId, chanIdRef.current, bytesToBase64(pastedTextForDirectWrite(text)))
+          const directText = pastedTextForDirectWrite(text)
+          termWrite(sessionId, chanIdRef.current, bytesToBase64(directText))
+          recordOutboundInput(directText)
           scheduleInputRefresh()
         }
         lastPasteTextRef.current = text
@@ -725,9 +802,13 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
         // Phase 2:幽灵文本可见时,→ 或 Ctrl+E 接受 ghost 串(写入 PTY 并吞键)。
         const gh = ghostRef.current
         if (gh && gh.text && (ev.key === 'ArrowRight' || (ev.ctrlKey && (ev.key === 'e' || ev.key === 'E')))) {
-          termWrite0(gh.text)
-          setGhost(null)
-          setSuggest(null)
+          const top = suggestRef.current?.items[0]
+          if (top) acceptHistoryMatch(top, suggestRef.current?.input ?? currentInputRef.current)
+          else {
+            termWrite0(gh.text)
+            setGhost(null)
+            setSuggest(null)
+          }
           return swallow()
         }
         const sg = suggestRef.current
@@ -744,15 +825,7 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
           case 'Tab': {
             // 只补全不执行:写入「选中项相对当前输入的剩余差额」。
             const sel = sg.items[idx]
-            const input = currentInputRef.current
-            if (sel && sel.text.startsWith(input)) {
-              const tail = sel.text.slice(input.length)
-              if (tail) termWrite0(tail)
-            } else if (sel) {
-              // 非前缀命中:无法安全 diff,直接忽略键(关闭候选)。
-            }
-            setSuggest(null)
-            setGhost(null)
+            acceptHistoryMatch(sel, sg.input)
             return swallow()
           }
           case 'Escape':
@@ -856,6 +929,7 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
           // Drop keystrokes after a server-initiated close (channel already torn down).
           if (!chanIdRef.current) return
           termWrite(sessionId, chanIdRef.current, bytesToBase64(d))
+          recordOutboundInput(d)
           // 节流(~40ms)提取当前输入并刷新候选。延迟一拍,让 PTY 回显落到缓冲区。
           scheduleInputRefresh()
         })
@@ -899,6 +973,7 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
       try { hostEl.removeEventListener('mouseup', onSelMouseUp) } catch { /* best-effort */ }
       try { inputMarkerRef.current?.marker?.dispose() } catch { /* best-effort */ }
       inputMarkerRef.current = null
+      acceptHistoryMatchRef.current = () => {}
       if (ro) ro.disconnect()
       if (unlisten) unlisten()
       // Only call termClose if the channel is still live (not already closed by server).
@@ -1209,13 +1284,7 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
           input={suggest.input}
           onPick={(i) => {
             const sel = suggest.items[i]
-            const input = currentInputRef.current
-            if (sel && sel.text.startsWith(input) && sessionId && chanIdRef.current) {
-              const tail = sel.text.slice(input.length)
-              if (tail) termWrite(sessionId, chanIdRef.current, bytesToBase64(tail))
-            }
-            setSuggest(null)
-            setGhost(null)
+            acceptHistoryMatchRef.current(sel, suggest.input)
             try { termRef.current?.focus() } catch { /* best-effort */ }
           }}
         />

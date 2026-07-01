@@ -16,8 +16,11 @@ const h = vi.hoisted(() => ({
   xtermPaste: vi.fn(),
   xtermDispose: vi.fn(),
   dataCb: { fn: null as ((d: string) => void) | null },
+  termEventCb: { fn: null as ((d: { bytesBase64?: string; closed?: boolean; inputStart?: boolean; execStart?: boolean }) => void) | null },
   keyHandler: { fn: null as ((ev: KeyboardEvent) => boolean) | null },
   selectionText: '',
+  bufferText: '',
+  cursorX: 0,
 }))
 const { termOpen, termWrite, termResize, termClose, listen, xtermWrite, xtermPaste, xtermDispose } = h
 
@@ -44,7 +47,16 @@ vi.mock('@xterm/xterm', () => ({
     clear() {}
     getSelection() { return h.selectionText }
     getSelectionPosition() { return { start: { x: 0, y: 0 }, end: { x: 4, y: 0 } } }
-    buffer = { active: { viewportY: 0 } }
+    buffer = {
+      active: {
+        viewportY: 0,
+        baseY: 0,
+        get cursorX() { return h.cursorX },
+        get cursorY() { return 0 },
+        getLine() { return { translateToString: () => h.bufferText } },
+      },
+    }
+    registerMarker() { return { line: 0, isDisposed: false, dispose: vi.fn() } }
     loadAddon() {}
     attachCustomKeyEventHandler(cb: (ev: KeyboardEvent) => boolean) { h.keyHandler.fn = cb }
     dispose() { h.xtermDispose() }
@@ -79,8 +91,16 @@ describe('TerminalPane (xterm wiring)', () => {
   beforeEach(() => {
     termOpen.mockClear(); termWrite.mockClear(); termResize.mockClear(); termClose.mockClear()
     listen.mockClear(); xtermWrite.mockClear(); xtermPaste.mockClear(); xtermDispose.mockClear(); h.dataCb.fn = null
+    listen.mockImplementation(async (_event: string, cb: (d: { bytesBase64?: string; closed?: boolean; inputStart?: boolean; execStart?: boolean }) => void) => {
+      h.termEventCb.fn = cb
+      return () => {}
+    })
     h.keyHandler.fn = null
+    h.termEventCb.fn = null
     h.selectionText = ''
+    h.bufferText = ''
+    h.cursorX = 0
+    localStorage.clear()
     ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
   })
   afterEach(() => {
@@ -143,6 +163,39 @@ describe('TerminalPane (xterm wiring)', () => {
 
     expect(shouldProcess).toBe(false)
     expect(termWrite).not.toHaveBeenCalledWith('sess-1', 'chan-1', btoa('\x16'))
+  })
+
+  it('does not duplicate the last typed character when accepting a stale history suggestion', async () => {
+    localStorage.setItem('catio-history', JSON.stringify([{
+      id: 'hist-1',
+      kind: 'shell',
+      target: 'bastion.catio.io',
+      text: 'docker ps',
+      when: 'now',
+      dur: '0ms',
+      ts: 10,
+    }]))
+    wrap(<TerminalPane conn={DATA.byId['h-bastion']} sessionId="sess-1" active />)
+    await waitFor(() => expect(h.dataCb.fn).not.toBeNull())
+    await waitFor(() => expect(h.termEventCb.fn).not.toBeNull())
+    await waitFor(() => expect(h.keyHandler.fn).not.toBeNull())
+
+    act(() => { h.termEventCb.fn?.({ inputStart: true }) })
+    h.bufferText = 'docke'
+    h.cursorX = 5
+    act(() => { h.dataCb.fn?.('docke') })
+    await waitFor(() => expect(document.querySelector('[title="docker ps"]')).not.toBeNull())
+    termWrite.mockClear()
+
+    act(() => { h.dataCb.fn?.('r') })
+    const ev = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })
+    let shouldProcess = true
+    act(() => { shouldProcess = h.keyHandler.fn!(ev) })
+
+    expect(shouldProcess).toBe(false)
+    expect(termWrite).toHaveBeenCalledWith('sess-1', 'chan-1', btoa('r'))
+    expect(termWrite).toHaveBeenCalledWith('sess-1', 'chan-1', btoa(' ps'))
+    expect(termWrite).not.toHaveBeenCalledWith('sess-1', 'chan-1', btoa('r ps'))
   })
 
   it('copies selected terminal text with a fallback when Clipboard API is unavailable', async () => {
