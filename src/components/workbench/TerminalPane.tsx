@@ -135,6 +135,9 @@ function base64ToBytes(b64: string): Uint8Array {
 function pastedTextForDirectWrite(s: string): string {
   return s.replace(/\r?\n/g, '\r')
 }
+function isPasteShortcut(ev: KeyboardEvent): boolean {
+  return (ev.key === 'v' || ev.key === 'V') && (ev.ctrlKey || ev.metaKey) && !ev.altKey
+}
 function isEditableOutsideTerminal(target: EventTarget | null, terminalHost: HTMLElement): boolean {
   if (!(target instanceof Element)) return false
   if (terminalHost.contains(target)) return false
@@ -228,6 +231,7 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
   // prevent double-termClose and dead-channel keystroke writes.
   const chanIdRef = useRef<string | null>(null)
   const lastPasteAtRef = useRef(0)
+  const lastPasteTextRef = useRef('')
   const activeRef = useRef(active)
   activeRef.current = active
   const isFocusedRef = useRef(isFocused)
@@ -661,6 +665,8 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
           termWrite(sessionId, chanIdRef.current, bytesToBase64(pastedTextForDirectWrite(text)))
           scheduleInputRefresh()
         }
+        lastPasteTextRef.current = text
+        lastPasteAtRef.current = Date.now()
         try { term.focus() } catch { /* best-effort */ }
         return true
       } catch {
@@ -674,10 +680,11 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
       if (!text) return
       ev.preventDefault()
       ev.stopPropagation()
-      if (pasteText(text)) lastPasteAtRef.current = Date.now()
+      if (text === lastPasteTextRef.current && Date.now() - lastPasteAtRef.current < 250) return
+      pasteText(text)
     }
     const onWindowKeyDown = (ev: KeyboardEvent) => {
-      if (!(ev.key === 'v' || ev.key === 'V') || (!ev.ctrlKey && !ev.metaKey) || ev.altKey) return
+      if (!isPasteShortcut(ev)) return
       if (!canHandleTerminalPaste(ev.target)) return
       const clip = navigator.clipboard
       if (!clip || typeof clip.readText !== 'function') return
@@ -689,10 +696,10 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
         clip.readText()
           .then(text => {
             if (lastPasteAtRef.current >= startedAt) return
-            if (pasteText(text)) lastPasteAtRef.current = Date.now()
+            pasteText(text)
           })
           .catch(() => { /* clipboard permission denied/unavailable */ })
-      }, 0)
+      }, 50)
     }
     window.addEventListener('paste', onWindowPaste, true)
     window.addEventListener('keydown', onWindowKeyDown, true)
@@ -710,6 +717,10 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
           try { term.focus() } catch { /* best-effort */ }
           return false
         }
+        // Ctrl+v must not be translated into the terminal control character (^V).
+        // Returning false blocks xterm's key processing while leaving the browser's paste default
+        // action intact, so the real ClipboardEvent can still carry the text on HTTP deployments.
+        if (isPasteShortcut(ev) && canHandleTerminalPaste(ev.target)) return false
         // Phase 2:幽灵文本可见时,→ 或 Ctrl+E 接受 ghost 串(写入 PTY 并吞键)。
         const gh = ghostRef.current
         if (gh && gh.text && (ev.key === 'ArrowRight' || (ev.ctrlKey && (ev.key === 'e' || ev.key === 'E')))) {

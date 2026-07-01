@@ -16,6 +16,7 @@ const h = vi.hoisted(() => ({
   xtermPaste: vi.fn(),
   xtermDispose: vi.fn(),
   dataCb: { fn: null as ((d: string) => void) | null },
+  keyHandler: { fn: null as ((ev: KeyboardEvent) => boolean) | null },
 }))
 const { termOpen, termWrite, termResize, termClose, listen, xtermWrite, xtermPaste, xtermDispose } = h
 
@@ -44,6 +45,7 @@ vi.mock('@xterm/xterm', () => ({
     getSelectionPosition() { return { start: { x: 0, y: 0 }, end: { x: 4, y: 0 } } }
     buffer = { active: { viewportY: 0 } }
     loadAddon() {}
+    attachCustomKeyEventHandler(cb: (ev: KeyboardEvent) => boolean) { h.keyHandler.fn = cb }
     dispose() { h.xtermDispose() }
     focus() {}
     onResize() {}
@@ -76,6 +78,7 @@ describe('TerminalPane (xterm wiring)', () => {
   beforeEach(() => {
     termOpen.mockClear(); termWrite.mockClear(); termResize.mockClear(); termClose.mockClear()
     listen.mockClear(); xtermWrite.mockClear(); xtermPaste.mockClear(); xtermDispose.mockClear(); h.dataCb.fn = null
+    h.keyHandler.fn = null
     ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
   })
   afterEach(() => {
@@ -125,6 +128,19 @@ describe('TerminalPane (xterm wiring)', () => {
     expect(ev.defaultPrevented).toBe(true)
     expect(xtermPaste).toHaveBeenCalledWith('pwd')
     expect(termWrite).toHaveBeenCalledWith('sess-1', 'chan-1', btoa('pwd'))
+  })
+
+  it('blocks ctrl+v from being sent to the PTY as a control character', async () => {
+    wrap(<TerminalPane conn={DATA.byId['h-bastion']} sessionId="sess-1" active />)
+    await waitFor(() => expect(h.dataCb.fn).not.toBeNull())
+    await waitFor(() => expect(h.keyHandler.fn).not.toBeNull())
+    termWrite.mockClear()
+
+    const ev = new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true, cancelable: true })
+    const shouldProcess = h.keyHandler.fn!(ev)
+
+    expect(shouldProcess).toBe(false)
+    expect(termWrite).not.toHaveBeenCalledWith('sess-1', 'chan-1', btoa('\x16'))
   })
 
   it('does not hijack paste events from regular inputs outside the terminal surface', async () => {
