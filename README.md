@@ -4,9 +4,9 @@
 
 # Catio
 
-### One workspace for your servers **and** your databases.
+### One native workbench for servers, databases, tunnels, monitoring, and AI.
 
-A fast, native, cross‑platform desktop client, with an optional browser-accessible Server mode, that unifies **SSH / SFTP / terminals**, a **multi‑engine database studio**, **agentless monitoring**, **tunnels**, an **AI copilot**, and **one‑click network asset discovery** — built on Rust + Tauri, with a polished React UI.
+Catio is an open-source operations and database client built with **Rust + Tauri 2 + React**. It brings **SSH terminals**, **SFTP**, **remote monitoring**, **port forwarding**, **VNC/RDP entry points**, **a multi-engine database studio**, **asset discovery**, **Catio Agent**, and **MCP** into one fast desktop app, with an optional browser-accessible **Server mode** for teams.
 
 <br/>
 
@@ -14,207 +14,309 @@ A fast, native, cross‑platform desktop client, with an optional browser-access
 [![Rust](https://img.shields.io/badge/Rust-stable-000000?logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)](https://react.dev)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
-![Platforms](https://img.shields.io/badge/Windows_·_macOS_·_Linux-cross--platform-4c8bf5)
+![Dual Mode](https://img.shields.io/badge/Desktop_%2B_Server-dual_mode-4c8bf5)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
 **English** · [简体中文](README.zh-CN.md)
 
 </div>
 
-> [!NOTE]
-> Catio bundles the day‑to‑day tools of an ops engineer into a single, beautiful window — so you stop juggling a terminal, a DB GUI, a tunnel manager, and a monitoring tab. The full UI ships in **English and 简体中文**, with multiple light/dark themes.
+<div align="center">
+  <img src="docs/screenshots/%E4%B8%BB%E9%A1%B5.jpg" alt="Catio home dashboard" width="920" />
+</div>
 
-<!-- Drop a product screenshot or short GIF here for maximum impact:
-<div align="center"><img src="docs/screenshot.png" width="880" /></div>
--->
-
----
-
-## ✨ Highlights
-
-### 🖥️ Terminal & SSH
-- **Real SSH** powered by [`russh`](https://github.com/Eugeny/russh) — password & private‑key auth, **ProxyJump / bastion** chains, TOFU known‑hosts.
-- **GPU‑accelerated terminal** (xterm.js + WebGL) with search, fit, and a smooth render path.
-- **Multiple tabs per connection** and **multi‑exec broadcast** — type once, run across a whole fleet of hosts.
-- **Shell history** with inline completion.
-
-### 📂 Files & Network
-- **SFTP browser** for browsing and transferring files over the same SSH session.
-- **Tunnels & port forwarding** plus **SOCKS proxy** support for reaching private infrastructure.
-
-### 📊 Agentless Monitoring
-- Live **CPU / memory / network / disk / GPU** sparklines streamed over a plain SSH `exec` channel — **nothing to install on the remote host**.
-
-### 🗄️ Multi‑Engine Database Studio
-- **25+ engines** out of the box (see the [full list](#-supported-databases)), via native Rust drivers, wire‑protocol compatibility, and an optional **bundled JDBC sidecar** for everything else.
-- **SQL console** with CodeMirror — syntax highlighting, autocompletion, multi‑statement editing.
-- **Schema/structure browsing**, **query history**, and reusable **snippets**.
-- First‑class support for **Chinese domestic / 信创 databases** (openGauss, KingbaseES, GaussDB, TiDB, OceanBase, GBase, Doris, StarRocks, GoldenDB…).
-
-### 🤖 AI Copilot
-- A built‑in assistant for **SQL and shell**, aware of the table/host you're working on.
-- **MCP (Model Context Protocol)** integration to expose your connections as tools.
-
-### 🔎 Auto‑Scan Asset Discovery
-- Point Catio at a **CIDR / IP range / hostname** and it will:
-  - **fingerprint** open services and versions (SSH, MySQL, PostgreSQL, Redis, MongoDB…),
-  - try a **credential dictionary** (and **SSH keys**) to find what actually logs in,
-  - stream a **live, terminal‑style log** of every attempt,
-  - then let you **one‑click import** results into the vault, **batch‑organize** them into groups, or **export** the inventory to CSV/JSON.
-
-### 🔐 Security‑First by Design
-- Connection secrets are **never persisted in plaintext** — an **encrypted vault** (PBKDF2 + AES‑GCM) gates them behind account auth, and session‑only secrets stay in memory.
-- Imported credentials **connect on first use without re‑prompting**, without ever writing a plaintext password to disk.
-
-### 🎨 Crafted UX
-- Native, snappy, and small — Rust release builds are LTO‑optimized and stripped.
-- **i18n** (English / 简体中文) and **multiple themes** built on CSS‑variable design tokens.
+> If you jump between terminals, SQL clients, tunnel scripts, monitoring tabs, AI chat, and spreadsheet exports every day, Catio is the attempt to make that whole workflow feel like one product instead of six glued-together tools.
 
 ---
 
-## 🧩 Supported Databases
+## Why Star Catio
+
+- **Real infra workflows, not a toy shell**: SSH, SFTP, multi-tab terminals, command broadcast, ProxyJump, tunnels, SOCKS, remote system metrics, VNC, local shell, serial, Telnet, Mosh, and RDP launch support.
+- **A serious database studio**: native/protocol-compatible drivers plus JDBC expansion, schema browsing, editable data grids, SQL console, EXPLAIN, history, snippets, import/export, table transfer, SQL file execution, Redis/Mongo/Elasticsearch paths, and ER metadata.
+- **Desktop and Server mode from one codebase**: run it as a native Tauri client for personal use, or deploy `catio-server` behind Docker/systemd for browser access and multi-user isolation.
+- **AI that sits where work happens**: Catio Agent follows the active terminal or database tab, can use terminal buffer and schema context, and supports Ollama or OpenAI-compatible endpoints.
+- **MCP built in**: expose connected hosts and databases to external coding agents through MCP, with tokens, allowlists, and live tool-call logs.
+- **Made for contributors**: TypeScript strict mode, Rust modules with clear command boundaries, Vitest coverage, Rust unit tests, and a dual-mode CI gate.
+
+---
+
+## Product Tour
+
+| Host workbench | Database workbench |
+|---|---|
+| <img src="docs/screenshots/%E4%B8%BB%E6%9C%BA%E7%95%8C%E9%9D%A2-%E5%91%BD%E4%BB%A4%E5%80%99%E9%80%89%2B%E7%B3%BB%E7%BB%9F%E7%9B%91%E6%8E%A7.jpg" alt="Split SSH terminals with command suggestions and system monitoring" width="420" /> | <img src="docs/screenshots/%E6%95%B0%E6%8D%AE%E5%BA%93-%E6%95%B0%E6%8D%AE%E9%A2%84%E8%A7%88.jpg" alt="Database table preview and editable grid" width="420" /> |
+| Split terminals, command suggestions, multi-exec, and live CPU/memory/network/disk/GPU panels over SSH. | Schema tree, table preview, filtering, inline edits, import/export, and SQL tools in one database tab. |
+
+| Catio Agent | Asset discovery |
+|---|---|
+| <img src="docs/screenshots/%E4%B8%BB%E6%9C%BA%E7%BB%88%E7%AB%AF%E7%95%8C%E9%9D%A2-Agent%E9%97%AE%E7%AD%94.jpg" alt="Catio Agent explaining terminal output" width="420" /> | <img src="docs/screenshots/%E4%B8%BB%E6%9C%BA%E5%8F%91%E7%8E%B0-%E6%89%AB%E6%8F%8F.jpg" alt="Network asset discovery scanning progress" width="420" /> |
+| Ask about shell output, terminal errors, SQL, table schemas, and selected context without leaving the workbench. | Scan CIDR ranges, IP ranges, or hosts; fingerprint services; try credential/key dictionaries; import verified assets. |
+
+| Data transfer | Server and security settings |
+|---|---|
+| <img src="docs/screenshots/%E6%95%B0%E6%8D%AE%E5%BA%93-%E6%95%B0%E6%8D%AE%E8%BF%81%E7%A7%BB.jpg" alt="Database table transfer dialog" width="420" /> | <img src="docs/screenshots/%E5%A4%9A%E7%94%A8%E6%88%B7%E9%9A%94%E7%A6%BB.jpg" alt="Catio vault and user isolation settings" width="420" /> |
+| Move table data between connections with column mapping, append/truncate/upsert modes, and progress feedback. | Local vault mode and Server mode both keep secrets out of plaintext connection profiles. |
+
+<details>
+<summary>More screenshots</summary>
+
+| Agent asking data | Dark theme | Scan setup |
+|---|---|---|
+| <img src="docs/screenshots/%E6%95%B0%E6%8D%AE%E5%BA%93-Agent%E9%97%AE%E6%95%B0.jpg" alt="Ask data questions with Catio Agent" width="280" /> | <img src="docs/screenshots/%E6%95%B0%E6%8D%AE%E5%BA%93-Agent%E9%97%AE%E6%95%B0-%E4%B8%BB%E9%A2%982.jpg" alt="Catio Agent in dark theme" width="280" /> | <img src="docs/screenshots/%E4%B8%BB%E6%9C%BA%E5%8F%91%E7%8E%B0-%E9%85%8D%E7%BD%AE.jpg" alt="Asset discovery range and credential setup" width="280" /> |
+
+| Scan results | Agent model config | MCP settings |
+|---|---|---|
+| <img src="docs/screenshots/%E4%B8%BB%E6%9C%BA%E8%87%AA%E5%8A%A8%E5%8C%96%E5%8F%91%E7%8E%B0.jpg" alt="Asset discovery results" width="280" /> | <img src="docs/screenshots/Agent%E6%A8%A1%E5%9E%8B%E9%85%8D%E7%BD%AE.jpg" alt="Catio Agent model settings" width="280" /> | <img src="docs/screenshots/MCP%E8%AE%BE%E7%BD%AE.jpg" alt="MCP server settings" width="280" /> |
+
+| Database discovery | Host results | Grove theme |
+|---|---|---|
+| <img src="docs/screenshots/%E6%95%B0%E6%8D%AE%E5%BA%93%E5%8F%91%E7%8E%B0-%E6%89%AB%E6%8F%8F%E9%85%8D%E7%BD%AE.jpg" alt="Database discovery engine setup" width="280" /> | <img src="docs/screenshots/%E4%B8%BB%E6%9C%BA%E5%8F%91%E7%8E%B0-%E7%BB%93%E6%9E%9C.jpg" alt="Host discovery import results" width="280" /> | <img src="docs/screenshots/%E6%95%B0%E6%8D%AE%E5%BA%93-Agent%E9%97%AE%E6%95%B0-%E4%B8%BB%E9%A2%983.jpg" alt="Catio Agent in Grove theme" width="280" /> |
+
+| Theme settings |
+|---|
+| <img src="docs/screenshots/%E5%A4%96%E8%A7%82%E8%AE%BE%E7%BD%AE.jpg" alt="Catio theme settings" width="420" /> |
+
+</details>
+
+---
+
+## Core Capabilities
+
+### Terminal, SSH, And Remote Ops
+
+- SSH password and private-key auth, TOFU known hosts, `~/.ssh/config` import, and ProxyJump/bastion support.
+- xterm.js terminal with WebGL rendering, split panes, search, fit, shell history completion, and command broadcast across hosts.
+- SFTP browser with upload/download progress, mkdir/rename/delete/touch, remote text editing, and browser upload/download endpoints in Server mode.
+- Local shell, serial terminal, Telnet, Mosh, embedded VNC client, and native RDP client launch path.
+- Local/remote/dynamic SSH forwarding, including SOCKS-style dynamic tunnels.
+- Agentless monitoring over SSH `exec`: CPU, memory, network, disk, GPU, top processes, and OS detection.
+
+### Database Studio
+
+- Query console built on CodeMirror 6 with dialect-aware highlighting, formatting, autocompletion, multi-statement editing, and result grids.
+- Schema browser for tables/views/functions, table structure, object source, DDL helpers, ER relation metadata, and keyspace views.
+- Editable table data with DML preview/apply, paging, WHERE/ORDER BY helpers, column visibility, filters, and safe destructive-action prompts.
+- Import CSV/TSV/JSON/XLSX/XLSM/XLS into tables; export grids to XLSX; export database/schema SQL; run large SQL files with progress and cancellation.
+- Transfer table data between connections with mapping and append/truncate/upsert modes.
+- Query history and reusable snippets.
+- Redis keyspace browsing/editing, Mongo shell-style paths, and Elasticsearch/rqlite HTTP-oriented access.
+
+### Catio Agent And MCP
+
+- Agent providers: local **Ollama** or **OpenAI-compatible** endpoints, with model fetch/test controls.
+- The Agent can use current terminal output, selected text, active database schema/table context, and SQL snippets as prompt context.
+- Desktop MCP server exposes connected hosts and databases over SSE with token auth, IP allowlist, and live logs.
+- Server mode provides per-user MCP endpoints and tokens, so external agents can reach only that user's owned connections.
+
+### Discovery And Vault
+
+- Asset discovery accepts CIDR, IP ranges, single IPs, and hostnames.
+- It fingerprints SSH/MySQL/PostgreSQL/Redis/MongoDB and can try credential dictionaries or SSH private keys.
+- Results can be imported into the vault, grouped, or exported as CSV/JSON without exporting matched plaintext secrets.
+- Local vault mode uses account verification and AES-GCM credential caching; Server mode stores per-user secrets encrypted with `CATIO_MASTER_KEY`.
+
+---
+
+## Deployment Modes
+
+Catio is one repository with two runtime heads.
+
+| Mode | Entry point | Runtime | Best for |
+|---|---|---|---|
+| **Desktop client** | `src-tauri/src/main.rs` / `catio` | Tauri `invoke` + native event bus | Personal workstation installs on Windows, macOS, and Linux |
+| **Server mode** | `src-tauri/src/bin/server.rs` / `catio-server` | HTTP `/api/invoke` + WebSocket `/ws` | LAN/team browser access through Docker, systemd, or a reverse proxy |
+
+Server mode is not a fork. The React UI and Rust core are shared, while `src/services/transport.ts` routes calls to Tauri, HTTP, or WebSocket depending on runtime.
+
+### Server Mode Notes
+
+- Server mode serves `dist/`, injects `window.__CATIO_SERVER__=true`, and stores data under `CATIO_DATA`.
+- It supports login/bootstrap, user management, per-user stores, encrypted server-side secrets, SSH terminal streams, SFTP transfer endpoints, tunnels, monitoring, native database drivers, admin-only asset scans, and per-user MCP.
+- Docker is the easiest deployment path. Binary deployment is supported, but the server still links Tauri/WebKit dependencies through the shared crate.
+- JDBC engines are fully wired for desktop. The current Docker image does **not** bundle a JRE or the JDBC plugin path, so use native/protocol-compatible engines in Server mode unless you customize the image.
+- Local-device features such as local terminal, serial, and external RDP client launch are desktop-first and may be hidden or limited in Server mode.
+
+Read the full deployment guide: [docs/server-mode-deployment.md](docs/server-mode-deployment.md).
+
+---
+
+## Supported Databases
+
+Catio exposes 50+ selectable engine profiles. Some use native Rust drivers, some use wire-protocol compatibility, and long-tail engines go through the JDBC sidecar.
 
 | Category | Engines |
 |---|---|
-| **Relational** | PostgreSQL · MySQL · MariaDB · SQL Server · SQLite |
-| **Distributed / NewSQL** | CockroachDB · TiDB · OceanBase (MySQL & Oracle modes) · GoldenDB |
-| **Analytical / OLAP** | DuckDB · ClickHouse · Apache Doris · StarRocks · SelectDB · Databend · Amazon Redshift |
-| **国产 / 信创 (Chinese domestic)** | openGauss · GaussDB · KingbaseES · Vastbase · HighGo DB · KWDB · GBase 8a |
-| **NoSQL · KV · Search** | MongoDB · Redis · Elasticsearch |
+| **Core relational** | PostgreSQL · MySQL · MariaDB · SQL Server · SQLite · DuckDB |
+| **Distributed / NewSQL** | CockroachDB · TiDB · OceanBase (MySQL) · OceanBase (Oracle) |
+| **Analytics / OLAP** | ClickHouse · Apache Doris · StarRocks · SelectDB · Databend · Amazon Redshift |
+| **Chinese domestic / 信创** | openGauss · GaussDB · KingbaseES · Vastbase · HighGo DB · KWDB · GoldenDB · GBase 8a · GreatSQL · PolarDB (MySQL) · TDSQL |
+| **Document / KV / Search** | MongoDB · Redis · Elasticsearch · rqlite |
+| **JDBC sidecar** | Oracle · IBM Db2 · Snowflake · Apache Hive · Trino · Cassandra · Neo4j · SAP HANA · Teradata · Vertica · Firebird · Exasol · Informix · 达梦 DM · YashanDB · GBase 8s · XuguDB · Apache Kylin · Apache IoTDB · TDengine · InterSystems IRIS · Databricks · Google BigQuery · SUNDB · MS Access · H2 |
 
-> Engines without a native Rust driver connect through the bundled **JDBC sidecar**; Catio manages driver JARs for you.
+JDBC notes:
+
+- Catio vendors `src-tauri/resources/catio-jdbc-plugin.jar`.
+- End users still need a JRE/JDK 17+ for desktop JDBC usage.
+- Proprietary database driver JARs are not redistributed. Put user-supplied drivers in `CATIO_JDBC_DRIVERS_DIR`.
+- H2 is bundled for self-test paths.
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
-- **Node.js** 18+ and **npm**
-- **Rust** (stable) + the [Tauri 2 prerequisites](https://tauri.app/start/prerequisites/) for your OS
-- *(optional)* **JDK 17+ & Maven** — only needed if you rebuild the JDBC sidecar
 
-### Run in development
+- Node.js 18+ and npm
+- Rust stable and the [Tauri 2 prerequisites](https://tauri.app/start/prerequisites/) for your OS
+- Optional: JDK 17+ and Maven, only when rebuilding the JDBC sidecar
+
+### Run The Desktop App
+
 ```bash
-# install dependencies
 npm ci
-
-# launch the desktop app (Rust backend + Vite frontend)
 npm run tauri dev
 ```
 
-### Build a release bundle
+### Build A Desktop Release
+
 ```bash
 npm run tauri build
 ```
-Installers/binaries are emitted under `src-tauri/target/release/bundle/`.
 
-### Deploy Server mode with Docker
-```bash
-DOCKER_BUILDKIT=1 docker build -t catio-server:local .
-docker run -d \
-  --name catio-server \
-  -p 8787:8787 \
-  -v catio-data:/app/data \
-  catio-server:local
-```
-Open `http://<server-ip>:8787`. See [Server mode deployment](docs/server-mode-deployment.md) for required environment variables, binary deployment, reverse proxy guidance, and the desktop/server support matrix.
+Release bundles are emitted under `src-tauri/target/release/bundle/`.
 
-### Frontend‑only dev (browser, no native backend)
+### Run Frontend-Only Dev
+
 ```bash
 npm run dev
 ```
 
+This is useful for UI work and tests. Real SSH/database features require Tauri or Server mode.
+
+### Deploy Server Mode With Docker
+
+```bash
+DOCKER_BUILDKIT=1 docker build -t catio-server:local .
+
+docker run -d \
+  --name catio-server \
+  --restart unless-stopped \
+  -p 8787:8787 \
+  -e CATIO_MASTER_KEY="CHANGE_ME_BASE64_32_BYTES" \
+  -e CATIO_ADMIN_USER="admin" \
+  -e CATIO_ADMIN_PASSWORD="CHANGE_ME_STRONG_PASSWORD" \
+  -v catio-data:/app/data \
+  catio-server:local
+```
+
+Open `http://<server-ip>:8787`. For production-like LAN usage, put it behind VPN, a gateway, or an HTTPS reverse proxy; do not expose an unaudited admin surface directly to the public internet.
+
 ---
 
-## 🧱 Tech Stack
+## Tech Stack
 
 | Layer | Technology |
 |---|---|
-| **Shell** | [Tauri 2](https://tauri.app) (Rust) — tiny native binary, system webview |
-| **Backend** | Rust · `tokio` · `russh` / `russh-sftp` · native DB drivers (`tokio-postgres`, `mysql_async`, `tiberius`, `rusqlite`, `duckdb`, `mongodb`, `redis`) |
-| **Frontend** | React 18 · TypeScript (strict) · Vite |
-| **Editor & Terminal** | CodeMirror 6 · xterm.js (WebGL) |
-| **i18n / Theming** | `i18next` · CSS‑variable design tokens |
-| **Interop** | Java JDBC sidecar for long‑tail engines · MCP for AI tooling |
+| **Desktop shell** | Tauri 2, Rust, system webview |
+| **Server head** | Axum, HTTP `/api/invoke`, WebSocket `/ws`, static `dist/` hosting |
+| **Backend runtime** | Rust, tokio, russh, russh-sftp, portable-pty, serialport, reqwest |
+| **Database drivers** | tokio-postgres, mysql_async, tiberius, rusqlite, duckdb, mongodb, redis, ClickHouse HTTP, Elasticsearch HTTP, rqlite HTTP, Java JDBC sidecar |
+| **Frontend** | React 18, TypeScript strict mode, Vite |
+| **Editor / terminal** | CodeMirror 6, xterm.js with WebGL |
+| **AI / interop** | Ollama, OpenAI-compatible chat endpoints, Model Context Protocol |
+| **UX foundation** | i18next, CSS-variable theme tokens, light/dark theme variants |
 
 ---
 
-## 🚢 Deployment Modes
+## Project Structure
 
-Catio is maintained as one codebase with two release heads:
-
-| Mode | Entry point | Transport | Best for |
-|---|---|---|---|
-| Desktop client | `src-tauri/src/main.rs` / `catio` | Tauri `invoke` + native event bus | Personal workstation installs on Windows, macOS, and Linux |
-| Server mode | `src-tauri/src/bin/server.rs` / `catio-server` | HTTP `/api/invoke` + WebSocket `/ws` | LAN/team browser access through Docker or a systemd service |
-
-Server mode is intentionally not a separate fork. Shared UI and Rust core stay in sync, while runtime-specific behavior is gated by `window.__CATIO_SERVER__`.
-
----
-
-## 🗂️ Project Structure
-
-```
+```text
 catio/
-├─ src/                 # React frontend: components, services, state, i18n, styles
-│  ├─ components/       #   shell · views · panels · workbench · modals · scan · dbviews
-│  ├─ services/         #   typed wrappers around Tauri/server transports
-│  └─ state/            #   connection/group/vault stores
-├─ src-tauri/           # Rust backend
-│  └─ src/
-│     ├─ ssh/           #   SSH/SFTP/tunnels/monitor (SessionManager, known hosts)
-│     ├─ db/            #   DB commands, connection manager, per‑engine drivers
-│     ├─ scan/          #   auto‑scan: range expansion · protocol probes · concurrent login
-│     ├─ server*.rs     #   Server mode HTTP/WebSocket/MCP bridge
-│     └─ mcp/           #   Model Context Protocol integration
-├─ docs/                # design specs & implementation plans
-└─ deploy/test/         # docker-compose for local DB integration tests
+├─ src/                         # React frontend: components, services, state, i18n, styles
+│  ├─ components/
+│  │  ├─ workbench/             # terminals, database panes, VNC, remote file editor
+│  │  ├─ dbviews/               # SQL console, grids, import/export/transfer dialogs
+│  │  ├─ panels/                # AI, SFTP, tunnels, monitor, snippets, history
+│  │  ├─ scan/                  # asset discovery flow
+│  │  └─ views/                 # home, vault, settings
+│  ├─ services/                 # typed transport wrappers for Tauri/server/dev
+│  └─ state/                    # connection stores, vault, preferences, conversations
+├─ src-tauri/
+│  ├─ src/
+│  │  ├─ ssh/                   # SSH/SFTP/tunnels/monitor/multiexec
+│  │  ├─ db/                    # DB commands, manager, drivers, import/export/transfer
+│  │  ├─ scan/                  # range expansion, probes, concurrent login attempts
+│  │  ├─ mcp/                   # shared MCP tool core
+│  │  ├─ server*.rs             # Server mode HTTP/WS/MCP bridge
+│  │  ├─ auth.rs                # Server users, sessions, per-user stores
+│  │  └─ secrets.rs             # encrypted secret storage helpers
+│  └─ jdbc-plugin/              # Java sidecar source and README
+├─ docs/                        # plans, specs, deployment guide, screenshots
+├─ deploy/test/                 # local DB integration-test compose stack
+└─ scripts/                     # helper scripts for JDBC build and visual checks
 ```
 
 ---
 
-## 🧪 Testing
+## Testing
 
 ```bash
-# Frontend: type-check + unit/component tests (Vitest + Testing Library)
+# Frontend type-check + Vitest suite
 npx tsc --noEmit
 npm run test
 
-# Backend: Rust unit tests
-cd src-tauri && cargo test --lib
+# Rust library tests
+cd src-tauri
+cargo test --lib
 ```
 
-Real‑database integration tests are **env‑gated** — spin up dependencies with
-`docker compose -f deploy/test/docker-compose.yml up --wait` and follow
-`deploy/test/README.md`. Tests skip cleanly when their env vars aren't set.
+Dual-mode CI also checks:
+
+```bash
+cargo check --manifest-path src-tauri/Cargo.toml --lib
+cargo check --manifest-path src-tauri/Cargo.toml --bin catio
+cargo check --manifest-path src-tauri/Cargo.toml --bin catio-server
+```
+
+Real-database integration tests are env-gated. Start dependencies with `docker compose -f deploy/test/docker-compose.yml up --wait`, then follow [deploy/test/README.md](deploy/test/README.md).
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
-Contributions are welcome! A few conventions that keep the codebase healthy:
+Catio is especially good for contributors who care about developer tools, database clients, terminals, Rust/Tauri, or AI-assisted operations software.
 
-- One logical change per commit; semantic prefixes (`feat:`, `fix:`, `refactor:`, `perf:`, `docs:`, `chore:`).
-- Keep changes surgical — match existing component, service, and error‑handling patterns.
-- Any new user‑facing string must be added to **both** `src/i18n/zh.json` and `src/i18n/en.json`.
-- New UI must support theme switching (use design tokens, no hard‑coded colors).
-- **Never** commit real secrets, private keys, production connection strings, or downloaded JDBC driver JARs.
+High-impact contribution areas:
 
----
+- database engine depth: SSL/TLS options, richer dialect metadata, JDBC polish, driver-specific UX
+- terminal and remote ops: SFTP editing, VNC/RDP depth, tunnel UX, monitoring probes
+- Server mode: Docker hardening, reverse-proxy docs, auditability, multi-user admin workflows
+- AI/MCP: safer tool policies, better context selection, richer MCP tool coverage
+- QA: targeted Vitest/Rust tests, visual checks, real database test fixtures
 
-## 📝 License
+Local conventions:
 
-Catio is released under the [**MIT License**](LICENSE).
+- One logical change per commit.
+- Keep changes surgical and match existing component/service/error patterns.
+- Add user-visible text to both `src/i18n/en.json` and `src/i18n/zh.json`.
+- Keep UI theme-aware by using CSS variables and existing design tokens.
+- Never commit real passwords, private keys, production connection strings, downloaded proprietary JDBC drivers, or local logs.
 
----
-
-## 🙏 Acknowledgements
-
-- [Tauri](https://tauri.app) — the lightweight desktop runtime that makes Catio fast and small.
-- [`russh`](https://github.com/Eugeny/russh) and the [Reach](https://github.com/alexandrosnt/Reach) project — references for the SSH / SFTP / tunneling design.
-- [dbx](https://github.com/t8y2/dbx) — reference for database‑side patterns.
-- [xterm.js](https://xtermjs.org) · [CodeMirror](https://codemirror.net) — the terminal and editor that power the workbench.
+If Catio matches a workflow you want to see in open source, a star, issue, bug report, benchmark, screenshot, or small PR all helps the project reach the next contributor.
 
 ---
 
-<div align="center"><sub>Built with ❤️ for people who live in the terminal — and the query console.</sub></div>
+## License
+
+Catio is released under the [MIT License](LICENSE).
+
+---
+
+## Acknowledgements
+
+- [Tauri](https://tauri.app) for the lightweight desktop runtime.
+- [`russh`](https://github.com/Eugeny/russh) and [Reach](https://github.com/alexandrosnt/Reach) as references for SSH/SFTP/tunneling ideas.
+- [dbx](https://github.com/t8y2/dbx) as a reference for database-side patterns.
+- [xterm.js](https://xtermjs.org) and [CodeMirror](https://codemirror.net) for the terminal and editor foundations.
+
+<div align="center"><sub>Built for people who live between the shell prompt and the query console.</sub></div>

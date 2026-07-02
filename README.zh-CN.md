@@ -4,9 +4,9 @@
 
 # Catio
 
-### 服务器与数据库，一个工作台全搞定。
+### 服务器、数据库、隧道、监控与 AI，一个原生工作台搞定。
 
-一款快速、原生、跨平台的桌面客户端，把 **SSH / SFTP / 终端**、**多引擎数据库工作台**、**无 Agent 监控**、**隧道代理**、**AI 助手** 和 **一键资产发现** 集中到一个精致的窗口里 —— 基于 Rust + Tauri 构建，配以打磨过的 React 界面。
+Catio 是一个基于 **Rust + Tauri 2 + React** 的开源运维与数据库客户端。它把 **SSH 终端**、**SFTP**、**远程监控**、**端口转发**、**VNC/RDP 入口**、**多引擎数据库工作台**、**资产发现**、**Catio Agent** 和 **MCP** 放进一个快速的桌面应用里，同时提供面向团队浏览器访问的 **Server 模式**。
 
 <br/>
 
@@ -14,182 +14,309 @@
 [![Rust](https://img.shields.io/badge/Rust-stable-000000?logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)](https://react.dev)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
-![Platforms](https://img.shields.io/badge/Windows_·_macOS_·_Linux-跨平台-4c8bf5)
+![Dual Mode](https://img.shields.io/badge/Desktop_%2B_Server-dual_mode-4c8bf5)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
 [English](README.md) · **简体中文**
 
 </div>
 
-> [!NOTE]
-> Catio 把运维工程师日常需要的工具集中到一个漂亮的窗口里 —— 你不必再在终端、数据库 GUI、隧道管理器和监控面板之间来回切换。整套界面提供 **简体中文与 English**，并内置多套明/暗主题。
+<div align="center">
+  <img src="docs/screenshots/%E4%B8%BB%E9%A1%B5.jpg" alt="Catio 主页工作台" width="920" />
+</div>
 
-<!-- 在此放置一张产品截图或短 GIF，效果最佳：
-<div align="center"><img src="docs/screenshot.png" width="880" /></div>
--->
-
----
-
-## ✨ 功能亮点
-
-### 🖥️ 终端与 SSH
-- **真实 SSH**，基于 [`russh`](https://github.com/Eugeny/russh) —— 支持密码与私钥登录、**ProxyJump / 跳板机** 链路、TOFU known-hosts。
-- **GPU 加速终端**（xterm.js + WebGL），自带搜索、自适应、流畅渲染。
-- **单连接多标签** 与 **多主机命令广播** —— 一次输入，在整片主机集群上同时执行。
-- **Shell 历史** 与内联补全。
-
-### 📂 文件与网络
-- **SFTP 浏览器**，在同一条 SSH 会话上浏览与传输文件。
-- **隧道与端口转发** 以及 **SOCKS 代理**，轻松抵达内网基础设施。
-
-### 📊 无 Agent 监控
-- 通过普通 SSH `exec` 通道实时采集 **CPU / 内存 / 网络 / 磁盘 / GPU** 折线图 —— **远端无需安装任何程序**。
-
-### 🗄️ 多引擎数据库工作台
-- 开箱即用支持 **25+ 引擎**（见[完整列表](#-支持的数据库)），通过原生 Rust 驱动、协议兼容，以及可选的**内置 JDBC sidecar** 覆盖其余引擎。
-- **SQL 控制台**（基于 CodeMirror）—— 语法高亮、自动补全、多语句编辑。
-- **结构浏览**、**查询历史** 与可复用的 **代码片段**。
-- 对 **国产 / 信创数据库** 一等支持（openGauss、KingbaseES、GaussDB、TiDB、OceanBase、GBase、Doris、StarRocks、GoldenDB……）。
-
-### 🤖 AI 助手
-- 内置 **SQL 与 Shell** 助手，能感知你当前操作的表 / 主机上下文。
-- **MCP（Model Context Protocol）** 集成，把你的连接暴露为工具。
-
-### 🔎 自动扫描资产发现
-- 给 Catio 一个 **CIDR / IP 段 / 主机名**，它会：
-  - **识别** 开放的服务与版本（SSH、MySQL、PostgreSQL、Redis、MongoDB……）；
-  - 用 **凭证字典**（以及 **SSH 密钥**）尝试登录，找出真正能登录的目标；
-  - 实时输出 **终端风格的扫描日志**，逐次展示每一次尝试；
-  - 随后支持把结果 **一键入库** 到保险库、**按分组批量维护**、或将清单 **导出为 CSV/JSON**。
-
-### 🔐 安全优先
-- 连接密钥**绝不明文落盘** —— **加密保险库**（PBKDF2 + AES-GCM）在账户验证之下托管它们，会话内密钥仅驻留内存。
-- 入库的凭据**首次连接即免重复输入**，且全程不会把明文密码写入磁盘。
-
-### 🎨 精心打磨的体验
-- 原生、轻快、体积小 —— Rust release 构建经 LTO 优化并 strip。
-- **国际化**（中文 / English）与**多套主题**，基于 CSS 变量设计令牌。
+> 如果你每天都在终端、数据库客户端、隧道脚本、监控页面、AI 对话和表格导出之间切换，Catio 试图把这条工作流做成一个完整产品，而不是六个工具的临时拼接。
 
 ---
 
-## 🧩 支持的数据库
+## 为什么值得点 Star
+
+- **真实基础设施工作流，不是玩具终端**：SSH、SFTP、多标签终端、命令广播、ProxyJump、隧道、SOCKS、远程系统指标、VNC、本地 shell、串口、Telnet、Mosh 和 RDP 启动入口。
+- **认真做的数据库工作台**：原生/协议兼容驱动加 JDBC 扩展，结构浏览、可编辑表格、SQL 控制台、EXPLAIN、历史、片段、导入导出、表迁移、SQL 文件执行、Redis/Mongo/Elasticsearch 路径和 ER 元数据。
+- **同一套代码同时支持桌面端与 Server 模式**：个人可用 Tauri 桌面客户端，小团队可部署 `catio-server`，通过 Docker/systemd 和浏览器访问，并支持多用户隔离。
+- **AI 就在操作现场**：Catio Agent 跟随当前终端或数据库标签，可读取终端缓冲区和 Schema 上下文，支持 Ollama 与 OpenAI 兼容端点。
+- **内置 MCP**：把已连接主机和数据库暴露给外部编码代理，带 token、IP 白名单和实时工具调用日志。
+- **适合贡献者进入**：TypeScript strict、清晰的 Rust command 边界、Vitest 覆盖、Rust 单元测试和双模式 CI 门禁。
+
+---
+
+## 产品巡览
+
+| 主机工作台 | 数据库工作台 |
+|---|---|
+| <img src="docs/screenshots/%E4%B8%BB%E6%9C%BA%E7%95%8C%E9%9D%A2-%E5%91%BD%E4%BB%A4%E5%80%99%E9%80%89%2B%E7%B3%BB%E7%BB%9F%E7%9B%91%E6%8E%A7.jpg" alt="SSH 分屏终端、命令候选与系统监控" width="420" /> | <img src="docs/screenshots/%E6%95%B0%E6%8D%AE%E5%BA%93-%E6%95%B0%E6%8D%AE%E9%A2%84%E8%A7%88.jpg" alt="数据库表格预览与编辑" width="420" /> |
+| 分屏终端、命令候选、多机执行，以及通过 SSH 采集的 CPU/内存/网络/磁盘/GPU 面板。 | Schema 树、表格预览、筛选、行内编辑、导入导出与 SQL 工具集中在一个数据库标签中。 |
+
+| Catio Agent | 资产发现 |
+|---|---|
+| <img src="docs/screenshots/%E4%B8%BB%E6%9C%BA%E7%BB%88%E7%AB%AF%E7%95%8C%E9%9D%A2-Agent%E9%97%AE%E7%AD%94.jpg" alt="Catio Agent 解释终端输出" width="420" /> | <img src="docs/screenshots/%E4%B8%BB%E6%9C%BA%E5%8F%91%E7%8E%B0-%E6%89%AB%E6%8F%8F.jpg" alt="网络资产发现扫描进度" width="420" /> |
+| 不离开工作台即可询问 shell 输出、终端报错、SQL、表结构和选中上下文。 | 扫描 CIDR/IP 段/主机名，识别服务，尝试凭据/密钥字典，并导入验证通过的资产。 |
+
+| 数据迁移 | Server 与安全设置 |
+|---|---|
+| <img src="docs/screenshots/%E6%95%B0%E6%8D%AE%E5%BA%93-%E6%95%B0%E6%8D%AE%E8%BF%81%E7%A7%BB.jpg" alt="数据库表迁移对话框" width="420" /> | <img src="docs/screenshots/%E5%A4%9A%E7%94%A8%E6%88%B7%E9%9A%94%E7%A6%BB.jpg" alt="Catio 保险库与用户隔离设置" width="420" /> |
+| 在连接之间迁移表数据，支持列映射、追加、清空后写入、Upsert 和进度反馈。 | 本地保险库模式与 Server 模式都避免把连接密码明文写进 profile。 |
+
+<details>
+<summary>更多截图</summary>
+
+| Agent 问数 | 深色主题 | 扫描配置 |
+|---|---|---|
+| <img src="docs/screenshots/%E6%95%B0%E6%8D%AE%E5%BA%93-Agent%E9%97%AE%E6%95%B0.jpg" alt="使用 Catio Agent 问数据库" width="280" /> | <img src="docs/screenshots/%E6%95%B0%E6%8D%AE%E5%BA%93-Agent%E9%97%AE%E6%95%B0-%E4%B8%BB%E9%A2%982.jpg" alt="深色主题下的 Catio Agent" width="280" /> | <img src="docs/screenshots/%E4%B8%BB%E6%9C%BA%E5%8F%91%E7%8E%B0-%E9%85%8D%E7%BD%AE.jpg" alt="资产发现范围和凭据配置" width="280" /> |
+
+| 扫描结果 | Agent 模型配置 | MCP 设置 |
+|---|---|---|
+| <img src="docs/screenshots/%E4%B8%BB%E6%9C%BA%E8%87%AA%E5%8A%A8%E5%8C%96%E5%8F%91%E7%8E%B0.jpg" alt="资产发现结果" width="280" /> | <img src="docs/screenshots/Agent%E6%A8%A1%E5%9E%8B%E9%85%8D%E7%BD%AE.jpg" alt="Catio Agent 模型设置" width="280" /> | <img src="docs/screenshots/MCP%E8%AE%BE%E7%BD%AE.jpg" alt="MCP 服务设置" width="280" /> |
+
+| 数据库发现 | 主机发现结果 | 松岚主题 |
+|---|---|---|
+| <img src="docs/screenshots/%E6%95%B0%E6%8D%AE%E5%BA%93%E5%8F%91%E7%8E%B0-%E6%89%AB%E6%8F%8F%E9%85%8D%E7%BD%AE.jpg" alt="数据库发现引擎配置" width="280" /> | <img src="docs/screenshots/%E4%B8%BB%E6%9C%BA%E5%8F%91%E7%8E%B0-%E7%BB%93%E6%9E%9C.jpg" alt="主机发现导入结果" width="280" /> | <img src="docs/screenshots/%E6%95%B0%E6%8D%AE%E5%BA%93-Agent%E9%97%AE%E6%95%B0-%E4%B8%BB%E9%A2%983.jpg" alt="松岚主题下的 Catio Agent" width="280" /> |
+
+| 主题设置 |
+|---|
+| <img src="docs/screenshots/%E5%A4%96%E8%A7%82%E8%AE%BE%E7%BD%AE.jpg" alt="Catio 主题设置" width="420" /> |
+
+</details>
+
+---
+
+## 核心能力
+
+### 终端、SSH 与远程运维
+
+- SSH 密码与私钥认证、TOFU known hosts、`~/.ssh/config` 导入、ProxyJump/跳板机支持。
+- xterm.js 终端，WebGL 渲染、分屏、搜索、自适应、shell 历史补全，以及跨主机命令广播。
+- SFTP 浏览器，支持上传/下载进度、mkdir/rename/delete/touch、远程文本编辑，以及 Server 模式下的浏览器上传/下载端点。
+- 本地 shell、串口终端、Telnet、Mosh、内嵌 VNC 客户端和系统 RDP 客户端启动入口。
+- 本地/远程/动态 SSH 转发，包括 SOCKS 风格动态隧道。
+- 通过 SSH `exec` 实现无 Agent 监控：CPU、内存、网络、磁盘、GPU、Top 进程和 OS 检测。
+
+### 数据库工作台
+
+- CodeMirror 6 SQL 控制台，支持方言感知的高亮、格式化、自动补全、多语句编辑和结果表格。
+- Schema 浏览：表、视图、函数、表结构、对象源码、DDL 辅助、ER 关系元数据和 keyspace 视图。
+- 可编辑表数据：DML 预览/应用、分页、WHERE/ORDER BY 辅助、列显隐、筛选和危险操作确认。
+- 导入 CSV/TSV/JSON/XLSX/XLSM/XLS 到表；导出表格为 XLSX；导出 database/schema SQL；执行大型 SQL 文件并支持进度与取消。
+- 在连接之间迁移表数据，支持列映射和 append/truncate/upsert 模式。
+- 查询历史与可复用 SQL 片段。
+- Redis keyspace 浏览与编辑、Mongo shell 风格路径，以及 Elasticsearch/rqlite 的 HTTP 访问路径。
+
+### Catio Agent 与 MCP
+
+- Agent 提供商：本地 **Ollama** 或 **OpenAI 兼容**端点，支持拉取模型和连接测试。
+- Agent 可使用当前终端输出、选中文本、当前数据库 Schema/表上下文和 SQL 片段作为 prompt 上下文。
+- 桌面端 MCP server 通过 SSE 暴露已连接主机和数据库，支持 token 鉴权、IP 白名单和实时日志。
+- Server 模式提供每用户 MCP endpoint 与 token，外部代理只能访问该用户自己的连接。
+
+### 发现与保险库
+
+- 资产发现支持 CIDR、IP 区间、单 IP 和主机名。
+- 可识别 SSH/MySQL/PostgreSQL/Redis/MongoDB，并尝试凭据字典或 SSH 私钥。
+- 结果可导入保险库、分组管理，或导出 CSV/JSON，且不会导出命中的明文密钥。
+- 本地保险库模式使用账户校验和 AES-GCM 凭据缓存；Server 模式使用 `CATIO_MASTER_KEY` 加密每用户 secret。
+
+---
+
+## 部署模式
+
+Catio 是一个仓库、两个运行入口。
+
+| 模式 | 入口 | 运行时 | 适用场景 |
+|---|---|---|---|
+| **桌面客户端** | `src-tauri/src/main.rs` / `catio` | Tauri `invoke` + 原生事件总线 | Windows、macOS、Linux 上的个人工作站安装 |
+| **Server 模式** | `src-tauri/src/bin/server.rs` / `catio-server` | HTTP `/api/invoke` + WebSocket `/ws` | 局域网/小团队通过 Docker、systemd 或反向代理浏览器访问 |
+
+Server 模式不是一个单独分叉。React UI 和 Rust 核心共用，`src/services/transport.ts` 根据运行环境自动走 Tauri、HTTP 或 WebSocket。
+
+### Server 模式说明
+
+- Server 模式托管 `dist/`，向首页注入 `window.__CATIO_SERVER__=true`，数据保存在 `CATIO_DATA` 下。
+- 支持登录/初始化、用户管理、每用户 store、加密的服务端 secret、SSH 终端流、SFTP 传输端点、隧道、监控、原生数据库驱动、管理员资产扫描和每用户 MCP。
+- Docker 是最简单的部署方式；二进制部署也支持，但由于共用 crate，服务端仍会间接链接 Tauri/WebKit 依赖。
+- JDBC 引擎在桌面端已接通。当前 Docker 镜像默认**不**包含 JRE 或 JDBC plugin 运行路径，Server 模式建议优先使用原生/协议兼容引擎，除非你自定义镜像。
+- 本地设备相关能力如本地终端、串口、外部 RDP 客户端启动以桌面端为主，在 Server 模式可能隐藏或受限。
+
+完整部署指南见：[docs/server-mode-deployment.md](docs/server-mode-deployment.md)。
+
+---
+
+## 支持的数据库
+
+Catio 暴露 50+ 个可选数据库 profile。其中一部分走原生 Rust 驱动，一部分走协议兼容，长尾引擎通过 JDBC sidecar 扩展。
 
 | 分类 | 引擎 |
 |---|---|
-| **关系型** | PostgreSQL · MySQL · MariaDB · SQL Server · SQLite |
-| **分布式 / NewSQL** | CockroachDB · TiDB · OceanBase（MySQL 与 Oracle 模式）· GoldenDB |
-| **分析型 / OLAP** | DuckDB · ClickHouse · Apache Doris · StarRocks · SelectDB · Databend · Amazon Redshift |
-| **国产 / 信创** | openGauss · GaussDB · KingbaseES · Vastbase · HighGo DB · KWDB · GBase 8a |
-| **NoSQL · KV · 检索** | MongoDB · Redis · Elasticsearch |
+| **核心关系型** | PostgreSQL · MySQL · MariaDB · SQL Server · SQLite · DuckDB |
+| **分布式 / NewSQL** | CockroachDB · TiDB · OceanBase (MySQL) · OceanBase (Oracle) |
+| **分析型 / OLAP** | ClickHouse · Apache Doris · StarRocks · SelectDB · Databend · Amazon Redshift |
+| **国产 / 信创** | openGauss · GaussDB · KingbaseES · Vastbase · HighGo DB · KWDB · GoldenDB · GBase 8a · GreatSQL · PolarDB (MySQL) · TDSQL |
+| **文档 / KV / 搜索** | MongoDB · Redis · Elasticsearch · rqlite |
+| **JDBC sidecar** | Oracle · IBM Db2 · Snowflake · Apache Hive · Trino · Cassandra · Neo4j · SAP HANA · Teradata · Vertica · Firebird · Exasol · Informix · 达梦 DM · YashanDB · GBase 8s · XuguDB · Apache Kylin · Apache IoTDB · TDengine · InterSystems IRIS · Databricks · Google BigQuery · SUNDB · MS Access · H2 |
 
-> 没有原生 Rust 驱动的引擎通过内置 **JDBC sidecar** 连接；Catio 会替你管理驱动 JAR。
+JDBC 说明：
+
+- Catio vendored `src-tauri/resources/catio-jdbc-plugin.jar`。
+- 桌面端使用 JDBC 时，用户仍需安装 JRE/JDK 17+。
+- 项目不再分发专有数据库 driver JAR。用户自行把驱动放入 `CATIO_JDBC_DRIVERS_DIR`。
+- H2 已内置，用于自测路径。
 
 ---
 
-## 🚀 快速开始
+## 快速开始
 
 ### 环境要求
-- **Node.js** 18+ 与 **npm**
-- **Rust**（stable）以及对应平台的 [Tauri 2 环境依赖](https://tauri.app/start/prerequisites/)
-- *（可选）* **JDK 17+ 与 Maven** —— 仅在你需要重建 JDBC sidecar 时
 
-### 开发运行
+- Node.js 18+ 与 npm
+- Rust stable，以及对应操作系统的 [Tauri 2 环境依赖](https://tauri.app/start/prerequisites/)
+- 可选：JDK 17+ 与 Maven，仅在重建 JDBC sidecar 时需要
+
+### 运行桌面端
+
 ```bash
-# 安装依赖
 npm ci
-
-# 启动桌面应用（Rust 后端 + Vite 前端）
 npm run tauri dev
 ```
 
-### 打包发布版
+### 构建桌面发布版
+
 ```bash
 npm run tauri build
 ```
-安装包 / 可执行文件生成于 `src-tauri/target/release/bundle/`。
 
-### 仅前端开发（浏览器，无原生后端）
+发布产物位于 `src-tauri/target/release/bundle/`。
+
+### 仅前端开发
+
 ```bash
 npm run dev
 ```
 
+该模式适合 UI 开发和测试。真实 SSH/数据库能力需要 Tauri 或 Server 模式。
+
+### 使用 Docker 部署 Server 模式
+
+```bash
+DOCKER_BUILDKIT=1 docker build -t catio-server:local .
+
+docker run -d \
+  --name catio-server \
+  --restart unless-stopped \
+  -p 8787:8787 \
+  -e CATIO_MASTER_KEY="CHANGE_ME_BASE64_32_BYTES" \
+  -e CATIO_ADMIN_USER="admin" \
+  -e CATIO_ADMIN_PASSWORD="CHANGE_ME_STRONG_PASSWORD" \
+  -v catio-data:/app/data \
+  catio-server:local
+```
+
+浏览器打开 `http://<server-ip>:8787`。面向生产或局域网长期使用时，建议放在 VPN、网关或 HTTPS 反向代理之后，不要把未审计的管理面直接暴露到公网。
+
 ---
 
-## 🧱 技术栈
+## 技术栈
 
 | 层 | 技术 |
 |---|---|
-| **外壳** | [Tauri 2](https://tauri.app)（Rust）—— 极小原生体积，复用系统 webview |
-| **后端** | Rust · `tokio` · `russh` / `russh-sftp` · 原生数据库驱动（`tokio-postgres`、`mysql_async`、`tiberius`、`rusqlite`、`duckdb`、`mongodb`、`redis`） |
-| **前端** | React 18 · TypeScript（strict）· Vite |
-| **编辑器与终端** | CodeMirror 6 · xterm.js（WebGL） |
-| **国际化 / 主题** | `i18next` · CSS 变量设计令牌 |
-| **互操作** | 长尾引擎走 Java JDBC sidecar · AI 工具走 MCP |
+| **桌面外壳** | Tauri 2、Rust、系统 webview |
+| **Server head** | Axum、HTTP `/api/invoke`、WebSocket `/ws`、静态 `dist/` 托管 |
+| **后端运行时** | Rust、tokio、russh、russh-sftp、portable-pty、serialport、reqwest |
+| **数据库驱动** | tokio-postgres、mysql_async、tiberius、rusqlite、duckdb、mongodb、redis、ClickHouse HTTP、Elasticsearch HTTP、rqlite HTTP、Java JDBC sidecar |
+| **前端** | React 18、TypeScript strict、Vite |
+| **编辑器 / 终端** | CodeMirror 6、xterm.js with WebGL |
+| **AI / 互操作** | Ollama、OpenAI 兼容 chat endpoint、Model Context Protocol |
+| **体验基座** | i18next、CSS 变量主题 token、明暗主题变体 |
 
 ---
 
-## 🗂️ 项目结构
+## 项目结构
 
-```
+```text
 catio/
-├─ src/                 # React 前端：组件、服务、状态、i18n、样式
-│  ├─ components/       #   shell · views · panels · workbench · modals · scan · dbviews
-│  ├─ services/         #   对 Tauri command 的类型化封装
-│  └─ state/            #   连接 / 分组 / 保险库 状态存储
-├─ src-tauri/           # Rust 后端
-│  └─ src/
-│     ├─ ssh/           #   SSH/SFTP/隧道/监控（SessionManager、known hosts）
-│     ├─ db/            #   数据库命令、连接管理、各引擎驱动
-│     ├─ scan/          #   自动扫描：范围展开 · 协议探针 · 并发试登录
-│     └─ mcp.rs         #   Model Context Protocol 集成
-├─ docs/                # 设计规格与实施计划
-└─ deploy/test/         # 本地数据库集成测试的 docker-compose
+├─ src/                         # React 前端：组件、服务、状态、i18n、样式
+│  ├─ components/
+│  │  ├─ workbench/             # 终端、数据库 pane、VNC、远程文件编辑
+│  │  ├─ dbviews/               # SQL 控制台、表格、导入导出/迁移弹窗
+│  │  ├─ panels/                # AI、SFTP、隧道、监控、片段、历史
+│  │  ├─ scan/                  # 资产发现流程
+│  │  └─ views/                 # 主页、保险库、设置
+│  ├─ services/                 # Tauri/server/dev 的类型化 transport 封装
+│  └─ state/                    # 连接状态、保险库、偏好、会话
+├─ src-tauri/
+│  ├─ src/
+│  │  ├─ ssh/                   # SSH/SFTP/隧道/监控/多机执行
+│  │  ├─ db/                    # DB commands、manager、drivers、导入导出/迁移
+│  │  ├─ scan/                  # 范围展开、协议探测、并发试登录
+│  │  ├─ mcp/                   # 共享 MCP tool core
+│  │  ├─ server*.rs             # Server 模式 HTTP/WS/MCP bridge
+│  │  ├─ auth.rs                # Server 用户、会话、每用户 store
+│  │  └─ secrets.rs             # 加密 secret 存储辅助
+│  └─ jdbc-plugin/              # Java sidecar 源码与 README
+├─ docs/                        # 计划、规格、部署指南、截图
+├─ deploy/test/                 # 本地数据库集成测试 compose stack
+└─ scripts/                     # JDBC 构建与视觉检查等辅助脚本
 ```
 
 ---
 
-## 🧪 测试
+## 测试
 
 ```bash
-# 前端：类型检查 + 单元/组件测试（Vitest + Testing Library）
+# 前端类型检查 + Vitest
 npx tsc --noEmit
 npm run test
 
-# 后端：Rust 单元测试
-cd src-tauri && cargo test --lib
+# Rust library tests
+cd src-tauri
+cargo test --lib
 ```
 
-真实数据库的集成测试均由**环境变量控制**：用
-`docker compose -f deploy/test/docker-compose.yml up --wait` 拉起依赖，
-再按 `deploy/test/README.md` 配置。未设置环境变量时这些测试会干净跳过。
+双模式 CI 还会检查：
+
+```bash
+cargo check --manifest-path src-tauri/Cargo.toml --lib
+cargo check --manifest-path src-tauri/Cargo.toml --bin catio
+cargo check --manifest-path src-tauri/Cargo.toml --bin catio-server
+```
+
+真实数据库集成测试由环境变量控制。先运行 `docker compose -f deploy/test/docker-compose.yml up --wait`，再按 [deploy/test/README.md](deploy/test/README.md) 配置。
 
 ---
 
-## 🤝 参与贡献
+## 参与贡献
 
-欢迎贡献！以下约定有助于保持代码库健康：
+如果你关心开发者工具、数据库客户端、终端、Rust/Tauri，或 AI 辅助运维软件，Catio 有很多适合贡献的入口。
 
-- 一个逻辑变更对应一个 commit；使用语义化前缀（`feat:`、`fix:`、`refactor:`、`perf:`、`docs:`、`chore:`）。
-- 改动保持外科手术式范围 —— 沿用现有组件、服务与错误处理模式。
-- 任何新增的用户可见文案必须**同时**写入 `src/i18n/zh.json` 与 `src/i18n/en.json`。
-- 新 UI 必须支持主题切换（使用设计令牌，不要硬编码颜色）。
-- **切勿**提交真实密钥、私钥、生产连接串或下载的 JDBC 驱动 JAR。
+高价值方向：
 
----
+- 数据库引擎深度：SSL/TLS 参数、方言元数据、JDBC 体验、driver-specific UX
+- 终端与远程运维：SFTP 编辑、VNC/RDP 深度、隧道体验、监控探针
+- Server 模式：Docker 加固、反向代理文档、审计能力、多用户管理流程
+- AI/MCP：更安全的工具策略、更好的上下文选择、更丰富的 MCP tool 覆盖
+- QA：定向 Vitest/Rust 测试、视觉检查、真实数据库测试 fixture
 
-## 📝 许可证
+本地约定：
 
-Catio 以 [**MIT License**](LICENSE) 开源发布。
+- 一个逻辑变更一个 commit。
+- 保持外科手术式改动，匹配已有组件、服务和错误处理模式。
+- 新增用户可见文案同时写入 `src/i18n/en.json` 和 `src/i18n/zh.json`。
+- UI 使用 CSS 变量和现有 design token，保持主题可切换。
+- 不要提交真实密码、私钥、生产连接串、下载的专有 JDBC 驱动或本地日志。
 
----
-
-## 🙏 致谢
-
-- [Tauri](https://tauri.app) —— 让 Catio 又快又小的轻量桌面运行时。
-- [`russh`](https://github.com/Eugeny/russh) 与 [Reach](https://github.com/alexandrosnt/Reach) —— SSH / SFTP / 隧道设计的参考。
-- [dbx](https://github.com/t8y2/dbx) —— 数据库侧实现模式的参考。
-- [xterm.js](https://xtermjs.org) · [CodeMirror](https://codemirror.net) —— 驱动终端与编辑器的核心组件。
+如果 Catio 正好覆盖了你想在开源世界里看到的工作流，点一个 star、发 issue、提交 bug 报告、做 benchmark、补截图或提一个小 PR，都会帮助它遇到下一个贡献者。
 
 ---
 
-<div align="center"><sub>为生活在终端 —— 以及查询控制台 —— 里的人们，用 ❤️ 打造。</sub></div>
+## 许可证
+
+Catio 基于 [MIT License](LICENSE) 开源发布。
+
+---
+
+## 致谢
+
+- [Tauri](https://tauri.app) 提供轻量桌面运行时。
+- [`russh`](https://github.com/Eugeny/russh) 与 [Reach](https://github.com/alexandrosnt/Reach) 为 SSH/SFTP/隧道设计提供参考。
+- [dbx](https://github.com/t8y2/dbx) 为数据库侧实现模式提供参考。
+- [xterm.js](https://xtermjs.org) 与 [CodeMirror](https://codemirror.net) 提供终端和编辑器基础。
+
+<div align="center"><sub>为常年在 shell prompt 与 query console 之间切换的人打造。</sub></div>
