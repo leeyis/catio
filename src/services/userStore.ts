@@ -111,7 +111,7 @@ export function clearUserStores(): void {
 /** The canonical list of per-user collections (must match the backend `store` strings + modules). */
 export const USER_STORES = [
   'connections', 'db-connections', 'vnc-connections', 'rdp-connections',
-  'tunnel-connections', 'groups', 'snippets', 'history', 'conversations',
+  'tunnel-connections', 'groups', 'connection-favorites', 'snippets', 'history', 'conversations',
 ] as const
 
 /** Ephemeral per-browser UI blobs (open tabs, recent sessions) that are NOT per-item collections.

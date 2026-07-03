@@ -119,8 +119,8 @@ export default function App() {
   const [showNew, setShowNew] = useState<boolean>(false)
   // EDIT mode for the DB NewConnectionModal (null = create/new DB profile).
   const [editProfile, setEditProfile] = useState<DbProfile | null>(null)
-  // Sidebar vault filter: all | host | db.
-  const [sidebarFilter, setSidebarFilter] = useState<string>('all')
+  // Sidebar vault filter: favorite | host | db.
+  const [sidebarFilter, setSidebarFilter] = useState<string>('favorite')
   // EDIT mode for the SSH NewConnectionModal (null = create/new host profile).
   const [editing, setEditing] = useState<ConnectionProfile | null>(null)
   // Pending delete confirmation (styled ConfirmModal).
@@ -200,7 +200,7 @@ export default function App() {
   // pendingJumpSecret: when a profile has a jump host, collect jump secret first.
   const [pendingJumpSecret, setPendingJumpSecret] = useState<{ args: SshConnectArgs; name: string; profileId?: string } | null>(null)
   const [pendingConnect, setPendingConnect] = useState<{ args: SshConnectArgs; name: string; profileId?: string } | null>(null)
-  const [pendingTrust, setPendingTrust] = useState<{ args: SshConnectArgs; name: string; sessionId: string; fingerprint: string } | null>(null)
+  const [pendingTrust, setPendingTrust] = useState<{ args: SshConnectArgs; name: string; sessionId: string; fingerprint: string; profileId?: string } | null>(null)
   // Connect feedback: host name while a connect is in flight (shows an overlay so
   // there's immediate feedback instead of a 1–2s silent gap), and a styled in-app
   // error dialog (replaces the jarring native window.alert).
@@ -278,7 +278,7 @@ export default function App() {
     name: p.name,
     sub: `${p.user}@${p.host}:${p.port}`,
     icon: 'server',
-    status: 'idle',
+    status: sessionMap[p.id] ? 'up' : 'idle',
     proto: 'ssh',
     ...(p.os ? { os: p.os } : {}),
     ...ownerTag(p),
@@ -564,17 +564,21 @@ export default function App() {
   }
 
   // Build a display Connection for a live SSH session and open its terminal tab.
-  function openLiveTab(args: SshConnectArgs, name: string, sessionId?: string) {
-    const connId = `live-${args.host}:${args.port}-${args.user}`
+  function openLiveTab(args: SshConnectArgs, name: string, sessionId?: string, profileId?: string) {
+    const prof = profileId
+      ? loadProfiles().find(p => p.id === profileId)
+      : loadProfiles().find(p => p.host === args.host && p.port === args.port && p.user === args.user)
+    const connId = profileId ?? `live-${args.host}:${args.port}-${args.user}`
     const conn: Connection = {
       id: connId,
-      group: '',
+      group: prof?.group ?? '',
       kind: 'host',
       name,
       sub: `${args.user}@${args.host}:${args.port}`,
       icon: 'server',
       status: 'up',
       proto: 'ssh',
+      ...(prof?.os ? { os: prof.os } : {}),
     }
     setLiveConns(prev => ({ ...prev, [connId]: conn }))
     if (sessionId) setSessionMap(prev => ({ ...prev, [connId]: sessionId }))
@@ -597,7 +601,7 @@ export default function App() {
     // keyed by the saved PROFILE id (not the live `live-…` connId), so resolve the
     // matching profile by host/port/user from the freshest store — this is what the
     // home resolves against, and it persists across restarts.
-    const pid = loadProfiles().find(p => p.host === args.host && p.port === args.port && p.user === args.user)?.id
+    const pid = prof?.id
     if (pid) { recordRecentSession(pid); setRecentSessions(loadRecentSessions()) }
 
     // Detect the remote OS so the sidebar/home glyph shows the real OS logo. Runs
@@ -607,8 +611,8 @@ export default function App() {
       void sshDetectOs(sessionId).then(os => {
         if (!os) return
         setLiveConns(prev => (prev[connId] ? { ...prev, [connId]: { ...prev[connId], os } } : prev))
-        const prof = loadProfiles().find(p => p.host === args.host && p.port === args.port && p.user === args.user)
-        if (prof && prof.os !== os) { try { saveProfile({ ...prof, os }); reloadProfiles() } catch { /* ignore */ } }
+        const profile = loadProfiles().find(p => p.id === pid)
+        if (profile && profile.os !== os) { try { saveProfile({ ...profile, os }); reloadProfiles() } catch { /* ignore */ } }
       }).catch(() => { /* best-effort */ })
     }
 
@@ -653,22 +657,20 @@ export default function App() {
     if (!isTauri() && !isServer()) {
       // Demo path (dev/test only): no IPC, just open a demo terminal tab (no sessionId).
       // In server mode we fall through to the real connect (sshConnect over HTTP → WS terminal).
-      openLiveTab(args, display.name)
-      return
+      openLiveTab(args, display.name, undefined, display.profileId)
+      return true
     }
     // If the modal already supplied a target secret, the jump secret (if any) also
     // came from the form — connect directly (skip all prompts).
     if (args.secret && args.secret.length > 0) {
-      void performConnect(args, display.name, args.secret, display.profileId)
-      return
+      return performConnect(args, display.name, args.secret, display.profileId)
     }
     // 扫描导入的 ✓authed 主机：本次会话内存里存有命中凭证，首连直连免再输。
     // 注意用 !== undefined 判断：私钥命中存的是空口令标记（''），也应直连（用私钥免口令）。
     if (display.profileId) {
       const sess = getSessionSecret(display.profileId)
       if (sess !== undefined) {
-        void performConnect(args, display.name, sess, display.profileId)
-        return
+        return performConnect(args, display.name, sess, display.profileId)
       }
     }
     // Auth-gated cache: reuse a remembered secret (no prompt). Skipped when a jump
@@ -676,23 +678,23 @@ export default function App() {
     if (display.profileId && (!args.jump || args.jump.secret)) {
       const cached = await cachedSecret(display.profileId)
       if (cached) {
-        void performConnect(args, display.name, cached, display.profileId)
-        return
+        return performConnect(args, display.name, cached, display.profileId)
       }
     }
     // Reconnect path: collect secrets interactively.
     // If a jump host is configured AND it has no secret yet, collect jump secret first.
     if (args.jump && !args.jump.secret) {
       setPendingJumpSecret({ args, name: display.name, profileId: display.profileId })
-      return
+      return false
     }
     // Otherwise collect target secret.
     setPendingConnect({ args, name: display.name, profileId: display.profileId })
+    return false
   }
 
   // Secret collected → call sshConnect; route to trust prompt / success / error.
   // args.jump (with its secret) is forwarded intact to sshConnect.
-  async function performConnect(args: SshConnectArgs, name: string, secret: string, profileId?: string) {
+  async function performConnect(args: SshConnectArgs, name: string, secret: string, profileId?: string): Promise<boolean> {
     // Immediate feedback: show the connecting overlay before the (1–2s) await.
     setConnecting(name)
     try {
@@ -700,10 +702,11 @@ export default function App() {
       // Auth succeeded → the secret is valid; cache it (when auth + vault allow).
       if (profileId) rememberConnSecret(profileId, secret)
       if (result.hostKeyTrusted === false) {
-        setPendingTrust({ args, name, sessionId: result.sessionId, fingerprint: result.hostKeyFingerprint })
-        return
+        setPendingTrust({ args, name, sessionId: result.sessionId, fingerprint: result.hostKeyFingerprint, profileId })
+        return false
       }
-      openLiveTab(args, name, result.sessionId)
+      openLiveTab(args, name, result.sessionId, profileId)
+      return true
     } catch (err) {
       const kind = (err as { kind?: string } | null)?.kind
       if (kind === 'HostKeyMismatch') {
@@ -714,6 +717,7 @@ export default function App() {
         const message = /auth/i.test(raw) ? t('modals.connectErrorAuth') : t('modals.connectErrorGeneric', { message: raw })
         setConnectError(message)
       }
+      return false
     } finally {
       setConnecting(null)
     }
@@ -724,7 +728,7 @@ export default function App() {
     try {
       await sshTrustHost(`${p.args.host}:${p.args.port}`, p.fingerprint)
     } catch { /* best-effort — proceed even if recording fails */ }
-    openLiveTab(p.args, p.name, p.sessionId)
+    openLiveTab(p.args, p.name, p.sessionId, p.profileId)
     setPendingTrust(null)
   }
 
@@ -903,7 +907,7 @@ export default function App() {
         return 'needs-auth'
       }
       // 成功 → openLiveTab 注册 sessionMap 并开标签，返回新 sessionId。
-      openLiveTab(args, profile.name, result.sessionId)
+      openLiveTab(args, profile.name, result.sessionId, profile.id)
       return result.sessionId
     } catch {
       return 'failed'
@@ -946,6 +950,77 @@ export default function App() {
     } catch {
       return false
     }
+  }
+
+  function terminalTabConnected(tab: Tab): boolean {
+    if (tab.kind !== 'terminal') return false
+    if (!isTauri() && !isServer()) return true
+    const conn = liveConns[tab.connId] ?? vaultConns.find(c => c.id === tab.connId) ?? D.byId[tab.connId] ?? null
+    if (conn && (conn.proto === 'local' || conn.proto === 'serial' || conn.proto === 'telnet' || conn.proto === 'mosh' || conn.proto === 'vnc')) return true
+    return !!tab.sessionId && Object.values(sessionMap).includes(tab.sessionId)
+  }
+
+  function profileForTerminalTab(tab: Tab, conn: Connection | null): ConnectionProfile | undefined {
+    const direct = profiles.find(p => p.id === tab.connId || p.id === conn?.id)
+    if (direct) return direct
+    return profiles.find(p => {
+      const liveId = `live-${p.host}:${p.port}-${p.user}`
+      const sub = `${p.user}@${p.host}:${p.port}`
+      return tab.connId === liveId || conn?.id === liveId || conn?.sub === sub
+    })
+  }
+
+  function markSshSessionClosed(sessionId: string) {
+    const closedTabIds = tabsRef.current.filter(tb => tb.sessionId === sessionId).map(tb => tb.id)
+    const closedConnIds = new Set<string>([
+      ...Object.entries(sessionMap).filter(([, sid]) => sid === sessionId).map(([connId]) => connId),
+      ...tabsRef.current.filter(tb => tb.sessionId === sessionId).map(tb => tb.connId),
+    ])
+    const unlisten = historyUnlisteners.current[sessionId]
+    if (unlisten) {
+      unlisten()
+      delete historyUnlisteners.current[sessionId]
+    }
+    setSessionMap(prev => {
+      const next = { ...prev }
+      for (const [connId, sid] of Object.entries(prev)) {
+        if (sid === sessionId) delete next[connId]
+      }
+      return next
+    })
+    setTabs(prev => prev.map(tb => tb.sessionId === sessionId ? { ...tb, sessionId: undefined } : tb))
+    setChanMap(prev => {
+      const next = { ...prev }
+      closedTabIds.forEach(id => { delete next[id] })
+      return next
+    })
+    setLiveConns(prev => {
+      let changed = false
+      const next = { ...prev }
+      closedConnIds.forEach(connId => {
+        if (next[connId]) {
+          next[connId] = { ...next[connId], status: 'down' }
+          changed = true
+        }
+      })
+      return changed ? next : prev
+    })
+    setDetailConn(prev => prev && closedConnIds.has(prev.id) ? { ...prev, status: 'idle' } : prev)
+  }
+
+  async function reconnectTerminalTab(tabId: string): Promise<boolean> {
+    const tab = tabsRef.current.find(tb => tb.id === tabId)
+    if (!tab || tab.kind !== 'terminal') return false
+    const conn = liveConns[tab.connId] ?? vaultConns.find(c => c.id === tab.connId) ?? D.byId[tab.connId] ?? null
+    const profile = profileForTerminalTab(tab, conn)
+    if (!profile) {
+      if (conn) void openConn(conn)
+      return false
+    }
+    return connectProfile(
+      { host: profile.host, port: profile.port, user: profile.user, auth: profile.auth, jump: profile.jump },
+      { name: profile.name, profileId: profile.id },
+    )
   }
 
   // If a closing tab held a live session that no remaining tab shares, drop it.
@@ -1563,7 +1638,7 @@ export default function App() {
 
               {/* tab bar — only in workbench when there are tabs */}
               {view === 'workbench' && tabs.length > 0 && (
-                <WorkbenchTabs tabs={tabs} activeTab={activeTab} onActivate={setActiveTab} onClose={closeTab} onCloseOthers={closeOthers} onCloseAll={closeAll} onNew={() => setShowNew(true)} onDuplicate={duplicateTab} onRename={renameTab} />
+                <WorkbenchTabs tabs={tabs} activeTab={activeTab} onActivate={setActiveTab} onClose={closeTab} onCloseOthers={closeOthers} onCloseAll={closeAll} onNew={() => setShowNew(true)} onDuplicate={duplicateTab} onRename={renameTab} terminalConnected={terminalTabConnected} />
               )}
               {view === 'workbench' && tabs.length === 0 && <EmptyWorkbench onNew={() => setShowNew(true)} />}
 
@@ -1590,7 +1665,7 @@ export default function App() {
                           <LocalTerminalPane conn={tabConn} active={isShown} />
                         )}
                         {tab.kind === 'terminal' && tabConn?.proto !== 'vnc' && !(tabConn && (tabConn.proto === 'local' || tabConn.proto === 'serial' || tabConn.proto === 'telnet' || tabConn.proto === 'mosh')) && (
-                          <SplitTerminal conn={tabConn} sessionId={tab.sessionId} active={isShown} resolveSessionId={resolveSessionId} mxCandidates={mxCandidates} ensureSession={ensureSession} onConnectTarget={onConnectTarget} sendToPty={sendToPty} onChannel={(_sid, chan) => setChanMap(m => { const n = { ...m }; if (chan) n[tab.id] = chan; else delete n[tab.id]; return n })} />
+                          <SplitTerminal conn={tabConn} sessionId={tab.sessionId} active={isShown} connected={terminalTabConnected(tab)} resolveSessionId={resolveSessionId} mxCandidates={mxCandidates} ensureSession={ensureSession} onConnectTarget={onConnectTarget} sendToPty={sendToPty} onSessionClosed={markSshSessionClosed} onReconnect={() => reconnectTerminalTab(tab.id)} onChannel={(_sid, chan) => setChanMap(m => { const n = { ...m }; if (chan) n[tab.id] = chan; else delete n[tab.id]; return n })} />
                         )}
                         {tab.kind === 'sql' && tabConn && (
                           <DbWorkbench conn={tabConn} density={density} active={isShown} />

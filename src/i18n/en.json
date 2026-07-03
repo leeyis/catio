@@ -17,6 +17,9 @@
     "filterPlaceholder": "Filter…",
     "vault": "Vault",
     "all": "All",
+    "favorites": "Favorites",
+    "favorite": "Favorite",
+    "unfavorite": "Unfavorite",
     "hosts": "Hosts",
     "databases": "Databases",
     "saved": "Saved",
@@ -33,6 +36,8 @@
     "noMatchingConns": "No matching connections",
     "vaultEmptyTitle": "No connections yet",
     "vaultEmptyHint": "Add a host or database from the center — it'll show up here.",
+    "favoriteEmptyTitle": "No favorites yet",
+    "favoriteEmptyHint": "Switch to Hosts or Databases, hover an item, then click the star.",
     "localLoginIsolated": "Local login · Isolated",
     "activeStatus": "3 active · 1 tunnel",
     "authDisabled": "No login password",
@@ -378,7 +383,8 @@
     "noDesktop": "(demo mode: not a desktop environment, VNC not connected)"
   },
   "terminal": {
-    "disconnected": "Disconnected — click this connection in the sidebar to reconnect"
+    "disconnected": "Disconnected — press Ctrl+R to reconnect",
+    "reconnecting": "Reconnecting…"
   },
   "compare": {
     "title": "Data Compare",

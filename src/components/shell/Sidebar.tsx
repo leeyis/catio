@@ -6,6 +6,7 @@ import { BrandMark } from '../BrandMark'
 import { IconBtn, ConnGlyph, Segmented } from '../atoms'
 import { useData } from '../../state/DataContext'
 import { useGroups, addGroup, removeGroup } from '../../state/groups'
+import { toggleConnectionFavorite, useConnectionFavorites } from '../../state/connectionFavorites'
 import type { Connection } from '../../services/types'
 import { isServer } from '../../services/transport'
 import { useServerAuth } from '../auth/ServerAuthGate'
@@ -35,7 +36,7 @@ export interface SidebarProps {
   currentUser?: string
   authEnabled?: boolean
   onLock?: React.MouseEventHandler<HTMLButtonElement>
-  /** Active kind filter ('all' | 'host' | 'db'). Controlled by the parent so the
+  /** Active filter ('favorite' | 'host' | 'db'). Controlled by the parent so the
    *  New Connection modal can default its kind to match. Falls back to internal
    *  state when not provided (preserves standalone usage). */
   filter?: string
@@ -57,6 +58,8 @@ export interface ConnRowProps {
   selectable?: boolean
   selected?: boolean
   onSelectToggle?: (conn: Connection) => void
+  favorite?: boolean
+  onFavoriteToggle?: (conn: Connection) => void
 }
 
 export interface IconRailProps {
@@ -171,6 +174,8 @@ export function Sidebar({ activeId, onOpen, onDetail, collapsed, onToggleCollaps
   const D = useData()
   const groups = useGroups()
   const allConns = vaultConns || D.connections
+  const favoriteIds = useConnectionFavorites()
+  const favoriteSet = useMemo(() => new Set(favoriteIds), [favoriteIds])
   const [query, setQuery] = useState('')
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({})
 
@@ -196,6 +201,8 @@ export function Sidebar({ activeId, onOpen, onDetail, collapsed, onToggleCollaps
     selectable: batchMode,
     selected: selectedIds.has(conn.id),
     onSelectToggle: toggleSelect,
+    favorite: favoriteSet.has(conn.id),
+    onFavoriteToggle: (conn: Connection) => { toggleConnectionFavorite(conn.id) },
   })
   const handleBatchMove = () => {
     if (!selectedConns.length) return
@@ -213,19 +220,20 @@ export function Sidebar({ activeId, onOpen, onDetail, collapsed, onToggleCollaps
     setAddingGroup(false)
   }
   // Controlled when the parent supplies `filter`; otherwise self-managed.
-  const [filterState, setFilterState] = useState('all') // all | host | db
+  const [filterState, setFilterState] = useState('favorite') // favorite | host | db
   const filter = filterProp ?? filterState
   const setFilter = (v: string) => { setFilterState(v); onFilterChange?.(v) }
 
   const conns = useMemo(() => {
     return allConns.filter(c => {
+      if (filter === 'favorite' && !favoriteSet.has(c.id)) return false
       // RDP/VNC are remote-machine connections → show them under the "host" filter too.
-      if (filter !== 'all' && c.kind !== filter && !(filter === 'host' && (c.kind === 'rdp' || c.kind === 'vnc'))) return false
+      if (filter !== 'favorite' && c.kind !== filter && !(filter === 'host' && (c.kind === 'rdp' || c.kind === 'vnc'))) return false
       if (!query) return true
       const q = query.toLowerCase()
       return c.name.toLowerCase().includes(q) || c.sub.toLowerCase().includes(q) || (c.tags || []).some(tag => tag.includes(q))
     })
-  }, [query, filter, allConns])
+  }, [query, filter, allConns, favoriteSet])
 
   if (collapsed) {
     return (
@@ -268,7 +276,7 @@ export function Sidebar({ activeId, onOpen, onDetail, collapsed, onToggleCollaps
         {/* kind filter */}
         <div className="row gap6">
           <Segmented size="sm" value={filter} onChange={setFilter} options={[
-            { value: 'all', label: t('shell.all') },
+            { value: 'favorite', label: t('shell.favorites'), icon: 'star' },
             { value: 'host', label: t('shell.hosts'), icon: 'server' },
             { value: 'db', label: t('shell.databases'), icon: 'database' },
           ]} />
@@ -370,10 +378,10 @@ export function Sidebar({ activeId, onOpen, onDetail, collapsed, onToggleCollaps
         })}
         {!conns.length && (
           <div className="col" style={{ alignItems: 'center', gap: 10, padding: '32px 16px', textAlign: 'center' }}>
-            <div className="icon-badge" style={{ width: 44, height: 44, borderRadius: 13, background: 'var(--surface-sunken)', color: 'var(--text-faint)' }}><Icon name={query ? 'search' : 'plug'} size={20} /></div>
+            <div className="icon-badge" style={{ width: 44, height: 44, borderRadius: 13, background: 'var(--surface-sunken)', color: 'var(--text-faint)' }}><Icon name={query ? 'search' : filter === 'favorite' ? 'star' : 'plug'} size={20} /></div>
             <div className="col" style={{ gap: 4 }}>
-              <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text-secondary)' }}>{query ? t('shell.noMatchingConns') : t('shell.vaultEmptyTitle')}</span>
-              {!query && <span style={{ fontSize: 11, color: 'var(--text-faint)', lineHeight: 1.5 }}>{t('shell.vaultEmptyHint')}</span>}
+              <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text-secondary)' }}>{query ? t('shell.noMatchingConns') : filter === 'favorite' ? t('shell.favoriteEmptyTitle') : t('shell.vaultEmptyTitle')}</span>
+              {!query && <span style={{ fontSize: 11, color: 'var(--text-faint)', lineHeight: 1.5 }}>{filter === 'favorite' ? t('shell.favoriteEmptyHint') : t('shell.vaultEmptyHint')}</span>}
             </div>
           </div>
         )}
@@ -447,7 +455,7 @@ export function Sidebar({ activeId, onOpen, onDetail, collapsed, onToggleCollaps
 
 // ---- ConnRow ----
 
-export function ConnRow({ conn, active, onOpen, onDetail, nested, selectable, selected, onSelectToggle }: ConnRowProps) {
+export function ConnRow({ conn, active, onOpen, onDetail, nested, selectable, selected, onSelectToggle, favorite, onFavoriteToggle }: ConnRowProps) {
   const D = useData()
   const { t } = useTranslation()
   const [hover, setHover] = useState(false)
@@ -495,6 +503,23 @@ export function ConnRow({ conn, active, onOpen, onDetail, nested, selectable, se
         </div>
         <span className="ell mono" style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{nested ? (D.engineMeta[conn.engine ?? ''] || {}).label : conn.sub}</span>
       </div>
+      {onFavoriteToggle && (hover || favorite) && (
+        <button
+          className="icon-btn bare"
+          title={favorite ? t('shell.unfavorite') : t('shell.favorite')}
+          aria-label={favorite ? t('shell.unfavorite') : t('shell.favorite')}
+          onClick={e => { e.stopPropagation(); onFavoriteToggle(conn) }}
+          style={{
+            flexShrink: 0,
+            width: 24,
+            height: 24,
+            color: favorite ? 'var(--signal-amber)' : 'var(--text-faint)',
+            background: favorite ? 'color-mix(in srgb, var(--signal-amber) 12%, transparent)' : 'transparent',
+          }}
+        >
+          <Icon name="star" size={14} fill={favorite ? 'currentColor' : 'none'} />
+        </button>
+      )}
     </div>
   )
 }

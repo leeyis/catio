@@ -15,11 +15,14 @@ export interface SplitTerminalProps {
   conn: Connection | null
   sessionId?: string
   active?: boolean
+  connected?: boolean
   resolveSessionId?: (connId: string) => string | undefined
   mxCandidates?: Connection[]
   ensureSession?: (connId: string) => Promise<string | 'needs-auth' | 'failed'>
   onConnectTarget?: (connId: string) => void
   sendToPty?: (sessionId: string, cmd: string) => Promise<boolean>
+  onSessionClosed?: (sessionId: string) => void
+  onReconnect?: () => Promise<boolean> | boolean | void
   /** Reports the FOCUSED pane's live channel id (null when none). */
   onChannel?: (sessionId: string, chanId: string | null) => void
 }

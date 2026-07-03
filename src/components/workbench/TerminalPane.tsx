@@ -31,6 +31,8 @@ export interface TerminalPaneProps {
    * + resize the PTY + focus so xterm lays out and redraws correctly.
    */
   active?: boolean
+  /** App-level connection state. When false, the toolbar and reconnect shortcut show disconnected. */
+  connected?: boolean
   /**
    * 把连接 id 映射到其 live session id。用于广播候选显示「已连接/未连接」状态；
    * 缺省（demo）时回退到候选自身 status。
@@ -53,6 +55,10 @@ export interface TerminalPaneProps {
    * 由 App 解析该会话的 chan 并 termWrite；自动建连的新标签通道注册有延迟，内部会轮询等待。
    */
   sendToPty?: (sessionId: string, cmd: string) => Promise<boolean>
+  /** Server-side terminal/session close notification. */
+  onSessionClosed?: (sessionId: string) => void
+  /** Reconnect the owning terminal tab. Returns true when a new session was opened immediately. */
+  onReconnect?: () => Promise<boolean> | boolean | void
   /**
    * Surfaces the live PTY channel id to App so it can write into the active
    * terminal (e.g. snippet/history "insert"). Called with the chanId once
@@ -163,6 +169,9 @@ function applyInputDelta(input: string, data: string): string {
 function isPasteShortcut(ev: KeyboardEvent): boolean {
   return (ev.key === 'v' || ev.key === 'V') && (ev.ctrlKey || ev.metaKey) && !ev.altKey
 }
+function isReconnectShortcut(ev: KeyboardEvent): boolean {
+  return (ev.key === 'r' || ev.key === 'R') && ev.ctrlKey && !ev.metaKey && !ev.altKey && !ev.shiftKey
+}
 function isEditableOutsideTerminal(target: EventTarget | null, terminalHost: HTMLElement): boolean {
   if (!(target instanceof Element)) return false
   if (terminalHost.contains(target)) return false
@@ -222,12 +231,13 @@ interface MxTarget {
 }
 type MxRunState = Record<string, MxTarget>
 
-export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCandidates, ensureSession, onConnectTarget, sendToPty, onChannel, isFocused = true, split }: TerminalPaneProps) {
+export function TerminalPane({ conn, sessionId, active, connected, resolveSessionId, mxCandidates, ensureSession, onConnectTarget, sendToPty, onChannel, onSessionClosed, onReconnect, isFocused = true, split }: TerminalPaneProps) {
   const { t } = useTranslation()
   const D = useData()
   const { prefs } = usePrefs()
   const [broadcast, setBroadcast] = useState(false)
   const [mxOpen, setMxOpen] = useState(false)
+  const [sessionClosed, setSessionClosed] = useState(false)
   const selfId = conn ? conn.id : 'h-bastion'
   const selfProto = conn ? (conn.proto || 'ssh') : 'ssh'
   // Broadcast targets must match the ACTIVE tab: same kind (host) AND same protocol —
@@ -265,6 +275,10 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
   // only on session identity) always calls the current closure without re-running.
   const onChannelRef = useRef<TerminalPaneProps['onChannel']>(onChannel)
   onChannelRef.current = onChannel
+  const onSessionClosedRef = useRef<TerminalPaneProps['onSessionClosed']>(onSessionClosed)
+  onSessionClosedRef.current = onSessionClosed
+  const onReconnectRef = useRef<TerminalPaneProps['onReconnect']>(onReconnect)
+  onReconnectRef.current = onReconnect
   const [selBar, setSelBar] = useState<{ left: number; top: number; text: string } | null>(null)
   // ---- 历史补全(Phase 1:候选下拉,无幽灵文本)----
   // suggest:可见时的候选列表 + 坐标;为 null 时不渲染。selectedIndex 单独存以便键盘移动。
@@ -308,6 +322,17 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
   // 取 @ 后、: 前的主机段二者方可相等匹配。不复用于工具栏显示,避免改动既有 UI。
   const matchHost = conn ? hostFromSub(conn.sub) : 'db-bastion'
   const live = !!sessionId && (isTauri() || isServer())
+  const terminalConnected = live && !sessionClosed && (connected ?? true)
+  const terminalConnectedRef = useRef(terminalConnected)
+  terminalConnectedRef.current = terminalConnected
+  const closedNotifiedRef = useRef(false)
+  const reconnectingRef = useRef(false)
+
+  useEffect(() => {
+    closedNotifiedRef.current = false
+    reconnectingRef.current = false
+    setSessionClosed(false)
+  }, [sessionId])
 
   // 把 connId 映射到显示名：优先候选列表，回退 D.byId，最后用 id 本身。
   const nameForConn = (connId: string): string =>
@@ -782,6 +807,21 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
     window.addEventListener('paste', onWindowPaste, true)
     window.addEventListener('keydown', onWindowKeyDown, true)
 
+    const requestReconnect = () => {
+      const fn = onReconnectRef.current
+      if (!fn || reconnectingRef.current) return
+      reconnectingRef.current = true
+      term.write(`\r\n\x1b[2m[${t('terminal.reconnecting')}]\x1b[0m\r\n`)
+      Promise.resolve(fn())
+        .then(ok => {
+          if (ok) {
+            try { term.clear() } catch { /* best-effort */ }
+          }
+        })
+        .catch(() => { /* App surfaces connect errors through the existing modal path. */ })
+        .finally(() => { reconnectingRef.current = false })
+    }
+
     // attachCustomKeyEventHandler:候选可见时拦截 ↑/↓/Enter/Tab/Esc(在抵达 PTY 前)。
     // 测试里 xterm mock 没有这个方法 → 存在性保护。
     if (typeof term.attachCustomKeyEventHandler === 'function') {
@@ -794,6 +834,10 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
           try { ev.preventDefault(); ev.stopPropagation() } catch { /* noop */ }
           try { term.focus() } catch { /* best-effort */ }
           return false
+        }
+        if (isReconnectShortcut(ev) && !terminalConnectedRef.current && onReconnectRef.current) {
+          requestReconnect()
+          return swallow()
         }
         // Ctrl+v must not be translated into the terminal control character (^V).
         // Returning false blocks xterm's key processing while leaving the browser's paste default
@@ -919,9 +963,14 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
             // Server-initiated close: write notice, close channel, then mark it dead so
             // keystrokes and unmount cleanup don't call termClose on a dead channel.
             clearInputCapture()
-            term.write('\r\n\x1b[2m[connection closed]\x1b[0m\r\n')
+            setSessionClosed(true)
+            term.write(`\r\n\x1b[2m[${t('terminal.disconnected')}]\x1b[0m\r\n`)
             if (chanIdRef.current) { termClose(sessionId, chanIdRef.current); chanIdRef.current = null }
             onChannelRef.current?.(sessionId, null)
+            if (!closedNotifiedRef.current) {
+              closedNotifiedRef.current = true
+              onSessionClosedRef.current?.(sessionId)
+            }
           }
         })
         if (disposed) { unlisten(); if (chanIdRef.current) { termClose(sessionId, chanIdRef.current); chanIdRef.current = null } return }
@@ -942,7 +991,7 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
           ro.observe(hostEl)
         }
       })()
-    } else if (isTauri()) {
+    } else if (isTauri() || isServer()) {
       // Restored tab whose session ended / wasn't reconnected. Show a clear notice rather
       // than misleading mock data (the dev/non-Tauri path below keeps the read-only mock).
       term.write(`\r\n\x1b[2m[${t('terminal.disconnected')}]\x1b[0m\r\n`)
@@ -1086,7 +1135,12 @@ export function TerminalPane({ conn, sessionId, active, resolveSessionId, mxCand
             <span className="row gap6" style={{ fontSize: 13, fontWeight: 600 }}>{conn ? conn.name : 'db-bastion'} <span className="mono" style={{ fontSize: 10, color: 'var(--text-faint)', fontWeight: 400 }}>ssh-ed25519</span></span>
             <span className="mono" style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{host} · xterm-256color</span>
           </div>
-          <span className="chip" style={{ background: 'color-mix(in srgb, var(--signal-green) 13%, transparent)', color: 'var(--signal-green)' }}><span className="dot" style={{ background: 'var(--signal-green)' }} /> connected</span>
+          <span className="chip" style={{
+            background: terminalConnected ? 'color-mix(in srgb, var(--signal-green) 13%, transparent)' : 'var(--surface-sunken)',
+            color: terminalConnected ? 'var(--signal-green)' : 'var(--text-faint)',
+          }}>
+            <span className="dot" style={{ background: terminalConnected ? 'var(--signal-green)' : 'var(--text-faint)' }} /> {terminalConnected ? t('workbench.connected') : t('workbench.disconnected')}
+          </span>
         </div>
         <div className="row gap6" style={{ flex: 'none' }}>
           <div style={{ position: 'relative' }}>

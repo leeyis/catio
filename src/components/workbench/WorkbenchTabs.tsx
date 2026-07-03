@@ -15,6 +15,7 @@ export interface WorkbenchTabsProps {
   onNew: () => void
   onDuplicate: (id: string) => void
   onRename: (id: string, title: string) => void
+  terminalConnected?: (tab: Tab) => boolean
 }
 
 interface ContextMenu {
@@ -23,7 +24,7 @@ interface ContextMenu {
   y: number
 }
 
-export function WorkbenchTabs({ tabs, activeTab, onActivate, onClose, onCloseOthers, onCloseAll, onNew, onDuplicate, onRename }: WorkbenchTabsProps) {
+export function WorkbenchTabs({ tabs, activeTab, onActivate, onClose, onCloseOthers, onCloseAll, onNew, onDuplicate, onRename, terminalConnected }: WorkbenchTabsProps) {
   const { t } = useTranslation()
   const D = useData()
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null)
@@ -77,6 +78,7 @@ export function WorkbenchTabs({ tabs, activeTab, onActivate, onClose, onCloseOth
       {tabs.map(tab => {
         const conn = D.byId[tab.connId];
         const active = tab.id === activeTab;
+        const connected = tab.kind === 'terminal' ? (terminalConnected?.(tab) ?? true) : false;
         return (
           <div key={tab.id} onClick={() => onActivate(tab.id)}
             onContextMenu={e => handleContextMenu(e, tab.id)}
@@ -88,7 +90,7 @@ export function WorkbenchTabs({ tabs, activeTab, onActivate, onClose, onCloseOth
             <Icon name={tab.kind === 'terminal' ? (conn && conn.proto === 'local' ? 'terminal' : 'globe') : tab.kind === 'remote-file' ? 'file-code' : 'table-2'} size={14}
               style={{ color: active ? 'var(--accent-primary)' : 'var(--text-tertiary)' }} />
             <span className="ell" style={{ maxWidth: 150, fontSize: 12.5, fontWeight: active ? 600 : 500, color: active ? 'var(--accent-primary)' : 'var(--text-secondary)' }}>{tab.title}</span>
-            {tab.kind === 'terminal' && <span className="dot" style={{ background: 'var(--signal-green)' }} />}
+            {tab.kind === 'terminal' && <span className="dot" title={connected ? t('workbench.connected') : t('workbench.disconnected')} style={{ background: connected ? 'var(--signal-green)' : 'var(--text-faint)' }} />}
             {tab.kind === 'remote-file' && tab.dirty && <span className="dot" style={{ background: 'var(--signal-amber)' }} />}
             <button className="icon-btn bare" style={{ width: 18, height: 18 }} onClick={(e) => { e.stopPropagation(); onClose(tab.id); }}><Icon name="x" size={12} /></button>
           </div>

@@ -17,6 +17,9 @@
     "filterPlaceholder": "过滤…",
     "vault": "Vault",
     "all": "全部",
+    "favorites": "收藏",
+    "favorite": "收藏",
+    "unfavorite": "取消收藏",
     "hosts": "主机",
     "databases": "数据库",
     "saved": "已保存",
@@ -33,6 +36,8 @@
     "noMatchingConns": "无匹配连接",
     "vaultEmptyTitle": "还没有连接",
     "vaultEmptyHint": "在中间页面新建主机或数据库，连接会显示在这里。",
+    "favoriteEmptyTitle": "暂无收藏",
+    "favoriteEmptyHint": "切到主机或数据库，悬浮条目后点星标加入收藏。",
     "localLoginIsolated": "本地登录 · 已隔离",
     "activeStatus": "3 active · 1 tunnel",
     "authDisabled": "未设登录密码",
@@ -378,7 +383,8 @@
     "noDesktop": "(演示模式:非桌面环境,VNC 未连接)"
   },
   "terminal": {
-    "disconnected": "连接已断开 — 在左侧栏点击该连接可重新连接"
+    "disconnected": "连接已断开 — 按 Ctrl+R 重连",
+    "reconnecting": "正在重连…"
   },
   "compare": {
     "title": "数据对比",
