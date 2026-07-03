@@ -10,7 +10,7 @@
 //! reaches the admin's own resources (the `is_admin` bypass used by `/api/invoke` deliberately
 //! does NOT apply here). A crafted/guessed id outside the owned set resolves to None/Err.
 //!
-//! The 12 tools are the shared [`crate::mcp::core`] implementation; this module only adds the
+//! The tools are the shared [`crate::mcp::core`] implementation; this module only adds the
 //! transport: an SSE session table (sessionId → sender) + a small JSON-RPC envelope. P3b adds a
 //! realtime log streamed over the WS hub (`mcp-log://<user_id>` + `mcp-log://all`, gated on
 //! `has_subscriber`), a [`WsSink`] that remaps SFTP progress onto it, and an optional network-layer

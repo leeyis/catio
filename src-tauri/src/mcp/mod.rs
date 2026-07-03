@@ -16,7 +16,7 @@
 //! Intentionally hand-rolled over tokio (no extra HTTP framework) to keep the
 //! binary small.
 //!
-//! The 12 tools themselves live in the transport/identity-agnostic [`core`] module so
+//! The tools themselves live in the transport/identity-agnostic [`core`] module so
 //! the desktop (here) and server (`crate::server_mcp`) heads share ONE implementation;
 //! this module keeps the desktop-specific HTTP/SSE transport, file logging, `mcp://log`
 //! emit, IP whitelist, and Tauri commands, and injects a [`DesktopTargets`] visible set.
@@ -416,7 +416,7 @@ async fn dispatch(ctx: &ServerCtx, req: &Value, client_ip: &str) -> Option<Value
     }
 }
 
-// ---- desktop McpTargets + tool entry (delegates the 12 tools to the shared core) ----
+// ---- desktop McpTargets + tool entry (delegates tools to the shared core) ----
 
 /// Desktop visible set — backs the frontend-synced `conns`/`hosts` registries (single user),
 /// mirroring the old `resolve_conn_id`/`resolve_host` + list helpers verbatim.
