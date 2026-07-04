@@ -92,6 +92,39 @@ async fn login_wrong_password_401_correct_200_and_cookie_gates_access() {
 }
 
 #[tokio::test]
+async fn self_registration_requires_existing_admin_and_creates_normal_logged_in_user() {
+    let base = start().await;
+
+    // Self-registration must not be able to create the first account; otherwise a fresh server
+    // could end up with no administrator.
+    let early = jar_client();
+    let (st, _) = invoke(&early, &base, "auth_register",
+        json!({ "username": "alice", "password": "secret123" })).await;
+    assert_eq!(st, 400);
+
+    let admin = jar_client();
+    invoke(&admin, &base, "auth_bootstrap", json!({ "username": "admin", "password": "secret123" })).await;
+
+    let alice = jar_client();
+    let (st, body) = invoke(&alice, &base, "auth_register",
+        json!({ "username": "alice", "password": "secret123", "isAdmin": true })).await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body["user"]["username"], "alice");
+    assert_eq!(body["user"]["isAdmin"], false, "self-registration must never grant admin");
+
+    let (st, body) = invoke(&alice, &base, "auth_me", json!({})).await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body["user"]["username"], "alice");
+
+    let (st, _) = invoke(&alice, &base, "user_create",
+        json!({ "username": "eve", "password": "secret123", "isAdmin": true })).await;
+    assert_eq!(st, 403, "self-registered users are normal users");
+
+    let (_, body) = invoke(&admin, &base, "user_list", json!({})).await;
+    assert!(body.as_array().unwrap().iter().any(|u| u["username"] == "alice"), "{body}");
+}
+
+#[tokio::test]
 async fn change_password_is_self_service_and_gated() {
     let base = start().await;
     let cl = jar_client();

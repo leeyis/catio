@@ -33,9 +33,8 @@ async fn invoke(cl: &reqwest::Client, base: &str, cmd: &str, args: Value) -> (u1
 async fn admin_and_bob(base: &str) -> (reqwest::Client, reqwest::Client) {
     let admin = jar();
     invoke(&admin, base, "auth_bootstrap", json!({ "username": "admin", "password": "secret123" })).await;
-    invoke(&admin, base, "user_create", json!({ "username": "bob", "password": "secret123", "isAdmin": false })).await;
     let bob = jar();
-    invoke(&bob, base, "auth_login", json!({ "username": "bob", "password": "secret123" })).await;
+    invoke(&bob, base, "auth_register", json!({ "username": "bob", "password": "secret123" })).await;
     (admin, bob)
 }
 

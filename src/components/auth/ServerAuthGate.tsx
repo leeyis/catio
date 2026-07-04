@@ -9,7 +9,7 @@
 import React, { createContext, useContext, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { isServer } from '../../services/transport'
-import { authMe, authLogin, authBootstrap, authLogout, type ServerUser } from '../../services/auth'
+import { authMe, authLogin, authRegister, authBootstrap, authLogout, type ServerUser } from '../../services/auth'
 import { hydrateUserStores, clearUserStores, clearEphemeralServerState, USER_STORES } from '../../services/userStore'
 
 import { Icon } from '../Icon'
@@ -35,7 +35,7 @@ export function useServerAuth(): ServerAuthCtx {
   return useContext(Ctx)
 }
 
-type Phase = 'loading' | 'login' | 'bootstrap' | 'ready'
+type Phase = 'loading' | 'login' | 'bootstrap' | 'register' | 'ready'
 
 export function ServerAuthGate({ children }: { children: React.ReactNode }) {
   // Desktop / dev / test: no server auth at all — pass through untouched.
@@ -95,7 +95,11 @@ function ServerAuthGateImpl({ children }: { children: React.ReactNode }) {
     )
   }
 
-  return <AuthForm mode={phase === 'bootstrap' ? 'bootstrap' : 'login'} onDone={refresh} />
+  return <AuthForm
+    mode={phase === 'bootstrap' ? 'bootstrap' : phase === 'register' ? 'register' : 'login'}
+    onDone={refresh}
+    onModeChange={setPhase}
+  />
 }
 
 const overlay: React.CSSProperties = {
@@ -103,9 +107,15 @@ const overlay: React.CSSProperties = {
   background: 'var(--app-bg, #0b0d12)',
 }
 
-function AuthForm({ mode, onDone }: { mode: 'login' | 'bootstrap'; onDone: () => Promise<void> }) {
+function AuthForm({ mode, onDone, onModeChange }: {
+  mode: 'login' | 'bootstrap' | 'register'
+  onDone: () => Promise<void>
+  onModeChange: (mode: 'login' | 'register') => void
+}) {
   const { t } = useTranslation()
   const init = mode === 'bootstrap'
+  const register = mode === 'register'
+  const creating = init || register
   const [u, setU] = useState('')
   const [p, setP] = useState('')
   const [p2, setP2] = useState('')
@@ -116,13 +126,14 @@ function AuthForm({ mode, onDone }: { mode: 'login' | 'bootstrap'; onDone: () =>
   async function submit() {
     setErr('')
     if (!u.trim()) { setErr(t('serverAuth.errNoUsername')); return }
-    if (init) {
+    if (creating) {
       if (p.length < 6) { setErr(t('serverAuth.errPassTooShort')); return }
       if (p !== p2) { setErr(t('serverAuth.errPassMismatch')); return }
     }
     setBusy(true)
     try {
       if (init) await authBootstrap(u.trim(), p)
+      else if (register) await authRegister(u.trim(), p)
       else await authLogin(u.trim(), p)
       await onDone()
     } catch (e) {
@@ -134,6 +145,10 @@ function AuthForm({ mode, onDone }: { mode: 'login' | 'bootstrap'; onDone: () =>
 
   const field: React.CSSProperties = { height: 40, padding: '0 12px', borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', fontSize: 13.5, color: 'var(--text-primary)', outline: 'none', width: '100%' }
   const Label = ({ children }: { children: React.ReactNode }) => <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{children}</span>
+  const title = init ? t('serverAuth.bootstrapTitle') : register ? t('serverAuth.registerTitle') : t('serverAuth.loginTitle')
+  const subtitle = init ? t('serverAuth.bootstrapSub') : register ? t('serverAuth.registerSub') : t('serverAuth.loginSub')
+  const actionIcon = init ? 'check' : register ? 'user' : 'lock'
+  const actionText = init ? t('serverAuth.btnCreate') : register ? t('serverAuth.btnRegister') : t('serverAuth.btnSignIn')
 
   return (
     <div style={overlay}>
@@ -147,9 +162,9 @@ function AuthForm({ mode, onDone }: { mode: 'login' | 'bootstrap'; onDone: () =>
             </div>
           </div>
           <div className="col" style={{ alignItems: 'center', gap: 3 }}>
-            <span style={{ fontSize: 18, fontWeight: 700, letterSpacing: '-0.3px' }}>{init ? t('serverAuth.bootstrapTitle') : t('serverAuth.loginTitle')}</span>
+            <span style={{ fontSize: 18, fontWeight: 700, letterSpacing: '-0.3px' }}>{title}</span>
             <span style={{ fontSize: 12.5, color: 'var(--text-tertiary)', textAlign: 'center', textWrap: 'pretty' }}>
-              {init ? t('serverAuth.bootstrapSub') : t('serverAuth.loginSub')}
+              {subtitle}
             </span>
           </div>
         </div>
@@ -164,14 +179,14 @@ function AuthForm({ mode, onDone }: { mode: 'login' | 'bootstrap'; onDone: () =>
             <Label>{t('serverAuth.fieldPassword')}</Label>
             <div className="row" style={{ position: 'relative' }}>
               <input type={showPw ? 'text' : 'password'} value={p} onChange={e => { setP(e.target.value); setErr('') }}
-                onKeyDown={e => { if (e.key === 'Enter' && !init) submit() }}
+                onKeyDown={e => { if (e.key === 'Enter' && mode === 'login') submit() }}
                 placeholder={t('serverAuth.fieldPasswordPlaceholder')} style={field} />
               <button className="icon-btn bare" style={{ position: 'absolute', right: 4, top: 4, width: 32, height: 32 }} onClick={() => setShowPw(s => !s)} tabIndex={-1}>
                 <Icon name={showPw ? 'eye-off' : 'eye'} size={15} />
               </button>
             </div>
           </label>
-          {init && (
+          {creating && (
             <label className="col gap5">
               <Label>{t('serverAuth.fieldConfirmPassword')}</Label>
               <input type="password" value={p2} onChange={e => { setP2(e.target.value); setErr('') }}
@@ -184,8 +199,17 @@ function AuthForm({ mode, onDone }: { mode: 'login' | 'bootstrap'; onDone: () =>
         {/* actions */}
         <div className="col gap10" style={{ padding: '12px 28px 18px' }}>
           <button className="btn btn-primary lg" style={{ width: '100%', opacity: busy ? 0.6 : 1 }} disabled={busy} onClick={submit}>
-            <Icon name={init ? 'check' : 'lock'} size={16} /> {init ? t('serverAuth.btnCreate') : t('serverAuth.btnSignIn')}
+            <Icon name={actionIcon} size={16} /> {actionText}
           </button>
+          {!init && (
+            <div className="row gap6" style={{ justifyContent: 'center', alignItems: 'center', fontSize: 12, color: 'var(--text-tertiary)' }}>
+              <span>{register ? t('serverAuth.hasAccount') : t('serverAuth.noAccount')}</span>
+              <button className="bare" style={{ border: 'none', background: 'transparent', color: 'var(--accent-primary)', fontWeight: 700, cursor: 'pointer', padding: 0 }}
+                onClick={() => { setErr(''); setP2(''); onModeChange(register ? 'login' : 'register') }}>
+                {register ? t('serverAuth.backToLogin') : t('serverAuth.goRegister')}
+              </button>
+            </div>
+          )}
         </div>
 
         {/* footer note */}

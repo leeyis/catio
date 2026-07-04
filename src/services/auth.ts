@@ -31,6 +31,12 @@ export async function authLogin(username: string, password: string): Promise<Ser
   return r.user
 }
 
+/** Self-register a normal server user; on success the server sets the session cookie. */
+export async function authRegister(username: string, password: string): Promise<ServerUser> {
+  const r = await rpc<{ user: ServerUser }>('auth_register', { username, password })
+  return r.user
+}
+
 /** Create the first admin on a fresh server (only valid when no users exist), then auto-login. */
 export async function authBootstrap(username: string, password: string): Promise<ServerUser> {
   const r = await rpc<{ user: ServerUser }>('auth_bootstrap', { username, password })

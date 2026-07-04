@@ -257,6 +257,7 @@ async fn invoke(State(st): State<AppState>, headers: HeaderMap, Json(req): Json<
     // Public / cookie-managing auth commands — reachable WITHOUT a session.
     match req.cmd.as_str() {
         "auth_login" => return auth_login(&st, &req.args).await,
+        "auth_register" => return auth_register(&st, &req.args).await,
         "auth_logout" => return auth_logout(&st, token),
         "auth_me" => {
             // `needsBootstrap` lets the UI show the first-run "create admin" form (no users yet)
@@ -380,6 +381,29 @@ async fn auth_login(st: &AppState, args: &Value) -> Response {
             login_response(&user, &token)
         }
         Err(e) => (StatusCode::UNAUTHORIZED, Json(json!({ "error": e }))).into_response(),
+    }
+}
+
+/// Self-service signup for the web deploy. It is intentionally NOT a bootstrap path: the first
+/// account must still be an admin created by `auth_bootstrap` or CATIO_ADMIN_* env vars. Every
+/// self-registered account is a normal user; admins can still create admin accounts via
+/// `user_create`.
+async fn auth_register(st: &AppState, args: &Value) -> Response {
+    if st.auth.user_count().map(|n| n == 0).unwrap_or(true) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "请先创建管理员账户" })),
+        )
+            .into_response();
+    }
+    let username = args.get("username").and_then(Value::as_str).unwrap_or("");
+    let password = args.get("password").and_then(Value::as_str).unwrap_or("");
+    match st.auth.create_user(username, password, false) {
+        Ok(user) => {
+            let token = create_session(st, user.clone());
+            login_response(&user, &token)
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
     }
 }
 

@@ -6,17 +6,19 @@ const h = vi.hoisted(() => ({
   isServer: vi.fn(),
   authMe: vi.fn(),
   authLogin: vi.fn(),
+  authRegister: vi.fn(),
   authBootstrap: vi.fn(),
   authLogout: vi.fn(),
 }))
 vi.mock('../../services/transport', () => ({ isServer: h.isServer, isTauri: () => false, rpc: vi.fn() }))
 vi.mock('../../services/auth', () => ({
-  authMe: h.authMe, authLogin: h.authLogin, authBootstrap: h.authBootstrap, authLogout: h.authLogout,
+  authMe: h.authMe, authLogin: h.authLogin, authRegister: h.authRegister, authBootstrap: h.authBootstrap, authLogout: h.authLogout,
 }))
 
 import { ServerAuthGate } from './ServerAuthGate'
 
 const ADMIN = { id: 1, username: 'admin', isAdmin: true, createdAt: 0 }
+const USER = { id: 2, username: 'alice', isAdmin: false, createdAt: 0 }
 
 describe('ServerAuthGate', () => {
   beforeAll(async () => { await i18n.changeLanguage('en') })
@@ -64,6 +66,23 @@ describe('ServerAuthGate', () => {
     fireEvent.click(screen.getByText('Sign in'))
     await waitFor(() => expect(screen.getByText('APP')).toBeTruthy())
     expect(h.authLogin).toHaveBeenCalledWith('admin', 'secret123')
+  })
+
+  it('registers a normal user from the login form, then reveals the app', async () => {
+    h.isServer.mockReturnValue(true)
+    h.authMe.mockResolvedValueOnce({ user: null, needsBootstrap: false }) // initial
+    h.authRegister.mockResolvedValue(USER)
+    h.authMe.mockResolvedValueOnce({ user: USER, needsBootstrap: false }) // after register
+    render(<ServerAuthGate><div>APP</div></ServerAuthGate>)
+    await waitFor(() => expect(screen.getByText('Sign in to Catio')).toBeTruthy())
+    fireEvent.click(screen.getByText('Register'))
+    await waitFor(() => expect(screen.getByText('Create Catio account')).toBeTruthy())
+    fireEvent.change(screen.getByPlaceholderText('Enter a username'), { target: { value: 'alice' } })
+    fireEvent.change(screen.getByPlaceholderText('Enter your password'), { target: { value: 'secret123' } })
+    fireEvent.change(screen.getByPlaceholderText('Re-enter your password'), { target: { value: 'secret123' } })
+    fireEvent.click(screen.getByText('Create account'))
+    await waitFor(() => expect(screen.getByText('APP')).toBeTruthy())
+    expect(h.authRegister).toHaveBeenCalledWith('alice', 'secret123')
   })
 
   it('surfaces the server error message on a failed login', async () => {
