@@ -13,6 +13,7 @@ import {
   listActiveDbConnections,
   type DbProfile,
 } from '../../state/dbConnections'
+import { loadProfiles } from '../../state/connections'
 import { dbErrMsg } from '../../services/db'
 import { findEngine } from '../../services/dbEngines'
 
@@ -59,6 +60,17 @@ function Row({ k, v, mono }: RowProps) {
     <div className="row" style={{ justifyContent: 'space-between', padding: '8px 0', borderBottom: '1px solid var(--border-hairline)' }}>
       <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>{k}</span>
       <span className={mono ? 'mono' : ''} style={{ fontSize: 12, color: 'var(--text-primary)', fontWeight: 500 }}>{v}</span>
+    </div>
+  )
+}
+
+function NotesBlock({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="col" style={{ gap: 6, padding: '10px 0', borderBottom: '1px solid var(--border-hairline)' }}>
+      <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>{label}</span>
+      <span style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--text-primary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+        {value}
+      </span>
     </div>
   )
 }
@@ -120,6 +132,8 @@ function HostDetails({
   const { t } = useTranslation()
   const D = useData()
   const c = conn
+  const profileNotes = c ? loadProfiles().find(p => p.id === c.id)?.notes : undefined
+  const notes = (profileNotes ?? c?.notes ?? '').trim()
 
   if (!c) {
     return (
@@ -164,6 +178,7 @@ function HostDetails({
           {c.stats && <Row k={t('panels.detailUptime')} v={c.stats.up} mono />}
           {c.lastUsed && <Row k={t('panels.detailLastUsed')} v={t('panels.lastUsedAgo', { time: c.lastUsed })} />}
           <Row k={t('panels.detailCredentials')} v={<span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}><Icon name="lock" size={12} style={{ color: 'var(--text-faint)' }} />{t('panels.credentialsValue')}</span>} />
+          {notes && <NotesBlock label={t('panels.detailNotes')} value={notes} />}
         </div>
         <div className="row gap8" style={{ marginTop: 16 }}>
           {connected ? (
@@ -219,6 +234,7 @@ function DbDetails({ conn, onClose, onEdit, onDelete, onConnect, onDisconnect, o
     ?? profile.dbType
 
   const descriptor = `${profile.dbType}://${profile.user}@${profile.host}:${profile.port}/${profile.database ?? ''}`
+  const notes = (profile.notes ?? '').trim()
 
   async function handleCopy() {
     try {
@@ -289,6 +305,7 @@ function DbDetails({ conn, onClose, onEdit, onDelete, onConnect, onDisconnect, o
           <Row k={t('panels.detailPort')} v={profile.port} mono />
           <Row k={t('panels.detailUser')} v={profile.user} mono />
           {profile.database && <Row k={t('panels.detailDatabase')} v={profile.database} mono />}
+          {notes && <NotesBlock label={t('panels.detailNotes')} value={notes} />}
         </div>
 
         {copied && (

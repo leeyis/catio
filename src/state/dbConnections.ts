@@ -28,6 +28,8 @@ export type DbProfile = Omit<DbConnectArgs, 'secret'> & StoreItem & {
   name: string
   /** Optional vault group id; defaults to DEFAULT_DB_GROUP when rendered. */
   group?: string
+  /** User-maintained non-secret notes shown in connection details. */
+  notes?: string
   /** Engine-catalog id (e.g. "cockroachdb"). Distinguishes protocol-family
    *  variants that share a `dbType` so the glyph/logo and edit-mode pre-select
    *  resolve to the right brand. Falls back to `dbType` when absent (legacy
@@ -100,6 +102,7 @@ export function dbProfileToConnection(p: DbProfile, active = false): Connection 
     // brand logo (CockroachDB, MariaDB, …) without affecting dialect.
     engineId: p.engineId,
     status: active ? 'up' : 'idle',
+    ...(p.notes ? { notes: p.notes } : {}),
     ...(p.needsAuth ? { needsAuth: true } : {}),
   }
 }

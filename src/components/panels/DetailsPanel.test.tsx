@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { LanguageProvider } from '../../state/LanguageContext'
 import { DataProvider } from '../../state/DataContext'
 import { DetailsPanel } from './DetailsPanel'
@@ -77,6 +77,12 @@ describe('DetailsPanel (host)', () => {
     wrap(<DetailsPanel conn={CONN} onClose={() => {}} />)
     expect(screen.queryByText('最近使用')).toBeNull()
   })
+
+  it('shows saved host notes in the details panel', () => {
+    wrap(<DetailsPanel conn={{ ...CONN, notes: '密码提示：使用堡垒机账号备注' }} onClose={() => {}} />)
+    expect(screen.getByText('备注')).toBeTruthy()
+    expect(screen.getByText('密码提示：使用堡垒机账号备注')).toBeTruthy()
+  })
 })
 
 describe('DetailsPanel (db)', () => {
@@ -119,6 +125,7 @@ describe('DetailsPanel (db)', () => {
     wrap(<DetailsPanel conn={conn} onClose={() => {}} />)
     fireEvent.click(screen.getByText('复制'))
     expect(writeText).toHaveBeenCalledWith('postgres://postgres@127.0.0.1:55432/orders')
+    await waitFor(() => expect(screen.getAllByText('已复制').length).toBeGreaterThan(0))
   })
 
   it('connect prompts for a secret when no active connection exists', () => {
@@ -135,5 +142,13 @@ describe('DetailsPanel (db)', () => {
     const conn = dbProfileToConnection({ ...profile, id: 'db-missing' })
     wrap(<DetailsPanel conn={conn} onClose={() => {}} />)
     expect(screen.queryByText('orders-pg')).toBeNull()
+  })
+
+  it('shows saved DB notes in the details panel', () => {
+    const noted: DbProfile = { ...profile, id: 'db-noted', notes: '生产只读账号，密码看团队 vault 提示' }
+    saveDbConnection(noted)
+    wrap(<DetailsPanel conn={dbProfileToConnection(noted)} onClose={() => {}} />)
+    expect(screen.getByText('备注')).toBeTruthy()
+    expect(screen.getByText('生产只读账号，密码看团队 vault 提示')).toBeTruthy()
   })
 })

@@ -66,6 +66,15 @@ interface FieldProps {
   onInput?: React.FormEventHandler<HTMLInputElement>
 }
 
+interface TextAreaProps {
+  label: string
+  placeholder?: string
+  value?: string
+  defaultValue?: string
+  onChange?: (v: string) => void
+  inputRef?: React.Ref<HTMLTextAreaElement>
+}
+
 // Hoisted to module scope so it keeps a stable component identity across
 // re-renders — otherwise React remounts the <input> on every render and inputs
 // lose focus/value mid-typing (e.g. when the test result or canTest state changes).
@@ -86,6 +95,34 @@ function Field({ label, value, onChange, placeholder, w, mono, type, numeric, in
         type={type ?? 'text'}
         className={mono ? 'mono' : ''}
         style={{ height: 36, padding: '0 12px', borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }} />
+    </label>
+  )
+}
+
+function TextAreaField({ label, placeholder, value, defaultValue, onChange, inputRef }: TextAreaProps) {
+  const controlled = typeof onChange === 'function'
+  return (
+    <label className="col" style={{ gap: 5 }}>
+      <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{label}</span>
+      <textarea
+        {...(controlled
+          ? { value: value ?? '', onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => onChange!(e.target.value) }
+          : { ref: inputRef, defaultValue: defaultValue ?? value ?? '' })}
+        placeholder={placeholder}
+        rows={3}
+        style={{
+          minHeight: 76,
+          padding: '9px 12px',
+          borderRadius: 10,
+          border: '1px solid var(--border-hairline-alt)',
+          background: 'var(--surface-sunken)',
+          fontSize: 13,
+          lineHeight: 1.45,
+          color: 'var(--text-primary)',
+          outline: 'none',
+          resize: 'vertical',
+        }}
+      />
     </label>
   )
 }
@@ -136,6 +173,7 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onO
   const portRef = useRef<HTMLInputElement>(null)
   const serialPortRef = useRef<HTMLInputElement>(null)
   const userRef = useRef<HTMLInputElement>(null)
+  const notesRef = useRef<HTMLTextAreaElement>(null)
   const ALL_PROTOS = [
     { id: 'ssh', label: 'SSH' }, { id: 'mosh', label: 'Mosh' },
     { id: 'telnet', label: 'Telnet' }, { id: 'serial', label: 'Serial' },
@@ -221,6 +259,7 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onO
   const [dbPort, setDbPort] = useState(editDbProfile ? String(editDbProfile.port) : '5432')
   const [dbUser, setDbUser] = useState(editDbProfile?.user ?? '')
   const [dbDatabase, setDbDatabase] = useState(editDbProfile?.database ?? '')
+  const [dbNotes, setDbNotes] = useState(editDbProfile?.notes ?? '')
   // Advanced connection params (URL query string), e.g. MongoDB
   // "authSource=admin&directConnection=true".
   const [dbOptions, setDbOptions] = useState(editDbProfile?.options ?? '')
@@ -369,11 +408,12 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onO
       const user = (userRef.current?.value || '').trim()
       const port = Number(portRef.current?.value) || 22
       const name = (nameRef.current?.value || '').trim() || host
+      const notes = (notesRef.current?.value || '').trim()
       const auth = currentAuth()
       // Persist jump WITHOUT secret. Preserve the detected OS across edits.
       const jump = currentJumpProfile()
       try {
-        saveProfile({ id: editHost.id, name, host, port, user, auth, jump, ...(group ? { group } : {}), ...(editHost.os ? { os: editHost.os } : {}) })
+        saveProfile({ id: editHost.id, name, host, port, user, auth, jump, ...(group ? { group } : {}), ...(notes ? { notes } : {}), ...(editHost.os ? { os: editHost.os } : {}) })
       } catch { /* localStorage unavailable — ignore */ }
       onSaved?.()
       onClose()
@@ -428,6 +468,7 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onO
       const user = (userRef.current?.value || '').trim()
       const port = Number(portRef.current?.value) || 22
       const name = (nameRef.current?.value || '').trim() || host
+      const notes = (notesRef.current?.value || '').trim()
       const auth = currentAuth()
       // args carries the in-memory secret so App can connect WITHOUT a 2nd prompt.
       // jump.secret also rides in args (in-memory only, never persisted).
@@ -436,7 +477,7 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onO
       const jump = currentJumpProfile()
       const profileId = `live-${host}:${port}-${user}`
       try {
-        saveProfile({ id: profileId, name, host, port, user, auth, jump, ...(group ? { group } : {}) })
+        saveProfile({ id: profileId, name, host, port, user, auth, jump, ...(group ? { group } : {}), ...(notes ? { notes } : {}) })
       } catch { /* localStorage unavailable — ignore */ }
       onConnect(args, { name, profileId })
     }
@@ -505,6 +546,7 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onO
       port: Number(dbPort),
       user: dbUser,
       ...(dbDatabase ? { database: dbDatabase } : {}),
+      ...(dbNotes.trim() ? { notes: dbNotes.trim() } : {}),
       ...(dbOptions.trim() ? { options: dbOptions.trim() } : {}),
       ...(dbSsl ? { ssl: true } : {}),
       ...(dbSsl && dbCaCertPath.trim() ? { caCertPath: dbCaCertPath.trim() } : {}),
@@ -821,6 +863,22 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onO
                 )}
               </div>
             )}
+            {kind === 'db' ? (
+              <TextAreaField
+                label={t('modals.fieldNotes')}
+                value={dbNotes}
+                onChange={setDbNotes}
+                placeholder={t('modals.fieldNotesPlaceholder')}
+              />
+            ) : proto === 'ssh' ? (
+              <TextAreaField
+                key={`notes-${kind}`}
+                label={t('modals.fieldNotes')}
+                defaultValue={editHost?.notes ?? ''}
+                inputRef={notesRef}
+                placeholder={t('modals.fieldNotesPlaceholder')}
+              />
+            ) : null}
             {/* Error message */}
             {kind === 'db' && dbError && (
               <span style={{ fontSize: 12, color: 'var(--danger-fg)' }}>{dbError}</span>

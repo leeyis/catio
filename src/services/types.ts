@@ -29,6 +29,8 @@ export interface Connection {
    *  connection (so the sidebar can badge "owned by X"). Absent for one's own connections. */
   ownerName?: string
   tags?: string[]
+  /** User-maintained non-secret notes shown in connection details. */
+  notes?: string
   lastUsed?: string
   proto?: 'ssh' | 'telnet' | 'local' | 'serial' | 'mosh' | 'vnc'
   os?: string

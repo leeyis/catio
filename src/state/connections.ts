@@ -20,6 +20,8 @@ export interface ConnectionProfile extends StoreItem {
   jump?: JumpProfile
   /** Vault group id (from state/groups). Absent → renders under "未分组". */
   group?: string
+  /** User-maintained non-secret notes shown in connection details. */
+  notes?: string
   /** Detected OS id (ubuntu/debian/alpine/…), set after a successful connect so
    *  the sidebar glyph shows the real OS logo. Absent → generic host icon. */
   os?: string

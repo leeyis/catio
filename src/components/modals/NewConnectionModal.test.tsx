@@ -9,6 +9,7 @@ const h = vi.hoisted(() => ({
   testConnection: vi.fn(),
   dbConnect: vi.fn(),
   saveProfile: vi.fn(),
+  saveDbConnection: vi.fn(),
   sshTest: vi.fn(),
 }))
 vi.mock('../../services/db', async (importOriginal) => {
@@ -16,6 +17,10 @@ vi.mock('../../services/db', async (importOriginal) => {
   return { ...mod, testConnection: h.testConnection, dbConnect: h.dbConnect }
 })
 vi.mock('../../state/connections', () => ({ saveProfile: h.saveProfile }))
+vi.mock('../../state/dbConnections', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../state/dbConnections')>()
+  return { ...actual, saveDbConnection: h.saveDbConnection, generateProfileId: () => 'db-generated-id' }
+})
 vi.mock('../../services/ssh', async (orig) => {
   const actual = await orig<typeof import('../../services/ssh')>()
   return { ...actual, sshTest: h.sshTest }
@@ -233,7 +238,12 @@ describe('NewConnectionModal — multi-engine catalog', () => {
 })
 
 describe('NewConnectionModal — create mode', () => {
-  beforeEach(() => { h.saveProfile.mockClear(); h.sshTest.mockReset() })
+  beforeEach(() => {
+    h.saveProfile.mockClear()
+    h.saveDbConnection.mockReset()
+    h.dbConnect.mockReset()
+    h.sshTest.mockReset()
+  })
 
   it('starts with EMPTY defaults (no prototype sample values)', () => {
     wrap(<NewConnectionModal onClose={() => {}} onConnect={() => {}} />)
@@ -326,6 +336,50 @@ describe('NewConnectionModal — create mode', () => {
     expect(JSON.stringify(savedProfile)).not.toContain('jump-pw-123')
     // jump.secret should not be in the saved profile
     expect(JSON.stringify(savedProfile)).not.toContain('"secret"')
+  })
+
+  it('Save&Connect persists host notes on the saved profile', () => {
+    const onConnect = vi.fn()
+    wrap(<NewConnectionModal onClose={() => {}} onConnect={onConnect} />)
+    fireEvent.click(screen.getByText('主机 / 终端'))
+
+    const host = screen.getByText('主机').parentElement!.querySelector('input') as HTMLInputElement
+    const user = screen.getByText('用户名').parentElement!.querySelector('input') as HTMLInputElement
+    const notes = screen.getByText('备注').parentElement!.querySelector('textarea') as HTMLTextAreaElement
+    fireEvent.input(host, { target: { value: '10.0.0.8' } })
+    fireEvent.input(user, { target: { value: 'deploy' } })
+    fireEvent.change(notes, { target: { value: '生产主机，密码提示看团队 vault 条目 A' } })
+
+    fireEvent.click(screen.getByText('保存并连接'))
+
+    expect(h.saveProfile).toHaveBeenCalledTimes(1)
+    expect(h.saveProfile.mock.calls[0][0]).toMatchObject({
+      id: 'live-10.0.0.8:22-deploy',
+      notes: '生产主机，密码提示看团队 vault 条目 A',
+    })
+  })
+
+  it('Save&Connect persists DB notes on the saved profile', () => {
+    h.dbConnect.mockImplementation(() => new Promise(() => {}))
+    wrap(<NewConnectionModal onClose={() => {}} />)
+
+    const name = screen.getByText('名称').parentElement!.querySelector('input') as HTMLInputElement
+    const host = screen.getByText('主机').parentElement!.querySelector('input') as HTMLInputElement
+    const user = screen.getByText('用户').parentElement!.querySelector('input') as HTMLInputElement
+    const notes = screen.getByText('备注').parentElement!.querySelector('textarea') as HTMLTextAreaElement
+    fireEvent.change(name, { target: { value: 'orders-prod' } })
+    fireEvent.change(host, { target: { value: '127.0.0.1' } })
+    fireEvent.change(user, { target: { value: 'app_ro' } })
+    fireEvent.change(notes, { target: { value: '只读账号，密码提示：轮换批次 2026Q3' } })
+
+    fireEvent.click(screen.getByText('保存并连接'))
+
+    expect(h.saveDbConnection).toHaveBeenCalledTimes(1)
+    expect(h.saveDbConnection.mock.calls[0][0]).toMatchObject({
+      id: 'db-generated-id',
+      name: 'orders-prod',
+      notes: '只读账号，密码提示：轮换批次 2026Q3',
+    })
   })
 })
 

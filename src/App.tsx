@@ -280,6 +280,7 @@ export default function App() {
     icon: 'server',
     status: sessionMap[p.id] ? 'up' : 'idle',
     proto: 'ssh',
+    ...(p.notes ? { notes: p.notes } : {}),
     ...(p.os ? { os: p.os } : {}),
     ...ownerTag(p),
   }))
@@ -578,6 +579,7 @@ export default function App() {
       icon: 'server',
       status: 'up',
       proto: 'ssh',
+      ...(prof?.notes ? { notes: prof.notes } : {}),
       ...(prof?.os ? { os: prof.os } : {}),
     }
     setLiveConns(prev => ({ ...prev, [connId]: conn }))
