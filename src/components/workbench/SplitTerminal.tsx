@@ -34,6 +34,7 @@ export function SplitTerminal({ onChannel, ...paneProps }: SplitTerminalProps) {
   const [focused, setFocused] = useState<string>(() => collectLeaves(root)[0])
   const [dragId, setDragId] = useState<string | null>(null)
   const [dropId, setDropId] = useState<string | null>(null)
+  const [historySuggestEnabled, setHistorySuggestEnabled] = useState(true)
   // Latest channel id per pane (so focus changes can re-report to App).
   const paneChan = useRef<Record<string, string | null>>({})
 
@@ -121,6 +122,8 @@ export function SplitTerminal({ onChannel, ...paneProps }: SplitTerminalProps) {
             style={{ position: 'absolute', left: `${r.left}%`, top: `${r.top}%`, width: `${r.width}%`, height: `${r.height}%`, padding: multi ? 1 : 0, boxSizing: 'border-box', opacity: dragId === id ? 0.55 : 1 }}>
             <div style={{ height: '100%', width: '100%', minHeight: 0, position: 'relative', background: 'var(--surface-subtle)', outline: multi ? (dropId === id ? '2px dashed var(--accent-primary)' : focused === id ? '2px solid var(--accent-border)' : 'none') : 'none', outlineOffset: '-2px' }}>
               <TerminalPane {...paneProps} isFocused={id === focused}
+                historySuggestEnabled={historySuggestEnabled}
+                onToggleHistorySuggest={() => setHistorySuggestEnabled(v => !v)}
                 onChannel={(sid, chan) => { paneChan.current[id] = chan; if (id === focused) onChannel?.(sid, chan) }}
                 split={{
                   count: leafIds.length,

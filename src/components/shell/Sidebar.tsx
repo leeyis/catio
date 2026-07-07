@@ -576,7 +576,7 @@ export function IconRail({ active, onSelect, panelOpen, onMcp }: IconRailProps) 
         <button title={t('shell.railMcp')} onClick={onMcp} style={{ width: 32, height: 32, borderRadius: 8, display: 'grid', placeItems: 'center', color: 'var(--text-tertiary)', cursor: 'pointer' }}
           onMouseEnter={e => (e.currentTarget.style.background = 'var(--surface-sunken)')}
           onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
-          <Icon name="command" size={17} />
+          <Icon name="network" size={17} />
         </button>
       </div>
     </div>

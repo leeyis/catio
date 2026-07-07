@@ -59,6 +59,10 @@ export interface TerminalPaneProps {
   onSessionClosed?: (sessionId: string) => void
   /** Reconnect the owning terminal tab. Returns true when a new session was opened immediately. */
   onReconnect?: () => Promise<boolean> | boolean | void
+  /** Current-tab history command suggestions. Defaults on for newly opened SSH tabs. */
+  historySuggestEnabled?: boolean
+  /** Toggle the current SSH tab's history command suggestions. */
+  onToggleHistorySuggest?: () => void
   /**
    * Surfaces the live PTY channel id to App so it can write into the active
    * terminal (e.g. snippet/history "insert"). Called with the chanId once
@@ -231,7 +235,7 @@ interface MxTarget {
 }
 type MxRunState = Record<string, MxTarget>
 
-export function TerminalPane({ conn, sessionId, active, connected, resolveSessionId, mxCandidates, ensureSession, onConnectTarget, sendToPty, onChannel, onSessionClosed, onReconnect, isFocused = true, split }: TerminalPaneProps) {
+export function TerminalPane({ conn, sessionId, active, connected, resolveSessionId, mxCandidates, ensureSession, onConnectTarget, sendToPty, onChannel, onSessionClosed, onReconnect, historySuggestEnabled = true, onToggleHistorySuggest, isFocused = true, split }: TerminalPaneProps) {
   const { t } = useTranslation()
   const D = useData()
   const { prefs } = usePrefs()
@@ -306,6 +310,8 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
   suggestRef.current = suggest
   const suggestIndexRef = useRef(0)
   suggestIndexRef.current = suggestIndex
+  const historySuggestEnabledRef = useRef(historySuggestEnabled)
+  historySuggestEnabledRef.current = historySuggestEnabled
   const acceptHistoryMatchRef = useRef<(sel: HistoryMatch | undefined, fallbackInput: string) => void>(() => {})
   // Multiexec run state — 每个目标的进度/状态，渲染到结果面板。
   const [mxRunState, setMxRunState] = useState<MxRunState>({})
@@ -347,6 +353,12 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
     setSessionClosed(false)
   }, [sessionId])
 
+  useEffect(() => {
+    if (historySuggestEnabled) return
+    setSuggest(null)
+    setGhost(null)
+    suppressedInputRef.current = null
+  }, [historySuggestEnabled])
 
   // 把 connId 映射到显示名：优先候选列表，回退 D.byId，最后用 id 本身。
   const nameForConn = (connId: string): string =>
@@ -690,7 +702,7 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
 
     // 提取当前输入 → planHistoryCompletion → 更新候选 state(+ Phase 2 ghost 浮层)。
     const refreshSuggest = () => {
-      if (!(live && sessionId)) { setSuggest(null); setGhost(null); return }
+      if (!(live && sessionId) || !historySuggestEnabledRef.current) { setSuggest(null); setGhost(null); return }
       const input = readCurrentInput()
       if (input == null) { clearInputCapture(); return }
       currentInputRef.current = input
@@ -876,6 +888,7 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
         // Returning false blocks xterm's key processing while leaving the browser's paste default
         // action intact, so the real ClipboardEvent can still carry the text on HTTP deployments.
         if (isPasteShortcut(ev) && canHandleTerminalPaste(ev.target)) return false
+        if (!historySuggestEnabledRef.current) return true
         // Phase 2:幽灵文本可见时,→ 或 Ctrl+E 接受 ghost 串(写入 PTY 并吞键)。
         const gh = ghostRef.current
         if (gh && gh.text && (ev.key === 'ArrowRight' || (ev.ctrlKey && (ev.key === 'e' || ev.key === 'E')))) {
@@ -1174,6 +1187,19 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
           </span>
         </div>
         <div className="row gap6" style={{ flex: 'none' }}>
+          {onToggleHistorySuggest && (
+            <button className="icon-btn bare"
+              aria-pressed={historySuggestEnabled}
+              title={t(historySuggestEnabled ? 'workbench.disableHistorySuggest' : 'workbench.enableHistorySuggest')}
+              onClick={onToggleHistorySuggest}
+              style={{
+                color: historySuggestEnabled ? 'var(--accent-primary)' : 'var(--text-faint)',
+                background: historySuggestEnabled ? 'var(--accent-soft)' : undefined,
+                opacity: historySuggestEnabled ? 1 : 0.7,
+              }}>
+              <Icon name="command" size={15} />
+            </button>
+          )}
           <div style={{ position: 'relative' }}>
             <button onClick={() => setMxOpen(o => !o)}
               className="chip" style={{ cursor: 'pointer', height: 28, background: broadcast ? 'var(--accent-soft)' : 'var(--surface-sunken)', color: broadcast ? 'var(--accent-primary)' : 'var(--text-tertiary)', fontWeight: 600 }}>
@@ -1359,7 +1385,7 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
       </div>
 
       {/* 历史补全候选下拉(仅 live + 输入激活 + 有匹配时显示) */}
-      {live && suggest && (
+      {historySuggestEnabled && live && suggest && (
         <HistorySuggest
           items={suggest.items}
           selectedIndex={suggestIndex}
@@ -1378,7 +1404,7 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
       {/* Phase 2:行内灰色「幽灵文本」浮层 —— 纯视觉叠加,绝不写入终端。
           字体/字号跟随终端(prefs.monoFont/termFontPx)+ lineHeight 与 xterm host 同口径,
           颜色用 var(--text-faint) 跟随主题。仅 live + ghost 可见时渲染。 */}
-      {live && ghost && (
+      {historySuggestEnabled && live && ghost && (
         <span
           aria-hidden
           className="mono"

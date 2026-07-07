@@ -473,6 +473,8 @@
     "disableBroadcast": "Disable broadcast",
     "searchBuffer": "Search buffer",
     "clearScreen": "Clear screen",
+    "disableHistorySuggest": "Disable command suggestions",
+    "enableHistorySuggest": "Enable command suggestions",
     "broadcastCmdPlaceholder": "Type a command to run on {{count}} hosts…",
     "broadcastSend": "Run on {{count}}",
     "broadcastResults": "Broadcast results",

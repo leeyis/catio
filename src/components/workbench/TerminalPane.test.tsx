@@ -218,6 +218,37 @@ describe('TerminalPane (xterm wiring)', () => {
     expect(termWrite).not.toHaveBeenCalledWith('sess-1', 'chan-1', btoa('r ps'))
   })
 
+  it('does not show or accept history suggestions when disabled for the tab', async () => {
+    localStorage.setItem('catio-history', JSON.stringify([{
+      id: 'hist-1',
+      kind: 'shell',
+      target: 'bastion.catio.io',
+      text: 'docker ps',
+      when: 'now',
+      dur: '0ms',
+      ts: 10,
+    }]))
+    wrap(<TerminalPane conn={DATA.byId['h-bastion']} sessionId="sess-1" active historySuggestEnabled={false} />)
+    await waitFor(() => expect(h.dataCb.fn).not.toBeNull())
+    await waitFor(() => expect(h.termEventCb.fn).not.toBeNull())
+    await waitFor(() => expect(h.keyHandler.fn).not.toBeNull())
+
+    act(() => { h.termEventCb.fn?.({ inputStart: true }) })
+    h.bufferText = 'docke'
+    h.cursorX = 5
+    act(() => { h.dataCb.fn?.('docke') })
+    await act(async () => { await new Promise<void>(r => setTimeout(r, 60)) })
+    expect(document.querySelector('[title="docker ps"]')).toBeNull()
+    termWrite.mockClear()
+
+    const ev = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })
+    let shouldProcess = false
+    act(() => { shouldProcess = h.keyHandler.fn!(ev) })
+
+    expect(shouldProcess).toBe(true)
+    expect(termWrite).not.toHaveBeenCalledWith('sess-1', 'chan-1', btoa('r'))
+    expect(termWrite).not.toHaveBeenCalledWith('sess-1', 'chan-1', btoa(' ps'))
+  })
 
   it('copies selected terminal text with a fallback when Clipboard API is unavailable', async () => {
     const previousExec = document.execCommand
