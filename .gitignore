@@ -40,3 +40,6 @@ deploy/
 
 # local docker image export (deployment artifact, regenerable)
 catio-server.tar.gz
+
+# arm64 deb 构建产物
+dist-deb/

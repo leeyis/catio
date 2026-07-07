@@ -2,6 +2,7 @@
 .git
 node_modules
 dist
+dist-deb
 src-tauri/target
 .worktrees
 **/*.log
