@@ -973,6 +973,7 @@ export default function App() {
   }
 
   function markSshSessionClosed(sessionId: string) {
+    sshDisconnect(sessionId).catch(() => { /* best-effort stale backend cleanup */ })
     const closedTabIds = tabsRef.current.filter(tb => tb.sessionId === sessionId).map(tb => tb.id)
     const closedConnIds = new Set<string>([
       ...Object.entries(sessionMap).filter(([, sid]) => sid === sessionId).map(([connId]) => connId),
@@ -1698,7 +1699,7 @@ export default function App() {
                 onNewConversation={cur ? (() => newAgentConversation(cur.id)) : undefined}
                 onRestoreConversation={cur ? (convId => restoreConversation(cur.id, convId)) : undefined}
                 onDeleteConversation={cur ? (convId => deleteAgentConversation(cur.id, convId)) : undefined} />}
-              {activePanel === 'sftp' && <SftpPanel onClose={() => setPanelOpen(false)} conn={curConn ?? undefined} sessionId={cur?.sessionId} onEditFile={p => { if (cur) openRemoteFile(cur.connId, cur.sessionId, p) }} />}
+              {activePanel === 'sftp' && <SftpPanel onClose={() => setPanelOpen(false)} conn={curConn ?? undefined} sessionId={cur?.sessionId} onSessionClosed={markSshSessionClosed} onEditFile={p => { if (cur) openRemoteFile(cur.connId, cur.sessionId, p) }} />}
               {activePanel === 'monitor' && <MonitorPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} />}
               {activePanel === 'tunnels' && <TunnelsPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} activeConnId={cur?.connId} profiles={profiles}
                 onSaveProfile={cur ? (kind, bind, target, name) => {

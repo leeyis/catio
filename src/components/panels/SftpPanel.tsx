@@ -5,10 +5,10 @@ import { IconBtn } from '../atoms'
 import type { Connection, SftpItem } from '../../services/types'
 import { PanelShell } from './PanelShell'
 import { PanelEmpty } from './PanelEmpty'
-import { sftpList, sftpRealpath, sftpMkdir, sftpTouch, sftpRename, sftpDelete, sftpDownloadUrl } from '../../services/ssh'
+import { sftpList, sftpRealpath, sftpMkdir, sftpTouch, sftpRename, sftpDelete, sftpDownloadUrl, isSshSessionLostError, sshErrorMessage } from '../../services/ssh'
 import { useTransfers, startUpload, startDownload, startWebUpload, cancelTransfer, onTransferDone } from '../../state/transfers'
 import { getSftpNav, setSftpNav } from '../../state/sftpNav'
-import { loadFavorites, toggleFavorite, COMMON_DIRS } from '../../state/sftpFavorites'
+import { FAVORITES_STORAGE_KEYS, loadFavorites, toggleFavorite, COMMON_DIRS } from '../../state/sftpFavorites'
 
 function isTauriEnv(): boolean {
   return (
@@ -71,12 +71,14 @@ export interface SftpPanelProps {
   onClose: () => void
   conn?: Connection
   sessionId?: string
+  onSessionClosed?: (sessionId: string) => void
   /** Open a remote file in the editor (double-click / context menu). When absent, files download. */
   onEditFile?: (path: string) => void
 }
 
-export function SftpPanel({ onClose, conn, sessionId, onEditFile }: SftpPanelProps) {
+export function SftpPanel({ onClose, conn, sessionId, onSessionClosed, onEditFile }: SftpPanelProps) {
   const { t } = useTranslation()
+  const favoriteScope = conn?.id ?? null
 
   // Seed from the per-session cache so reopening the panel restores the directory
   // the user was browsing (and its listing) instead of flashing back to home.
@@ -84,7 +86,7 @@ export function SftpPanel({ onClose, conn, sessionId, onEditFile }: SftpPanelPro
   const [path, setPath] = useState<string>(() => (sessionId ? getSftpNav(sessionId)?.path ?? '' : ''))
   const [pathInput, setPathInput] = useState<string>(() => (sessionId ? getSftpNav(sessionId)?.path ?? '' : ''))
   // Path favorites + quick-jump dropdown (C1).
-  const [favorites, setFavorites] = useState<string[]>(() => loadFavorites())
+  const [favorites, setFavorites] = useState<string[]>(() => loadFavorites(favoriteScope))
   const [jumpOpen, setJumpOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -103,6 +105,17 @@ export function SftpPanel({ onClose, conn, sessionId, onEditFile }: SftpPanelPro
   const sessionRef = useRef(sessionId)
   sessionRef.current = sessionId
   const pathRef = useRef(sessionId ? getSftpNav(sessionId)?.path ?? '' : '')
+  const onSessionClosedRef = useRef(onSessionClosed)
+  onSessionClosedRef.current = onSessionClosed
+
+  useEffect(() => {
+    setFavorites(loadFavorites(favoriteScope))
+  }, [favoriteScope])
+
+  const showError = useCallback((e: unknown, sid = sessionRef.current) => {
+    setError(sshErrorMessage(e))
+    if (sid && isSshSessionLostError(e)) onSessionClosedRef.current?.(sid)
+  }, [])
 
   const load = useCallback((p: string) => {
     const sid = sessionRef.current
@@ -118,9 +131,9 @@ export function SftpPanel({ onClose, conn, sessionId, onEditFile }: SftpPanelPro
         setSelected(null)
         setSftpNav(sid, { path: p, items: list })
       })
-      .catch(e => setError(String(e)))
+      .catch(e => showError(e, sid))
       .finally(() => setLoading(false))
-  }, [])
+  }, [showError])
 
   // Resolve home ('.') to an absolute path on (re)connect, then list it.
   useEffect(() => {
@@ -141,10 +154,17 @@ export function SftpPanel({ onClose, conn, sessionId, onEditFile }: SftpPanelPro
       setPathInput(cached.path)
       return
     }
-    sftpRealpath(sessionId, '.')
+    const sid = sessionId
+    sftpRealpath(sid, '.')
       .then(abs => load(abs))
-      .catch(() => load('.'))
-  }, [sessionId, load])
+      .catch(e => {
+        if (isSshSessionLostError(e)) {
+          showError(e, sid)
+          return
+        }
+        load('.')
+      })
+  }, [sessionId, load, showError])
 
   // ---- transfers ----
   // Transfer state + the Tauri progress/complete/cancel/error listeners live in the
@@ -163,9 +183,9 @@ export function SftpPanel({ onClose, conn, sessionId, onEditFile }: SftpPanelPro
     try {
       await startUpload(sid, localPath, joinPath(dir, name), dir, name)
     } catch (e) {
-      setError(String(e))
+      showError(e, sid)
     }
-  }, [])
+  }, [showError])
 
   const handleDrop = useCallback(async (paths: string[]) => {
     if (!sessionRef.current || paths.length === 0) return
@@ -209,7 +229,7 @@ export function SftpPanel({ onClose, conn, sessionId, onEditFile }: SftpPanelPro
     if (files && sessionId) {
       const dir = pathRef.current
       for (const file of Array.from(files)) {
-        startWebUpload(sessionId, joinPath(dir, file.name), file, dir).catch(err => setError(String(err)))
+        startWebUpload(sessionId, joinPath(dir, file.name), file, dir).catch(err => showError(err, sessionId))
       }
     }
     e.target.value = '' // reset so picking the same file again still fires change
@@ -244,7 +264,7 @@ export function SftpPanel({ onClose, conn, sessionId, onEditFile }: SftpPanelPro
     import('@tauri-apps/plugin-dialog').then(({ save }) => {
       save({ defaultPath: it.name }).then(dest => {
         if (!dest) return
-        startDownload(sessionId, it.path, dest, pathRef.current, it.name).catch(e => setError(String(e)))
+        startDownload(sessionId, it.path, dest, pathRef.current, it.name).catch(e => showError(e, sessionId))
       })
     })
   }
@@ -276,7 +296,7 @@ export function SftpPanel({ onClose, conn, sessionId, onEditFile }: SftpPanelPro
     if (!sessionId || !kind || !name) return
     const target = joinPath(pathRef.current, name)
     const op = kind === 'dir' ? sftpMkdir(sessionId, target) : sftpTouch(sessionId, target)
-    op.then(() => load(pathRef.current)).catch(e => setError(String(e)))
+    op.then(() => load(pathRef.current)).catch(e => showError(e, sessionId))
   }
   const startRename = (it: SftpItem) => {
     setCtxMenu(null)
@@ -289,13 +309,13 @@ export function SftpPanel({ onClose, conn, sessionId, onEditFile }: SftpPanelPro
     const trimmed = r.newName.trim()
     if (!trimmed || trimmed === baseName(r.path)) return
     const newPath = joinPath(parentPath(r.path), trimmed)
-    sftpRename(sessionId, r.path, newPath).then(() => load(pathRef.current)).catch(e => setError(String(e)))
+    sftpRename(sessionId, r.path, newPath).then(() => load(pathRef.current)).catch(e => showError(e, sessionId))
   }
   const confirmDelete = () => {
     const it = deleteConfirm
     setDeleteConfirm(null)
     if (!sessionId || !it) return
-    sftpDelete(sessionId, it.path, it.type === 'dir').then(() => load(pathRef.current)).catch(e => setError(String(e)))
+    sftpDelete(sessionId, it.path, it.type === 'dir').then(() => load(pathRef.current)).catch(e => showError(e, sessionId))
   }
 
   // close the context menu on any outside click / escape
@@ -314,7 +334,7 @@ export function SftpPanel({ onClose, conn, sessionId, onEditFile }: SftpPanelPro
   const jumpTo = (p: string) => {
     setJumpOpen(false)
     if (p === '~') {
-      if (sessionId) sftpRealpath(sessionId, '.').then(load).catch(e => setError(String(e)))
+      if (sessionId) sftpRealpath(sessionId, '.').then(load).catch(e => showError(e, sessionId))
       return
     }
     goPath(p)
@@ -337,10 +357,14 @@ export function SftpPanel({ onClose, conn, sessionId, onEditFile }: SftpPanelPro
 
   // Keep favorites in sync if another window toggles them.
   useEffect(() => {
-    const onStorage = (e: StorageEvent) => { if (e.key === 'catio-sftp-favorites') setFavorites(loadFavorites()) }
+    const onStorage = (e: StorageEvent) => {
+      if (e.key && FAVORITES_STORAGE_KEYS.includes(e.key as (typeof FAVORITES_STORAGE_KEYS)[number])) {
+        setFavorites(loadFavorites(favoriteScope))
+      }
+    }
     window.addEventListener('storage', onStorage)
     return () => window.removeEventListener('storage', onStorage)
-  }, [])
+  }, [favoriteScope])
 
   return (
     <PanelShell
@@ -382,7 +406,7 @@ export function SftpPanel({ onClose, conn, sessionId, onEditFile }: SftpPanelPro
             {jumpOpen && (
               <div style={{ position: 'absolute', right: 8, top: 42, zIndex: 60, minWidth: 250, maxHeight: 360, overflowY: 'auto', padding: 4, borderRadius: 10, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', boxShadow: 'var(--shadow-dropdown)' }}>
                 {/* 顶部:明确的「收藏/取消收藏当前目录」动作,带当前目录名 */}
-                <button onClick={() => { if (path) setFavorites(toggleFavorite(path)) }} disabled={!path}
+                <button onClick={() => { if (path) setFavorites(toggleFavorite(path, favoriteScope)) }} disabled={!path}
                   className="row" style={{ width: '100%', gap: 8, alignItems: 'center', padding: '8px', borderRadius: 7, border: 'none', background: 'transparent', cursor: path ? 'pointer' : 'default', textAlign: 'left' }}
                   onMouseEnter={e => (e.currentTarget.style.background = 'var(--accent-soft)')}
                   onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
@@ -400,7 +424,7 @@ export function SftpPanel({ onClose, conn, sessionId, onEditFile }: SftpPanelPro
                       style={{ flex: 1, minWidth: 0, textAlign: 'left', padding: '6px 8px', fontSize: 12, background: 'transparent', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', borderRadius: 7 }}
                       onMouseEnter={e => (e.currentTarget.style.background = 'var(--accent-soft)')}
                       onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>{p}</button>
-                    <IconBtn name="x" size={11} variant="bare" title={t('panels.sftpUnfavorite')} onClick={() => setFavorites(toggleFavorite(p))} />
+                    <IconBtn name="x" size={11} variant="bare" title={t('panels.sftpUnfavorite')} onClick={() => setFavorites(toggleFavorite(p, favoriteScope))} />
                   </div>
                 ))}
                 {/* 常用目录 */}

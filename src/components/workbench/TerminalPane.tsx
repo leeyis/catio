@@ -9,7 +9,7 @@ import '@xterm/xterm/css/xterm.css'
 import { Icon } from '../Icon'
 import { ConnGlyph, StatusDot } from '../atoms'
 import { useData } from '../../state/DataContext'
-import { termOpen, termWrite, termResize, termClose, listen, getTermBuffer, onHistory } from '../../services/ssh'
+import { termOpen, termWrite, termResize, termClose, listen, getTermBuffer, onHistory, isSshSessionLostError } from '../../services/ssh'
 import { copyTextToClipboard } from '../../services/clipboard'
 import { usePrefs, monoFontStack } from '../../state/preferences'
 import { registerTermBuffer, unregisterTermBuffer } from '../../services/termBuffers'
@@ -265,6 +265,8 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
   // Mutable ref tracking the active channel id; nulled on server-initiated close to
   // prevent double-termClose and dead-channel keystroke writes.
   const chanIdRef = useRef<string | null>(null)
+  const sessionIdRef = useRef(sessionId)
+  sessionIdRef.current = sessionId
   const lastPasteAtRef = useRef(0)
   const lastPasteTextRef = useRef('')
   const activeRef = useRef(active)
@@ -328,11 +330,23 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
   const closedNotifiedRef = useRef(false)
   const reconnectingRef = useRef(false)
 
+  const notifySshSessionLost = (lostSessionId: string) => {
+    const currentSession = sessionIdRef.current === lostSessionId
+    if (currentSession) {
+      setSessionClosed(true)
+      onChannelRef.current?.(lostSessionId, null)
+      if (closedNotifiedRef.current) return
+      closedNotifiedRef.current = true
+    }
+    onSessionClosedRef.current?.(lostSessionId)
+  }
+
   useEffect(() => {
     closedNotifiedRef.current = false
     reconnectingRef.current = false
     setSessionClosed(false)
   }, [sessionId])
+
 
   // 把 connId 映射到显示名：优先候选列表，回退 D.byId，最后用 id 本身。
   const nameForConn = (connId: string): string =>
@@ -702,9 +716,28 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
       extractTimer = setTimeout(() => { extractTimer = null; refreshSuggest() }, 40)
     }
 
+    const markTerminalClosed = () => {
+      if (!sessionId) return
+      const sid = sessionId
+      clearInputCapture()
+      term.write(`\r\n\x1b[2m[${t('terminal.disconnected')}]\x1b[0m\r\n`)
+      if (chanIdRef.current) {
+        const deadChan = chanIdRef.current
+        chanIdRef.current = null
+        Promise.resolve(termClose(sid, deadChan)).catch(() => { /* best-effort cleanup */ })
+      }
+      notifySshSessionLost(sid)
+    }
+
+    const handleTermWriteFailure = (error: unknown) => {
+      if (isSshSessionLostError(error)) markTerminalClosed()
+    }
+
     // 把字符写入 PTY(补全用)。沿用 onData 的 base64 编码路径。
     const termWrite0 = (s: string) => {
-      if (live && sessionId && chanIdRef.current) termWrite(sessionId, chanIdRef.current, bytesToBase64(s))
+      if (live && sessionId && chanIdRef.current) {
+        Promise.resolve(termWrite(sessionId, chanIdRef.current, bytesToBase64(s))).catch(handleTermWriteFailure)
+      }
     }
 
     const recordOutboundInput = (data: string) => {
@@ -764,7 +797,7 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
         if (typeof term.paste === 'function') term.paste(text)
         else {
           const directText = pastedTextForDirectWrite(text)
-          termWrite(sessionId, chanIdRef.current, bytesToBase64(directText))
+          termWrite0(directText)
           recordOutboundInput(directText)
           scheduleInputRefresh()
         }
@@ -962,22 +995,14 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
           } else if (p.closed) {
             // Server-initiated close: write notice, close channel, then mark it dead so
             // keystrokes and unmount cleanup don't call termClose on a dead channel.
-            clearInputCapture()
-            setSessionClosed(true)
-            term.write(`\r\n\x1b[2m[${t('terminal.disconnected')}]\x1b[0m\r\n`)
-            if (chanIdRef.current) { termClose(sessionId, chanIdRef.current); chanIdRef.current = null }
-            onChannelRef.current?.(sessionId, null)
-            if (!closedNotifiedRef.current) {
-              closedNotifiedRef.current = true
-              onSessionClosedRef.current?.(sessionId)
-            }
+            markTerminalClosed()
           }
         })
         if (disposed) { unlisten(); if (chanIdRef.current) { termClose(sessionId, chanIdRef.current); chanIdRef.current = null } return }
         term.onData(d => {
           // Drop keystrokes after a server-initiated close (channel already torn down).
           if (!chanIdRef.current) return
-          termWrite(sessionId, chanIdRef.current, bytesToBase64(d))
+          termWrite0(d)
           recordOutboundInput(d)
           // 节流(~40ms)提取当前输入并刷新候选。延迟一拍,让 PTY 回显落到缓冲区。
           scheduleInputRefresh()
@@ -986,7 +1011,9 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
           ro = new ResizeObserver(() => {
             if (!hasSize()) return // 隐藏标签尺寸为 0：跳过，保持 PTY 上次的可用宽度
             try { fitAddon.fit() } catch { /* no layout */ }
-            if (chanIdRef.current) termResize(sessionId, chanIdRef.current, term.cols, term.rows)
+            if (chanIdRef.current) {
+              Promise.resolve(termResize(sessionId, chanIdRef.current, term.cols, term.rows)).catch(handleTermWriteFailure)
+            }
           })
           ro.observe(hostEl)
         }
@@ -1045,7 +1072,9 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
     term.options.fontFamily = monoFontStack(prefs.monoFont)
     try { fitAddonRef.current?.fit() } catch { /* no layout */ }
     if (live && sessionId && chanIdRef.current) {
-      try { termResize(sessionId, chanIdRef.current, term.cols, term.rows) } catch { /* best-effort */ }
+      Promise.resolve(termResize(sessionId, chanIdRef.current, term.cols, term.rows)).catch(error => {
+        if (isSshSessionLostError(error)) notifySshSessionLost(sessionId)
+      })
     }
   }, [prefs.termFontPx, prefs.monoFont, live, sessionId])
 
@@ -1062,7 +1091,9 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
       if (!live || !sessionId) return false
       const chanId = chanIdRef.current
       if (!chanId) return false
-      termWrite(sessionId, chanId, bytesToBase64(text))
+      Promise.resolve(termWrite(sessionId, chanId, bytesToBase64(text))).catch(error => {
+        if (isSshSessionLostError(error)) notifySshSessionLost(sessionId)
+      })
       try { termRef.current?.focus() } catch { /* best-effort */ }
       return true
     }

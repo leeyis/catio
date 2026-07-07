@@ -61,6 +61,16 @@ describe('services/ssh', () => {
     expect(result).toBe('## OS\nUbuntu 22.04')
     delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
   })
+
+  it('detects SSH session-loss errors without treating ordinary SFTP errors as disconnects', async () => {
+    const { isSshSessionLostError, sshErrorMessage } = await import('./ssh')
+
+    expect(isSshSessionLostError({ kind: 'NotFound', message: 'session not found: sess-1' })).toBe(true)
+    expect(isSshSessionLostError(new Error('channel closed'))).toBe(true)
+    expect(isSshSessionLostError(new Error('io error: connection reset by peer'))).toBe(true)
+    expect(isSshSessionLostError(new Error('sftp error: Permission denied'))).toBe(false)
+    expect(sshErrorMessage({ message: 'session not found: sess-1' })).toBe('session not found: sess-1')
+  })
 })
 
 // Port-forwarding (tunnels) must route over the HTTP transport in server (web) mode — the original

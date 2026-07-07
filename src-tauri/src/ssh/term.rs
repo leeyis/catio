@@ -122,7 +122,10 @@ pub async fn term_open_core(
     let evt = format!("term://{chan_id}");
     let history_evt = format!("history://{session_id}");
     let (tx, mut rx) = mpsc::unbounded_channel::<TermCmd>();
+    sess.lock().await.insert_term(chan_id.clone(), tx);
 
+    let sess_for_owner = sess.clone();
+    let chan_for_owner = chan_id.clone();
     tokio::spawn(async move {
         let mut scanner = osc::Scanner::new(nonce);
         // Audit state for the in-flight command.
@@ -189,15 +192,24 @@ pub async fn term_open_core(
                     _ => {}
                 },
                 cmd = rx.recv() => match cmd {
-                    Some(TermCmd::Write(bytes)) => { let _ = channel.data(&bytes[..]).await; }
-                    Some(TermCmd::Resize(c, r)) => { let _ = channel.window_change(c, r, 0, 0).await; }
+                    Some(TermCmd::Write(bytes)) => {
+                        if channel.data(&bytes[..]).await.is_err() {
+                            sink.emit(&evt, serde_json::json!({ "closed": true }));
+                            break;
+                        }
+                    }
+                    Some(TermCmd::Resize(c, r)) => {
+                        if channel.window_change(c, r, 0, 0).await.is_err() {
+                            sink.emit(&evt, serde_json::json!({ "closed": true }));
+                            break;
+                        }
+                    }
                     Some(TermCmd::Close) | None => { let _ = channel.eof().await; break; }
                 },
             }
         }
+        sess_for_owner.lock().await.remove_term(&chan_for_owner);
     });
-
-    sess.lock().await.insert_term(chan_id.clone(), tx);
     Ok(chan_id)
 }
 

@@ -12,6 +12,10 @@ const h = vi.hoisted(() => ({
   termClose: vi.fn(),
   listen: vi.fn().mockResolvedValue(() => {}),
   getTermBuffer: vi.fn().mockResolvedValue([]),
+  isSshSessionLostError: vi.fn((e: unknown) => {
+    const msg = e instanceof Error ? e.message : String(e)
+    return msg.toLowerCase().includes('channel closed') || msg.toLowerCase().includes('session not found')
+  }),
   xtermWrite: vi.fn(),
   xtermPaste: vi.fn(),
   xtermDispose: vi.fn(),
@@ -31,6 +35,7 @@ vi.mock('../../services/ssh', () => ({
   termClose: h.termClose,
   listen: h.listen,
   getTermBuffer: h.getTermBuffer,
+  isSshSessionLostError: h.isSshSessionLostError,
 }))
 
 // ---- xterm mock (jsdom can't render a real terminal) ----
@@ -89,7 +94,7 @@ function pasteEvent(text: string): ClipboardEvent {
 
 describe('TerminalPane (xterm wiring)', () => {
   beforeEach(() => {
-    termOpen.mockClear(); termWrite.mockClear(); termResize.mockClear(); termClose.mockClear()
+    termOpen.mockClear(); termWrite.mockClear(); termResize.mockClear(); termClose.mockClear(); h.isSshSessionLostError.mockClear()
     listen.mockClear(); xtermWrite.mockClear(); xtermPaste.mockClear(); xtermDispose.mockClear(); h.dataCb.fn = null
     listen.mockImplementation(async (_event: string, cb: (d: { bytesBase64?: string; closed?: boolean; inputStart?: boolean; execStart?: boolean }) => void) => {
       h.termEventCb.fn = cb
@@ -122,6 +127,21 @@ describe('TerminalPane (xterm wiring)', () => {
     await waitFor(() => expect(h.dataCb.fn).not.toBeNull())
     h.dataCb.fn!('a')
     expect(termWrite).toHaveBeenCalledWith('sess-1', 'chan-1', btoa('a'))
+  })
+
+  it('marks the SSH session closed when PTY writes hit a dead channel', async () => {
+    const onSessionClosed = vi.fn()
+    termWrite.mockRejectedValueOnce(new Error('channel closed'))
+    wrap(<TerminalPane conn={DATA.byId['h-bastion']} sessionId="sess-1" onSessionClosed={onSessionClosed} />)
+    await waitFor(() => expect(h.dataCb.fn).not.toBeNull())
+
+    await act(async () => {
+      h.dataCb.fn?.('a')
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(onSessionClosed).toHaveBeenCalledWith('sess-1'))
+    expect(termClose).toHaveBeenCalledWith('sess-1', 'chan-1')
   })
 
   it('pastes clipboard text into the live PTY in desktop mode', async () => {
@@ -197,6 +217,7 @@ describe('TerminalPane (xterm wiring)', () => {
     expect(termWrite).toHaveBeenCalledWith('sess-1', 'chan-1', btoa(' ps'))
     expect(termWrite).not.toHaveBeenCalledWith('sess-1', 'chan-1', btoa('r ps'))
   })
+
 
   it('copies selected terminal text with a fallback when Clipboard API is unavailable', async () => {
     const previousExec = document.execCommand

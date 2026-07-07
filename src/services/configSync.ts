@@ -16,6 +16,7 @@ const EXPORT_KEYS = [
   'catio-groups',
   'catio-connection-favorites',
   'catio-sftp-favorites',
+  'catio-sftp-favorites-v2',
   'catio-snippets',
   'catio-prefs',
   'catio-theme',

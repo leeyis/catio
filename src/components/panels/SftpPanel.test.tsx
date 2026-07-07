@@ -2,7 +2,7 @@ import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { LanguageProvider } from '../../state/LanguageContext'
 import { DataProvider } from '../../state/DataContext'
-import type { SftpItem } from '../../services/types'
+import type { Connection, SftpItem } from '../../services/types'
 
 // ---- ssh service mock ----
 const h = vi.hoisted(() => ({
@@ -14,7 +14,14 @@ const h = vi.hoisted(() => ({
   sftpTouch: vi.fn(),
   sftpRename: vi.fn(),
   sftpDelete: vi.fn(),
+  sftpDownloadUrl: vi.fn((sessionId: string, path: string) => `/api/sftp/download?sessionId=${sessionId}&path=${path}`),
   sftpTransferCancel: vi.fn(),
+  isSshSessionLostError: vi.fn((e: unknown) => {
+    const kind = e && typeof e === 'object' && 'kind' in e ? String((e as { kind?: unknown }).kind) : ''
+    const msg = e instanceof Error ? e.message : String(e && typeof e === 'object' && 'message' in e ? (e as { message?: unknown }).message : e)
+    return kind === 'NotFound' || kind === 'ChannelClosed' || msg.toLowerCase().includes('session not found') || msg.toLowerCase().includes('channel closed')
+  }),
+  sshErrorMessage: vi.fn((e: unknown) => e instanceof Error ? e.message : String(e && typeof e === 'object' && 'message' in e ? (e as { message?: unknown }).message : e)),
   listen: vi.fn().mockResolvedValue(() => {}),
 }))
 
@@ -27,7 +34,10 @@ vi.mock('../../services/ssh', () => ({
   sftpTouch: h.sftpTouch,
   sftpRename: h.sftpRename,
   sftpDelete: h.sftpDelete,
+  sftpDownloadUrl: h.sftpDownloadUrl,
   sftpTransferCancel: h.sftpTransferCancel,
+  isSshSessionLostError: h.isSshSessionLostError,
+  sshErrorMessage: h.sshErrorMessage,
   listen: h.listen,
 }))
 
@@ -54,6 +64,22 @@ const ROOT_ITEMS: SftpItem[] = [
 const LOGS_ITEMS: SftpItem[] = [
   mk({ name: 'app.log', path: '/srv/logs/app.log', type: 'file', size: 4300 }),
 ]
+const CONN_A: Connection = {
+  id: 'host-a',
+  group: 'g',
+  kind: 'host',
+  name: 'Host A',
+  sub: 'user@host-a:22',
+  icon: 'server',
+  status: 'up',
+  proto: 'ssh',
+}
+const CONN_B: Connection = {
+  ...CONN_A,
+  id: 'host-b',
+  name: 'Host B',
+  sub: 'user@host-b:22',
+}
 
 function wrap(ui: React.ReactNode) {
   return render(
@@ -65,6 +91,7 @@ function wrap(ui: React.ReactNode) {
 
 describe('SftpPanel (SFTP wiring)', () => {
   beforeEach(() => {
+    localStorage.clear()
     h.sftpRealpath.mockResolvedValue('/srv')
     h.sftpList.mockImplementation((_sid: string, p: string) => Promise.resolve(p === '/srv/logs' ? LOGS_ITEMS : ROOT_ITEMS))
     h.sftpUpload.mockResolvedValue('xfer-1')
@@ -74,12 +101,16 @@ describe('SftpPanel (SFTP wiring)', () => {
     h.sftpRename.mockResolvedValue(undefined)
     h.sftpDelete.mockResolvedValue(undefined)
     h.sftpTransferCancel.mockResolvedValue(undefined)
+    h.sftpDownloadUrl.mockClear()
+    h.isSshSessionLostError.mockClear()
+    h.sshErrorMessage.mockClear()
     h.listen.mockResolvedValue(() => {})
     ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
   })
 
   afterEach(() => {
     delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+    localStorage.clear()
     clearSftpNav()
     vi.clearAllMocks()
   })
@@ -109,6 +140,26 @@ describe('SftpPanel (SFTP wiring)', () => {
     fireEvent.doubleClick(screen.getByText('logs'))
     await waitFor(() => expect(h.sftpList).toHaveBeenCalledWith('sess-1', '/srv/logs'))
     await waitFor(() => expect(screen.getByText('app.log')).toBeTruthy())
+  })
+
+  it('notifies the owner when listing fails because the SSH session is gone', async () => {
+    const onSessionClosed = vi.fn()
+    h.sftpList.mockRejectedValueOnce({ kind: 'NotFound', message: 'session not found: sess-1' })
+
+    wrap(<SftpPanel onClose={() => {}} sessionId="sess-1" onSessionClosed={onSessionClosed} />)
+
+    await waitFor(() => expect(onSessionClosed).toHaveBeenCalledWith('sess-1'))
+    expect(screen.getByText('session not found: sess-1')).toBeTruthy()
+  })
+
+  it('does not close the session for ordinary SFTP operation errors', async () => {
+    const onSessionClosed = vi.fn()
+    h.sftpList.mockRejectedValueOnce(new Error('sftp error: Permission denied'))
+
+    wrap(<SftpPanel onClose={() => {}} sessionId="sess-1" onSessionClosed={onSessionClosed} />)
+
+    await waitFor(() => expect(screen.getByText('sftp error: Permission denied')).toBeTruthy())
+    expect(onSessionClosed).not.toHaveBeenCalled()
   })
 
   it('restores the last browsed directory after the panel is reopened', async () => {
@@ -143,6 +194,33 @@ describe('SftpPanel (SFTP wiring)', () => {
     fireEvent.change(input, { target: { value: '/srv/logs' } })
     fireEvent.keyDown(input, { key: 'Enter' })
     await waitFor(() => expect(h.sftpList).toHaveBeenCalledWith('sess-1', '/srv/logs'))
+  })
+
+  it('scopes SFTP favorites by connection', async () => {
+    localStorage.setItem('catio-sftp-favorites-v2', JSON.stringify({
+      [CONN_A.id]: ['/srv/only-a'],
+      [CONN_B.id]: ['/srv/only-b'],
+    }))
+
+    wrap(<SftpPanel onClose={() => {}} conn={CONN_A} sessionId="sess-1" />)
+    await waitFor(() => expect(screen.getByText('a.txt')).toBeTruthy())
+    fireEvent.click(screen.getByTitle('收藏夹 / 快速跳转'))
+
+    expect(screen.getByText('/srv/only-a')).toBeTruthy()
+    expect(screen.queryByText('/srv/only-b')).toBeNull()
+  })
+
+  it('writes new favorites into the current connection scope only', async () => {
+    wrap(<SftpPanel onClose={() => {}} conn={CONN_A} sessionId="sess-1" />)
+    await waitFor(() => expect(screen.getByText('a.txt')).toBeTruthy())
+
+    fireEvent.click(screen.getByTitle('收藏夹 / 快速跳转'))
+    fireEvent.click(screen.getByText('收藏当前目录'))
+
+    const scoped = JSON.parse(localStorage.getItem('catio-sftp-favorites-v2') ?? '{}') as Record<string, string[]>
+    expect(scoped[CONN_A.id]).toEqual(['/srv'])
+    expect(scoped[CONN_B.id]).toBeUndefined()
+    expect(localStorage.getItem('catio-sftp-favorites')).toBeNull()
   })
 
   it('creates a new folder via the header button + inline input', async () => {

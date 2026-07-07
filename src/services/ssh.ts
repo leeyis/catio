@@ -22,6 +22,26 @@ async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Prom
   return invoke<T>(cmd, args)
 }
 
+export function sshErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message
+  if (error && typeof error === 'object' && 'message' in error) {
+    return String((error as { message?: unknown }).message)
+  }
+  return String(error)
+}
+
+export function isSshSessionLostError(error: unknown): boolean {
+  const kind = error && typeof error === 'object' && 'kind' in error
+    ? String((error as { kind?: unknown }).kind)
+    : ''
+  if (kind === 'NotFound' || kind === 'ChannelClosed') return true
+
+  const message = sshErrorMessage(error).toLowerCase()
+  if (message.includes('session not found') || message.includes('channel closed')) return true
+  if (message.includes('session closed')) return true
+  return /\b(connection reset|broken pipe|disconnect|disconnected|connection closed|connection aborted)\b/.test(message)
+}
+
 // Web transport: rpc() routes ssh_* request/response over HTTP in server mode; subscribe()/wsCmd()
 // carry the terminal stream + term_* commands over the WebSocket (M3).
 import { rpc, isServer, subscribe, wsCmd, wsNotify } from './transport'
