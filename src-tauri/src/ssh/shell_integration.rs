@@ -22,6 +22,7 @@ const INTEGRATION_TEMPLATE: &str = r#"if [ -n "${ZSH_VERSION:-}" ]; then
   autoload -Uz add-zsh-hook 2>/dev/null
   add-zsh-hook preexec __catio_pe; add-zsh-hook precmd __catio_pc
   case "$PS1" in *'633;B'*) ;; *) PS1="$PS1"$'%{\e]633;B\a%}';; esac
+  print -rn -- $'\e]633;P;CatioReady='"$__catio_n"$'\a'
 elif [ -n "${BASH_VERSION:-}" ]; then
   __catio_n='__CATIO_NONCE__'
   __catio_esc(){ local s=${1//\\/\\\\}; s=${s//;/\\x3b}; s=${s//$'\n'/\\x0a}; printf '%s' "$s"; }
@@ -31,6 +32,7 @@ elif [ -n "${BASH_VERSION:-}" ]; then
   trap '__catio_pe' DEBUG
   case "${PROMPT_COMMAND:-}" in *__catio_pc*) ;; *) PROMPT_COMMAND="__catio_pc${PROMPT_COMMAND:+;$PROMPT_COMMAND}";; esac
   case "$PS1" in *'633;B'*) ;; *) PS1="$PS1"$'\[\e]633;B\a\]';; esac
+  printf '\e]633;P;CatioReady=%s\a' "$__catio_n"
 fi"#;
 
 /// 块大小：每条赋值行携带的 base64 字节数。配合固定前缀后整行远低于 POSIX
@@ -147,6 +149,30 @@ mod tests {
         assert!(
             body.contains(r#"local e=$?; __catio_in=0;"#),
             "__catio_pc must reset __catio_in before its printfs: {body}"
+        );
+    }
+
+    #[test]
+    fn emits_nonce_gated_ready_sentinel() {
+        // Both shells must emit our nonce-gated CatioReady sentinel AFTER installing
+        // hooks. It is the only trusted signal that unmutes the terminal, so a host's
+        // pre-existing integration (which lacks our nonce) can't unmute us early.
+        let body = INTEGRATION_TEMPLATE.replace("__CATIO_NONCE__", "NONCE123");
+        // zsh: print -rn -- $'\e]633;P;CatioReady='"$__catio_n"$'\a'
+        assert!(
+            body.contains(r#"print -rn -- $'\e]633;P;CatioReady='"$__catio_n"$'\a'"#),
+            "zsh must emit CatioReady sentinel: {body}"
+        );
+        // bash: printf '\e]633;P;CatioReady=%s\a' "$__catio_n"
+        assert!(
+            body.contains(r#"printf '\e]633;P;CatioReady=%s\a' "$__catio_n""#),
+            "bash must emit CatioReady sentinel: {body}"
+        );
+        // Exactly two emissions (one per shell branch).
+        assert_eq!(
+            body.matches("CatioReady").count(),
+            2,
+            "expected one CatioReady sentinel per shell branch: {body}"
         );
     }
 

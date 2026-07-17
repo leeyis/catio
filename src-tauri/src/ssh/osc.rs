@@ -10,6 +10,12 @@ pub enum OscEvent {
     ExecStart,
     ExecEnd(Option<i32>),
     Cwd(String),
+    /// Our own shell-integration bootstrap finished installing its hooks and
+    /// emitted the nonce-gated `633;P;CatioReady=<nonce>` sentinel. This is the
+    /// ONLY trusted signal that OUR integration is live — the terminal layer uses
+    /// it (not any generic 633/133 marker, which a host's pre-existing integration
+    /// could emit before our bootstrap even runs) to end the connect-time mute.
+    Ready,
 }
 
 /// Defensive cap: if a partial sequence buffer grows past this without a
@@ -87,30 +93,39 @@ impl Scanner {
                 }
             }
         } else if let Some(prop) = rest.strip_prefix("P;") {
-            // 633;P;Cwd=<escapedPwd>  (other P props: strip, no event).
+            // 633;P;Cwd=<escapedPwd> or 633;P;CatioReady=<nonce> (our sentinel).
+            // Other P props: strip, no event.
             if let Some(val) = prop.strip_prefix("Cwd=") {
                 events.push(OscEvent::Cwd(unescape(val)));
+            } else if let Some(n) = prop.strip_prefix("CatioReady=") {
+                // Nonce-gated: only OUR bootstrap knows the nonce, so a host's
+                // pre-existing integration can't spoof this to unmute early.
+                if n == self.nonce {
+                    events.push(OscEvent::Ready);
+                }
             }
         }
         events
     }
 
-    /// Returns `(visible_bytes, events, first_marker_offset)`.
+    /// Returns `(visible_bytes, events, ready_offset)`.
     ///
-    /// `first_marker_offset` is `Some(n)` when this call stripped at least one
-    /// OSC 633/133 sequence, where `n` is the length of `visible_bytes` accumulated
-    /// *before* the first such sequence. Callers use this to locate where shell
-    /// integration first became live within the batch — everything before it is
-    /// pre-integration output (e.g. the echoed bootstrap line), everything after
-    /// is the clean prompt. `None` means no 633/133 sequence appeared in this batch.
+    /// `ready_offset` is `Some(n)` when this call stripped OUR nonce-gated
+    /// `633;P;CatioReady=<nonce>` sentinel, where `n` is the length of
+    /// `visible_bytes` accumulated *before* that sentinel. The terminal layer uses
+    /// it to end the connect-time mute precisely at the point our integration went
+    /// live: everything before `n` is pre-integration output (the echoed bootstrap
+    /// line, plus any MOTD), everything at/after is the clean first prompt. `None`
+    /// means our sentinel did not appear in this batch — a generic 633/133 marker
+    /// (e.g. from a host's own integration) deliberately does NOT set this.
     pub fn feed(&mut self, chunk: &[u8]) -> (Vec<u8>, Vec<OscEvent>, Option<usize>) {
         let mut buf = std::mem::take(&mut self.pending);
         buf.extend_from_slice(chunk);
 
         let mut visible: Vec<u8> = Vec::with_capacity(buf.len());
         let mut events: Vec<OscEvent> = Vec::new();
-        // Offset (into `visible`) just before the first stripped 633/133 sequence.
-        let mut first_marker: Option<usize> = None;
+        // Offset (into `visible`) just before OUR Ready sentinel, once seen.
+        let mut ready_offset: Option<usize> = None;
         let mut i = 0;
 
         while i < buf.len() {
@@ -120,7 +135,7 @@ impl Scanner {
                     // Trailing lone ESC — could be the start of a split ESC].
                     // Stash from here in pending and stop.
                     self.pending.extend_from_slice(&buf[i..]);
-                    return self.finish(visible, events, first_marker);
+                    return self.finish(visible, events, ready_offset);
                 }
                 if buf[i + 1] == b']' {
                     // OSC start. Search for a terminator from i+2.
@@ -129,19 +144,22 @@ impl Scanner {
                         None => {
                             // Incomplete OSC -> buffer the rest in pending.
                             self.pending.extend_from_slice(&buf[i..]);
-                            return self.finish(visible, events, first_marker);
+                            return self.finish(visible, events, ready_offset);
                         }
                         Some((rel_term_start, term_len)) => {
                             let term_start = payload_start + rel_term_start;
                             let payload = &buf[payload_start..term_start];
                             let seq_end = term_start + term_len; // exclusive
                             if payload.starts_with(b"633;") || payload.starts_with(b"133;") {
-                                // Parse + strip (do not add to visible). Record the
-                                // visible offset of the first such marker in this batch.
-                                if first_marker.is_none() {
-                                    first_marker = Some(visible.len());
+                                // Parse + strip (do not add to visible).
+                                let evs = self.parse_payload(payload);
+                                // Record the visible offset of OUR Ready sentinel.
+                                if ready_offset.is_none()
+                                    && evs.iter().any(|e| *e == OscEvent::Ready)
+                                {
+                                    ready_offset = Some(visible.len());
                                 }
-                                events.extend(self.parse_payload(payload));
+                                events.extend(evs);
                             } else {
                                 // Pass-through: copy the full sequence inclusive.
                                 visible.extend_from_slice(&buf[i..seq_end]);
@@ -157,7 +175,7 @@ impl Scanner {
             i += 1;
         }
 
-        self.finish(visible, events, first_marker)
+        self.finish(visible, events, ready_offset)
     }
 
     /// Apply the defensive pending cap, then return.
@@ -165,14 +183,14 @@ impl Scanner {
         &mut self,
         mut visible: Vec<u8>,
         events: Vec<OscEvent>,
-        first_marker: Option<usize>,
+        ready_offset: Option<usize>,
     ) -> (Vec<u8>, Vec<OscEvent>, Option<usize>) {
         if self.pending.len() > PENDING_CAP {
             // No terminator within a reasonable window — flush as visible and reset.
             visible.append(&mut self.pending);
             self.pending.clear();
         }
-        (visible, events, first_marker)
+        (visible, events, ready_offset)
     }
 }
 
@@ -258,20 +276,36 @@ mod tests {
         assert_eq!(s(&vis), "done");
         assert!(ev.contains(&OscEvent::ExecStart));
     }
-    #[test] fn first_marker_offset_splits_pre_integration_noise() {
-        // The batch that first carries a 633/133 marker may also carry the echoed
-        // bootstrap line before it. `first_marker_offset` must point just past that
-        // pre-marker noise so callers can drop it and keep only the clean prompt.
+    #[test] fn ready_sentinel_emits_event_and_is_nonce_gated() {
+        let mut sc = Scanner::new("GOOD");
+        // Correct nonce -> Ready event, stripped from visible.
+        let (vis, ev, _) = sc.feed(b"x\x1b]633;P;CatioReady=GOOD\x07");
+        assert_eq!(s(&vis), "x");
+        assert!(ev.contains(&OscEvent::Ready));
+        // Wrong nonce -> NO Ready (a host's own integration can't spoof it).
+        let mut sc2 = Scanner::new("GOOD");
+        let (_v, ev2, off2) = sc2.feed(b"\x1b]633;P;CatioReady=BAD\x07");
+        assert!(!ev2.contains(&OscEvent::Ready));
+        assert_eq!(off2, None);
+    }
+    #[test] fn ready_offset_splits_pre_integration_noise() {
+        // The batch carrying our Ready sentinel may also carry the echoed bootstrap
+        // line (and a host's own 633 marker) before it. `ready_offset` must point
+        // just past that noise so callers drop it and keep only the clean prompt.
         let mut sc = Scanner::new("N");
-        let (vis, _ev, off) = sc.feed(b"__c='blob'\r\n\x1b]633;A\x07user@host:~$ ");
-        assert_eq!(s(&vis), "__c='blob'\r\nuser@host:~$ ");
-        assert_eq!(off, Some("__c='blob'\r\n".len()));
-        // Bytes at/after the offset are the clean prompt.
+        // Pre-existing host integration marker (633;A) must NOT set the offset;
+        // only OUR nonce-gated sentinel does.
+        let (vis, _ev, off) = sc.feed(
+            b"\x1b]633;A\x07host-prompt$ __c='blob'\r\n\x1b]633;P;CatioReady=N\x07user@host:~$ ",
+        );
+        assert_eq!(s(&vis), "host-prompt$ __c='blob'\r\nuser@host:~$ ");
+        assert_eq!(off, Some("host-prompt$ __c='blob'\r\n".len()));
         assert_eq!(s(&vis[off.unwrap()..]), "user@host:~$ ");
     }
-    #[test] fn first_marker_offset_none_without_marker() {
+    #[test] fn ready_offset_none_without_sentinel() {
         let mut sc = Scanner::new("N");
-        let (_v, _e, off) = sc.feed(b"plain output, no osc");
+        // Plain output and even a generic 633 marker leave ready_offset None.
+        let (_v, _e, off) = sc.feed(b"plain\x1b]633;A\x07more");
         assert_eq!(off, None);
     }
 }

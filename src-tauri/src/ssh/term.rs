@@ -232,22 +232,23 @@ fn emit_scanned(
     last_emit: &mut Option<(String, std::time::Instant)>,
     strip_lead_nl: &mut bool,
 ) {
-    let (mut visible, events, first_marker) = scanner.feed(data);
+    let (mut visible, events, ready_offset) = scanner.feed(data);
     // Decide whether to show this batch's visible bytes.
     if *muted {
-        // 任何被 strip 的 633/133 序列都标志 shell 集成已生效(首个 prompt 到达)→ 解除 mute。
-        // 用 first_marker(而非 events 非空)判断:prompt-start(633;A)等序列会被 strip 但不产生
-        // event,若只看 events 会漏判、迟迟不解除 mute。无 marker 的 shell 靠 3s 兜底解除。
-        if let Some(off) = first_marker {
+        // 只在收到「我们自己的、带 nonce 的就绪哨兵」(633;P;CatioReady=<nonce>)时解除 mute。
+        // 关键:不能用「任意 633/133 marker」判断——很多主机(尤其 AI 开发机)已装了 VS Code
+        // Remote 等自带 shell-integration,其登录首个 prompt 就带 OSC 633 标记。若见到任意标记
+        // 就解除 mute,主机自带的标记会在我们的 bootstrap 回显到达之前解除 mute → 整段 base64
+        // 引导回显全部泄漏到终端(用户报告的现象)。哨兵由我们的 bootstrap 在 hook 装好后发出、
+        // 用 nonce 门控,主机自带集成无法伪造,故是唯一可信的「我方集成已生效」信号。
+        if let Some(off) = ready_offset {
             *muted = false;
-            // 关键:解除 mute 的这一批里,marker 之前的 visible 字节是集成生效前的输出
-            // ——即被 PTY 回显出来的 bootstrap 引导行(base64 分块 + eval)。当服务端把这些
-            // 回显与首个 prompt marker 攒进同一批发回时(首次连接常见),整批一起显示就会把
-            // 那一大堆 base64 噪声打到终端(用户报告的现象);第二次连接因回显与 marker 分批
-            // 落在不同的 feed 里、噪声批仍处于 mute 中被丢弃,故显得正常。这里按 marker 边界
-            // 精确切割:丢弃 marker 之前的噪声,只保留其后的干净 prompt,不再依赖分批时序。
+            // 哨兵之前的 visible 是集成生效前的输出——被 PTY 回显的 bootstrap 引导行(base64
+            // 分块 + eval)以及可能的 MOTD。当这些回显与哨兵攒进同一批发回时,按哨兵边界精确
+            // 切割:丢弃哨兵之前的噪声,只保留其后的干净 prompt,不依赖服务端分批时序。
             visible.drain(..off);
         } else if started.elapsed() > std::time::Duration::from_millis(MUTE_FALLBACK_MS) {
+            // 无我方集成的 shell(如 ESXi ash,eval 得空串、不发哨兵)靠 3s 兜底解除 mute。
             *muted = false;
         }
     }
@@ -323,6 +324,9 @@ fn emit_scanned(
                     *last_emit = Some((cmd, std::time::Instant::now()));
                 }
             }
+            // Ready is consumed by the mute logic above (via ready_offset); it is
+            // not a command-audit event and carries no history/UI side effect here.
+            osc::OscEvent::Ready => {}
         }
     }
 }
@@ -479,34 +483,50 @@ mod tests {
     }
 
     #[test]
-    fn same_batch_echo_and_marker_hides_bootstrap_noise() {
-        // 根因回归:当 PTY 回显的 bootstrap 引导行(base64 分块)与首个 prompt marker
-        // 落在同一批数据里(首次连接常见),解除 mute 时必须只显示 marker 之后的干净 prompt,
-        // 丢弃 marker 之前的 base64 回显噪声。此前整批一起显示 → 用户看到一大堆命令。
+    fn same_batch_echo_and_ready_hides_bootstrap_noise() {
+        // 根因回归:当 PTY 回显的 bootstrap 引导行(base64 分块)、主机自带集成的 633 标记、
+        // 与我方就绪哨兵落在同一批(首次连接常见),解除 mute 时必须只显示哨兵之后的干净 prompt,
+        // 丢弃哨兵之前的一切噪声。此前「见任意 633 就解除 mute」会让主机自带标记提前解除 →
+        // 整段 base64 回显泄漏(用户报告的现象)。
         let sink = CapturingSink::default();
         let mut scanner = osc::Scanner::new("N");
         let mut muted = true;
         let started = std::time::Instant::now();
-        // 一批里同时含:回显的引导命令(噪声) + 633;A(prompt start marker) + 干净 prompt。
-        let batch = b" __c=\"$__c\"'QUJD'\r\n eval \"unset __c; ...\"\r\n\x1b]633;A\x07user@host:~$ ";
+        // 主机自带集成先发 633;A(不应解除 mute),接着是回显噪声,最后我方哨兵 + 干净 prompt。
+        let batch = b"\x1b]633;A\x07 __c=\"$__c\"'QUJD'\r\n eval \"...\"\r\n\x1b]633;P;CatioReady=N\x07admin@spark:~$ ";
         let visible = run_batch(&sink, "term://c1", &mut scanner, &mut muted, &started, batch);
-        assert!(!muted, "首个 marker 到达后必须解除 mute");
+        assert!(!muted, "收到我方就绪哨兵后必须解除 mute");
         assert_eq!(
             String::from_utf8_lossy(&visible),
-            "user@host:~$ ",
-            "只应显示 marker 之后的干净 prompt,base64 回显噪声必须被丢弃"
+            "admin@spark:~$ ",
+            "只应显示哨兵之后的干净 prompt,回显噪声与主机自带标记之后的内容必须被丢弃"
         );
     }
 
     #[test]
-    fn muted_batch_before_marker_shows_nothing() {
-        // marker 到达之前的纯噪声批:整批处于 mute,不应显示任何字节。
+    fn host_own_marker_does_not_unmute() {
+        // 主机自带 shell-integration 的 633 标记(无我方 nonce 的哨兵)绝不能解除 mute,
+        // 否则其登录首个 prompt 的标记会在我方 bootstrap 回显到达前解除 mute → 噪声泄漏。
+        let sink = CapturingSink::default();
+        let mut scanner = osc::Scanner::new("N");
+        let mut muted = true;
+        let started = std::time::Instant::now();
+        // 一批含主机自带的 prompt-start/exec 标记 + 回显,但无我方哨兵。
+        let batch = b"\x1b]633;A\x07host$ \x1b]633;C\x07 __c=\"$__c\"'QUJD'\r\n";
+        let visible = run_batch(&sink, "term://c1", &mut scanner, &mut muted, &started, batch);
+        assert!(muted, "无我方哨兵时必须保持 mute");
+        assert!(visible.is_empty(), "mute 阶段不应显示任何回显噪声");
+    }
+
+    #[test]
+    fn muted_batch_before_ready_shows_nothing() {
+        // 哨兵到达之前的纯噪声批:整批处于 mute,不应显示任何字节。
         let sink = CapturingSink::default();
         let mut scanner = osc::Scanner::new("N");
         let mut muted = true;
         let started = std::time::Instant::now();
         let visible = run_batch(&sink, "term://c1", &mut scanner, &mut muted, &started, b" __c=\"$__c\"'QUJD'\r\n");
-        assert!(muted, "无 marker 时仍处于 mute");
+        assert!(muted, "无哨兵时仍处于 mute");
         assert!(visible.is_empty(), "mute 阶段不应显示任何回显噪声");
     }
 }
