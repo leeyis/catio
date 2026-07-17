@@ -700,8 +700,13 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
     // 提取当前输入 → planHistoryCompletion → 更新候选 state(+ Phase 2 ghost 浮层)。
     const refreshSuggest = () => {
       if (!(live && sessionId) || !historySuggestEnabledRef.current) { setSuggest(null); setGhost(null); return }
-      const input = readCurrentInput()
-      if (input == null) { clearInputCapture(); return }
+      // 用对账后的 optimistic 而非裸屏幕文本:PTY 回显有滞后,刚敲的字符(如 `docker p` 的 `p`)
+      // 可能还没落到屏幕缓冲,直接读屏幕会得到 `docker ` 并匹配出全部 docker 历史。
+      // syncScreenInputSnapshot 已把两者对账(回显滞后时保留更完整的 optimistic,
+      // PTY 改写行时回退到屏幕),对账后的 optimisticInputRef 即最准的当前输入。
+      const screenInput = syncScreenInputSnapshot()
+      if (screenInput == null) { clearInputCapture(); return }
+      const input = optimisticInputRef.current || screenInput
       currentInputRef.current = input
       // Esc 忽略本次输入,直到输入文本变化才恢复。
       if (suppressedInputRef.current != null && suppressedInputRef.current === input) { setSuggest(null); setGhost(null); return }

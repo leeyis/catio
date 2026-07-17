@@ -185,6 +185,31 @@ describe('TerminalPane (xterm wiring)', () => {
     expect(termWrite).not.toHaveBeenCalledWith('sess-1', 'chan-1', btoa('\x16'))
   })
 
+  it('filters candidates by the optimistic input when PTY echo lags behind', async () => {
+    localStorage.setItem('catio-history', JSON.stringify([
+      { id: 'h1', kind: 'shell', target: 'bastion.catio.io', text: 'docker ps', when: 'now', dur: '0ms', ts: 30 },
+      { id: 'h2', kind: 'shell', target: 'bastion.catio.io', text: 'docker logs -f api', when: 'now', dur: '0ms', ts: 20 },
+      { id: 'h3', kind: 'shell', target: 'bastion.catio.io', text: 'docker images', when: 'now', dur: '0ms', ts: 10 },
+    ]))
+    wrap(<TerminalPane conn={DATA.byId['h-bastion']} sessionId="sess-1" active />)
+    await waitFor(() => expect(h.dataCb.fn).not.toBeNull())
+    await waitFor(() => expect(h.termEventCb.fn).not.toBeNull())
+
+    act(() => { h.termEventCb.fn?.({ inputStart: true }) })
+    // 屏幕缓冲只回显到 `docker `(cursorX=7),但用户已敲下 `p` → optimistic 累积为 `docker p`。
+    h.bufferText = 'docker '
+    h.cursorX = 7
+    act(() => { h.dataCb.fn?.('docker ') })
+    await waitFor(() => expect(document.querySelector('[title="docker ps"]')).not.toBeNull())
+    act(() => { h.dataCb.fn?.('p') }) // 屏幕未更新,仅 optimistic 推进到 `docker p`
+    await act(async () => { await new Promise<void>(r => setTimeout(r, 60)) })
+
+    // 用 optimistic `docker p` 过滤:只保留 docker ps,logs/images 不应出现。
+    expect(document.querySelector('[title="docker ps"]')).not.toBeNull()
+    expect(document.querySelector('[title="docker logs -f api"]')).toBeNull()
+    expect(document.querySelector('[title="docker images"]')).toBeNull()
+  })
+
   it('does not duplicate the last typed character when accepting a stale history suggestion', async () => {
     localStorage.setItem('catio-history', JSON.stringify([{
       id: 'hist-1',
