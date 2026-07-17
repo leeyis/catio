@@ -42,7 +42,7 @@ WORKDIR /app/src-tauri
 # Cache the downloaded registry across builds (BuildKit) so a code-only change doesn't re-fetch
 # every dependency. Only the registry is cached — target/ stays in the layer for the COPY below.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    cargo build --release --bin catio-server
+    cargo build --release --bin catio-server --features server
 RUN strip target/release/catio-server || true
 
 # ── stage 3: runtime ─────────────────────────────────────────────────────────

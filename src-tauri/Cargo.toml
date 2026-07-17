@@ -14,9 +14,17 @@ path = "src/main.rs"
 
 # Web-server head (Option B spike): serves the built UI + exposes the same Rust core over
 # HTTP/WS for LAN browser access. Reuses catio_lib; does not affect the desktop binary.
+# required-features 让它默认不参与构建:桌面 `tauri build`(尤其 universal 打包)不会枚举/
+# lipo 这个二进制,避免「universal 目录缺 catio-server 导致 bundle 失败」。服务端/Docker
+# 构建显式加 `--features server` 即可。
 [[bin]]
 name = "catio-server"
 path = "src/bin/server.rs"
+required-features = ["server"]
+
+[features]
+# 仅用于开启 catio-server 二进制的构建;不改变 lib 行为。
+server = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

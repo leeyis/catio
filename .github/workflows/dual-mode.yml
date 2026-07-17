@@ -55,7 +55,7 @@ jobs:
             librsvg2-dev libssl-dev libxdo-dev pkg-config libudev-dev
       - run: cargo check --manifest-path src-tauri/Cargo.toml --lib
       - run: cargo check --manifest-path src-tauri/Cargo.toml --bin catio
-      - run: cargo check --manifest-path src-tauri/Cargo.toml --bin catio-server
+      - run: cargo check --manifest-path src-tauri/Cargo.toml --bin catio-server --features server
 
   rust-test:
     name: Rust library tests
