@@ -961,7 +961,7 @@ checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
 name = "catio"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "argon2 0.5.3",
  "async-trait",
