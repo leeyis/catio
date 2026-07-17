@@ -29,17 +29,6 @@ Catio is an open-source operations and database client built with **Rust + Tauri
 
 ---
 
-## Why Star Catio
-
-- **Real infra workflows, not a toy shell**: SSH, SFTP, multi-tab terminals, command broadcast, ProxyJump, tunnels, SOCKS, remote system metrics, VNC, local shell, serial, Telnet, Mosh, and RDP launch support.
-- **A serious database studio**: native/protocol-compatible drivers plus JDBC expansion, schema browsing, editable data grids, SQL console, EXPLAIN, history, snippets, import/export, table transfer, SQL file execution, Redis/Mongo/Elasticsearch paths, and ER metadata.
-- **Desktop and Server mode from one codebase**: run it as a native Tauri client for personal use, or deploy `catio-server` behind Docker/systemd for browser access and multi-user isolation.
-- **AI that sits where work happens**: Catio Agent follows the active terminal or database tab, can use terminal buffer and schema context, and supports Ollama or OpenAI-compatible endpoints.
-- **MCP built in**: expose connected hosts and databases to external coding agents through MCP, with tokens, allowlists, and live tool-call logs.
-- **Made for contributors**: TypeScript strict mode, Rust modules with clear command boundaries, Vitest coverage, Rust unit tests, and a dual-mode CI gate.
-
----
-
 ## Product Tour
 
 | Host workbench | Database workbench |
