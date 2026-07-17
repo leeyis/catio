@@ -1097,6 +1097,7 @@
     "mcpLogTransfer": "Transfer",
     "aboutTitle": "About Catio",
     "aboutDesc": "Brings a <b>secure SSH terminal</b>, port tunnels, a <b>multi-engine database client</b>, and an <b>AI assistant</b> into one cross-platform desktop app — hosts, tunnels, databases, and AI, all in one place.",
+    "aboutRepo": "Repository",
     "themeDawnSub": "Dawn · Clear & Bright",
     "themeAmberSub": "Amber · Warm Champagne",
     "themeGroveSub": "Grove · Silent Forest",

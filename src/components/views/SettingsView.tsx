@@ -1223,6 +1223,17 @@ function AboutSettings() {
             <span className="mono" style={{ fontSize: 12.5, fontWeight: 500, color: 'var(--text-faint)' }}>v{__APP_VERSION__}</span>
           </span>
           <span style={{ fontSize: 12.5, color: 'var(--text-secondary)', lineHeight: 1.5, maxWidth: 420 }}><Trans i18nKey="settings.aboutDesc" components={{ b: <b /> }} /></span>
+          {/* 外链在 Tauri webview 里需拦截默认导航,改用 window.open 打开系统浏览器(与 AIPanel 同口径)。 */}
+          <a
+            href="https://github.com/leeyis/catio"
+            rel="noreferrer"
+            onClick={e => { e.preventDefault(); window.open('https://github.com/leeyis/catio', '_blank', 'noreferrer') }}
+            className="row gap6"
+            style={{ marginTop: 4, fontSize: 12.5, fontWeight: 500, color: 'var(--accent-primary)', width: 'fit-content' }}
+          >
+            <Icon name="external-link" size={13} />
+            <span>{t('settings.aboutRepo')}</span>
+          </a>
         </div>
       </div>
     </Block>
