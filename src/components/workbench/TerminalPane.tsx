@@ -294,9 +294,6 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
   // ghost:engine 返回的 items[0] 剩余后缀(仅严格前缀命中时非空);left/top 为光标像素位置。
   // 仅单行输入且不会换行时渲染。
   const [ghost, setGhost] = useState<{ text: string; left: number; top: number } | null>(null)
-  // ghost 镜像到 ref,供 attachCustomKeyEventHandler 在按键时同步读取(→/Ctrl+E 接受)。
-  const ghostRef = useRef<typeof ghost>(null)
-  ghostRef.current = ghost
   // 输入起点标记:OSC 633;B 命中后记录的光标行 marker + 列,用于提取「当前输入」。
   const inputMarkerRef = useRef<{ marker: { line: number; dispose(): void } | null; startCol: number } | null>(null)
   // 本次输入是否被 Esc 忽略(直到输入再次变化才恢复)。
@@ -867,13 +864,13 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
         .finally(() => { reconnectingRef.current = false })
     }
 
-    // attachCustomKeyEventHandler:候选可见时拦截 ↑/↓/Enter/Tab/Esc(在抵达 PTY 前)。
+    // attachCustomKeyEventHandler:候选可见时拦截 ↑/↓/→/Esc(在抵达 PTY 前)。
+    // 回车/Tab 不再参与补全,直接放行给 PTY(避免长命令输入时误触补全)。
     // 测试里 xterm mock 没有这个方法 → 存在性保护。
     if (typeof term.attachCustomKeyEventHandler === 'function') {
       term.attachCustomKeyEventHandler((ev) => {
         if (ev.type !== 'keydown') return true
-        // 吞键:除了让 xterm 不处理(return false),还必须 preventDefault 阻止浏览器默认行为
-        // ——尤其 Tab 的默认是「焦点移到下一个可聚焦元素」,否则补全后焦点会跳到右侧 Agent 面板;
+        // 吞键:让 xterm 不处理(return false)并 preventDefault 阻止浏览器默认行为,
         // stopPropagation 阻止冒泡到可能切换面板的全局快捷键。最后把焦点收回终端。
         const swallow = () => {
           try { ev.preventDefault(); ev.stopPropagation() } catch { /* noop */ }
@@ -889,18 +886,6 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
         // action intact, so the real ClipboardEvent can still carry the text on HTTP deployments.
         if (isPasteShortcut(ev) && canHandleTerminalPaste(ev.target)) return false
         if (!historySuggestEnabledRef.current) return true
-        // Phase 2:幽灵文本可见时,→ 或 Ctrl+E 接受 ghost 串(写入 PTY 并吞键)。
-        const gh = ghostRef.current
-        if (gh && gh.text && (ev.key === 'ArrowRight' || (ev.ctrlKey && (ev.key === 'e' || ev.key === 'E')))) {
-          const top = suggestRef.current?.items[0]
-          if (top) acceptHistoryMatch(top, suggestRef.current?.input ?? currentInputRef.current)
-          else {
-            termWrite0(gh.text)
-            setGhost(null)
-            setSuggest(null)
-          }
-          return swallow()
-        }
         const sg = suggestRef.current
         if (!sg || !sg.items.length) return true // 候选不可见时一律放行
         const idx = suggestIndexRef.current
@@ -911,9 +896,9 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
           case 'ArrowDown':
             setSuggestIndex(i => (i + 1) % sg.items.length)
             return swallow()
-          case 'Enter':
-          case 'Tab': {
-            // 只补全不执行:写入「选中项相对当前输入的剩余差额」。
+          case 'ArrowRight': {
+            // 唯一的补全键:→ 只补全不执行,写入「当前选中项相对当前输入的剩余差额」。
+            // (回车/Tab 已移除补全语义,避免长命令输入时误触。)
             const sel = sg.items[idx]
             acceptHistoryMatch(sel, sg.input)
             return swallow()

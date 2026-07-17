@@ -208,7 +208,7 @@ describe('TerminalPane (xterm wiring)', () => {
     termWrite.mockClear()
 
     act(() => { h.dataCb.fn?.('r') })
-    const ev = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })
+    const ev = new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true })
     let shouldProcess = true
     act(() => { shouldProcess = h.keyHandler.fn!(ev) })
 
@@ -216,6 +216,38 @@ describe('TerminalPane (xterm wiring)', () => {
     expect(termWrite).toHaveBeenCalledWith('sess-1', 'chan-1', btoa('r'))
     expect(termWrite).toHaveBeenCalledWith('sess-1', 'chan-1', btoa(' ps'))
     expect(termWrite).not.toHaveBeenCalledWith('sess-1', 'chan-1', btoa('r ps'))
+  })
+
+  it('does not accept a history suggestion on Tab or Enter (only ArrowRight completes)', async () => {
+    localStorage.setItem('catio-history', JSON.stringify([{
+      id: 'hist-1',
+      kind: 'shell',
+      target: 'bastion.catio.io',
+      text: 'docker ps',
+      when: 'now',
+      dur: '0ms',
+      ts: 10,
+    }]))
+    wrap(<TerminalPane conn={DATA.byId['h-bastion']} sessionId="sess-1" active />)
+    await waitFor(() => expect(h.dataCb.fn).not.toBeNull())
+    await waitFor(() => expect(h.termEventCb.fn).not.toBeNull())
+    await waitFor(() => expect(h.keyHandler.fn).not.toBeNull())
+
+    act(() => { h.termEventCb.fn?.({ inputStart: true }) })
+    h.bufferText = 'docke'
+    h.cursorX = 5
+    act(() => { h.dataCb.fn?.('docke') })
+    await waitFor(() => expect(document.querySelector('[title="docker ps"]')).not.toBeNull())
+    termWrite.mockClear()
+
+    // Tab 与 Enter 都不再补全:放行给 PTY(返回 true),且不写入补全差额。
+    for (const key of ['Tab', 'Enter']) {
+      const ev = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })
+      let shouldProcess = false
+      act(() => { shouldProcess = h.keyHandler.fn!(ev) })
+      expect(shouldProcess).toBe(true)
+    }
+    expect(termWrite).not.toHaveBeenCalledWith('sess-1', 'chan-1', btoa(' ps'))
   })
 
   it('does not show or accept history suggestions when disabled for the tab', async () => {

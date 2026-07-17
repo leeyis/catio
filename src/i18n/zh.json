@@ -541,7 +541,7 @@
     "tabKeyspace": "键空间",
     "noTabs": "没有打开的标签",
     "noTabsHint": "从左侧选择表、视图或函数，或新建查询",
-    "historySuggestHint": "↑↓ 选择 · Tab/↵ 补全 · Esc 关闭",
+    "historySuggestHint": "↑↓ 选择 · → 补全 · Esc 关闭",
     "broadcastConfirmTitle": "确认广播",
     "broadcastConfirmDesc": "该命令将同时在 {{count}} 台主机上执行。",
     "broadcastConfirmCmd": "将执行的命令",

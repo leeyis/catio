@@ -541,7 +541,7 @@
     "tabKeyspace": "Keyspace",
     "noTabs": "No open tabs",
     "noTabsHint": "Pick a table, view or function from the sidebar, or open a new query",
-    "historySuggestHint": "↑↓ select · Tab/↵ complete · Esc close",
+    "historySuggestHint": "↑↓ select · → complete · Esc close",
     "broadcastConfirmTitle": "Confirm broadcast",
     "broadcastConfirmDesc": "This command will run on {{count}} hosts at the same time.",
     "broadcastConfirmCmd": "Command to run",
