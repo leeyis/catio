@@ -1,10 +1,11 @@
 name: dual-mode gates
 
+# 仅在打 v* 标签或手动触发时运行门禁。日常 push/PR 到 main 不再自动构建,
+# 避免每次提交都跑一整套 CI;需要时可在 Actions 页手动 workflow_dispatch。
 on:
-  pull_request:
-    branches: [main]
   push:
-    branches: [main]
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 concurrency:
