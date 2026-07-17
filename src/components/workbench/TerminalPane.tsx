@@ -700,14 +700,11 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
     // 提取当前输入 → planHistoryCompletion → 更新候选 state(+ Phase 2 ghost 浮层)。
     const refreshSuggest = () => {
       if (!(live && sessionId) || !historySuggestEnabledRef.current) { setSuggest(null); setGhost(null); return }
-      // 用对账后的 optimistic 而非裸屏幕文本:PTY 回显有滞后,刚敲的字符(如 `docker p` 的 `p`)
-      // 可能还没落到屏幕缓冲,直接读屏幕会得到 `docker ` 并匹配出全部 docker 历史。
-      // syncScreenInputSnapshot 已把两者对账(回显滞后时保留更完整的 optimistic,
-      // PTY 改写行时回退到屏幕),对账后的 optimisticInputRef 即最准的当前输入。
-      const screenInput = syncScreenInputSnapshot()
+      // marker 失效(readCurrentInput 返回 null)才清空;否则用 reconcileInput 对账出的
+      // 权威输入(普通编辑信 optimistic 击键模型,避免回显滞后导致的错配/漂移)。
+      const screenInput = readCurrentInput()
       if (screenInput == null) { clearInputCapture(); return }
-      const input = optimisticInputRef.current || screenInput
-      currentInputRef.current = input
+      const input = reconcileInput(screenInput, '')
       // Esc 忽略本次输入,直到输入文本变化才恢复。
       if (suppressedInputRef.current != null && suppressedInputRef.current === input) { setSuggest(null); setGhost(null); return }
       if (suppressedInputRef.current != null && suppressedInputRef.current !== input) suppressedInputRef.current = null
@@ -763,29 +760,26 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
       currentInputRef.current = next
     }
 
-    const syncScreenInputSnapshot = (): string | null => {
-      const screenInput = readCurrentInput()
-      if (screenInput == null) return null
-      currentInputRef.current = screenInput
-      const optimistic = optimisticInputRef.current
-      if (!optimistic || screenInput.length >= optimistic.length || !optimistic.startsWith(screenInput)) {
-        optimisticInputRef.current = screenInput
-      }
-      return screenInput
-    }
-
-    // 命令行上「当前已在 PTY 行里的输入」:取所有快照中最长的一条。
-    // syncScreenInputSnapshot 已先把 optimistic 与屏幕对账(屏幕更长/optimistic 非其前缀时重置),
-    // 因此这里的最长值要么等于屏幕文本,要么是「已发送但回显滞后」的 optimistic —— 都真实在行上。
-    const currentLineInput = (fallbackInput: string): string => {
-      const screenInput = syncScreenInputSnapshot()
-      const candidates = [
-        optimisticInputRef.current,
-        screenInput ?? '',
-        currentInputRef.current,
-        fallbackInput,
-      ].filter((v): v is string => !!v)
-      return candidates.reduce((best, next) => (next.length > best.length ? next : best), '')
+    // 把「屏幕回显文本」(echo 滞后、可能为 null)与「optimistic 击键模型」(即时、由
+    // applyInputDelta 累积)对账成一个权威当前输入,并同步两个 ref。返回值即当前输入。
+    //
+    // 关键:optimistic 反映的是「已发往 PTY 的击键」,而 PTY 依此改写自己的行缓冲,所以
+    // optimistic 恒等于 PTY 行的真实内容;屏幕(xterm)只是它的滞后重绘。因此普通编辑
+    // (打字/退格/Ctrl-U/Ctrl-W)一律信 optimistic,不能因「屏幕更长」就回退——那会把
+    // 尚未回显的退格「复活」(曾导致退格后再空格变成两个空格、候选错乱)。
+    // 仅两种情况采用屏幕文本:
+    //  ① optimistic 为空 —— 全新提示符 / 历史调回(↑)/ PTY 整行改写,击键模型无从得知;
+    //  ② 二者在前缀上分叉 —— PTY 重写了行(Tab 补全展开、历史检索),以屏幕所见为准。
+    const reconcileInput = (screen: string | null, fallback: string): string => {
+      const opt = optimisticInputRef.current
+      let chosen: string
+      if (screen == null) chosen = opt || fallback
+      else if (!opt) chosen = screen
+      else if (opt.startsWith(screen) || screen.startsWith(opt)) chosen = opt
+      else chosen = screen
+      optimisticInputRef.current = chosen
+      currentInputRef.current = chosen
+      return chosen
     }
 
     // 接受一条候选。确定性地把命令行改写为 sel.text,分三种情况(不再有 null 落空):
@@ -795,7 +789,7 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
     const BACKSPACE = '\x7f'
     const acceptHistoryMatch = (sel: HistoryMatch | undefined, fallbackInput: string) => {
       if (!sel) return
-      const base = currentLineInput(fallbackInput)
+      const base = reconcileInput(readCurrentInput(), fallbackInput)
       if (sel.text.startsWith(base)) {
         const tail = sel.text.slice(base.length)
         if (tail) termWrite0(tail)

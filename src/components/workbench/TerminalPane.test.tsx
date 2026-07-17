@@ -210,6 +210,116 @@ describe('TerminalPane (xterm wiring)', () => {
     expect(document.querySelector('[title="docker images"]')).toBeNull()
   })
 
+  it('backspace then space does not drift the input (no double-space / stale candidates)', async () => {
+    localStorage.setItem('catio-history', JSON.stringify([
+      { id: 'h1', kind: 'shell', target: 'bastion.catio.io', text: 'docker ps', when: 'now', dur: '0ms', ts: 30 },
+      { id: 'h2', kind: 'shell', target: 'bastion.catio.io', text: 'docker images', when: 'now', dur: '0ms', ts: 20 },
+    ]))
+    wrap(<TerminalPane conn={DATA.byId['h-bastion']} sessionId="sess-1" active />)
+    await waitFor(() => expect(h.dataCb.fn).not.toBeNull())
+    await waitFor(() => expect(h.termEventCb.fn).not.toBeNull())
+
+    act(() => { h.termEventCb.fn?.({ inputStart: true }) })
+    h.bufferText = 'docker '; h.cursorX = 7
+    act(() => { h.dataCb.fn?.('docker ') })
+    await waitFor(() => expect(document.querySelector('[title="docker ps"]')).not.toBeNull())
+
+    // 退格:optimistic 退回 `docker`,但屏幕回显滞后仍停在 `docker `(7 列)。
+    act(() => { h.dataCb.fn?.('\x7f') })
+    await act(async () => { await new Promise<void>(r => setTimeout(r, 60)) })
+    // 再空格:若发生漂移,optimistic 会变成 `docker  `(两空格)→ 无候选。
+    act(() => { h.dataCb.fn?.(' ') })
+    await act(async () => { await new Promise<void>(r => setTimeout(r, 60)) })
+
+    // 输入应回到单空格 `docker `,候选恢复(ps 与 images 都在),而非空/漂移。
+    expect(document.querySelector('[title="docker ps"]')).not.toBeNull()
+    expect(document.querySelector('[title="docker images"]')).not.toBeNull()
+  })
+
+  it('adopts the screen text on history recall when the optimistic model is empty', async () => {
+    localStorage.setItem('catio-history', JSON.stringify([
+      { id: 'h1', kind: 'shell', target: 'bastion.catio.io', text: 'kubectl get pods -A', when: 'now', dur: '0ms', ts: 10 },
+    ]))
+    wrap(<TerminalPane conn={DATA.byId['h-bastion']} sessionId="sess-1" active />)
+    await waitFor(() => expect(h.dataCb.fn).not.toBeNull())
+    await waitFor(() => expect(h.termEventCb.fn).not.toBeNull())
+
+    act(() => { h.termEventCb.fn?.({ inputStart: true }) })
+    // ↑ 调回历史:PTY 整行回填 `kubectl get pods`,但 Up 的转义序列被 applyInputDelta 忽略
+    // → optimistic 仍为空。屏幕才是唯一真相,应据此匹配。
+    h.bufferText = 'kubectl get pods'; h.cursorX = 16
+    act(() => { h.dataCb.fn?.('\x1b[A') })
+    await act(async () => { await new Promise<void>(r => setTimeout(r, 60)) })
+
+    expect(document.querySelector('[title="kubectl get pods -A"]')).not.toBeNull()
+  })
+
+  it('accepting a substring match rewrites the whole line (backspaces + full command)', async () => {
+    localStorage.setItem('catio-history', JSON.stringify([{
+      id: 'h1', kind: 'shell', target: 'bastion.catio.io', text: 'docker ps', when: 'now', dur: '0ms', ts: 10,
+    }]))
+    wrap(<TerminalPane conn={DATA.byId['h-bastion']} sessionId="sess-1" active />)
+    await waitFor(() => expect(h.dataCb.fn).not.toBeNull())
+    await waitFor(() => expect(h.termEventCb.fn).not.toBeNull())
+    await waitFor(() => expect(h.keyHandler.fn).not.toBeNull())
+
+    act(() => { h.termEventCb.fn?.({ inputStart: true }) })
+    // 输入 `ps`——它是 `docker ps` 的子串命中(非前缀)。
+    h.bufferText = 'ps'; h.cursorX = 2
+    act(() => { h.dataCb.fn?.('ps') })
+    await waitFor(() => expect(document.querySelector('[title="docker ps"]')).not.toBeNull())
+    termWrite.mockClear()
+
+    const ev = new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true })
+    act(() => { h.keyHandler.fn!(ev) })
+
+    // 互不为前缀:退格清空当前 `ps`(2 次),再写入完整 `docker ps`。
+    expect(termWrite).toHaveBeenCalledWith('sess-1', 'chan-1', btoa('\x7f\x7f'))
+    expect(termWrite).toHaveBeenCalledWith('sess-1', 'chan-1', btoa('docker ps'))
+  })
+
+  it('Esc suppresses the dropdown until the input text changes', async () => {
+    localStorage.setItem('catio-history', JSON.stringify([{
+      id: 'h1', kind: 'shell', target: 'bastion.catio.io', text: 'docker ps', when: 'now', dur: '0ms', ts: 10,
+    }]))
+    wrap(<TerminalPane conn={DATA.byId['h-bastion']} sessionId="sess-1" active />)
+    await waitFor(() => expect(h.dataCb.fn).not.toBeNull())
+    await waitFor(() => expect(h.termEventCb.fn).not.toBeNull())
+    await waitFor(() => expect(h.keyHandler.fn).not.toBeNull())
+
+    act(() => { h.termEventCb.fn?.({ inputStart: true }) })
+    h.bufferText = 'docker'; h.cursorX = 6
+    act(() => { h.dataCb.fn?.('docker') })
+    await waitFor(() => expect(document.querySelector('[title="docker ps"]')).not.toBeNull())
+
+    // Esc:隐藏候选并抑制当前输入。
+    const esc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+    act(() => { h.keyHandler.fn!(esc) })
+    expect(document.querySelector('[title="docker ps"]')).toBeNull()
+
+    // 输入未变(再次刷新)仍抑制。
+    await act(async () => { await new Promise<void>(r => setTimeout(r, 60)) })
+    expect(document.querySelector('[title="docker ps"]')).toBeNull()
+  })
+
+  it('execStart clears the suggestion dropdown', async () => {
+    localStorage.setItem('catio-history', JSON.stringify([{
+      id: 'h1', kind: 'shell', target: 'bastion.catio.io', text: 'docker ps', when: 'now', dur: '0ms', ts: 10,
+    }]))
+    wrap(<TerminalPane conn={DATA.byId['h-bastion']} sessionId="sess-1" active />)
+    await waitFor(() => expect(h.dataCb.fn).not.toBeNull())
+    await waitFor(() => expect(h.termEventCb.fn).not.toBeNull())
+
+    act(() => { h.termEventCb.fn?.({ inputStart: true }) })
+    h.bufferText = 'docker'; h.cursorX = 6
+    act(() => { h.dataCb.fn?.('docker') })
+    await waitFor(() => expect(document.querySelector('[title="docker ps"]')).not.toBeNull())
+
+    // 命令提交执行 → 清标记 + 隐藏候选。
+    act(() => { h.termEventCb.fn?.({ execStart: true }) })
+    expect(document.querySelector('[title="docker ps"]')).toBeNull()
+  })
+
   it('does not duplicate the last typed character when accepting a stale history suggestion', async () => {
     localStorage.setItem('catio-history', JSON.stringify([{
       id: 'hist-1',
