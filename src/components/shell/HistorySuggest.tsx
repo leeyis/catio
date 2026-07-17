@@ -65,25 +65,36 @@ export function HistorySuggest({ items, selectedIndex, left, top, flipUp, input,
               textAlign: 'left',
               gap: 0,
               width: '100%',
-              padding: '5px 9px',
+              // 选中项加左侧 accent 竖条(box-shadow inset),避免仅靠淡背景难以辨认。
+              padding: on ? '5px 9px 5px 7px' : '5px 9px',
+              borderLeft: on ? '2px solid var(--accent-primary)' : '2px solid transparent',
               borderRadius: 7,
               fontSize: 12.5,
               lineHeight: 1.5,
-              color: 'var(--text-secondary)',
-              background: on ? 'var(--accent-soft-alt)' : 'transparent',
-              whiteSpace: 'pre',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
+              color: on ? 'var(--text-primary)' : 'var(--text-secondary)',
+              background: on ? 'var(--accent-soft)' : 'transparent',
             }}
           >
-            {hasPrefix ? (
-              <>
-                <span style={{ fontWeight: 700, color: 'var(--accent-primary)' }}>{input}</span>
-                <span>{m.text.slice(input.length)}</span>
-              </>
-            ) : (
-              <span>{m.text}</span>
-            )}
+            {/* 单行文本容器:min-width:0 + overflow 才能让 text-overflow 在 flex 项内生效,
+                超长命令右侧收敛为省略号(完整文本仍在 title 里)。 */}
+            <span
+              style={{
+                minWidth: 0,
+                flex: 1,
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+              }}
+            >
+              {hasPrefix ? (
+                <>
+                  <span style={{ fontWeight: 700, color: 'var(--accent-primary)' }}>{input}</span>
+                  {m.text.slice(input.length)}
+                </>
+              ) : (
+                m.text
+              )}
+            </span>
           </button>
         )
       })}

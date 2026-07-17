@@ -708,7 +708,9 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
       if (suppressedInputRef.current != null && suppressedInputRef.current !== input) suppressedInputRef.current = null
       if (!input) { setSuggest(null); setGhost(null); return }
       const entries = loadShellHistory(matchHost, conn)
-      const { items, ghost: ghostSuffix } = planHistoryCompletion(input, entries)
+      // limit 8:与广播输入条同口径。上限过大(默认 50)会把大量子串命中的松散历史
+      // 全部铺开,既拥挤又像「没按输入过滤」——前缀命中通常远少于 8 条,截断只砍尾部子串项。
+      const { items, ghost: ghostSuffix } = planHistoryCompletion(input, entries, { limit: 8 })
       if (!items.length) { setSuggest(null); setGhost(null); return }
       const pos = computeSuggestPos()
       if (!pos) { setSuggest(null); setGhost(null); return }
