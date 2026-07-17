@@ -67,7 +67,26 @@ jobs:
           # tauri-action 会用 tauri.conf.json 的 version 替换 __VERSION__。
           tagName: ${{ github.ref_name }}
           releaseName: 'Catio v__VERSION__'
-          releaseBody: '下载对应平台的安装包:macOS 用 .dmg,Windows 用 .exe/.msi。未签名,首次打开需允许来自未知开发者的应用。'
+          releaseBody: |
+            下载对应平台的安装包:Windows 用 `.exe`,macOS 用 `.dmg`。
+
+            ## ⚠️ 应用未做代码签名
+
+            为控制成本本应用暂未接入 Apple/Windows 代码签名,系统会拦截,这**不是**病毒或恶意软件。
+
+            ### macOS 打开方法
+
+            提示「已损坏,无法打开」或「恶意软件」时,把 Catio 拖入「应用程序」后,在「终端」执行:
+
+            ```bash
+            sudo xattr -dr com.apple.quarantine /Applications/Catio.app
+            ```
+
+            之后正常双击打开即可。(该提示源于 macOS 对未签名应用附加的 quarantine 隔离属性,上面的命令仅移除该属性。)
+
+            ### Windows 打开方法
+
+            SmartScreen 提示「Windows 已保护你的电脑」时,点「更多信息」→「仍要运行」。
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
