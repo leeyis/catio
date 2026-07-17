@@ -1,0 +1,70 @@
+name: release
+
+# 打 v* 标签(如 v0.6.1)即自动构建并发布 macOS(通用包)与 Windows 客户端到 GitHub Release。
+on:
+  push:
+    tags:
+      - 'v*'
+
+# tauri-action 需要写权限来创建 Release 并上传产物。
+permissions:
+  contents: write
+
+jobs:
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS 通用包:一个 .dmg 同时支持 Apple Silicon 与 Intel。
+          - platform: macos-latest
+            args: '--target universal-apple-darwin'
+          # Windows:默认 x64,产出 NSIS .exe 与 MSI 安装包。
+          - platform: windows-latest
+            args: ''
+
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # macOS 通用包需要同时安装两个 target;Windows 用默认 host target。
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-
+            ${{ runner.os }}-cargo-
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build and release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # tauri-action 会用 tauri.conf.json 的 version 替换 __VERSION__。
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Catio v__VERSION__'
+          releaseBody: '下载对应平台的安装包:macOS 用 .dmg,Windows 用 .exe/.msi。未签名,首次打开需允许来自未知开发者的应用。'
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}
