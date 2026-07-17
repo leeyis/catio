@@ -19,8 +19,10 @@ jobs:
           # macOS 通用包:一个 .dmg 同时支持 Apple Silicon 与 Intel。
           - platform: macos-latest
             args: '--target universal-apple-darwin'
-          # Windows:默认 x64,产出 NSIS .exe 与 MSI 安装包。
-          - platform: windows-latest
+          # Windows:固定 windows-2022(稳定 VS 2022)。windows-latest 现指向带 VS18 preview
+          # 的镜像,其新版 MSVC 移除了 stdext::checked_array_iterator,导致 duckdb 捆绑的 fmt
+          # 编译失败(error C2653 'stdext')。x64,产出 NSIS .exe 与 MSI 安装包。
+          - platform: windows-2022
             args: ''
 
     runs-on: ${{ matrix.platform }}
