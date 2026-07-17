@@ -1223,11 +1223,20 @@ function AboutSettings() {
             <span className="mono" style={{ fontSize: 12.5, fontWeight: 500, color: 'var(--text-faint)' }}>v{__APP_VERSION__}</span>
           </span>
           <span style={{ fontSize: 12.5, color: 'var(--text-secondary)', lineHeight: 1.5, maxWidth: 420 }}><Trans i18nKey="settings.aboutDesc" components={{ b: <b /> }} /></span>
-          {/* 外链在 Tauri webview 里需拦截默认导航,改用 window.open 打开系统浏览器(与 AIPanel 同口径)。 */}
+          {/* 外链:Tauri webview 里 window.open 打不开系统浏览器,须走 opener 插件;
+              server/web 环境无该插件,回退到 window.open。 */}
           <a
             href="https://github.com/leeyis/catio"
             rel="noreferrer"
-            onClick={e => { e.preventDefault(); window.open('https://github.com/leeyis/catio', '_blank', 'noreferrer') }}
+            onClick={e => {
+              e.preventDefault()
+              const url = 'https://github.com/leeyis/catio'
+              if (isTauri()) {
+                import('@tauri-apps/plugin-opener').then(({ openUrl }) => openUrl(url)).catch(() => window.open(url, '_blank', 'noreferrer'))
+              } else {
+                window.open(url, '_blank', 'noreferrer')
+              }
+            }}
             className="row gap6"
             style={{ marginTop: 4, fontSize: 12.5, fontWeight: 500, color: 'var(--accent-primary)', width: 'fit-content' }}
           >

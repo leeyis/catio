@@ -16,6 +16,11 @@
     },
     "dialog:default",
     "dialog:allow-open",
-    "dialog:allow-save"
+    "dialog:allow-save",
+    {
+      "identifier": "opener:allow-open-url",
+      "comment": "只允许用系统默认浏览器打开 http/https 外链(如关于页的代码仓库),不放开任意 scheme/程序。",
+      "allow": [{ "url": "https://*" }, { "url": "http://*" }]
+    }
   ]
 }
