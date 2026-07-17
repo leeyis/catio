@@ -232,15 +232,22 @@ fn emit_scanned(
     last_emit: &mut Option<(String, std::time::Instant)>,
     strip_lead_nl: &mut bool,
 ) {
-    let (mut visible, events) = scanner.feed(data);
+    let (mut visible, events, first_marker) = scanner.feed(data);
     // Decide whether to show this batch's visible bytes.
     if *muted {
-        // The first OSC marker means shell integration is live (first prompt
-        // reached) → unmute and emit this (clean, post-eval) batch. Otherwise a
-        // 3s fallback unmutes shells that never emit markers.
-        // First OSC marker → shell integration live; otherwise a 3s fallback
-        // unmutes shells that never emit markers.
-        if !events.is_empty() || started.elapsed() > std::time::Duration::from_millis(MUTE_FALLBACK_MS) {
+        // 任何被 strip 的 633/133 序列都标志 shell 集成已生效(首个 prompt 到达)→ 解除 mute。
+        // 用 first_marker(而非 events 非空)判断:prompt-start(633;A)等序列会被 strip 但不产生
+        // event,若只看 events 会漏判、迟迟不解除 mute。无 marker 的 shell 靠 3s 兜底解除。
+        if let Some(off) = first_marker {
+            *muted = false;
+            // 关键:解除 mute 的这一批里,marker 之前的 visible 字节是集成生效前的输出
+            // ——即被 PTY 回显出来的 bootstrap 引导行(base64 分块 + eval)。当服务端把这些
+            // 回显与首个 prompt marker 攒进同一批发回时(首次连接常见),整批一起显示就会把
+            // 那一大堆 base64 噪声打到终端(用户报告的现象);第二次连接因回显与 marker 分批
+            // 落在不同的 feed 里、噪声批仍处于 mute 中被丢弃,故显得正常。这里按 marker 边界
+            // 精确切割:丢弃 marker 之前的噪声,只保留其后的干净 prompt,不再依赖分批时序。
+            visible.drain(..off);
+        } else if started.elapsed() > std::time::Duration::from_millis(MUTE_FALLBACK_MS) {
             *muted = false;
         }
     }
@@ -435,5 +442,71 @@ mod tests {
         let stale = Instant::now() - Duration::from_millis(DEDUP_WINDOW_MS + 50);
         let last = Some(("ls -la".to_string(), stale));
         assert!(!is_duplicate_emit(&last, "ls -la"));
+    }
+
+    /// 捕获型 sink:把 emit 的 (topic, payload) 存起来供断言。
+    #[derive(Default)]
+    struct CapturingSink(std::sync::Mutex<Vec<(String, serde_json::Value)>>);
+    impl crate::events::EventSink for CapturingSink {
+        fn emit(&self, topic: &str, payload: serde_json::Value) {
+            self.0.lock().unwrap().push((topic.to_string(), payload));
+        }
+    }
+
+    /// 用一批数据驱动 emit_scanned,返回该批发往 `term://` 事件的 visible 字节(拼接)。
+    fn run_batch(sink: &CapturingSink, evt: &str, scanner: &mut osc::Scanner, muted: &mut bool, started: &std::time::Instant, data: &[u8]) -> Vec<u8> {
+        let mut cur_cmd = None;
+        let mut cur_cwd = String::new();
+        let mut cur_start = std::time::Instant::now();
+        let mut last_emit = None;
+        let mut strip_lead_nl = false;
+        let before = sink.0.lock().unwrap().len();
+        emit_scanned(
+            sink, evt, "history://s", "host", scanner, data,
+            &mut cur_cmd, &mut cur_cwd, &mut cur_start,
+            muted, started, &mut last_emit, &mut strip_lead_nl,
+        );
+        let frames = sink.0.lock().unwrap();
+        let mut out = Vec::new();
+        for (topic, payload) in frames[before..].iter() {
+            if topic == evt {
+                if let Some(b64) = payload.get("bytesBase64").and_then(|v| v.as_str()) {
+                    out.extend(B64.decode(b64).unwrap());
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn same_batch_echo_and_marker_hides_bootstrap_noise() {
+        // 根因回归:当 PTY 回显的 bootstrap 引导行(base64 分块)与首个 prompt marker
+        // 落在同一批数据里(首次连接常见),解除 mute 时必须只显示 marker 之后的干净 prompt,
+        // 丢弃 marker 之前的 base64 回显噪声。此前整批一起显示 → 用户看到一大堆命令。
+        let sink = CapturingSink::default();
+        let mut scanner = osc::Scanner::new("N");
+        let mut muted = true;
+        let started = std::time::Instant::now();
+        // 一批里同时含:回显的引导命令(噪声) + 633;A(prompt start marker) + 干净 prompt。
+        let batch = b" __c=\"$__c\"'QUJD'\r\n eval \"unset __c; ...\"\r\n\x1b]633;A\x07user@host:~$ ";
+        let visible = run_batch(&sink, "term://c1", &mut scanner, &mut muted, &started, batch);
+        assert!(!muted, "首个 marker 到达后必须解除 mute");
+        assert_eq!(
+            String::from_utf8_lossy(&visible),
+            "user@host:~$ ",
+            "只应显示 marker 之后的干净 prompt,base64 回显噪声必须被丢弃"
+        );
+    }
+
+    #[test]
+    fn muted_batch_before_marker_shows_nothing() {
+        // marker 到达之前的纯噪声批:整批处于 mute,不应显示任何字节。
+        let sink = CapturingSink::default();
+        let mut scanner = osc::Scanner::new("N");
+        let mut muted = true;
+        let started = std::time::Instant::now();
+        let visible = run_batch(&sink, "term://c1", &mut scanner, &mut muted, &started, b" __c=\"$__c\"'QUJD'\r\n");
+        assert!(muted, "无 marker 时仍处于 mute");
+        assert!(visible.is_empty(), "mute 阶段不应显示任何回显噪声");
     }
 }

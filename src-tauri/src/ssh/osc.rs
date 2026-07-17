@@ -95,13 +95,22 @@ impl Scanner {
         events
     }
 
-    /// Returns (visible_bytes, events).
-    pub fn feed(&mut self, chunk: &[u8]) -> (Vec<u8>, Vec<OscEvent>) {
+    /// Returns `(visible_bytes, events, first_marker_offset)`.
+    ///
+    /// `first_marker_offset` is `Some(n)` when this call stripped at least one
+    /// OSC 633/133 sequence, where `n` is the length of `visible_bytes` accumulated
+    /// *before* the first such sequence. Callers use this to locate where shell
+    /// integration first became live within the batch — everything before it is
+    /// pre-integration output (e.g. the echoed bootstrap line), everything after
+    /// is the clean prompt. `None` means no 633/133 sequence appeared in this batch.
+    pub fn feed(&mut self, chunk: &[u8]) -> (Vec<u8>, Vec<OscEvent>, Option<usize>) {
         let mut buf = std::mem::take(&mut self.pending);
         buf.extend_from_slice(chunk);
 
         let mut visible: Vec<u8> = Vec::with_capacity(buf.len());
         let mut events: Vec<OscEvent> = Vec::new();
+        // Offset (into `visible`) just before the first stripped 633/133 sequence.
+        let mut first_marker: Option<usize> = None;
         let mut i = 0;
 
         while i < buf.len() {
@@ -111,7 +120,7 @@ impl Scanner {
                     // Trailing lone ESC — could be the start of a split ESC].
                     // Stash from here in pending and stop.
                     self.pending.extend_from_slice(&buf[i..]);
-                    return self.finish(visible, events);
+                    return self.finish(visible, events, first_marker);
                 }
                 if buf[i + 1] == b']' {
                     // OSC start. Search for a terminator from i+2.
@@ -120,14 +129,18 @@ impl Scanner {
                         None => {
                             // Incomplete OSC -> buffer the rest in pending.
                             self.pending.extend_from_slice(&buf[i..]);
-                            return self.finish(visible, events);
+                            return self.finish(visible, events, first_marker);
                         }
                         Some((rel_term_start, term_len)) => {
                             let term_start = payload_start + rel_term_start;
                             let payload = &buf[payload_start..term_start];
                             let seq_end = term_start + term_len; // exclusive
                             if payload.starts_with(b"633;") || payload.starts_with(b"133;") {
-                                // Parse + strip (do not add to visible).
+                                // Parse + strip (do not add to visible). Record the
+                                // visible offset of the first such marker in this batch.
+                                if first_marker.is_none() {
+                                    first_marker = Some(visible.len());
+                                }
                                 events.extend(self.parse_payload(payload));
                             } else {
                                 // Pass-through: copy the full sequence inclusive.
@@ -144,17 +157,22 @@ impl Scanner {
             i += 1;
         }
 
-        self.finish(visible, events)
+        self.finish(visible, events, first_marker)
     }
 
     /// Apply the defensive pending cap, then return.
-    fn finish(&mut self, mut visible: Vec<u8>, events: Vec<OscEvent>) -> (Vec<u8>, Vec<OscEvent>) {
+    fn finish(
+        &mut self,
+        mut visible: Vec<u8>,
+        events: Vec<OscEvent>,
+        first_marker: Option<usize>,
+    ) -> (Vec<u8>, Vec<OscEvent>, Option<usize>) {
         if self.pending.len() > PENDING_CAP {
             // No terminator within a reasonable window — flush as visible and reset.
             visible.append(&mut self.pending);
             self.pending.clear();
         }
-        (visible, events)
+        (visible, events, first_marker)
     }
 }
 
@@ -187,7 +205,7 @@ mod tests {
     #[test] fn extracts_command_and_exit_and_strips() {
         let mut sc = Scanner::new("N");
         let input = b"\x1b]633;E;ls\\x3b cat;N\x07\x1b]633;C\x07hello\r\n\x1b]633;D;0\x07$ ";
-        let (vis, ev) = sc.feed(input);
+        let (vis, ev, _) = sc.feed(input);
         assert_eq!(s(&vis), "hello\r\n$ ");
         assert!(ev.contains(&OscEvent::CommandLine("ls; cat".into())));
         assert!(ev.contains(&OscEvent::ExecStart));
@@ -195,49 +213,65 @@ mod tests {
     }
     #[test] fn rejects_wrong_nonce() {
         let mut sc = Scanner::new("GOOD");
-        let (_v, ev) = sc.feed(b"\x1b]633;E;whoami;BAD\x07");
+        let (_v, ev, _) = sc.feed(b"\x1b]633;E;whoami;BAD\x07");
         assert!(!ev.iter().any(|e| matches!(e, OscEvent::CommandLine(_))));
     }
     #[test] fn buffers_split_sequence() {
         let mut sc = Scanner::new("N");
-        let (v1, e1) = sc.feed(b"out\x1b]633;D;1");
+        let (v1, e1, _) = sc.feed(b"out\x1b]633;D;1");
         assert_eq!(s(&v1), "out"); assert!(e1.is_empty());
-        let (v2, e2) = sc.feed(b"3\x07more");
+        let (v2, e2, _) = sc.feed(b"3\x07more");
         assert_eq!(s(&v2), "more");
         assert!(e2.contains(&OscEvent::ExecEnd(Some(13))));
     }
     #[test] fn passes_through_other_osc() {
         let mut sc = Scanner::new("N");
-        let (v, _e) = sc.feed(b"\x1b]0;my title\x07X");
+        let (v, _e, _) = sc.feed(b"\x1b]0;my title\x07X");
         assert_eq!(s(&v), "\x1b]0;my title\x07X");
     }
     #[test] fn osc133_exit_and_start() {
         let mut sc = Scanner::new("N");
-        let (_v, ev) = sc.feed(b"\x1b]133;C\x07\x1b]133;D;2\x07");
+        let (_v, ev, _) = sc.feed(b"\x1b]133;C\x07\x1b]133;D;2\x07");
         assert!(ev.contains(&OscEvent::ExecStart));
         assert!(ev.contains(&OscEvent::ExecEnd(Some(2))));
     }
     #[test] fn input_start_event_and_stripped() {
         let mut sc = Scanner::new("N");
         // 633;B (prompt end / input start) must emit InputStart and be stripped.
-        let (vis, ev) = sc.feed(b"$ \x1b]633;B\x07");
+        let (vis, ev, _) = sc.feed(b"$ \x1b]633;B\x07");
         assert_eq!(s(&vis), "$ ");
         assert!(ev.contains(&OscEvent::InputStart));
         // 633;A (prompt start) must NOT emit an event but is still stripped.
-        let (vis2, ev2) = sc.feed(b"\x1b]633;A\x07x");
+        let (vis2, ev2, _) = sc.feed(b"\x1b]633;A\x07x");
         assert_eq!(s(&vis2), "x");
         assert!(!ev2.iter().any(|e| matches!(e, OscEvent::InputStart)));
     }
     #[test] fn cwd_event() {
         let mut sc = Scanner::new("N");
-        let (_v, ev) = sc.feed(b"\x1b]633;P;Cwd=/home/u\x07");
+        let (_v, ev, _) = sc.feed(b"\x1b]633;P;Cwd=/home/u\x07");
         assert!(ev.contains(&OscEvent::Cwd("/home/u".into())));
     }
     #[test] fn st_terminator_supported() {
         let mut sc = Scanner::new("N");
         // ST terminator (ESC \) instead of BEL
-        let (vis, ev) = sc.feed(b"\x1b]633;C\x1b\\done");
+        let (vis, ev, _) = sc.feed(b"\x1b]633;C\x1b\\done");
         assert_eq!(s(&vis), "done");
         assert!(ev.contains(&OscEvent::ExecStart));
+    }
+    #[test] fn first_marker_offset_splits_pre_integration_noise() {
+        // The batch that first carries a 633/133 marker may also carry the echoed
+        // bootstrap line before it. `first_marker_offset` must point just past that
+        // pre-marker noise so callers can drop it and keep only the clean prompt.
+        let mut sc = Scanner::new("N");
+        let (vis, _ev, off) = sc.feed(b"__c='blob'\r\n\x1b]633;A\x07user@host:~$ ");
+        assert_eq!(s(&vis), "__c='blob'\r\nuser@host:~$ ");
+        assert_eq!(off, Some("__c='blob'\r\n".len()));
+        // Bytes at/after the offset are the clean prompt.
+        assert_eq!(s(&vis[off.unwrap()..]), "user@host:~$ ");
+    }
+    #[test] fn first_marker_offset_none_without_marker() {
+        let mut sc = Scanner::new("N");
+        let (_v, _e, off) = sc.feed(b"plain output, no osc");
+        assert_eq!(off, None);
     }
 }
