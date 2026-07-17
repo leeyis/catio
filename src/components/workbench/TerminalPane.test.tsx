@@ -218,6 +218,37 @@ describe('TerminalPane (xterm wiring)', () => {
     expect(termWrite).not.toHaveBeenCalledWith('sess-1', 'chan-1', btoa('r ps'))
   })
 
+  it('completes on ArrowRight by writing the tail when input is a strict prefix', async () => {
+    localStorage.setItem('catio-history', JSON.stringify([{
+      id: 'hist-1',
+      kind: 'shell',
+      target: 'bastion.catio.io',
+      text: 'docker save -o out.tar img',
+      when: 'now',
+      dur: '0ms',
+      ts: 10,
+    }]))
+    wrap(<TerminalPane conn={DATA.byId['h-bastion']} sessionId="sess-1" active />)
+    await waitFor(() => expect(h.dataCb.fn).not.toBeNull())
+    await waitFor(() => expect(h.termEventCb.fn).not.toBeNull())
+    await waitFor(() => expect(h.keyHandler.fn).not.toBeNull())
+
+    act(() => { h.termEventCb.fn?.({ inputStart: true }) })
+    h.bufferText = 'docker s'
+    h.cursorX = 8
+    act(() => { h.dataCb.fn?.('docker s') })
+    await waitFor(() => expect(document.querySelector('[title="docker save -o out.tar img"]')).not.toBeNull())
+    termWrite.mockClear()
+
+    const ev = new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true })
+    let shouldProcess = true
+    act(() => { shouldProcess = h.keyHandler.fn!(ev) })
+
+    expect(shouldProcess).toBe(false)
+    // 前缀命中:只补尾部差额,把命令行补成完整命令。
+    expect(termWrite).toHaveBeenCalledWith('sess-1', 'chan-1', btoa('ave -o out.tar img'))
+  })
+
   it('does not accept a history suggestion on Tab or Enter (only ArrowRight completes)', async () => {
     localStorage.setItem('catio-history', JSON.stringify([{
       id: 'hist-1',

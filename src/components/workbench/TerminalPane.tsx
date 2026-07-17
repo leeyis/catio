@@ -769,28 +769,39 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
       return screenInput
     }
 
-    const inputForAcceptingMatch = (selectedText: string, fallbackInput: string): string | null => {
+    // 命令行上「当前已在 PTY 行里的输入」:取所有快照中最长的一条。
+    // syncScreenInputSnapshot 已先把 optimistic 与屏幕对账(屏幕更长/optimistic 非其前缀时重置),
+    // 因此这里的最长值要么等于屏幕文本,要么是「已发送但回显滞后」的 optimistic —— 都真实在行上。
+    const currentLineInput = (fallbackInput: string): string => {
       const screenInput = syncScreenInputSnapshot()
-      const snapshots = [
+      const candidates = [
         optimisticInputRef.current,
         screenInput ?? '',
         currentInputRef.current,
         fallbackInput,
       ].filter((v): v is string => !!v)
-      const latest = snapshots.reduce((best, next) => (next.length > best.length ? next : best), '')
-      if (latest) return selectedText.startsWith(latest) ? latest : null
-      return fallbackInput && selectedText.startsWith(fallbackInput) ? fallbackInput : null
+      return candidates.reduce((best, next) => (next.length > best.length ? next : best), '')
     }
 
+    // 接受一条候选。确定性地把命令行改写为 sel.text,分三种情况(不再有 null 落空):
+    //  ① sel.text 以当前输入为前缀(前缀命中)→ 只补尾部差额(避免重发已回显字符);
+    //  ② 当前输入以 sel.text 为前缀(输入比候选长)→ 退格删掉多余部分;
+    //  ③ 两者互不为前缀(子串命中等)→ 退格清空当前输入,再写入完整命令。
+    const BACKSPACE = '\x7f'
     const acceptHistoryMatch = (sel: HistoryMatch | undefined, fallbackInput: string) => {
       if (!sel) return
-      const input = inputForAcceptingMatch(sel.text, fallbackInput)
-      if (input && sel.text.startsWith(input)) {
-        const tail = sel.text.slice(input.length)
+      const base = currentLineInput(fallbackInput)
+      if (sel.text.startsWith(base)) {
+        const tail = sel.text.slice(base.length)
         if (tail) termWrite0(tail)
-        currentInputRef.current = sel.text
-        optimisticInputRef.current = sel.text
+      } else if (base.startsWith(sel.text)) {
+        termWrite0(BACKSPACE.repeat(base.length - sel.text.length))
+      } else {
+        if (base.length) termWrite0(BACKSPACE.repeat(base.length))
+        termWrite0(sel.text)
       }
+      currentInputRef.current = sel.text
+      optimisticInputRef.current = sel.text
       setSuggest(null)
       setGhost(null)
     }
@@ -1163,8 +1174,8 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
         <div className="row gap8" style={{ minWidth: 0, overflow: 'hidden' }}>
           <ConnGlyph conn={displayConn} size={26} radius={7} />
           <div className="col" style={{ lineHeight: 1.2 }}>
-            <span className="row gap6" style={{ fontSize: 13, fontWeight: 600 }}>{conn ? conn.name : 'db-bastion'} <span className="mono" style={{ fontSize: 10, color: 'var(--text-faint)', fontWeight: 400 }}>ssh-ed25519</span></span>
-            <span className="mono" style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{host} · xterm-256color</span>
+            <span className="row gap6" style={{ fontSize: 13, fontWeight: 600 }}>{conn ? conn.name : 'db-bastion'}</span>
+            <span className="mono" style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{host}</span>
           </div>
           <span className="chip" style={{
             background: terminalConnected ? 'color-mix(in srgb, var(--signal-green) 13%, transparent)' : 'var(--surface-sunken)',

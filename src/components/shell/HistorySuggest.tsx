@@ -40,8 +40,7 @@ export function HistorySuggest({ items, selectedIndex, left, top, flipUp, input,
         zIndex: 28,
         minWidth: 220,
         maxWidth: 420,
-        maxHeight: 240,
-        overflowY: 'auto',
+        maxHeight: 260,
         background: 'var(--surface-elevated)',
         border: '1px solid var(--border-hairline-alt)',
         borderRadius: 10,
@@ -49,6 +48,8 @@ export function HistorySuggest({ items, selectedIndex, left, top, flipUp, input,
         padding: 4,
       }}
     >
+      {/* 候选列表:仅此区域滚动,说明行固定在底部始终可见(否则候选多时说明被挤出滚动区)。 */}
+      <div className="col" style={{ minHeight: 0, overflowY: 'auto' }}>
       {items.map((m, i) => {
         const on = i === selectedIndex
         // 严格大小写前缀命中时把前缀部分加粗;否则整体常规渲染。
@@ -65,9 +66,7 @@ export function HistorySuggest({ items, selectedIndex, left, top, flipUp, input,
               textAlign: 'left',
               gap: 0,
               width: '100%',
-              // 选中项加左侧 accent 竖条(box-shadow inset),避免仅靠淡背景难以辨认。
-              padding: on ? '5px 9px 5px 7px' : '5px 9px',
-              borderLeft: on ? '2px solid var(--accent-primary)' : '2px solid transparent',
+              padding: '5px 9px',
               borderRadius: 7,
               fontSize: 12.5,
               lineHeight: 1.5,
@@ -98,7 +97,8 @@ export function HistorySuggest({ items, selectedIndex, left, top, flipUp, input,
           </button>
         )
       })}
-      <div style={{ padding: '4px 9px 2px', fontSize: 10, color: 'var(--text-faint)', whiteSpace: 'nowrap' }}>
+      </div>
+      <div style={{ padding: '4px 9px 2px', fontSize: 10, color: 'var(--text-faint)', whiteSpace: 'nowrap', flex: 'none' }}>
         {t('workbench.historySuggestHint')}
       </div>
     </div>
