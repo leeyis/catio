@@ -1710,7 +1710,19 @@ export default function App() {
                           <VncPane conn={tabConn} password={vncSecrets[tabConn.id] ?? ''} active={isShown} />
                         )}
                         {tab.kind === 'terminal' && tabConn && (tabConn.proto === 'local' || tabConn.proto === 'serial' || tabConn.proto === 'telnet' || tabConn.proto === 'mosh') && (
-                          <LocalTerminalPane conn={tabConn} active={isShown} />
+                          <LocalTerminalPane conn={tabConn} active={isShown} onHistory={e => {
+                            // 本地 shell 命令审计 → 历史面板(与 SSH 同源)。target 用连接名。
+                            appendHistory({
+                              kind: 'shell',
+                              target: tabConn.name,
+                              text: e.command,
+                              when: new Date().toLocaleTimeString(),
+                              dur: e.durationMs + 'ms',
+                              exitCode: e.exitCode ?? undefined,
+                              ts: Date.now() / 1000,
+                            })
+                            setHistory(loadHistory())
+                          }} />
                         )}
                         {tab.kind === 'terminal' && tabConn?.proto !== 'vnc' && !(tabConn && (tabConn.proto === 'local' || tabConn.proto === 'serial' || tabConn.proto === 'telnet' || tabConn.proto === 'mosh')) && (
                           <SplitTerminal conn={tabConn} sessionId={tab.sessionId} active={isShown} connected={terminalTabConnected(tab)} resolveSessionId={resolveSessionId} mxCandidates={mxCandidates} ensureSession={ensureSession} onConnectTarget={onConnectTarget} sendToPty={sendToPty} onSessionClosed={markSshSessionClosed} onReconnect={() => reconnectTerminalTab(tab.id)} onChannel={(_sid, chan) => setChanMap(m => { const n = { ...m }; if (chan) n[tab.id] = chan; else delete n[tab.id]; return n })} />

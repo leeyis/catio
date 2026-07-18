@@ -23,6 +23,8 @@ use crate::ssh::term::TermCmd;
 use crate::ssh::SshError;
 
 static CHAN_IDS: IdGen = IdGen::new("lterm");
+/// 本地终端历史事件的进程内单调 id(供前端去重),与 SSH 的 HIST_IDS 独立。
+static LOCAL_HIST_IDS: IdGen = IdGen::new("lhist");
 
 /// 一个终端在注册表里的句柄：指令发送端 + 「前端就绪」标志（读线程在它置位前不开读，
 /// 避免首屏输出落在前端注册监听之前被丢弃）。
@@ -73,6 +75,10 @@ fn spawn_terminal(
     eof_tx: UnboundedSender<TermCmd>,
     ready: Arc<AtomicBool>,
     mut rx: UnboundedReceiver<TermCmd>,
+    // 本地 shell 命令审计:Some(nonce) 时读线程过 OSC 扫描器抽命令、emit history://<chanId>。
+    // 关键:集成脚本由 shell 经 ZDOTDIR/rcfile 自己 source(不碰 stdin)→ 无引导回显 →
+    // **不 mute**,可见字节始终原样 emit,故绝不会像上次那样黑屏。None 时走纯字节直传。
+    audit_nonce: Option<String>,
 ) {
     let evt = format!("term://{chan_id}");
     let stop = Arc::new(AtomicBool::new(false));
@@ -82,6 +88,7 @@ fn spawn_terminal(
         let evt = evt.clone();
         let app = app.clone();
         let stop = stop.clone();
+        let chan_id = chan_id.clone();
         std::thread::spawn(move || {
             // 等前端注册好 `term://` 监听（term_local_ready 置位）；2s 兜底防止前端异常时永久阻塞。
             let start = Instant::now();
@@ -89,6 +96,11 @@ fn spawn_terminal(
                 std::thread::sleep(Duration::from_millis(5));
             }
             let mut buf = [0u8; 8192];
+            // 命令审计状态(仅 audit_nonce 为 Some 时使用)。
+            let mut scanner = audit_nonce.as_ref().map(|n| crate::ssh::osc::Scanner::new(n.clone()));
+            let history_evt = format!("history://{chan_id}");
+            let mut cur_cmd: Option<String> = None;
+            let mut cur_start = Instant::now();
             loop {
                 if stop.load(Ordering::Relaxed) {
                     break;
@@ -96,7 +108,36 @@ fn spawn_terminal(
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
-                        let _ = app.emit(&evt, serde_json::json!({ "bytesBase64": B64.encode(&buf[..n]) }));
+                        if let Some(sc) = scanner.as_mut() {
+                            // 审计路径:剥离 OSC 序列后 emit 可见字节(无 mute),并抽命令历史。
+                            use crate::ssh::osc::OscEvent;
+                            let (visible, events, _ready) = sc.feed(&buf[..n]);
+                            if !visible.is_empty() {
+                                let _ = app.emit(&evt, serde_json::json!({ "bytesBase64": B64.encode(&visible) }));
+                            }
+                            for ev in events {
+                                match ev {
+                                    OscEvent::CommandLine(c) => { cur_cmd = Some(c); cur_start = Instant::now(); }
+                                    OscEvent::ExecEnd(code) => {
+                                        if let Some(cmd) = cur_cmd.take() {
+                                            let dur = cur_start.elapsed().as_millis() as u64;
+                                            let _ = app.emit(&history_evt, serde_json::json!({
+                                                "id": LOCAL_HIST_IDS.next(),
+                                                "command": cmd,
+                                                "exitCode": code,
+                                                "cwd": "",
+                                                "durationMs": dur,
+                                                "host": "local",
+                                            }));
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        } else {
+                            // 纯字节直传(串口/Telnet/Mosh/非 zsh|bash 本地 shell)。
+                            let _ = app.emit(&evt, serde_json::json!({ "bytesBase64": B64.encode(&buf[..n]) }));
+                        }
                     }
                     Err(ref e) if e.kind() == ErrorKind::TimedOut || e.kind() == ErrorKind::WouldBlock => continue,
                     Err(_) => break,
@@ -136,6 +177,68 @@ fn default_shell() -> String {
     #[cfg(not(windows))]
     {
         std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
+    }
+}
+
+/// 本地 shell 命令审计支持的 shell 类型。仅 zsh / bash 能装 hook；其它(fish/sh/…)
+/// 走 `Other` —— 不注入,终端照常工作,只是没有命令历史(降级安全)。
+#[cfg(not(windows))]
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum LocalShellKind {
+    Zsh,
+    Bash,
+    Other,
+}
+
+/// 从 shell 可执行路径判定类型(按 basename 匹配,忽略路径与版本后缀)。
+#[cfg(not(windows))]
+fn classify_shell(shell_path: &str) -> LocalShellKind {
+    let base = shell_path.rsplit('/').next().unwrap_or(shell_path);
+    if base.contains("zsh") {
+        LocalShellKind::Zsh
+    } else if base.contains("bash") {
+        LocalShellKind::Bash
+    } else {
+        LocalShellKind::Other
+    }
+}
+
+/// 生成「本地 shell-integration」rc 脚本内容。与 SSH 的 `bootstrap_line` 不同:这份由
+/// shell 通过 ZDOTDIR(zsh) / --rcfile(bash) **自己 source**,绝不写入 stdin,因此:
+///   * 无引导回显 → 无需 mute(上次全黑的根因正是 stdin 注入 + mute)。
+///   * 先 source 用户真实 rc 再追加 hook,不影响用户环境。
+/// hook 发 OSC 633:preexec `E;<cmd>;<nonce>` + `C`,precmd `D;<exit>`;由 `osc::Scanner`
+/// (nonce 门控)剥离并抽成命令审计。`nonce` 防止用户自有集成的 633 序列被误当作我方命令。
+#[cfg(not(windows))]
+fn local_integration_rc(kind: LocalShellKind, nonce: &str, user_rc_source: &str) -> String {
+    match kind {
+        LocalShellKind::Zsh => format!(
+            r#"# --- catio local shell-integration (auto-generated) ---
+{user_rc_source}
+__catio_n='{nonce}'
+__catio_esc() {{ local s=${{1//\\/\\\\}}; s=${{s//;/\\x3b}}; s=${{s//$'\n'/\\x0a}}; print -rn -- "$s"; }}
+__catio_pe() {{ print -rn -- $'\e]633;E;'"$(__catio_esc "$1")"';'"$__catio_n"$'\a\e]633;C\a'; }}
+__catio_pc() {{ local e=$?; print -rn -- $'\e]633;D;'"$e"$'\a'; }}
+autoload -Uz add-zsh-hook 2>/dev/null
+add-zsh-hook preexec __catio_pe
+add-zsh-hook precmd __catio_pc
+# hook 已装好:还原 ZDOTDIR 到用户 HOME,使子 shell 走用户正常配置(不重复注入)。
+export ZDOTDIR="$HOME"
+"#
+        ),
+        LocalShellKind::Bash => format!(
+            r#"# --- catio local shell-integration (auto-generated) ---
+{user_rc_source}
+__catio_n='{nonce}'
+__catio_esc() {{ local s=${{1//\\/\\\\}}; s=${{s//;/\\x3b}}; s=${{s//$'\n'/\\x0a}}; printf '%s' "$s"; }}
+__catio_in=0
+__catio_pe() {{ case "$BASH_COMMAND" in __catio_*) return;; esac; if [ "$__catio_in" = 0 ]; then __catio_in=1; local c; c=$(builtin history 1 | sed 's/ *[0-9][0-9]* *//'); printf '\e]633;E;%s;%s\a\e]633;C\a' "$(__catio_esc "$c")" "$__catio_n"; fi; }}
+__catio_pc() {{ local e=$?; __catio_in=0; printf '\e]633;D;%s\a' "$e"; }}
+trap '__catio_pe' DEBUG
+case "${{PROMPT_COMMAND:-}}" in *__catio_pc*) ;; *) PROMPT_COMMAND="__catio_pc${{PROMPT_COMMAND:+;$PROMPT_COMMAND}}";; esac
+"#
+        ),
+        LocalShellKind::Other => String::new(),
     }
 }
 
@@ -181,6 +284,10 @@ fn open_pty_terminal(
     rows: u32,
     app: tauri::AppHandle,
     mgr: &LocalTermManager,
+    // 本地 shell 命令审计 nonce(Some→读线程扫描 emit 历史);其它终端传 None。
+    audit_nonce: Option<String>,
+    // 临时 ZDOTDIR/rcfile 目录:终端关闭时删除(best-effort);无则 None。
+    cleanup_dir: Option<std::path::PathBuf>,
 ) -> Result<String, SshError> {
     use portable_pty::{native_pty_system, PtySize};
 
@@ -201,12 +308,65 @@ fn open_pty_terminal(
         let _ = master.resize(PtySize { rows: r as u16, cols: c as u16, pixel_width: 0, pixel_height: 0 });
     });
     // kill + wait：避免 Unix 僵尸进程；并确保 slave 关闭后 master 读到 EOF 让读线程退出。
+    // 收尾时删除临时 ZDOTDIR 目录(若有)。
     let closer: CloseFn = Box::new(move || {
         let _ = child.kill();
         let _ = child.wait();
+        if let Some(dir) = cleanup_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     });
 
-    Ok(launch(app, reader, writer, resize, closer, mgr))
+    Ok(launch(app, reader, writer, resize, closer, mgr, audit_nonce))
+}
+
+/// 为 zsh/bash 搭建「命令审计」环境,**不碰 stdin**:
+///   * zsh:建临时 ZDOTDIR 目录,写 `.zshrc`(先 source 用户 `~/.zshrc` 再追加 hook)与
+///     `.zshenv`(还原 ZDOTDIR=用户 HOME + source 用户 `~/.zshenv`,使嵌套 shell/env 正常)。
+///   * bash:写临时 rcfile(先 source `~/.bashrc` 再追加 hook),用 `--rcfile` 传入。
+/// 成功返回 `(nonce, 临时目录, 是否已通过 --rcfile 设置好 cmd)`;shell 不支持则返回 None
+/// (调用方走裸 PTY,无历史)。任何 IO 失败也返回 None(降级,绝不阻断开终端)。
+#[cfg(not(windows))]
+fn setup_local_audit(
+    cmd: &mut portable_pty::CommandBuilder,
+    shell_path: &str,
+) -> Option<(String, std::path::PathBuf)> {
+    let kind = classify_shell(shell_path);
+    if kind == LocalShellKind::Other {
+        return None;
+    }
+    let home = home_dir()?;
+    let nonce = format!("{:016x}", rand::random::<u64>());
+    // 唯一临时目录:catio-term-<nonce>。
+    let dir = std::env::temp_dir().join(format!("catio-term-{nonce}"));
+    std::fs::create_dir_all(&dir).ok()?;
+
+    match kind {
+        LocalShellKind::Zsh => {
+            // .zshrc:先 source 用户真实 rc,再装 hook。用户 rc 缺失时 source 静默失败无碍。
+            let user_rc = format!("[ -f \"{home}/.zshrc\" ] && source \"{home}/.zshrc\"");
+            let rc = local_integration_rc(LocalShellKind::Zsh, &nonce, &user_rc);
+            std::fs::write(dir.join(".zshrc"), rc).ok()?;
+            // .zshenv:zsh 启动最先读它(在 .zshrc 之前)。关键:这里**绝不能**重置 ZDOTDIR——
+            // 否则 .zshrc 会从用户 HOME 读、我们的 hook 脚本(在临时 .zshrc)永不加载。仅 source
+            // 用户 .zshenv 补齐环境(因 ZDOTDIR 指向临时目录,zsh 不会自动读用户 ~/.zshenv)。
+            // ZDOTDIR 的还原放在 .zshrc 末尾(hook 装好之后)。
+            let zshenv = format!("[ -f \"{home}/.zshenv\" ] && source \"{home}/.zshenv\"\n");
+            std::fs::write(dir.join(".zshenv"), zshenv).ok()?;
+            cmd.env("ZDOTDIR", dir.to_string_lossy().to_string());
+            Some((nonce, dir))
+        }
+        LocalShellKind::Bash => {
+            let user_rc = format!("[ -f \"{home}/.bashrc\" ] && source \"{home}/.bashrc\"");
+            let rc = local_integration_rc(LocalShellKind::Bash, &nonce, &user_rc);
+            let rcfile = dir.join("bashrc");
+            std::fs::write(&rcfile, rc).ok()?;
+            cmd.arg("--rcfile");
+            cmd.arg(rcfile.to_string_lossy().to_string());
+            Some((nonce, dir))
+        }
+        LocalShellKind::Other => None,
+    }
 }
 
 /// 打开一个本地 shell 终端（PTY）。
@@ -215,9 +375,9 @@ fn open_pty_terminal(
 /// 不含 Homebrew/Docker/Colima 的 CLI 目录,`docker`/`brew` 会 not found。这里把常见目录
 /// 用 [`merge_path`] 并进当前 PATH(现有目录优先)交给 shell,使这些命令可用。
 ///
-/// 注:不注入 shell-integration、不 mute——本地 shell 走裸 PTY 直传(spawn 后交互式 shell
-/// 仍会 source `~/.zshrc`/`~/.bashrc`)。本地命令历史改用不碰 stdin 的方式后续单独实现,
-/// 避免向刚启动、行编辑器尚未就绪的 shell 注入而破坏交互(全黑无法输入)。
+/// 命令历史(zsh/bash):经 [`setup_local_audit`] 用 ZDOTDIR/rcfile 让 shell **自己 source**
+/// 集成脚本装 OSC hook(不碰 stdin、无 mute),读线程抽命令 emit `history://<chanId>`。
+/// 非 zsh/bash 或搭建失败则降级为裸 PTY(无历史),终端照常可用。
 #[tauri::command]
 pub async fn term_open_local(
     cols: u32,
@@ -241,7 +401,15 @@ pub async fn term_open_local(
     if let Some(home) = home_dir() {
         cmd.cwd(home);
     }
-    open_pty_terminal(cmd, cols, rows, app, &mgr)
+    // 命令审计(仅非 Windows 的 zsh/bash);失败/其它 shell → None,降级裸 PTY。
+    #[cfg(not(windows))]
+    let (audit_nonce, cleanup_dir) = match setup_local_audit(&mut cmd, &shell) {
+        Some((nonce, dir)) => (Some(nonce), Some(dir)),
+        None => (None, None),
+    };
+    #[cfg(windows)]
+    let (audit_nonce, cleanup_dir): (Option<String>, Option<std::path::PathBuf>) = (None, None);
+    open_pty_terminal(cmd, cols, rows, app, &mgr, audit_nonce, cleanup_dir)
 }
 
 /// 打开一个 Mosh 终端：委托系统 `mosh` 客户端在本地 PTY 里跑 `mosh user@host`
@@ -267,7 +435,8 @@ pub async fn term_open_mosh(
     if let Some(home) = home_dir() {
         cmd.cwd(home);
     }
-    open_pty_terminal(cmd, cols, rows, app, &mgr)
+    // Mosh 是远端 shell,不做本地审计 → None。
+    open_pty_terminal(cmd, cols, rows, app, &mgr, None, None)
 }
 
 /// 打开一个串口终端。`baud` 波特率（常见 9600 / 115200）。
@@ -290,7 +459,7 @@ pub async fn term_open_serial(
     let resize: ResizeFn = Box::new(|_, _| {});
     let closer: CloseFn = Box::new(|| {}); // 串口靠 stop 标志停轮询，无需额外拆除。
 
-    Ok(launch(app, Box::new(reader), Box::new(sp), resize, closer, &mgr))
+    Ok(launch(app, Box::new(reader), Box::new(sp), resize, closer, &mgr, None))
 }
 
 /// 打开一个 Telnet 终端（raw TCP 透传，最小实现）。connect 走 spawn_blocking + 超时，
@@ -324,7 +493,7 @@ pub async fn term_open_telnet(
         let _ = stream.shutdown(std::net::Shutdown::Both);
     });
 
-    Ok(launch(app, Box::new(reader), Box::new(writer), resize, closer, &mgr))
+    Ok(launch(app, Box::new(reader), Box::new(writer), resize, closer, &mgr, None))
 }
 
 /// 公共收尾：建 mpsc + ready 标志，spawn owner，登记注册表，返回 chan_id。
@@ -335,11 +504,12 @@ fn launch(
     resize: ResizeFn,
     closer: CloseFn,
     mgr: &LocalTermManager,
+    audit_nonce: Option<String>,
 ) -> String {
     let (tx, rx) = mpsc::unbounded_channel::<TermCmd>();
     let ready = Arc::new(AtomicBool::new(false));
     let chan_id = CHAN_IDS.next();
-    spawn_terminal(app, chan_id.clone(), reader, writer, resize, closer, tx.clone(), ready.clone(), rx);
+    spawn_terminal(app, chan_id.clone(), reader, writer, resize, closer, tx.clone(), ready.clone(), rx, audit_nonce);
     mgr.insert(chan_id.clone(), tx, ready);
     chan_id
 }
@@ -396,7 +566,48 @@ pub fn term_local_close(
 
 #[cfg(all(test, not(windows)))]
 mod tests {
-    use super::merge_path;
+    use super::{classify_shell, local_integration_rc, merge_path, LocalShellKind};
+
+    #[test]
+    fn classify_shell_matches_basename() {
+        assert_eq!(classify_shell("/bin/zsh"), LocalShellKind::Zsh);
+        assert_eq!(classify_shell("/opt/homebrew/bin/zsh"), LocalShellKind::Zsh);
+        assert_eq!(classify_shell("/bin/bash"), LocalShellKind::Bash);
+        assert_eq!(classify_shell("/usr/local/bin/bash"), LocalShellKind::Bash);
+        assert_eq!(classify_shell("/usr/bin/fish"), LocalShellKind::Other);
+        assert_eq!(classify_shell("/bin/sh"), LocalShellKind::Other);
+    }
+
+    #[test]
+    fn local_rc_zsh_embeds_nonce_hooks_and_user_source() {
+        let rc = local_integration_rc(LocalShellKind::Zsh, "NONCE123", "source ~/.zshrc");
+        // 先 source 用户 rc。
+        assert!(rc.contains("source ~/.zshrc"), "must source user rc first: {rc}");
+        // 装 preexec/precmd hook。
+        assert!(rc.contains("add-zsh-hook preexec __catio_pe"), "zsh preexec hook missing");
+        assert!(rc.contains("add-zsh-hook precmd __catio_pc"), "zsh precmd hook missing");
+        // nonce 门控命令序列。
+        assert!(rc.contains("NONCE123"), "nonce not embedded");
+        assert!(rc.contains(r#"$'\e]633;E;'"#), "OSC 633;E (command) missing");
+        assert!(rc.contains(r#"$'\e]633;D;'"#), "OSC 633;D (exit) missing");
+    }
+
+    #[test]
+    fn local_rc_bash_embeds_nonce_hooks_and_user_source() {
+        let rc = local_integration_rc(LocalShellKind::Bash, "NONCE123", "source ~/.bashrc");
+        assert!(rc.contains("source ~/.bashrc"), "must source user rc first: {rc}");
+        assert!(rc.contains("trap '__catio_pe' DEBUG"), "bash DEBUG trap missing");
+        assert!(rc.contains("__catio_pc"), "bash precmd missing");
+        assert!(rc.contains("NONCE123"), "nonce not embedded");
+        // 防自身命令进审计(镜像 SSH 端逻辑)。
+        assert!(rc.contains(r#"case "$BASH_COMMAND" in __catio_*)"#), "bash self-skip guard missing");
+    }
+
+    #[test]
+    fn local_rc_other_shell_is_empty() {
+        // 非 zsh/bash:不注入,返回空串(终端照常,只是无历史)。
+        assert_eq!(local_integration_rc(LocalShellKind::Other, "N", "src"), "");
+    }
 
     #[test]
     fn merge_path_appends_missing_dirs_preserving_order() {

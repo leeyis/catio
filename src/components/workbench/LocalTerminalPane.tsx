@@ -14,12 +14,16 @@ import { usePrefs, monoFontStack } from '../../state/preferences'
 import {
   termOpenLocal, termOpenSerial, termOpenTelnet, termOpenMosh,
   termLocalReady, termLocalWrite, termLocalResize, termLocalClose, listen,
+  type HistoryEvent,
 } from '../../services/ssh'
 import type { Connection } from '../../services/types'
 
 export interface LocalTerminalPaneProps {
   conn: Connection
   active?: boolean
+  /** 本地 shell(zsh/bash)命令审计回调:后端经 shell-integration 上报每条已执行命令,
+   *  App 追加到历史面板。仅 proto === 'local' 触发(串口/Telnet/Mosh 无 shell hook)。 */
+  onHistory?: (e: HistoryEvent) => void
 }
 
 const isTauri = (): boolean =>
@@ -46,13 +50,16 @@ function cssVar(name: string, fallback: string): string {
   return v || fallback
 }
 
-export function LocalTerminalPane({ conn, active }: LocalTerminalPaneProps) {
+export function LocalTerminalPane({ conn, active, onHistory }: LocalTerminalPaneProps) {
   const { t } = useTranslation()
   const { prefs } = usePrefs()
   const xtermHost = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const chanIdRef = useRef<string | null>(null)
+  // 持最新 onHistory,使 xterm 效应(按 conn.id/proto 键)不因回调身份变化而重建。
+  const onHistoryRef = useRef(onHistory)
+  onHistoryRef.current = onHistory
 
   const proto = conn.proto || 'local'
 
@@ -62,6 +69,7 @@ export function LocalTerminalPane({ conn, active }: LocalTerminalPaneProps) {
     if (!hostEl) return
     let disposed = false
     let unlisten: (() => void) | null = null
+    let unlistenHist: (() => void) | null = null
     let ro: ResizeObserver | null = null
     chanIdRef.current = null
 
@@ -115,6 +123,14 @@ export function LocalTerminalPane({ conn, active }: LocalTerminalPaneProps) {
           } catch { /* terminal disposed mid-flight */ }
         })
         if (disposed) { unlisten(); if (chanIdRef.current) { termLocalClose(chanIdRef.current); chanIdRef.current = null } return }
+        // 本地 shell 命令审计:订阅 history://<chanId>,把已执行命令送进历史面板(与 SSH 同源)。
+        // 仅本地 shell 装了 hook——串口/Telnet/Mosh 不会 emit,故只在 local 订阅。
+        if (proto === 'local' && onHistoryRef.current) {
+          unlistenHist = await listen<HistoryEvent>(`history://${chanId}`, e => {
+            try { onHistoryRef.current?.(e) } catch { /* best-effort */ }
+          })
+          if (disposed) { unlistenHist(); unlistenHist = null }
+        }
         // Listener is registered → let the backend reader start (avoids losing first output).
         void termLocalReady(chanId)
         term.onData(d => {
@@ -137,6 +153,7 @@ export function LocalTerminalPane({ conn, active }: LocalTerminalPaneProps) {
       disposed = true
       if (ro) ro.disconnect()
       if (unlisten) unlisten()
+      if (unlistenHist) unlistenHist()
       if (chanIdRef.current) { termLocalClose(chanIdRef.current); chanIdRef.current = null }
       term.dispose()
       termRef.current = null
