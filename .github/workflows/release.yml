@@ -78,24 +78,24 @@ jobs:
 
             SmartScreen 提示「Windows 已保护你的电脑」时,点「更多信息」→「仍要运行」。
 
-            ### macOS 打开方法(仅面向开发者自用)
+            ### macOS 说明(重要)
 
-            > ⚠️ 在 Apple 芯片(M 系列)+ macOS Sequoia 上,未经 Apple 公证的应用会被判为
-            > 「恶意软件」并直接移入废纸篓,`xattr` / ad-hoc 签名均无法绕过。**面向普通用户
-            > 分发必须做 Apple 公证(需付费开发者账号)**。若仅在自己的机器上使用,可临时关闭
-            > Gatekeeper:
+            > 在 Apple 芯片(M 系列)+ macOS Sequoia 上,从网络下载的未公证应用会被系统判为
+            > 「恶意软件」并直接移入废纸篓。`xattr` 去隔离、`codesign` ad-hoc 签名、
+            > `spctl --master-disable` 关 Gatekeeper 均已无法绕过——Sequoia 拦的就是
+            > 「下载来的未公证应用」本身。
 
-            ```bash
-            # 1. 关闭 Gatekeeper
-            sudo spctl --master-disable
-            ```
+            因此本 Release 的 `.dmg` 无法在 Apple 芯片 Mac 上直接打开。两条可行路径:
 
-            然后打开「系统设置 → 隐私与安全性 → 允许从以下位置下载的 App」,选择「任何来源」,即可正常双击打开 Catio。
+            1. 本地构建(推荐,自用)—— 本地编译产物不带下载隔离标记,双击即开:
+               ```bash
+               git clone https://github.com/leeyis/catio.git && cd catio
+               npm ci
+               npm run tauri build -- --bundles app
+               # 产物: src-tauri/target/release/bundle/macos/Catio.app
+               ```
 
-            ```bash
-            # 2. 用完后可恢复 Gatekeeper(可选)
-            sudo spctl --master-enable
-            ```
+            2. Apple 公证 —— 面向普通用户分发的唯一正规方案,需付费 Apple Developer 账号。
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
