@@ -112,12 +112,35 @@ fn spawn_terminal(
                             // 审计路径:剥离 OSC 序列后 emit 可见字节(无 mute),并抽命令历史。
                             use crate::ssh::osc::OscEvent;
                             let (visible, events, _ready) = sc.feed(&buf[..n]);
+                            // 关键(与 SSH term.rs 同款):inputStart(OSC 633;B)必须与提示符可见字节
+                            // **挂在同一帧**发出。若先发字节帧、再单独发 inputStart 帧,前端「在 write
+                            // 回调里 beginInputCapture」的分支收不到 inputStart,会在提示符尚未写完时
+                            // 同步捕获 marker,startCol 记错 → 候选永不出现。故先探测本批是否含 InputStart。
+                            let has_input_start = events.iter().any(|e| matches!(e, OscEvent::InputStart));
+                            let mut input_start_emitted = false;
                             if !visible.is_empty() {
-                                let _ = app.emit(&evt, serde_json::json!({ "bytesBase64": B64.encode(&visible) }));
+                                let mut frame = serde_json::json!({ "bytesBase64": B64.encode(&visible) });
+                                if has_input_start {
+                                    frame["inputStart"] = serde_json::Value::Bool(true);
+                                    input_start_emitted = true;
+                                }
+                                let _ = app.emit(&evt, frame);
                             }
                             for ev in events {
                                 match ev {
                                     OscEvent::CommandLine(c) => { cur_cmd = Some(c); cur_start = Instant::now(); }
+                                    // 输入起点(OSC 633;B):前端据此在提示符结束处打 marker、开始捕获当前输入。
+                                    // 已挂到 bytesBase64 帧时不再单独发;仅当本批无可见字节(marker 单发)时补发。
+                                    OscEvent::InputStart => {
+                                        if !input_start_emitted {
+                                            let _ = app.emit(&evt, serde_json::json!({ "inputStart": true }));
+                                            input_start_emitted = true;
+                                        }
+                                    }
+                                    // 命令开始执行(OSC 633;C):前端据此清掉输入捕获、隐藏候选。
+                                    OscEvent::ExecStart => {
+                                        let _ = app.emit(&evt, serde_json::json!({ "execStart": true }));
+                                    }
                                     OscEvent::ExecEnd(code) => {
                                         if let Some(cmd) = cur_cmd.take() {
                                             let dur = cur_start.elapsed().as_millis() as u64;
@@ -222,6 +245,9 @@ __catio_pc() {{ local e=$?; print -rn -- $'\e]633;D;'"$e"$'\a'; }}
 autoload -Uz add-zsh-hook 2>/dev/null
 add-zsh-hook preexec __catio_pe
 add-zsh-hook precmd __catio_pc
+# 给 PS1 追加 OSC 633;B(输入起点标记),使前端在提示符结束处捕获当前输入、驱动历史候选。
+# %{{...%}} 是 zsh 的「零宽」包裹,避免标记占用可见列。幂等:已含则不重复追加。
+case "$PS1" in *'633;B'*) ;; *) PS1="$PS1"$'%{{\e]633;B\a%}}';; esac
 # hook 已装好:还原 ZDOTDIR 到用户 HOME,使子 shell 走用户正常配置(不重复注入)。
 export ZDOTDIR="$HOME"
 "#
@@ -236,6 +262,8 @@ __catio_pe() {{ case "$BASH_COMMAND" in __catio_*) return;; esac; if [ "$__catio
 __catio_pc() {{ local e=$?; __catio_in=0; printf '\e]633;D;%s\a' "$e"; }}
 trap '__catio_pe' DEBUG
 case "${{PROMPT_COMMAND:-}}" in *__catio_pc*) ;; *) PROMPT_COMMAND="__catio_pc${{PROMPT_COMMAND:+;$PROMPT_COMMAND}}";; esac
+# 给 PS1 追加 OSC 633;B(输入起点标记)。\[...\] 是 bash 的「零宽」包裹,避免占用可见列。幂等。
+case "$PS1" in *'633;B'*) ;; *) PS1="$PS1"'\[\e]633;B\a\]';; esac
 "#
         ),
         LocalShellKind::Other => String::new(),
