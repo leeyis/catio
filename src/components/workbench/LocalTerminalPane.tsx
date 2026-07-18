@@ -3,14 +3,16 @@
  * shell-integration) — those are SSH-shell features. Drives the chosen transport
  * by `conn.proto` over the session-independent term_local_* IPC, sharing the same
  * `term://{chanId}` event protocol as the SSH terminal. */
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
 import { ConnGlyph } from '../atoms'
+import { Icon } from '../Icon'
 import { usePrefs, monoFontStack } from '../../state/preferences'
+import { copyTextToClipboard } from '../../services/clipboard'
 import {
   termOpenLocal, termOpenSerial, termOpenTelnet, termOpenMosh,
   termLocalReady, termLocalWrite, termLocalResize, termLocalClose, listen,
@@ -24,6 +26,16 @@ export interface LocalTerminalPaneProps {
   /** 本地 shell(zsh/bash)命令审计回调:后端经 shell-integration 上报每条已执行命令,
    *  App 追加到历史面板。仅 proto === 'local' 触发(串口/Telnet/Mosh 无 shell hook)。 */
   onHistory?: (e: HistoryEvent) => void
+  /** 上报本终端的 chanId(打开时传 id,关闭时传 null),App 写入 chanMap 供历史「插入」按钮判定。 */
+  onChannel?: (chanId: string | null) => void
+  /** 分屏控制(由 LocalSplitTerminal 注入);缺省时不显示分屏/关闭按钮(单终端)。 */
+  split?: {
+    count: number
+    onSplitRight: () => void
+    onSplitDown: () => void
+    onClose: () => void
+    onDragStart: (e: React.PointerEvent) => void
+  }
 }
 
 const isTauri = (): boolean =>
@@ -50,16 +62,24 @@ function cssVar(name: string, fallback: string): string {
   return v || fallback
 }
 
-export function LocalTerminalPane({ conn, active, onHistory }: LocalTerminalPaneProps) {
+export function LocalTerminalPane({ conn, active, onHistory, onChannel, split }: LocalTerminalPaneProps) {
   const { t } = useTranslation()
   const { prefs } = usePrefs()
   const xtermHost = useRef<HTMLDivElement>(null)
+  const rootRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const chanIdRef = useRef<string | null>(null)
-  // 持最新 onHistory,使 xterm 效应(按 conn.id/proto 键)不因回调身份变化而重建。
+  // 持最新回调,使 xterm 效应(按 conn.id/proto 键)不因回调身份变化而重建。
   const onHistoryRef = useRef(onHistory)
   onHistoryRef.current = onHistory
+  const onChannelRef = useRef(onChannel)
+  onChannelRef.current = onChannel
+  // active 门控用 ref,避免 catio-insert/run 监听 effect 频繁重挂。
+  const activeRef = useRef(active)
+  activeRef.current = active
+  // 选区浮动工具栏(复制 / 问 AI)。
+  const [selBar, setSelBar] = useState<{ x: number; y: number; text: string } | null>(null)
 
   const proto = conn.proto || 'local'
 
@@ -111,6 +131,8 @@ export function LocalTerminalPane({ conn, active, onHistory }: LocalTerminalPane
         }
         chanIdRef.current = chanId
         if (disposed) { termLocalClose(chanId); chanIdRef.current = null; return }
+        // 上报 channel:App 写入 chanMap[tab.id],使历史面板「插入终端」按钮对本地 tab 生效。
+        onChannelRef.current?.(chanId)
         if (active) { try { term.focus() } catch { /* best-effort */ } }
         unlisten = await listen<TermEvent>(`term://${chanId}`, (p) => {
           try {
@@ -136,6 +158,26 @@ export function LocalTerminalPane({ conn, active, onHistory }: LocalTerminalPane
         term.onData(d => {
           if (chanIdRef.current) termLocalWrite(chanIdRef.current, bytesToBase64(d))
         })
+        // 选区浮动工具栏:鼠标松开后若有选中文本,定位并弹出「复制 / 问 AI」。
+        const onSelMouseUp = () => {
+          setTimeout(() => {
+            const sel = term.getSelection()
+            const pos = term.getSelectionPosition()
+            const root = rootRef.current
+            if (!sel || !sel.trim() || !pos || !root) { setSelBar(null); return }
+            const rootRect = root.getBoundingClientRect()
+            const hostRect = hostEl.getBoundingClientRect()
+            const cellH = hostRect.height / term.rows
+            const cellW = hostRect.width / term.cols
+            // 选区结束点上方偏移,换算到 root 相对坐标。
+            const x = (hostRect.left - rootRect.left) + pos.end.x * cellW
+            const y = (hostRect.top - rootRect.top) + pos.end.y * cellH
+            setSelBar({ x, y, text: sel })
+          }, 0)
+        }
+        hostEl.addEventListener('mouseup', onSelMouseUp)
+        // 选区被清空时隐藏(拖选期间 onSelectionChange 抖动,仅用于隐藏)。
+        term.onSelectionChange(() => { if (!term.getSelection()) setSelBar(null) })
         if (typeof ResizeObserver !== 'undefined') {
           ro = new ResizeObserver(() => {
             if (!hasSize()) return
@@ -155,6 +197,7 @@ export function LocalTerminalPane({ conn, active, onHistory }: LocalTerminalPane
       if (unlisten) unlisten()
       if (unlistenHist) unlistenHist()
       if (chanIdRef.current) { termLocalClose(chanIdRef.current); chanIdRef.current = null }
+      onChannelRef.current?.(null)
       term.dispose()
       termRef.current = null
       fitRef.current = null
@@ -186,6 +229,34 @@ export function LocalTerminalPane({ conn, active, onHistory }: LocalTerminalPane
     return () => cancelAnimationFrame(id)
   }, [active])
 
+  // 历史面板/片段的「插入」「执行」按钮 → 当前聚焦的本地终端(与 SSH 终端同款事件总线)。
+  // catio-insert 只写入不回车;catio-run 写入后补回车执行。仅当本 pane 显示且聚焦时接收,
+  // 避免多终端时误注入到别的 tab。写入走 termLocalWrite(无 sessionId,本地专用)。
+  useEffect(() => {
+    function writeToPty(text: string) {
+      if (chanIdRef.current) termLocalWrite(chanIdRef.current, bytesToBase64(text))
+    }
+    // 门控只用「当前显示的 tab」(activeRef),不要求终端聚焦——因为点历史面板的
+    // 「运行/插入」按钮时终端 textarea 已失焦,若还要求 focused 会导致命令发不出
+    // (用户反馈:插入有效、运行无反应)。本地一个 tab 仅一个终端,无分屏误发风险。
+    function onInsert(e: Event) {
+      if (!activeRef.current) return
+      const text = (e as CustomEvent<{ text?: string }>).detail?.text
+      if (typeof text === 'string') writeToPty(text)
+    }
+    function onRun(e: Event) {
+      if (!activeRef.current) return
+      const text = (e as CustomEvent<{ text?: string }>).detail?.text
+      if (typeof text === 'string') { writeToPty(text); writeToPty('\r') }
+    }
+    window.addEventListener('catio-insert', onInsert)
+    window.addEventListener('catio-run', onRun)
+    return () => {
+      window.removeEventListener('catio-insert', onInsert)
+      window.removeEventListener('catio-run', onRun)
+    }
+  }, [])
+
   const subtitle = proto === 'serial'
     ? `${conn.serialPort ?? ''} · ${conn.baud ?? 115200} baud`
     : proto === 'telnet'
@@ -194,8 +265,20 @@ export function LocalTerminalPane({ conn, active, onHistory }: LocalTerminalPane
         ? `mosh ${conn.user ? conn.user + '@' : ''}${conn.host ?? ''}`
         : t('localTerm.localShell')
 
+  // 清屏(纯 xterm,无后端耦合)。
+  const clearTerm = () => { try { termRef.current?.clear() } catch { /* disposed */ } }
+  // 复制选中文本。
+  const copySel = () => { if (selBar) { copyTextToClipboard(selBar.text); setSelBar(null) } }
+  // 选中文本问 AI:走与 SSH 终端同款事件总线,detail 只用连接名(不依赖 sessionId)。
+  const askSelAI = () => {
+    if (selBar) {
+      window.dispatchEvent(new CustomEvent('catio-ask-ai', { detail: { text: selBar.text, target: conn.name, kind: 'shell' } }))
+      setSelBar(null)
+    }
+  }
+
   return (
-    <div className="col" style={{ height: '100%', minHeight: 0, flex: 1, width: '100%', minWidth: 0, overflow: 'hidden', position: 'relative' }}>
+    <div ref={rootRef} className="col" style={{ height: '100%', minHeight: 0, flex: 1, width: '100%', minWidth: 0, overflow: 'hidden', position: 'relative' }}>
       <div className="row" style={{ justifyContent: 'space-between', padding: '7px 12px', borderBottom: '1px solid var(--border-hairline)', gap: 10 }}>
         <div className="row gap8" style={{ minWidth: 0, overflow: 'hidden' }}>
           <ConnGlyph conn={conn} size={26} radius={7} />
@@ -204,8 +287,37 @@ export function LocalTerminalPane({ conn, active, onHistory }: LocalTerminalPane
             <span className="mono" style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{subtitle}</span>
           </div>
         </div>
+        {/* 工具栏:清屏 + 左右/上下分屏(与 SSH 终端一致)。分屏按钮由 split prop 驱动。 */}
+        <div className="row gap8" style={{ flex: 'none' }}>
+          <button className="icon-btn bare" title={t('workbench.clearScreen')} onClick={clearTerm}>
+            <Icon name="broom" size={15} />
+          </button>
+          {split && (
+            <>
+              <button className="icon-btn bare" title={t('split.splitRight')} onClick={split.onSplitRight}><Icon name="columns" size={15} /></button>
+              <button className="icon-btn bare" title={t('split.splitDown')} onClick={split.onSplitDown}><Icon name="rows" size={15} /></button>
+              {split.count >= 2 && (
+                <>
+                  <button className="icon-btn bare" title={t('split.drag')} onPointerDown={split.onDragStart} style={{ cursor: 'grab' }}><Icon name="grip-vertical" size={15} /></button>
+                  <button className="icon-btn bare" title={t('split.closePane')} onClick={split.onClose}><Icon name="x" size={15} /></button>
+                </>
+              )}
+            </>
+          )}
+        </div>
       </div>
       <div ref={xtermHost} style={{ flex: 1, minHeight: 0, width: '100%' }} />
+      {/* 选区浮动工具栏:复制 / 问 AI(定位于选区结束点上方)。 */}
+      {selBar && (
+        <div className="row gap8" style={{ position: 'absolute', left: Math.max(8, selBar.x), top: Math.max(8, selBar.y - 40), zIndex: 40, padding: '5px 7px', borderRadius: 9, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', boxShadow: 'var(--shadow-dropdown)' }}>
+          <button className="btn btn-ghost" onClick={copySel} style={{ fontSize: 12, padding: '3px 8px' }}>
+            <Icon name="copy" size={13} /> {t('workbench.copy')}
+          </button>
+          <button className="btn btn-ghost" onClick={askSelAI} style={{ fontSize: 12, padding: '3px 8px' }}>
+            <Icon name="wand" size={13} /> {t('workbench.askAI')}
+          </button>
+        </div>
+      )}
     </div>
   )
 }

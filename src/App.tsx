@@ -7,7 +7,7 @@ import ScanWizard from './components/scan/ScanWizard'
 import { SettingsView } from './components/views/SettingsView'
 import { WorkbenchTabs } from './components/workbench/WorkbenchTabs'
 import { RemoteFileEditor } from './components/workbench/RemoteFileEditor'
-import { LocalTerminalPane } from './components/workbench/LocalTerminalPane'
+import { LocalSplitTerminal } from './components/workbench/LocalSplitTerminal'
 import { SplitTerminal } from './components/workbench/SplitTerminal'
 import { VncPane } from './components/workbench/VncPane'
 import { DbWorkbench } from './components/workbench/DbWorkbench'
@@ -1469,16 +1469,31 @@ export default function App() {
     : undefined
 
   // Write text into the active terminal's live PTY channel (no trailing newline).
+  // 本地终端(local/serial/telnet/mosh)无 sessionId,走 termLocalWrite(chan);
+  // SSH 终端走 termWrite(sessionId, chan)。chanMap 按 tab.id 键,分屏时各自解析到自己的 channel。
   async function insertToTerminal(code: string) {
-    const sid = cur?.sessionId
-    // chanMap is keyed by tab.id (not sessionId) so two terminal copies sharing one
-    // sessionId resolve to their OWN channel — the insert lands in the active copy.
     const chan = cur ? chanMap[cur.id] : undefined
-    if (!sid || !chan) return
+    if (!chan) return
+    const curConn = cur ? (liveConns[cur.connId] ?? vaultConns.find(c => c.id === cur.connId)) : undefined
+    const isLocalProto = curConn && (curConn.proto === 'local' || curConn.proto === 'serial' || curConn.proto === 'telnet' || curConn.proto === 'mosh')
+    const b64 = btoa(unescape(encodeURIComponent(code)))
+    if (isLocalProto) {
+      const { termLocalWrite } = await import('./services/ssh')
+      await termLocalWrite(chan, b64)
+      return
+    }
+    const sid = cur?.sessionId
+    if (!sid) return
     const { termWrite } = await import('./services/ssh')
-    await termWrite(sid, chan, btoa(unescape(encodeURIComponent(code))))
+    await termWrite(sid, chan, b64)
   }
-  const canInsert = !!(cur?.sessionId && chanMap[cur.id])
+  // 可插入:本地终端只需 channel(有 chanMap 条目即已连);SSH 还需 sessionId。
+  const canInsert = (() => {
+    if (!cur || !chanMap[cur.id]) return false
+    const curConn = liveConns[cur.connId] ?? vaultConns.find(c => c.id === cur.connId)
+    const isLocalProto = curConn && (curConn.proto === 'local' || curConn.proto === 'serial' || curConn.proto === 'telnet' || curConn.proto === 'mosh')
+    return isLocalProto ? true : !!cur.sessionId
+  })()
   // Whether the focused tab is an active DB workbench — gates the SQL editor
   // insert affordance (mirrors `canInsert` for terminals). A DB tab has kind
   // 'sql'; the SqlConsole catio-insert listener lands the text in its active
@@ -1710,7 +1725,7 @@ export default function App() {
                           <VncPane conn={tabConn} password={vncSecrets[tabConn.id] ?? ''} active={isShown} />
                         )}
                         {tab.kind === 'terminal' && tabConn && (tabConn.proto === 'local' || tabConn.proto === 'serial' || tabConn.proto === 'telnet' || tabConn.proto === 'mosh') && (
-                          <LocalTerminalPane conn={tabConn} active={isShown} onHistory={e => {
+                          <LocalSplitTerminal conn={tabConn} active={isShown} onChannel={chan => setChanMap(m => { const n = { ...m }; if (chan) n[tab.id] = chan; else delete n[tab.id]; return n })} onHistory={e => {
                             // 本地 shell 命令审计 → 历史面板(与 SSH 同源)。target 用连接名。
                             appendHistory({
                               kind: 'shell',
