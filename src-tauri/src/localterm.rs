@@ -139,6 +139,35 @@ fn default_shell() -> String {
     }
 }
 
+/// macOS GUI app 由 launchd 赋予的 PATH 通常只有 `/usr/bin:/bin:/usr/sbin:/sbin`,
+/// 不含 Homebrew / Docker / Colima 等 CLI 目录。虽然以 login shell 启动会加载用户
+/// profile 补齐 PATH,但用户未在 profile 里配置时仍会缺失。这里把常见目录合并进
+/// 现有 PATH(保序、去重、原有目录优先),作为兜底。返回合并后的 PATH 字符串。
+///
+/// 纯函数便于单测:`current` 为进程当前 PATH,`extra` 为要补充的目录。
+#[cfg(not(windows))]
+fn merge_path(current: &str, extra: &[&str]) -> String {
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<&str> = Vec::new();
+    // 现有目录优先(用户/系统已有的解析顺序保持不变)。
+    for dir in current.split(':').chain(extra.iter().copied()) {
+        if dir.is_empty() || !seen.insert(dir) {
+            continue;
+        }
+        out.push(dir);
+    }
+    out.join(":")
+}
+
+/// macOS 上常见但 GUI PATH 里缺失的 CLI 目录(Homebrew arm64/x86_64 + 常见本地 bin)。
+#[cfg(target_os = "macos")]
+const MACOS_EXTRA_PATH: &[&str] = &[
+    "/opt/homebrew/bin",
+    "/opt/homebrew/sbin",
+    "/usr/local/bin",
+    "/usr/local/sbin",
+];
+
 fn home_dir() -> Option<String> {
     std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
@@ -181,6 +210,14 @@ fn open_pty_terminal(
 }
 
 /// 打开一个本地 shell 终端（PTY）。
+///
+/// PATH 修复(macOS/Linux):从 Dock/Finder 启动的 GUI app 只继承 launchd 的极简 PATH,
+/// 不含 Homebrew/Docker/Colima 的 CLI 目录,`docker`/`brew` 会 not found。这里把常见目录
+/// 用 [`merge_path`] 并进当前 PATH(现有目录优先)交给 shell,使这些命令可用。
+///
+/// 注:不注入 shell-integration、不 mute——本地 shell 走裸 PTY 直传(spawn 后交互式 shell
+/// 仍会 source `~/.zshrc`/`~/.bashrc`)。本地命令历史改用不碰 stdin 的方式后续单独实现,
+/// 避免向刚启动、行编辑器尚未就绪的 shell 注入而破坏交互(全黑无法输入)。
 #[tauri::command]
 pub async fn term_open_local(
     cols: u32,
@@ -188,7 +225,18 @@ pub async fn term_open_local(
     app: tauri::AppHandle,
     mgr: tauri::State<'_, LocalTermManager>,
 ) -> Result<String, SshError> {
-    let mut cmd = portable_pty::CommandBuilder::new(default_shell());
+    let shell = default_shell();
+    let mut cmd = portable_pty::CommandBuilder::new(&shell);
+    // 把常见 CLI 目录合并进当前 PATH(现有目录优先),解决 GUI 启动缺 Homebrew/Docker 目录。
+    #[cfg(not(windows))]
+    {
+        let cur = std::env::var("PATH").unwrap_or_default();
+        #[cfg(target_os = "macos")]
+        let merged = merge_path(&cur, MACOS_EXTRA_PATH);
+        #[cfg(not(target_os = "macos"))]
+        let merged = merge_path(&cur, &["/usr/local/bin", "/usr/local/sbin"]);
+        cmd.env("PATH", merged);
+    }
     cmd.env("TERM", "xterm-256color");
     if let Some(home) = home_dir() {
         cmd.cwd(home);
@@ -344,4 +392,36 @@ pub fn term_local_close(
         let _ = tx.send(TermCmd::Close);
     }
     Ok(())
+}
+
+#[cfg(all(test, not(windows)))]
+mod tests {
+    use super::merge_path;
+
+    #[test]
+    fn merge_path_appends_missing_dirs_preserving_order() {
+        // 现有目录保序在前,缺失的 extra 追加在后。
+        let out = merge_path("/usr/bin:/bin", &["/opt/homebrew/bin", "/usr/local/bin"]);
+        assert_eq!(out, "/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin");
+    }
+
+    #[test]
+    fn merge_path_dedups_existing_dirs() {
+        // extra 里已存在于当前 PATH 的目录不重复追加。
+        let out = merge_path("/opt/homebrew/bin:/usr/bin", &["/opt/homebrew/bin", "/usr/local/bin"]);
+        assert_eq!(out, "/opt/homebrew/bin:/usr/bin:/usr/local/bin");
+    }
+
+    #[test]
+    fn merge_path_skips_empty_segments() {
+        // 空段(如末尾冒号/连续冒号)被丢弃,不产生空目录。
+        let out = merge_path("/usr/bin::", &["/usr/local/bin"]);
+        assert_eq!(out, "/usr/bin:/usr/local/bin");
+    }
+
+    #[test]
+    fn merge_path_empty_current_uses_only_extra() {
+        let out = merge_path("", &["/opt/homebrew/bin"]);
+        assert_eq!(out, "/opt/homebrew/bin");
+    }
 }

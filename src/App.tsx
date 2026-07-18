@@ -271,19 +271,37 @@ export default function App() {
   // admin ever sees those; for a normal user every item is their own, so no badge).
   const selfName = serverAuth.user?.username
   const ownerTag = (p: { __ownerName?: string }) => (p.__ownerName && p.__ownerName !== selfName ? { ownerName: p.__ownerName } : {})
-  const profileConns: Connection[] = profiles.map(p => ({
-    id: p.id,
-    group: p.group ?? '',
-    kind: 'host',
-    name: p.name,
-    sub: `${p.user}@${p.host}:${p.port}`,
-    icon: 'server',
-    status: sessionMap[p.id] ? 'up' : 'idle',
-    proto: 'ssh',
-    ...(p.notes ? { notes: p.notes } : {}),
-    ...(p.os ? { os: p.os } : {}),
-    ...ownerTag(p),
-  }))
+  const profileConns: Connection[] = profiles.map(p => {
+    // 非 SSH 终端 profile:sub/icon 按 proto 定制(local 无 user@host:port)。
+    const proto = p.proto ?? 'ssh'
+    const sub = proto === 'local' ? 'local shell'
+      : proto === 'serial' ? `${p.serialPort ?? ''} · ${p.baud ?? 115200}`
+      : proto === 'telnet' ? `telnet ${p.host}:${p.port}`
+      : proto === 'mosh' ? `mosh ${p.user ? p.user + '@' : ''}${p.host}`
+      : `${p.user}@${p.host}:${p.port}`
+    const icon = proto === 'serial' ? 'hard-drive'
+      : (proto === 'telnet' || proto === 'mosh') ? 'globe'
+      : proto === 'local' ? 'terminal'
+      : 'server'
+    return {
+      id: p.id,
+      group: p.group ?? '',
+      kind: 'host' as const,
+      name: p.name,
+      sub,
+      icon,
+      status: sessionMap[p.id] ? 'up' : 'idle',
+      proto,
+      ...(p.serialPort ? { serialPort: p.serialPort } : {}),
+      ...(p.baud ? { baud: p.baud } : {}),
+      ...(p.host ? { host: p.host } : {}),
+      ...(p.port ? { port: p.port } : {}),
+      ...(p.user ? { user: p.user } : {}),
+      ...(p.notes ? { notes: p.notes } : {}),
+      ...(p.os ? { os: p.os } : {}),
+      ...ownerTag(p),
+    }
+  })
   // Real saved DB connections (reactive) → db Connection rows.
   const activeProfileIds = new Set(listActiveDbConnections().map(a => a.profileId))
   const realDbConns = dbProfiles.map(p => ({ ...dbProfileToConnection(p, activeProfileIds.has(p.id)), ...ownerTag(p) }))
@@ -748,6 +766,19 @@ export default function App() {
     // (collects the secret, verifies host key, opens a live session/tab).
     const profile = profiles.find(p => p.id === conn.id)
     if (profile) {
+      // 非 SSH 终端(本地/串口/Telnet/Mosh)不走 SSH 连接流,直接开对应终端标签。
+      if (profile.proto && profile.proto !== 'ssh') {
+        openTerminalConn({
+          proto: profile.proto,
+          name: profile.name,
+          ...(profile.host ? { host: profile.host } : {}),
+          ...(profile.port ? { port: profile.port } : {}),
+          ...(profile.user ? { user: profile.user } : {}),
+          ...(profile.serialPort ? { serialPort: profile.serialPort } : {}),
+          ...(profile.baud ? { baud: profile.baud } : {}),
+        })
+        return
+      }
       void connectProfile(
         { host: profile.host, port: profile.port, user: profile.user, auth: profile.auth, jump: profile.jump },
         { name: profile.name, profileId: profile.id },
@@ -1252,6 +1283,20 @@ export default function App() {
     if (conn.kind === 'tunnel' || conn.kind === 'rdp' || conn.kind === 'vnc') { void openConn(conn); closeDetailPanel(); return }
     const profile = profiles.find(p => p.id === conn.id)
     if (!profile) return
+    // 非 SSH 终端(本地/串口/Telnet/Mosh)不需要凭据,直接开终端标签,绝不弹密码。
+    if (profile.proto && profile.proto !== 'ssh') {
+      openTerminalConn({
+        proto: profile.proto,
+        name: profile.name,
+        ...(profile.host ? { host: profile.host } : {}),
+        ...(profile.port ? { port: profile.port } : {}),
+        ...(profile.user ? { user: profile.user } : {}),
+        ...(profile.serialPort ? { serialPort: profile.serialPort } : {}),
+        ...(profile.baud ? { baud: profile.baud } : {}),
+      })
+      closeDetailPanel()
+      return
+    }
     void connectProfile(
       { host: profile.host, port: profile.port, user: profile.user, auth: profile.auth, jump: profile.jump },
       { name: profile.name, profileId: profile.id },

@@ -441,23 +441,39 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onO
       return
     }
     // 本地/串口/Telnet/Mosh:不建内置 SSH 会话,直接开终端标签。必填为空时保持弹窗并聚焦,不静默关闭。
+    // 同时把这些连接持久化为 profile(proto 标记),使其出现在 Vault、关闭后仍可复用。
+    // 认证字段(user/password)对本地终端无意义,存占位空值以满足 ConnectionProfile 类型。
     if (kind === 'host' && (proto === 'local' || proto === 'serial' || proto === 'telnet' || proto === 'mosh') && onOpenTerminal) {
       const name = (nameRef.current?.value || '').trim()
+      // 持久化非 SSH 终端 profile(best-effort);id 用 proto+host/port 或时间戳保证稳定/去重。
+      const persist = (p: Omit<ConnectionProfile, 'auth'>) => {
+        try {
+          saveProfile({ ...p, auth: { method: 'password' }, ...(group ? { group } : {}) } as ConnectionProfile)
+        } catch { /* localStorage unavailable — ignore */ }
+        onSaved?.()
+      }
       if (proto === 'telnet') {
         const host = (hostRef.current?.value || '').trim()
         if (!host) { hostRef.current?.focus(); return }
-        onOpenTerminal({ proto: 'telnet', name: name || host, host, port: Number(portRef.current?.value) || 23 })
+        const port = Number(portRef.current?.value) || 23
+        persist({ id: `telnet-${host}:${port}`, name: name || host, host, port, user: '', proto: 'telnet' })
+        onOpenTerminal({ proto: 'telnet', name: name || host, host, port })
       } else if (proto === 'mosh') {
         const host = (hostRef.current?.value || '').trim()
         const user = (userRef.current?.value || '').trim()
         if (!host) { hostRef.current?.focus(); return }
+        persist({ id: `mosh-${user}@${host}`, name: name || host, host, port: 0, user, proto: 'mosh' })
         onOpenTerminal({ proto: 'mosh', name: name || host, host, user })
       } else if (proto === 'serial') {
         const sp = (serialPortRef.current?.value || '').trim()
         if (!sp) { serialPortRef.current?.focus(); return }
-        onOpenTerminal({ proto: 'serial', name: name || sp, serialPort: sp, baud: Number(baud) || 115200 })
+        const b = Number(baud) || 115200
+        persist({ id: `serial-${sp}`, name: name || sp, host: '', port: 0, user: '', proto: 'serial', serialPort: sp, baud: b })
+        onOpenTerminal({ proto: 'serial', name: name || sp, serialPort: sp, baud: b })
       } else {
-        onOpenTerminal({ proto: 'local', name: name || 'Local' })
+        const label = name || 'Local'
+        persist({ id: `local-${label}`, name: label, host: '', port: 0, user: '', proto: 'local' })
+        onOpenTerminal({ proto: 'local', name: label })
       }
       onClose()
       return
@@ -776,53 +792,66 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onO
                 </select>
               </label>
             </div>
-            <div className="row gap10">
-              {kind === 'db'
-                ? <Field label={t('modals.fieldHost')} value={dbHost} onChange={setDbHost} placeholder="127.0.0.1" mono w={2} />
-                : <Field key={`host-${kind}`} label={t('modals.fieldHost')} value={editHost ? editHost.host : ''} mono w={2} inputRef={hostRef} onInput={recomputeCanTest} />}
-              {kind === 'db'
-                ? <Field label={t('modals.fieldPort')} value={dbPort} onChange={setDbPort} numeric mono w={0.8} />
-                : <Field key={`port-${kind}`} label={t('modals.fieldPort')} value={editHost ? String(editHost.port) : '22'} numeric mono w={0.8} inputRef={portRef} />}
-            </div>
-            <div className="row gap10">
-              {kind === 'db'
-                ? <Field label={t('modals.fieldUser')} value={dbUser} onChange={setDbUser} placeholder={t('modals.fieldUserPlaceholder')} mono />
-                : <Field key={`user-${kind}`} label={t('modals.fieldUsername')} value={editHost ? editHost.user : ''} mono inputRef={userRef} onInput={recomputeCanTest} />}
-              {/* Secret field.
-                  DB kind: password/key field, controlled, never persisted.
-                  Host kind: coherent with the chosen auth method —
-                    password auth → password; key-file auth → optional passphrase.
-                    Controlled so it can feed sshTest / connect; never persisted. */}
-              {kind === 'db' ? (
-                <label className="col" style={{ gap: 5, flex: 1 }}>
-                  <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.fieldPasswordKey')}</span>
-                  <div className="row" style={{ height: 36, borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', paddingLeft: 10, paddingRight: 12, gap: 6, alignItems: 'center' }}>
-                    <Icon name="lock" size={12} style={{ color: 'var(--text-faint)', flex: 'none' }} />
-                    <input value={dbSecret} onChange={e => setDbSecret(e.target.value)}
-                      type="password" placeholder={t('modals.fieldPasswordPlaceholder')} className="mono"
-                      style={{ flex: 1, height: '100%', border: 'none', background: 'transparent', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }} />
-                  </div>
-                </label>
-              ) : authMethod === 'password' ? (
-                <label className="col" style={{ gap: 5, flex: 1 }}>
-                  <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.fieldPassword')}</span>
-                  <div className="row" style={{ height: 36, borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', paddingLeft: 10, paddingRight: 12, gap: 6, alignItems: 'center' }}>
-                    <Icon name="lock" size={12} style={{ color: 'var(--text-faint)', flex: 'none' }} />
-                    <input type="password" value={secret} onChange={e => setSecret(e.target.value)} placeholder={t('modals.fieldPassword')} className="mono"
-                      style={{ flex: 1, height: '100%', border: 'none', background: 'transparent', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }} />
-                  </div>
-                </label>
-              ) : (
-                <label className="col" style={{ gap: 5, flex: 1 }}>
-                  <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.fieldPassphrase')}</span>
-                  <div className="row" style={{ height: 36, borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', paddingLeft: 10, paddingRight: 12, gap: 6, alignItems: 'center' }}>
-                    <Icon name="lock" size={12} style={{ color: 'var(--text-faint)', flex: 'none' }} />
-                    <input type="password" value={secret} onChange={e => setSecret(e.target.value)} placeholder={t('modals.fieldPassphrasePlaceholder')} className="mono"
-                      style={{ flex: 1, height: '100%', border: 'none', background: 'transparent', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }} />
-                  </div>
-                </label>
-              )}
-            </div>
+            {/* host + port row.
+                DB: 始终显示。Host:local/serial 无网络地址(隐藏);telnet/mosh 显示 host,
+                telnet 还显示 port(mosh 端口由 mosh 自协商,隐藏);ssh/vnc/rdp 显示 host+port。 */}
+            {(kind === 'db' || (proto !== 'local' && proto !== 'serial')) && (
+              <div className="row gap10">
+                {kind === 'db'
+                  ? <Field label={t('modals.fieldHost')} value={dbHost} onChange={setDbHost} placeholder="127.0.0.1" mono w={2} />
+                  : <Field key={`host-${kind}`} label={t('modals.fieldHost')} value={editHost ? editHost.host : ''} mono w={2} inputRef={hostRef} onInput={recomputeCanTest} />}
+                {kind === 'db'
+                  ? <Field label={t('modals.fieldPort')} value={dbPort} onChange={setDbPort} numeric mono w={0.8} />
+                  : proto !== 'mosh'
+                    ? <Field key={`port-${kind}`} label={t('modals.fieldPort')} value={editHost ? String(editHost.port) : '22'} numeric mono w={0.8} inputRef={portRef} />
+                    : null}
+              </div>
+            )}
+            {/* user + password row.
+                DB: 始终显示。Host:local/serial/telnet 无需登录凭据(隐藏);mosh 显示用户名
+                (无密码,mosh 走 SSH 自身认证);ssh/vnc/rdp 显示用户名(+ssh/vnc 密码)。 */}
+            {(kind === 'db' || (proto !== 'local' && proto !== 'serial' && proto !== 'telnet')) && (
+              <div className="row gap10">
+                {kind === 'db'
+                  ? <Field label={t('modals.fieldUser')} value={dbUser} onChange={setDbUser} placeholder={t('modals.fieldUserPlaceholder')} mono />
+                  : <Field key={`user-${kind}`} label={t('modals.fieldUsername')} value={editHost ? editHost.user : ''} mono inputRef={userRef} onInput={recomputeCanTest} />}
+                {/* Secret field.
+                    DB kind: password/key field, controlled, never persisted.
+                    Host kind: coherent with the chosen auth method —
+                      password auth → password; key-file auth → optional passphrase.
+                      Controlled so it can feed sshTest / connect; never persisted.
+                    mosh 无密码字段(走 SSH 认证),故仅 db 或 ssh/vnc/rdp 显示。 */}
+                {kind === 'db' ? (
+                  <label className="col" style={{ gap: 5, flex: 1 }}>
+                    <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.fieldPasswordKey')}</span>
+                    <div className="row" style={{ height: 36, borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', paddingLeft: 10, paddingRight: 12, gap: 6, alignItems: 'center' }}>
+                      <Icon name="lock" size={12} style={{ color: 'var(--text-faint)', flex: 'none' }} />
+                      <input value={dbSecret} onChange={e => setDbSecret(e.target.value)}
+                        type="password" placeholder={t('modals.fieldPasswordPlaceholder')} className="mono"
+                        style={{ flex: 1, height: '100%', border: 'none', background: 'transparent', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }} />
+                    </div>
+                  </label>
+                ) : proto === 'mosh' ? null : authMethod === 'password' ? (
+                  <label className="col" style={{ gap: 5, flex: 1 }}>
+                    <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.fieldPassword')}</span>
+                    <div className="row" style={{ height: 36, borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', paddingLeft: 10, paddingRight: 12, gap: 6, alignItems: 'center' }}>
+                      <Icon name="lock" size={12} style={{ color: 'var(--text-faint)', flex: 'none' }} />
+                      <input type="password" value={secret} onChange={e => setSecret(e.target.value)} placeholder={t('modals.fieldPassword')} className="mono"
+                        style={{ flex: 1, height: '100%', border: 'none', background: 'transparent', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }} />
+                    </div>
+                  </label>
+                ) : (
+                  <label className="col" style={{ gap: 5, flex: 1 }}>
+                    <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.fieldPassphrase')}</span>
+                    <div className="row" style={{ height: 36, borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', paddingLeft: 10, paddingRight: 12, gap: 6, alignItems: 'center' }}>
+                      <Icon name="lock" size={12} style={{ color: 'var(--text-faint)', flex: 'none' }} />
+                      <input type="password" value={secret} onChange={e => setSecret(e.target.value)} placeholder={t('modals.fieldPassphrasePlaceholder')} className="mono"
+                        style={{ flex: 1, height: '100%', border: 'none', background: 'transparent', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }} />
+                    </div>
+                  </label>
+                )}
+              </div>
+            )}
             {/* Database name field — DB kind only */}
             {kind === 'db' && (
               <Field label={t('modals.fieldDatabase')} value={dbDatabase} onChange={setDbDatabase} placeholder="e.g. orders" />
