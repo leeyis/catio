@@ -383,6 +383,46 @@ describe('NewConnectionModal — create mode', () => {
   })
 })
 
+describe('NewConnectionModal — 本地终端', () => {
+  beforeEach(() => { h.saveProfile.mockClear() })
+
+  it('选中「本地」协议后隐藏主机/端口/用户名/密码字段', () => {
+    wrap(<NewConnectionModal onClose={() => {}} onOpenTerminal={() => {}} />)
+    fireEvent.click(screen.getByText('主机 / 终端'))
+    // 切到本地协议。
+    fireEvent.click(screen.getByText('本地'))
+    // 本地终端不应显示这些 SSH 字段。
+    expect(screen.queryByText('主机')).toBeNull()
+    expect(screen.queryByText('端口')).toBeNull()
+    expect(screen.queryByText('用户名')).toBeNull()
+    expect(screen.queryByPlaceholderText('密码')).toBeNull()
+    // 名称与分组仍在。
+    expect(screen.getByText('名称')).toBeTruthy()
+    expect(screen.getByText('分组')).toBeTruthy()
+  })
+
+  it('保存本地连接:持久化 proto=local 的 profile 且不含认证字段', () => {
+    const onOpenTerminal = vi.fn()
+    const onClose = vi.fn()
+    wrap(<NewConnectionModal onClose={onClose} onOpenTerminal={onOpenTerminal} />)
+    fireEvent.click(screen.getByText('主机 / 终端'))
+    fireEvent.click(screen.getByText('本地'))
+    const name = screen.getByText('名称').parentElement!.querySelector('input') as HTMLInputElement
+    fireEvent.input(name, { target: { value: '本机' } })
+    fireEvent.click(screen.getByText('连接'))
+    // 应持久化 profile 以便进 Vault、可复用。
+    expect(h.saveProfile).toHaveBeenCalledTimes(1)
+    const saved = h.saveProfile.mock.calls[0][0] as ConnectionProfile
+    expect(saved).toMatchObject({ name: '本机', proto: 'local' })
+    // 认证字段为占位空值,不泄漏用户名/主机。
+    expect(saved.host).toBe('')
+    expect(saved.user).toBe('')
+    // 同时打开本地终端标签。
+    expect(onOpenTerminal).toHaveBeenCalledWith({ proto: 'local', name: '本机' })
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('NewConnectionModal — edit mode', () => {
   beforeEach(() => { h.saveProfile.mockClear(); h.sshTest.mockReset() })
 

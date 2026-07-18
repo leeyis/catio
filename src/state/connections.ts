@@ -16,6 +16,14 @@ export interface ConnectionProfile extends StoreItem {
   port: number
   user: string
   auth: AuthMethod
+  /** Terminal protocol. Absent → treated as 'ssh' (legacy profiles). Non-SSH
+   *  terminals (local/serial/telnet/mosh) persist so they appear in the Vault and
+   *  can be reopened; for them host/port/user/auth may be placeholders. */
+  proto?: 'ssh' | 'local' | 'serial' | 'telnet' | 'mosh'
+  /** Serial device (proto === 'serial'), e.g. "/dev/ttyUSB0" / "COM3". */
+  serialPort?: string
+  /** Serial baud rate (proto === 'serial'). */
+  baud?: number
   /** ProxyJump bastion config — secrets are never stored here. */
   jump?: JumpProfile
   /** Vault group id (from state/groups). Absent → renders under "未分组". */
