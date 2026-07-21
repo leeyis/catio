@@ -154,6 +154,15 @@ export function LocalTerminalPane({ conn, active, onHistory, onChannel, split }:
     let unlistenHist: (() => void) | null = null
     let ro: ResizeObserver | null = null
     chanIdRef.current = null
+    // rAF 合帧(与 SSH TerminalPane 同款):高频输出把一次刷新拆成大量 term:// 数据帧,逐帧
+    // term.write 会打满主线程 + WebGL 重绘、多分屏并发时卡死。纯数据帧攒批一帧内合并成单次
+    // write;inputStart/execStart/closed 时序敏感的控制帧先 flush 再处理,交互语义零损失。
+    let pendingWriteBytes: Uint8Array[] = []
+    let writeFlushRaf: number | null = null
+    const rafFn: (cb: () => void) => number =
+      typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (cb) => setTimeout(cb, 16) as unknown as number
+    const cancelRafFn: (id: number) => void =
+      typeof cancelAnimationFrame === 'function' ? cancelAnimationFrame : (id) => clearTimeout(id)
 
     const term = new Terminal({
       theme: { background: cssVar('--term-bg', '#0B1020'), foreground: cssVar('--term-fg', '#E2E8F0') },
@@ -332,25 +341,52 @@ export function LocalTerminalPane({ conn, active, onHistory, onChannel, split }:
         }
         acceptHistoryMatchRef.current = acceptHistoryMatch
 
+        // 把攒批的数据帧合并成单次 term.write。onDone 在写入被 xterm 处理后回调(inputStart
+        // 时序:提示符字节写完、光标就位后才 beginInputCapture)。
+        const flushPendingWrite = (onDone?: () => void) => {
+          if (writeFlushRaf !== null) { cancelRafFn(writeFlushRaf); writeFlushRaf = null }
+          if (pendingWriteBytes.length === 0) {
+            if (onDone) { try { term.write('', onDone) } catch { /* disposed */ } }
+            return
+          }
+          let total = 0
+          for (const b of pendingWriteBytes) total += b.length
+          const merged = new Uint8Array(total)
+          let off = 0
+          for (const b of pendingWriteBytes) { merged.set(b, off); off += b.length }
+          pendingWriteBytes = []
+          try { term.write(merged, onDone) } catch { /* disposed */ }
+        }
+        const scheduleDataFrame = (bytes: Uint8Array) => {
+          pendingWriteBytes.push(bytes)
+          if (writeFlushRaf === null) {
+            writeFlushRaf = rafFn(() => { writeFlushRaf = null; flushPendingWrite(() => scheduleInputRefresh()) })
+          }
+        }
+
         unlisten = await listen<TermEvent>(`term://${chanId}`, (p) => {
           try {
             if (typeof p.bytesBase64 === 'string') {
-              // 关键(与 SSH TerminalPane 同款):inputStart 与提示符字节同帧时,必须在
-              // term.write 的**回调**里(字节已处理、光标已落到输入起点)才 beginInputCapture,
-              // 否则同步调用时光标还没到位,startCol 记错、readCurrentInput 读到空 → 候选永不出。
+              const bytes = base64ToBytes(p.bytesBase64)
               if (p.inputStart) {
-                term.write(base64ToBytes(p.bytesBase64), () => { beginInputCapture(); scheduleInputRefresh() })
+                // inputStart 与提示符字节同帧:连同已攒批数据一起立即 flush,在合并 write 的
+                // 回调里(光标已落到输入起点)才 beginInputCapture,否则 startCol 记错 → 候选永不出。
+                pendingWriteBytes.push(bytes)
+                flushPendingWrite(() => { beginInputCapture(); scheduleInputRefresh() })
               } else {
-                term.write(base64ToBytes(p.bytesBase64), () => scheduleInputRefresh())
+                // 纯数据帧:攒进队列,rAF 合并成单次 write(压掉高频输出的主线程堆积)。
+                scheduleDataFrame(bytes)
               }
             } else if (p.inputStart) {
-              // 单发的 inputStart 帧(提示符结束、OSC 恰好跨 read chunk):空写入 term.write('')
-              // 进入写队列作屏障,在回调里(此前提示符字节都已处理、光标就位)才捕获 marker。
-              term.write('', () => { beginInputCapture(); scheduleInputRefresh() })
+              // 单发的 inputStart 帧(提示符结束、OSC 恰好跨 read chunk):先 flush 已攒批数据,
+              // 在其回调里(此前字节都已处理、光标就位)才捕获 marker。
+              flushPendingWrite(() => { beginInputCapture(); scheduleInputRefresh() })
             } else if (p.execStart) {
-              // 命令开始执行:清掉输入捕获、隐藏候选。
+              // 命令开始执行:先 flush 保证顺序,再清掉输入捕获、隐藏候选。
+              flushPendingWrite()
               clearInputCapture()
             } else if (p.closed) {
+              flushPendingWrite()
               term.write(`\r\n\x1b[2m[${t('localTerm.closed')}]\x1b[0m\r\n`)
               clearInputCapture()
               if (chanIdRef.current) { termLocalClose(chanIdRef.current); chanIdRef.current = null }
@@ -440,6 +476,8 @@ export function LocalTerminalPane({ conn, active, onHistory, onChannel, split }:
 
     return () => {
       disposed = true
+      if (writeFlushRaf !== null) { cancelRafFn(writeFlushRaf); writeFlushRaf = null }
+      pendingWriteBytes = []
       if (ro) ro.disconnect()
       if (unlisten) unlisten()
       if (unlistenHist) unlistenHist()

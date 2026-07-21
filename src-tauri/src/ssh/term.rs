@@ -36,6 +36,29 @@ const MUTE_FALLBACK_MS: u64 = 3000;
 /// duplicate backend emission (shell emitting extra markers for one command) and
 /// suppressed. A human cannot retype the exact same command this fast.
 const DEDUP_WINDOW_MS: u64 = 800;
+/// 合帧刷新间隔。高频输出(watch/top 等全屏重绘)经 SSH 会拆成大量小数据帧,逐帧 emit 一个
+/// IPC 事件会淹没前端主线程(多分屏并发时连原生窗口按钮都点不动)。可见字节先攒进 pending
+/// buffer,每 ~8ms(约 120fps)合并 emit 一帧,从源头把 IPC 事件量砍到可控;远低于可感知延迟。
+/// inputStart/execStart 等时序敏感的控制帧仍立即 flush,交互语义不变。
+const FLUSH_INTERVAL_MS: u64 = 8;
+
+/// 把攒批的可见字节合并成单帧 emit 并清空 pending。`input_start` 为真时给该帧挂 inputStart
+/// 标志(提示符字节写完前端才 beginInputCapture);pending 为空且 input_start 为真时单发
+/// `{ inputStart: true }`(marker 跨批的兜底,与前端单发 inputStart 分支对齐)。
+fn flush_pending(sink: &dyn EventSink, evt: &str, pending: &mut Vec<u8>, input_start: bool) {
+    if pending.is_empty() {
+        if input_start {
+            sink.emit(evt, serde_json::json!({ "inputStart": true }));
+        }
+        return;
+    }
+    let mut frame = serde_json::json!({ "bytesBase64": B64.encode(&pending) });
+    if input_start {
+        frame["inputStart"] = serde_json::Value::Bool(true);
+    }
+    sink.emit(evt, frame);
+    pending.clear();
+}
 
 /// Returns true if `cmd` matches the last-emitted command within `DEDUP_WINDOW_MS`,
 /// i.e. it is a spurious duplicate that should be skipped.
@@ -98,12 +121,17 @@ pub async fn term_open_core(
             .map_err(|e| SshError::Io(e.to_string()))?;
         (channel, s.host.clone())
     };
+    // want_reply=true:让服务器对 pty/shell 请求回 Success/Failure。russh 把这些回复作为
+    // ChannelMsg 经 channel.wait() 投递(不是方法返回值),故 owner task 的 select! 必须处理
+    // Failure/OpenFailure——否则服务器拒绝(如达 MaxSessions 上限、同 session 多开 shell 被拒)
+    // 会被静默吞掉,channel 开着却永无数据 → 前端空白闪光标、永不自愈(分屏复用同一 session 时
+    // 尤其常见)。发送本身失败(传输层)仍即时返回 Err。
     channel
-        .request_pty(false, "xterm-256color", cols, rows, 0, 0, &[])
+        .request_pty(true, "xterm-256color", cols, rows, 0, 0, &[])
         .await
         .map_err(|e| SshError::Io(e.to_string()))?;
     channel
-        .request_shell(false)
+        .request_shell(true)
         .await
         .map_err(|e| SshError::Io(e.to_string()))?;
 
@@ -158,8 +186,17 @@ pub async fn term_open_core(
         let mute_fallback = tokio::time::sleep(std::time::Duration::from_millis(MUTE_FALLBACK_MS));
         tokio::pin!(mute_fallback);
         let mut fallback_fired = false;
+        // 合帧待发缓冲:emit_scanned 把可见字节攒进这里,由 flush_tick 定时或控制帧即时 flush。
+        let mut pending: Vec<u8> = Vec::new();
+        let mut flush_tick =
+            tokio::time::interval(std::time::Duration::from_millis(FLUSH_INTERVAL_MS));
+        // 落后不追补:定时器只为「攒批到点就发」,错过的 tick 无需补发,避免突发时空转。
+        flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
+                _ = flush_tick.tick() => {
+                    flush_pending(sink.as_ref(), &evt, &mut pending, false);
+                }
                 _ = &mut mute_fallback, if !fallback_fired => {
                     fallback_fired = true;
                     if muted {
@@ -176,6 +213,7 @@ pub async fn term_open_core(
                             sink.as_ref(), &evt, &history_evt, &host, &mut scanner, data,
                             &mut cur_cmd, &mut cur_cwd, &mut cur_start,
                             &mut muted, &started, &mut last_emit, &mut strip_lead_nl,
+                            &mut pending,
                         );
                     }
                     Some(ChannelMsg::ExtendedData { ref data, .. }) => {
@@ -183,9 +221,26 @@ pub async fn term_open_core(
                             sink.as_ref(), &evt, &history_evt, &host, &mut scanner, data,
                             &mut cur_cmd, &mut cur_cwd, &mut cur_start,
                             &mut muted, &started, &mut last_emit, &mut strip_lead_nl,
+                            &mut pending,
                         );
                     }
                     Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
+                        flush_pending(sink.as_ref(), &evt, &mut pending, false);
+                        sink.emit(&evt, serde_json::json!({ "closed": true }));
+                        break;
+                    }
+                    // 服务器拒绝 pty/shell 请求(want_reply=true 才会收到)。此前落入 `_ => {}`
+                    // 被静默吞掉 → channel 开着却无数据、前端空白闪光标永不自愈。改为把明确原因
+                    // 写进终端并关闭,让失败可见而非假装连上。OpenFailure 同理(资源不足/达上限)。
+                    Some(ChannelMsg::Failure) => {
+                        let msg = "\r\n\x1b[31m[无法打开终端:服务器拒绝了 shell/PTY 请求(可能已达 sshd MaxSessions 上限,请调大服务器 MaxSessions 或减少同一连接的分屏数)]\x1b[0m\r\n";
+                        sink.emit(&evt, serde_json::json!({ "bytesBase64": B64.encode(msg.as_bytes()) }));
+                        sink.emit(&evt, serde_json::json!({ "closed": true }));
+                        break;
+                    }
+                    Some(ChannelMsg::OpenFailure(reason)) => {
+                        let msg = format!("\r\n\x1b[31m[无法打开终端通道:服务器拒绝(原因 {reason:?})]\x1b[0m\r\n");
+                        sink.emit(&evt, serde_json::json!({ "bytesBase64": B64.encode(msg.as_bytes()) }));
                         sink.emit(&evt, serde_json::json!({ "closed": true }));
                         break;
                     }
@@ -194,12 +249,14 @@ pub async fn term_open_core(
                 cmd = rx.recv() => match cmd {
                     Some(TermCmd::Write(bytes)) => {
                         if channel.data(&bytes[..]).await.is_err() {
+                            flush_pending(sink.as_ref(), &evt, &mut pending, false);
                             sink.emit(&evt, serde_json::json!({ "closed": true }));
                             break;
                         }
                     }
                     Some(TermCmd::Resize(c, r)) => {
                         if channel.window_change(c, r, 0, 0).await.is_err() {
+                            flush_pending(sink.as_ref(), &evt, &mut pending, false);
                             sink.emit(&evt, serde_json::json!({ "closed": true }));
                             break;
                         }
@@ -231,6 +288,7 @@ fn emit_scanned(
     started: &std::time::Instant,
     last_emit: &mut Option<(String, std::time::Instant)>,
     strip_lead_nl: &mut bool,
+    pending: &mut Vec<u8>,
 ) {
     let (mut visible, events, ready_offset) = scanner.feed(data);
     // Decide whether to show this batch's visible bytes.
@@ -272,12 +330,13 @@ fn emit_scanned(
         }
     }
     if !*muted && !visible.is_empty() {
-        let mut frame = serde_json::json!({ "bytesBase64": B64.encode(&visible) });
+        // 攒进 pending;本批含 inputStart 时连同已攒批数据一起立即 flush 并挂标志(提示符字节
+        // 写完前端才 beginInputCapture,保证 startCol 记在输入起点)。无标志则等定时器合帧。
+        pending.extend_from_slice(&visible);
         if has_input_start {
-            frame["inputStart"] = serde_json::Value::Bool(true);
+            flush_pending(sink, evt, pending, true);
             input_start_emitted = true;
         }
-        sink.emit(evt, frame);
     }
     // Always process events for the audit state machine regardless of mute.
     for ev in events {
@@ -290,15 +349,17 @@ fn emit_scanned(
                 *cur_cwd = d;
             }
             osc::OscEvent::InputStart => {
-                // If there was no visible frame to piggyback on, send a standalone
-                // input-start frame. (Multiple InputStart in one batch collapse into
-                // a single emitted frame — the flag is idempotent for the UI.)
+                // 没有可见帧可搭载时:先 flush 已攒批数据(带 inputStart 标志),把标志挂在最后
+                // 一段可见字节上;pending 为空则单发 { inputStart: true }。(一批内多个 InputStart
+                // 折叠成一次——标志对 UI 幂等。)
                 if !input_start_emitted {
-                    sink.emit(evt, serde_json::json!({ "inputStart": true }));
+                    flush_pending(sink, evt, pending, true);
                     input_start_emitted = true;
                 }
             }
             osc::OscEvent::ExecStart => {
+                // 命令已提交:先 flush 残留可见字节保证顺序,再发 execStart(前端据此清输入捕获)。
+                flush_pending(sink, evt, pending, false);
                 sink.emit(evt, serde_json::json!({ "execStart": true }));
             }
             osc::OscEvent::ExecEnd(code) => {
@@ -464,12 +525,17 @@ mod tests {
         let mut cur_start = std::time::Instant::now();
         let mut last_emit = None;
         let mut strip_lead_nl = false;
+        let mut pending: Vec<u8> = Vec::new();
         let before = sink.0.lock().unwrap().len();
         emit_scanned(
             sink, evt, "history://s", "host", scanner, data,
             &mut cur_cmd, &mut cur_cwd, &mut cur_start,
             muted, started, &mut last_emit, &mut strip_lead_nl,
+            &mut pending,
         );
+        // 合帧后可见字节可能仍在 pending(无 inputStart/execStart 触发即时 flush 时),
+        // 补一次 flush 复刻 owner task 的定时器行为,让断言读得到本批可见字节。
+        flush_pending(sink, evt, &mut pending, false);
         let frames = sink.0.lock().unwrap();
         let mut out = Vec::new();
         for (topic, payload) in frames[before..].iter() {

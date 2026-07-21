@@ -519,6 +519,16 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
     let unlisten: (() => void) | null = null
     chanIdRef.current = null
     let ro: ResizeObserver | null = null
+    // rAF 合帧:高频输出(watch/top 等全屏重绘)会把一次刷新拆成大量 term:// 数据帧,逐帧
+    // term.write 会打满主线程 + WebGL 重绘,多分屏并发时连原生窗口按钮都点不动。把「纯数据帧」
+    // 攒进队列、一帧内合并成单次 write,可见字节序完全不变;inputStart/execStart/closed 等
+    // 时序敏感的控制帧一律先 flush 再处理,交互语义零损失。
+    let pendingWriteBytes: Uint8Array[] = []
+    let writeFlushRaf: number | null = null
+    const rafFn: (cb: () => void) => number =
+      typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (cb) => setTimeout(cb, 16) as unknown as number
+    const cancelRafFn: (id: number) => void =
+      typeof cancelAnimationFrame === 'function' ? cancelAnimationFrame : (id) => clearTimeout(id)
 
     const term = new Terminal({
       theme: { background: cssVar('--term-bg', '#0B1020'), foreground: cssVar('--term-fg', '#E2E8F0') },
@@ -977,6 +987,31 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
       }
     })
 
+    // 把攒批的数据帧合并成单次 term.write。onDone 在写入被 xterm 处理后回调(用于 inputStart
+    // 时序:提示符字节写完、光标就位后才 beginInputCapture)。队列为空时也要在 onDone 存在时
+    // 触发(单发 inputStart 帧无字节),用空写入作屏障。
+    const flushPendingWrite = (onDone?: () => void) => {
+      if (writeFlushRaf !== null) { cancelRafFn(writeFlushRaf); writeFlushRaf = null }
+      if (pendingWriteBytes.length === 0) {
+        if (onDone) { try { term.write('', onDone) } catch { /* disposed */ } }
+        return
+      }
+      let total = 0
+      for (const b of pendingWriteBytes) total += b.length
+      const merged = new Uint8Array(total)
+      let off = 0
+      for (const b of pendingWriteBytes) { merged.set(b, off); off += b.length }
+      pendingWriteBytes = []
+      try { term.write(merged, onDone) } catch { /* disposed */ }
+    }
+    // 纯数据帧攒进队列,rAF 合并;一帧内到达的多个块合成一次 write。
+    const scheduleDataFrame = (bytes: Uint8Array) => {
+      pendingWriteBytes.push(bytes)
+      if (writeFlushRaf === null) {
+        writeFlushRaf = rafFn(() => { writeFlushRaf = null; flushPendingWrite() })
+      }
+    }
+
     if (live && sessionId) {
       // ---- LIVE: wire to term_* IPC ----
       ;(async () => {
@@ -989,22 +1024,27 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
         if (active && isFocused) { try { term.focus() } catch { /* best-effort */ } }
         unlisten = await listen<TermEvent>(`term://${openedChanId}`, (p) => {
           if (typeof p.bytesBase64 === 'string') {
-            // 同帧可能携带 inputStart(此时这些字节即提示符本身)。先 write 提示符,
-            // 在 write 回调里(光标已落到输入起点)再捕获 marker。
+            const bytes = base64ToBytes(p.bytesBase64)
             if (p.inputStart) {
-              term.write(base64ToBytes(p.bytesBase64), () => beginInputCapture())
+              // inputStart 帧(这些字节即提示符本身)时序敏感:连同已攒批的数据一起立即 flush,
+              // 在合并 write 的回调里(光标已落到输入起点)才捕获 marker。
+              pendingWriteBytes.push(bytes)
+              flushPendingWrite(() => beginInputCapture())
             } else {
-              term.write(base64ToBytes(p.bytesBase64))
+              // 纯数据帧:攒进队列,rAF 合并成单次 write(压掉高频输出的主线程堆积)。
+              scheduleDataFrame(bytes)
             }
           } else if (p.inputStart) {
-            // 单发的 inputStart 帧(无字节):直接捕获。
-            beginInputCapture()
+            // 单发的 inputStart 帧(无字节):先 flush 已攒批数据,在其回调里再捕获 marker。
+            flushPendingWrite(() => beginInputCapture())
           } else if (p.execStart) {
-            // 命令已提交开始执行:清标记 + 隐藏候选。
+            // 命令已提交开始执行:先 flush 保证顺序,再清标记 + 隐藏候选。
+            flushPendingWrite()
             clearInputCapture()
           } else if (p.closed) {
-            // Server-initiated close: write notice, close channel, then mark it dead so
-            // keystrokes and unmount cleanup don't call termClose on a dead channel.
+            // Server-initiated close: flush 残留数据后写通知、关通道并标记为死,避免击键与
+            // 卸载清理对已死通道再调 termClose。
+            flushPendingWrite()
             markTerminalClosed()
           }
         })
@@ -1051,6 +1091,8 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
 
     return () => {
       disposed = true
+      if (writeFlushRaf !== null) { cancelRafFn(writeFlushRaf); writeFlushRaf = null }
+      pendingWriteBytes = []
       if (extractTimer) clearTimeout(extractTimer)
       if (selBarTimer) clearTimeout(selBarTimer)
       clearTimeout(fontSettleTimer)

@@ -44,7 +44,9 @@ vi.mock('@xterm/xterm', () => ({
     cols = 80
     rows = 24
     open() {}
-    write(...a: unknown[]) { h.xtermWrite(...a) }
+    // 真实 xterm 的 write(data, cb?) 在写入被解析后回调 cb。合帧后前端用该回调驱动
+    // beginInputCapture(提示符字节写完才捕获 marker),mock 必须忠实触发,否则 marker 永不设置。
+    write(...a: unknown[]) { h.xtermWrite(...a); const cb = a[a.length - 1]; if (typeof cb === 'function') (cb as () => void)() }
     paste(data: string) { h.xtermPaste(data); h.dataCb.fn?.(data.replace(/\r?\n/g, '\r')) }
     onData(cb: (d: string) => void) { h.dataCb.fn = cb }
     onSelectionChange() {}
