@@ -14,12 +14,19 @@ let stubSelectedText = ''
 vi.mock('./SqlEditor', () => ({
   // 桩件回显 code,使格式化按钮的接线(对编辑器内容做格式化替换)可被断言;
   // 同时暴露 getSelectedText 句柄,模拟用户选中片段的场景。
-  SqlEditor: forwardRef<{ getSelectedText: () => string }, { code?: string }>((props, ref) => {
+  SqlEditor: forwardRef<{ getSelectedText: () => string }, { code?: string; onRunSelection?: (sql: string) => void }>((props, ref) => {
     useImperativeHandle(ref, () => ({
       getSelectedText: () => stubSelectedText,
       insertAtCursor: (t: string) => t,
     }), [])
-    return <div data-testid="sql-editor-stub">{props.code}</div>
+    return <>
+      <div data-testid="sql-editor-stub">{props.code}</div>
+      {props.onRunSelection && (
+        <button data-testid="sql-selection-run-stub" onClick={() => props.onRunSelection?.('select 2')}>
+          run selection
+        </button>
+      )}
+    </>
   }),
 }))
 
@@ -46,6 +53,16 @@ vi.mock('../../services/db', () => ({
 
 const wrap = (ui: React.ReactNode) =>
   render(<LanguageProvider><DataProvider>{ui}</DataProvider></LanguageProvider>)
+
+describe('SqlConsole 选区运行入口', () => {
+  beforeAll(async () => { await i18n.changeLanguage('en') })
+
+  it('mock/demo 路径也向编辑器提供选区运行能力', () => {
+    wrap(<SqlConsole fresh initialCode="select 1" />)
+    fireEvent.click(screen.getByTestId('sql-selection-run-stub'))
+    expect(screen.getByText('Stop')).toBeInTheDocument()
+  })
+})
 
 describe('SqlConsole 分屏与最大化', () => {
   beforeAll(async () => { await i18n.changeLanguage('en') })
