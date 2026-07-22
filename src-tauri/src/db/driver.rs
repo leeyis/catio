@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use futures_util::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use crate::db::{DbError, DatabaseType, result::QueryResult, capabilities::Capabilities};
@@ -232,23 +233,27 @@ pub trait Driver: Send + Sync {
     /// 批量列名：为 schema 下每张表收集列名，供编辑器补全用。
     ///
     /// Default is engine-agnostic and best-effort: it reuses `list_tables` +
-    /// `table_structure`, so all drivers get it for free. Relational drivers MAY
-    /// override later with a single information_schema query for efficiency.
+    /// `table_structure` with bounded concurrency, so all drivers get it for free.
+    /// Relational drivers MAY override later with a single information_schema query.
     /// Per-table failures (e.g. Redis `table_structure` → Unsupported) degrade to
     /// an empty column list rather than failing the whole call. Capped at the
     /// first 200 tables to avoid pathological stalls on huge schemas (this is a
     /// completion aid, so a silent cap is acceptable).
     async fn schema_columns(&self, schema: &str) -> Result<Vec<(String, Vec<String>)>, DbError> {
         const MAX_TABLES: usize = 200;
+        const CONCURRENCY: usize = 8;
         let tables = self.list_tables(schema).await?;
-        let mut out = Vec::new();
-        for t in tables.into_iter().take(MAX_TABLES) {
-            match self.table_structure(schema, &t.name).await {
-                Ok(st) => out.push((t.name, st.columns.into_iter().map(|c| c.name).collect())),
-                Err(_) => out.push((t.name, Vec::new())), // best-effort: skip columns on per-table failure
-            }
-        }
-        Ok(out)
+        Ok(stream::iter(tables.into_iter().take(MAX_TABLES))
+            .map(|table| async move {
+                let name = table.name;
+                let columns = self.table_structure(schema, &name).await
+                    .map(|st| st.columns.into_iter().map(|column| column.name).collect())
+                    .unwrap_or_default();
+                (name, columns)
+            })
+            .buffered(CONCURRENCY)
+            .collect()
+            .await)
     }
 
     /// List stored functions/procedures in a schema. Default is empty so engines
@@ -273,8 +278,51 @@ pub trait Driver: Send + Sync {
 }
 
 #[cfg(test)]
-mod ssl_serde_tests {
-    use super::ConnectArgs;
+mod tests {
+    use super::{ColumnDef, ConnectArgs, Driver, ErRelation, TableInfo, TableStructure};
+    use crate::db::{DatabaseType, DbError, result::QueryResult};
+    use std::{sync::atomic::{AtomicUsize, Ordering}, time::Duration};
+
+    struct SchemaColumnsDriver {
+        active: AtomicUsize,
+        max_active: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl Driver for SchemaColumnsDriver {
+        fn db_type(&self) -> DatabaseType { DatabaseType::Sqlite }
+        async fn test(&self) -> Result<String, DbError> { unimplemented!() }
+        async fn query(&self, _sql: &str, _max_rows: u32) -> Result<QueryResult, DbError> { unimplemented!() }
+        async fn list_schemas(&self) -> Result<Vec<String>, DbError> { unimplemented!() }
+        async fn list_tables(&self, _schema: &str) -> Result<Vec<TableInfo>, DbError> {
+            Ok((0..20).map(|i| TableInfo { name: format!("table_{i}"), kind: "table".into(), rows_estimate: None }).collect())
+        }
+        async fn table_structure(&self, _schema: &str, table: &str) -> Result<TableStructure, DbError> {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            Ok(TableStructure {
+                comment: String::new(),
+                columns: vec![ColumnDef { name: format!("{table}_id"), type_name: "int".into(), nullable: false, default: None, key: String::new(), comment: String::new() }],
+                indexes: vec![],
+                fks: vec![],
+                triggers: vec![],
+            })
+        }
+        async fn er_relations(&self, _schema: &str) -> Result<Vec<ErRelation>, DbError> { unimplemented!() }
+    }
+
+    #[tokio::test]
+    async fn schema_columns_is_bounded_and_keeps_table_order() {
+        let driver = SchemaColumnsDriver { active: AtomicUsize::new(0), max_active: AtomicUsize::new(0) };
+        let columns = driver.schema_columns("main").await.unwrap();
+
+        assert_eq!(columns.len(), 20);
+        assert_eq!(columns[0], ("table_0".into(), vec!["table_0_id".into()]));
+        assert_eq!(columns[19], ("table_19".into(), vec!["table_19_id".into()]));
+        assert!((2..=8).contains(&driver.max_active.load(Ordering::SeqCst)));
+    }
 
     /// 不带任何 ssl 字段的旧 payload 必须仍可反序列化，且 ssl 全部回落默认（关闭、不指定 mode/ca）。
     #[test]
