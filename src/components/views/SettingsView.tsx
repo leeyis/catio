@@ -291,21 +291,8 @@ function AgentConfigBlock() {
   const [models, setModels] = useState<string[]>([])
   const [loading, setLoading] = useState(false)
   const [fetchError, setFetchError] = useState('')
-  const [modelOpen, setModelOpen] = useState(false)
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<ModelTestResult | null>(null)
-  const modelRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    if (!modelOpen) return
-    function handleClickOutside(e: MouseEvent) {
-      if (modelRef.current && !modelRef.current.contains(e.target as Node)) {
-        setModelOpen(false)
-      }
-    }
-    window.addEventListener('mousedown', handleClickOutside)
-    return () => window.removeEventListener('mousedown', handleClickOutside)
-  }, [modelOpen])
 
   async function handleFetch() {
     setLoading(true)
@@ -426,38 +413,17 @@ function AgentConfigBlock() {
       <div style={rowWrapStyle}>
         <span style={labelStyle}>{t('settings.agentModelLabel')}</span>
         <div className="row gap8" style={{ alignItems: 'flex-start' }}>
-          {/* Dropdown */}
-          <div ref={modelRef} style={{ position: 'relative', flex: 1 }}>
-            <button
-              onClick={() => setModelOpen(o => !o)}
-              style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8, height: 36, padding: '0 12px', borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', cursor: 'pointer', textAlign: 'left' }}
-            >
-              <span style={{ flex: 1, fontSize: 13, color: config.model ? 'var(--text-primary)' : 'var(--text-faint)' }}>
-                {config.model || t('settings.agentSelectModel')}
-              </span>
-              <Icon name="chevron-down" size={14} style={{ color: 'var(--text-faint)', transform: modelOpen ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform .14s' }} />
-            </button>
-            {modelOpen && (
-              <div style={{ position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0, zIndex: 80, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', borderRadius: 10, boxShadow: 'var(--shadow-dropdown)', maxHeight: 260, overflowY: 'auto' }}>
-                {models.length === 0 ? (
-                  <div style={{ padding: '10px 14px', fontSize: 12, color: 'var(--text-faint)' }}>{t('settings.agentNoModels')}</div>
-                ) : (
-                  models.map(m => {
-                    const active = config.model === m
-                    return (
-                      <button key={m}
-                        onClick={() => { update({ model: m }); setModelOpen(false) }}
-                        style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', border: 'none', background: active ? 'var(--accent-soft)' : 'transparent', cursor: 'pointer', textAlign: 'left' }}
-                      >
-                        <span style={{ flex: 1, fontSize: 13, fontWeight: active ? 600 : 400, color: active ? 'var(--accent-primary)' : 'var(--text-primary)' }}>{m}</span>
-                        {active && <Icon name="check" size={13} style={{ color: 'var(--accent-primary)' }} />}
-                      </button>
-                    )
-                  })
-                )}
-              </div>
-            )}
-          </div>
+          <input
+            type="text"
+            list="agent-model-options"
+            value={config.model}
+            onChange={e => update({ model: e.target.value })}
+            placeholder={t('settings.agentSelectModel')}
+            style={{ ...inputStyle, flex: 1 }}
+          />
+          <datalist id="agent-model-options">
+            {models.map(model => <option key={model} value={model} />)}
+          </datalist>
           {/* Fetch button */}
           <Btn
             variant="secondary"
