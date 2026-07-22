@@ -53,6 +53,23 @@ beforeEach(() => {
 })
 
 describe('AIPanel controlled conversation view', () => {
+  it.each([
+    ['shell', hostConn],
+    ['sql', dbConn],
+  ] as const)('supports copying and asking a user question again in %s mode', (mode, conn) => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    const onSend = vi.fn()
+    wrap(<AIPanel onClose={() => {}} mode={mode} conn={conn} attachment={null} onClearAttachment={() => {}}
+      conversation={conv([{ role: 'user', content: '检查当前连接状态' }])} onSend={onSend} />)
+
+    fireEvent.click(screen.getByRole('button', { name: '复制问题' }))
+    expect(writeText).toHaveBeenCalledWith('检查当前连接状态')
+
+    fireEvent.click(screen.getByRole('button', { name: '重问' }))
+    expect(onSend).toHaveBeenCalledWith('检查当前连接状态', { hasSelection: false })
+  })
+
   it('renders the conversation messages as markdown', () => {
     wrap(<AIPanel onClose={() => {}} mode="shell" conn={hostConn} attachment={null} onClearAttachment={() => {}}
       conversation={conv([{ role: 'assistant', content: '# Title\n\nhello **world**' }])} />)

@@ -185,7 +185,7 @@ export function ConnGlyph({ conn, size = 42, radius = 10 }: ConnGlyphProps) {
     const logo = dbLogo(glyphId)
     if (logo) {
       return (
-        <div className="icon-badge" style={{ width: size, height: size, borderRadius: radius, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', padding: small ? 4 : 6 }}>
+        <div className="icon-badge connection-logo" style={{ width: size, height: size, borderRadius: radius, padding: small ? 4 : 6 }}>
           <img src={logo} alt={m.short} style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
         </div>
       )
@@ -198,10 +198,9 @@ export function ConnGlyph({ conn, size = 42, radius = 10 }: ConnGlyphProps) {
   }
   const ol = osLogo(conn.os)
   if (ol) {
-    const m = small ? 4 : 6
     return (
-      <div className="icon-badge" style={{ width: size, height: size, borderRadius: radius, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)' }}>
-        <span style={{ display: 'block', width: size - m * 2, height: size - m * 2, backgroundColor: ol.color, WebkitMaskImage: `url(${ol.url})`, maskImage: `url(${ol.url})`, WebkitMaskRepeat: 'no-repeat', maskRepeat: 'no-repeat', WebkitMaskPosition: 'center', maskPosition: 'center', WebkitMaskSize: 'contain', maskSize: 'contain' }} />
+      <div className="icon-badge connection-logo" style={{ width: size, height: size, borderRadius: radius, padding: small ? 4 : 6 }}>
+        <span style={{ display: 'block', width: '100%', height: '100%', backgroundColor: ol.color, WebkitMaskImage: `url(${ol.url})`, maskImage: `url(${ol.url})`, WebkitMaskRepeat: 'no-repeat', maskRepeat: 'no-repeat', WebkitMaskPosition: 'center', maskPosition: 'center', WebkitMaskSize: 'contain', maskSize: 'contain' }} />
       </div>
     )
   }

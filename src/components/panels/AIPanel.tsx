@@ -78,6 +78,38 @@ function useCopied() {
   return { copied, copy }
 }
 
+interface UserMessageProps {
+  text: string
+  busy: boolean
+  onAskAgain?: (text: string) => void
+}
+
+function UserMessage({ text, busy, onAskAgain }: UserMessageProps) {
+  const { t } = useTranslation()
+  const { copied, copy } = useCopied()
+  const canAskAgain = !!onAskAgain && !busy
+
+  return (
+    <div className="col" style={{ alignSelf: 'flex-end', alignItems: 'flex-end', maxWidth: '88%', gap: 3 }}>
+      <div style={{ background: 'var(--accent-primary)', color: 'var(--on-accent)', padding: '9px 12px', borderRadius: '14px 14px 4px 14px', fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
+        {text}
+      </div>
+      <div className="row gap4" style={{ paddingRight: 2 }}>
+        <button type="button" className="icon-btn bare" aria-label={copied ? t('panels.questionCopied') : t('panels.copyQuestion')}
+          title={copied ? t('panels.questionCopied') : t('panels.copyQuestion')} style={{ width: 24, height: 24, color: copied ? 'var(--signal-green)' : 'var(--text-faint)' }}
+          onClick={() => copy(text)}>
+          <Icon name={copied ? 'check' : 'copy'} size={13} />
+        </button>
+        <button type="button" className="icon-btn bare" aria-label={t('panels.askAgain')} title={t('panels.askAgain')}
+          disabled={!canAskAgain} style={{ width: 24, height: 24, color: 'var(--text-faint)', opacity: canAskAgain ? 1 : 0.45 }}
+          onClick={() => onAskAgain?.(text)}>
+          <Icon name="refresh-cw" size={13} />
+        </button>
+      </div>
+    </div>
+  )
+}
+
 // ---- Block code card with action row ----
 interface BlockCodeProps {
   lang: string
@@ -670,7 +702,8 @@ export function AIPanel({ onClose, mode = 'sql', conn, connId, engine, attachmen
       ) : (
         <div ref={scrollRef} className="grow" style={{ overflowY: 'auto', padding: '14px 12px', display: 'flex', flexDirection: 'column', gap: 14 }}>
           {msgs.map((m, i) => m.role === 'user'
-            ? <div key={i} style={{ alignSelf: 'flex-end', maxWidth: '88%', background: 'var(--accent-primary)', color: 'var(--on-accent)', padding: '9px 12px', borderRadius: '14px 14px 4px 14px', fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{m.content}</div>
+            ? <UserMessage key={i} text={m.content} busy={busy}
+                onAskAgain={onSend ? text => onSend(text, { hasSelection: false }) : undefined} />
             : <AssistantMessage key={i} text={m.content} mode={mode} conn={conn} onInsert={onInsert} canInsert={canInsert}
                 isStreaming={busy && i === msgs.length - 1} />)}
           {busy && msgs.length > 0 && msgs[msgs.length - 1].content === '' && (

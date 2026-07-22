@@ -482,6 +482,8 @@
   --surface-subtle: #FAFBFC;
   --surface-sunken: #F1F5F9;
   --surface-inset: #ECEEF3;
+  --logo-tile-bg: #F8FAFC;
+  --logo-tile-border: #D9E0E9;
 
   /* accent */
   --accent-primary: #1b1bb9;
@@ -536,6 +538,8 @@
   --surface-subtle: #1E1A14;
   --surface-sunken: #2C261E;
   --surface-inset: #1B1711;
+  --logo-tile-bg: #F8FAFC;
+  --logo-tile-border: #D9E0E9;
 
   --accent-primary: #D4A574;
   --accent-soft: rgba(212,165,116,0.15);
@@ -585,6 +589,8 @@
   --surface-subtle: #091210;
   --surface-sunken: #12241B;
   --surface-inset: #081009;
+  --logo-tile-bg: #F8FAFC;
+  --logo-tile-border: #D9E0E9;
 
   --accent-primary: #4ADE80;
   --accent-soft: rgba(74,222,128,0.14);
@@ -640,7 +646,10 @@ html, body {
 }
 /* Desktop-app look: no visible scrollbar chrome anywhere (vertical or horizontal).
    Scrolling still works via wheel/trackpad/keys; regions keep overflow:auto. */
-* { scrollbar-width: none; }
+* {
+  scrollbar-width: none;
+  scrollbar-color: color-mix(in srgb, var(--text-faint) 45%, var(--surface-inset)) var(--surface-inset);
+}
 *::-webkit-scrollbar { width: 0; height: 0; background: transparent; }
 .mono { font-family: var(--font-mono, 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace); }
 button { font-family: inherit; cursor: pointer; border: none; background: none; }
@@ -650,28 +659,35 @@ input, textarea { font-family: inherit; }
 select option { background: var(--surface-elevated); color: var(--text-primary); }
 ::selection { background: color-mix(in srgb, var(--accent-primary) 26%, transparent); }
 
-/* scrollbars */
-*::-webkit-scrollbar { width: 10px; height: 10px; }
+/* Theme the complete native scrollbar surface. Windows WebView2 otherwise
+   falls back to a white system track/button even when the thumb is themed. */
+*::-webkit-scrollbar { width: 10px; height: 10px; background: var(--surface-inset); }
+*::-webkit-scrollbar-track { background: var(--surface-inset); }
+*::-webkit-scrollbar-button { width: 0; height: 0; background: var(--surface-inset); }
 *::-webkit-scrollbar-thumb {
-  background: color-mix(in srgb, var(--text-faint) 40%, transparent);
+  background: color-mix(in srgb, var(--text-faint) 45%, var(--surface-inset));
   border-radius: 999px;
   border: 3px solid transparent;
   background-clip: padding-box;
 }
-*::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--text-faint) 65%, transparent); background-clip: padding-box; }
-*::-webkit-scrollbar-corner { background: transparent; }
+*::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--text-faint) 65%, var(--surface-inset)); background-clip: padding-box; }
+*::-webkit-scrollbar-corner { background: var(--surface-inset); }
 
 /* opt-in 可见滚动条：仅供数据区(库结构树/结果网格/SQL 编辑器)主动挂载，覆盖上面的全局隐藏 */
-.scrollon { scrollbar-width: thin; }
-.scrollon::-webkit-scrollbar { width: 10px; height: 10px; }
+.scrollon {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--text-faint) 45%, var(--surface-inset)) var(--surface-inset);
+}
+.scrollon::-webkit-scrollbar { width: 10px; height: 10px; background: var(--surface-inset); }
+.scrollon::-webkit-scrollbar-track { background: var(--surface-inset); }
 .scrollon::-webkit-scrollbar-thumb {
-  background: color-mix(in srgb, var(--text-faint) 40%, transparent);
+  background: color-mix(in srgb, var(--text-faint) 45%, var(--surface-inset));
   border-radius: 999px;
   border: 3px solid transparent;
   background-clip: padding-box;
 }
-.scrollon::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--text-faint) 65%, transparent); background-clip: padding-box; }
-.scrollon::-webkit-scrollbar-corner { background: transparent; }
+.scrollon::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--text-faint) 65%, var(--surface-inset)); background-clip: padding-box; }
+.scrollon::-webkit-scrollbar-corner { background: var(--surface-inset); }
 
 /* 结果网格行号上的"查看明细"按钮：默认隐藏，悬浮该行时浮出 */
 /* 默认 pointer-events:none，让点击穿透到行号单元格触发「行多选」；悬浮该行时才可点开明细。
@@ -868,6 +884,20 @@ select option { background: var(--surface-elevated); color: var(--text-primary);
   display: grid; place-items: center; flex: none;
   background: var(--surface-sunken); color: var(--text-secondary);
   border-radius: 10px;
+}
+.connection-logo {
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: var(--logo-tile-bg);
+  border: 1px solid var(--logo-tile-border);
+  line-height: 0;
+}
+.connection-logo > img,
+.connection-logo > span {
+  display: block;
+  margin: auto;
+  transform-origin: center;
 }
 
 /* toggle §6.7 */

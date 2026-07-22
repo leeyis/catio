@@ -5,8 +5,8 @@
 // Rendered directly via <img>, so they keep their real brand colours.
 //
 // OS logos: monochrome single-path marks from simple-icons (MIT) →
-// public/logos/os/. Rendered via CSS mask + a brand colour so they tint to the
-// theme (single colour, no embedded fill). Initial/unknown OS falls back to the
+// public/logos/os/. Rendered via CSS mask with a fixed brand colour, independent
+// of the active theme. Initial/unknown OS falls back to the
 // generic host icon until the backend detects the real OS post-connect.
 
 /** Engine id (catalog id / DbType, plus mock aliases) → logo filename under
@@ -91,9 +91,9 @@ const OS_LOGO: Record<string, { file: string; color: string }> = {
   arch: { file: 'archlinux.svg', color: '#1793D1' },
   rhel: { file: 'redhat.svg', color: '#EE0000' },
   redhat: { file: 'redhat.svg', color: '#EE0000' },
-  // Generic Linux (Tux) for distros we can't pin down — themed, not branded.
-  linux: { file: 'linux.svg', color: 'var(--text-secondary)' },
-  macos: { file: 'apple.svg', color: 'var(--text-secondary)' },
+  // Generic Linux and Apple marks still use stable brand colours.
+  linux: { file: 'linux.svg', color: '#FCC624' },
+  macos: { file: 'apple.svg', color: '#A2AAAD' },
 }
 
 /** Resolve a DB engine to its brand logo URL, or null when none is bundled. */

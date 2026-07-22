@@ -43,6 +43,17 @@ describe('Sidebar ConnRow', () => {
   })
 })
 
+describe('collapsed Sidebar connection logos', () => {
+  it('removes button padding and centers the fixed-size logo tile', () => {
+    const ubuntu = { ...CONN, id: 'ubuntu', name: 'Ubuntu', os: 'ubuntu' }
+    wrap(<Sidebar collapsed conns={[ubuntu]} onOpen={() => {}} />)
+
+    const button = screen.getByTitle('Ubuntu')
+    expect(button).toHaveStyle({ padding: '0px', display: 'grid', placeItems: 'center' })
+    expect(button.querySelector('.connection-logo')).toBeTruthy()
+  })
+})
+
 describe('Sidebar footer auth state', () => {
   it('auth disabled: shows authDisabled text, no mock user, enable button calls onEnableAuth', () => {
     const onOpen = vi.fn()

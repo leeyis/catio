@@ -19,7 +19,8 @@ describe('dbLogo', () => {
 describe('osLogo', () => {
   it('resolves a known OS to a url + tint colour', () => {
     expect(osLogo('ubuntu')).toEqual({ url: '/logos/os/ubuntu.svg', color: '#E95420' })
-    expect(osLogo('macos')?.url).toBe('/logos/os/apple.svg')
+    expect(osLogo('linux')).toEqual({ url: '/logos/os/linux.svg', color: '#FCC624' })
+    expect(osLogo('macos')).toEqual({ url: '/logos/os/apple.svg', color: '#A2AAAD' })
   })
   it('returns null for unknown / missing OS', () => {
     expect(osLogo('plan9')).toBeNull()

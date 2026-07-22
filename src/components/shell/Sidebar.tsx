@@ -242,7 +242,7 @@ export function Sidebar({ activeId, onOpen, onDetail, collapsed, onToggleCollaps
         <div style={{ height: 1, width: 24, background: 'var(--border-hairline)', margin: '4px 0' }} />
         {allConns.slice(0, 8).map(c => (
           <button key={c.id} className="icon-btn bare" onClick={() => onOpen(c)} title={c.name}
-            style={{ width: 38, height: 38, borderRadius: 10, background: activeId === c.id ? 'var(--accent-soft)' : 'transparent' }}>
+            style={{ width: 38, height: 38, padding: 0, borderRadius: 10, display: 'grid', placeItems: 'center', background: activeId === c.id ? 'var(--accent-soft)' : 'transparent' }}>
             <ConnGlyph conn={c} size={30} radius={8} />
           </button>
         ))}
