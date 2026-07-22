@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { firstShellCommand, planAgentShellExecution } from './agentExecution'
+import { firstShellCommand, planAgentShellExecution, runAgentShellLoop } from './agentExecution'
 
 describe('Agent shell execution policy', () => {
   const answer = '查看结果：\n```sh\nnvidia-smi\n```'
@@ -12,6 +12,9 @@ describe('Agent shell execution policy', () => {
     expect(planAgentShellExecution(answer, 'ask')).toEqual({ action: 'run', command: 'nvidia-smi' })
     expect(planAgentShellExecution('```bash\nrm -rf /tmp/demo\n```', 'ask').action).toBe('confirm')
     expect(planAgentShellExecution('```powershell\nnpm install\n```', 'ask').action).toBe('confirm')
+    expect(planAgentShellExecution('```sh\nsystemctl list-units\n```', 'ask').action).toBe('confirm')
+    expect(planAgentShellExecution('```sh\nsystemctl list-units --no-pager\n```', 'ask')).toEqual({ action: 'run', command: 'systemctl list-units --no-pager' })
+    expect(planAgentShellExecution('```sh\nollama list\n```', 'ask')).toEqual({ action: 'run', command: 'ollama list' })
   })
 
   it('asks before commands that can mutate state, execute nested commands, or expose secrets', () => {
@@ -36,5 +39,34 @@ describe('Agent shell execution policy', () => {
 
   it('ignores unlabeled, inline and incomplete code', () => {
     expect(firstShellCommand('`whoami`\n```\nwhoami\n```\n```sh\nunclosed')).toBeNull()
+  })
+
+  it('does not automatically execute a multi-line shell block', () => {
+    expect(firstShellCommand('```sh\necho one\necho two\n```')).toBeNull()
+    expect(planAgentShellExecution('```sh\necho one\necho two\n```', 'auto').action).toBe('repair')
+  })
+
+  it('keeps executing one command per turn until the Agent returns a final answer', async () => {
+    const commands: string[] = []
+    const result = await runAgentShellLoop('```sh\nfirst\n```', 'auto', async plan => {
+      if (plan.action === 'repair') return null
+      commands.push(plan.command)
+      return commands.length === 1 ? '```sh\nsecond\n```' : 'Task complete.'
+    })
+
+    expect(commands).toEqual(['first', 'second'])
+    expect(result).toEqual({ limitReached: false })
+  })
+
+  it('asks the Agent to repair an invalid shell block instead of silently ending the loop', async () => {
+    const actions: string[] = []
+    const result = await runAgentShellLoop('```sh\necho one\necho two\n```', 'auto', async plan => {
+      actions.push(plan.action)
+      if (plan.action === 'repair') return '```sh\necho one && echo two\n```'
+      return 'Task complete.'
+    })
+
+    expect(actions).toEqual(['repair', 'run'])
+    expect(result).toEqual({ limitReached: false })
   })
 })

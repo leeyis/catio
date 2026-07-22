@@ -8,9 +8,9 @@
 
 import { useSyncExternalStore } from 'react'
 
-export type ModelProvider = 'ollama' | 'openai' | 'deepseek' | 'anthropic'
+export type ModelProvider = 'ollama' | 'openai' | 'deepseek' | 'zhipu' | 'kimi' | 'anthropic'
 export type ModelProtocol = 'ollama' | 'openai' | 'anthropic'
-export type AnthropicAuthMode = 'api-key' | 'auth-token'
+export type AnthropicAuthMode = 'auto' | 'api-key' | 'auth-token'
 export type AgentExecutionMode = 'manual' | 'ask' | 'auto'
 
 export interface ModelProviderPreset {
@@ -22,10 +22,12 @@ export const MODEL_PROVIDER_PRESETS: Record<ModelProvider, ModelProviderPreset> 
   ollama: { protocol: 'ollama', defaultBaseUrl: 'http://localhost:11434' },
   openai: { protocol: 'openai', defaultBaseUrl: 'https://api.openai.com' },
   deepseek: { protocol: 'openai', defaultBaseUrl: 'https://api.deepseek.com' },
+  zhipu: { protocol: 'openai', defaultBaseUrl: 'https://open.bigmodel.cn/api/paas/v4' },
+  kimi: { protocol: 'openai', defaultBaseUrl: 'https://api.moonshot.cn/v1' },
   anthropic: { protocol: 'anthropic', defaultBaseUrl: 'https://api.anthropic.com' },
 }
 
-export const MODEL_PROVIDER_ORDER: ModelProvider[] = ['ollama', 'openai', 'deepseek', 'anthropic']
+export const MODEL_PROVIDER_ORDER: ModelProvider[] = ['ollama', 'deepseek', 'zhipu', 'kimi', 'openai', 'anthropic']
 
 export interface AgentConfig {
   provider: ModelProvider
@@ -37,10 +39,10 @@ export interface AgentConfig {
 }
 
 export const DEFAULT_AGENT_CONFIG: AgentConfig = {
-  provider: 'ollama',
-  baseUrl: MODEL_PROVIDER_PRESETS.ollama.defaultBaseUrl,
+  provider: 'deepseek',
+  baseUrl: MODEL_PROVIDER_PRESETS.deepseek.defaultBaseUrl,
   apiKey: '',
-  anthropicAuthMode: 'api-key',
+  anthropicAuthMode: 'auto',
   model: '',
   executionMode: 'manual',
 }
@@ -71,7 +73,10 @@ function readFromStorage(): AgentConfig {
       apiKey: typeof parsed.apiKey === 'string'
         ? parsed.apiKey
         : typeof parsed.openaiKey === 'string' ? parsed.openaiKey : '',
-      anthropicAuthMode: parsed.anthropicAuthMode === 'auth-token' ? 'auth-token' : 'api-key',
+      // The auth selector is intentionally hidden from novice users. Re-evaluate
+      // old values through the key/token heuristic instead of preserving a stale
+      // override that can no longer be changed in the UI.
+      anthropicAuthMode: 'auto',
       model: typeof parsed.model === 'string' ? parsed.model : '',
       // Execution permission is session-only. Restarting Catio always returns to
       // the safest default instead of preserving a stale Full Access grant.

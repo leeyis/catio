@@ -13,6 +13,7 @@ import { termOpen, termWrite, termResize, termClose, listen, getTermBuffer, onHi
 import { copyTextToClipboard } from '../../services/clipboard'
 import { usePrefs, monoFontStack } from '../../state/preferences'
 import { registerTermBuffer, unregisterTermBuffer } from '../../services/termBuffers'
+import { markTerminalChannelExecution } from '../../services/terminalCapture'
 import type { Connection, TermLine as TermLineType } from '../../services/types'
 import { loadHistory } from '../../state/history'
 import { planHistoryCompletion, type ShellHistoryEntry, type HistoryMatch } from '../shell/historyCompletion'
@@ -103,7 +104,7 @@ const isServer = (): boolean =>
 // inputStart/execStart carry OSC 633;B / 633;C signals from the backend so the
 // frontend knows when the prompt finished (start capturing input) and when a
 // command was submitted (hide candidates).
-interface TermEvent { bytesBase64?: string; closed?: boolean; inputStart?: boolean; execStart?: boolean }
+interface TermEvent { bytesBase64?: string; closed?: boolean; inputStart?: boolean; execStart?: boolean; execEnd?: boolean }
 
 // 从 conn.sub(`user@host:port`)解析出裸 host/IP。这是后端 term.rs 写入 history.target
 // 的口径(s.host),前后两侧用同一字段才能匹配到候选。无 `@` 时整串视为主机段;
@@ -746,6 +747,7 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
       term.write(`\r\n\x1b[2m[${t('terminal.disconnected')}]\x1b[0m\r\n`)
       if (chanIdRef.current) {
         const deadChan = chanIdRef.current
+        markTerminalChannelExecution(deadChan, false)
         chanIdRef.current = null
         Promise.resolve(termClose(sid, deadChan)).catch(() => { /* best-effort cleanup */ })
       }
@@ -1023,6 +1025,8 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
         // 显示的 tab 时,避免在后台打开时抢焦点)。
         if (active && isFocused) { try { term.focus() } catch { /* best-effort */ } }
         unlisten = await listen<TermEvent>(`term://${openedChanId}`, (p) => {
+          if (p.execStart) markTerminalChannelExecution(openedChanId, true)
+          if (p.execEnd || p.closed) markTerminalChannelExecution(openedChanId, false)
           if (typeof p.bytesBase64 === 'string') {
             const bytes = base64ToBytes(p.bytesBase64)
             if (p.inputStart) {
@@ -1104,6 +1108,7 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
       acceptHistoryMatchRef.current = () => {}
       if (ro) ro.disconnect()
       if (unlisten) unlisten()
+      if (chanIdRef.current) markTerminalChannelExecution(chanIdRef.current, false)
       // Only call termClose if the channel is still live (not already closed by server).
       if (live && sessionId && chanIdRef.current) { termClose(sessionId, chanIdRef.current); chanIdRef.current = null }
       if (live && sessionId) { onChannelRef.current?.(sessionId, null) }

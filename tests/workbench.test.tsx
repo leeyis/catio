@@ -23,9 +23,9 @@ vi.mock('@xterm/xterm/css/xterm.css', () => ({}))
 const wrap = (ui: React.ReactNode) => render(<LanguageProvider><DataProvider>{ui}</DataProvider></LanguageProvider>)
 it('TerminalPane renders terminal chrome (xterm surface)', () => {
   wrap(<TerminalPane conn={DATA.byId['h-bastion']} />)
-  // header shows the connection name + connected chip (chrome preserved)
+  // Without a live session id, the header truthfully shows a disconnected chip.
   expect(screen.getAllByText(/db-bastion/i).length).toBeGreaterThan(0)
-  expect(screen.getByText(/connected/i)).toBeTruthy()
+  expect(screen.getByText('未连接')).toBeTruthy()
 })
 it('DbWorkbench renders schema table name orders', () => {
   wrap(<DbWorkbench conn={DATA.byId['d-orders']} />)

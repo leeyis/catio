@@ -22,6 +22,7 @@ import { HistorySuggest } from '../shell/HistorySuggest'
 import { planHistoryCompletion, type HistoryMatch } from '../shell/historyCompletion'
 import { loadHistory } from '../../state/history'
 import type { Connection } from '../../services/types'
+import { markTerminalChannelExecution } from '../../services/terminalCapture'
 
 export interface LocalTerminalPaneProps {
   conn: Connection
@@ -47,7 +48,7 @@ const isTauri = (): boolean =>
 
 // inputStart(OSC 633;B)/execStart(633;C):本地 shell 后端据 shell-integration 发出,
 // 驱动历史命令候选补全的输入捕获(提示符结束→开始捕获;命令执行→清空候选)。
-interface TermEvent { bytesBase64?: string; closed?: boolean; inputStart?: boolean; execStart?: boolean }
+interface TermEvent { bytesBase64?: string; closed?: boolean; inputStart?: boolean; execStart?: boolean; execEnd?: boolean }
 
 function bytesToBase64(s: string): string {
   const bytes = new TextEncoder().encode(s)
@@ -366,6 +367,8 @@ export function LocalTerminalPane({ conn, active, onHistory, onChannel, split }:
 
         unlisten = await listen<TermEvent>(`term://${chanId}`, (p) => {
           try {
+            if (p.execStart) markTerminalChannelExecution(chanId, true)
+            if (p.execEnd || p.closed) markTerminalChannelExecution(chanId, false)
             if (typeof p.bytesBase64 === 'string') {
               const bytes = base64ToBytes(p.bytesBase64)
               if (p.inputStart) {
@@ -481,6 +484,7 @@ export function LocalTerminalPane({ conn, active, onHistory, onChannel, split }:
       if (ro) ro.disconnect()
       if (unlisten) unlisten()
       if (unlistenHist) unlistenHist()
+      if (chanIdRef.current) markTerminalChannelExecution(chanIdRef.current, false)
       if (chanIdRef.current) { termLocalClose(chanIdRef.current); chanIdRef.current = null }
       onChannelRef.current?.(null)
       term.dispose()

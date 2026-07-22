@@ -1,17 +1,19 @@
+import type { ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Btn, IconBtn } from '../atoms'
 
 export interface ConfirmModalProps {
   title: string
-  message: string
+  message: ReactNode
   confirmLabel: string
   cancelLabel?: string
   danger?: boolean
+  confirmIcon?: string
   onConfirm: () => void
   onCancel: () => void
 }
 
-export function ConfirmModal({ title, message, confirmLabel, cancelLabel, danger, onConfirm, onCancel }: ConfirmModalProps) {
+export function ConfirmModal({ title, message, confirmLabel, cancelLabel, danger, confirmIcon, onConfirm, onCancel }: ConfirmModalProps) {
   const { t } = useTranslation()
 
   return (
@@ -48,12 +50,12 @@ export function ConfirmModal({ title, message, confirmLabel, cancelLabel, danger
 
         {/* body */}
         <div className="col" style={{ gap: 10, padding: '16px 20px 20px' }}>
-          <span style={{ fontSize: 12.5, color: 'var(--text-tertiary)', lineHeight: 1.5 }}>
+          <div style={{ fontSize: 12.5, color: 'var(--text-tertiary)', lineHeight: 1.5 }}>
             {message}
-          </span>
+          </div>
           <div className="row gap8" style={{ justifyContent: 'flex-end', marginTop: 4 }}>
             <Btn variant="ghost" onClick={onCancel}>{cancelLabel ?? t('modals.cancel')}</Btn>
-            <Btn variant={danger ? 'danger' : 'primary'} icon={danger ? 'trash-2' : 'check'} onClick={onConfirm}>{confirmLabel}</Btn>
+            <Btn variant={danger ? 'danger' : 'primary'} icon={confirmIcon ?? (danger ? 'trash-2' : 'check')} onClick={onConfirm}>{confirmLabel}</Btn>
           </div>
         </div>
       </div>

@@ -10,8 +10,10 @@ import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointer
 import { TerminalPane } from './TerminalPane'
 import { splitLeaf, closeLeaf, swapLeaves, collectLeaves, computeRects, type PaneNode } from './terminalLayout'
 import type { Connection } from '../../services/types'
+import { notifyAgentTerminalSplitReady, onAgentTerminalSplitCancel, onAgentTerminalSplitRequest } from '../../services/agentTerminalSplit'
 
 export interface SplitTerminalProps {
+  tabId?: string
   conn: Connection | null
   sessionId?: string
   active?: boolean
@@ -29,7 +31,7 @@ export interface SplitTerminalProps {
 
 let paneSeq = 0
 
-export function SplitTerminal({ onChannel, ...paneProps }: SplitTerminalProps) {
+export function SplitTerminal({ tabId, onChannel, ...paneProps }: SplitTerminalProps) {
   const [root, setRoot] = useState<PaneNode>(() => ({ type: 'leaf', id: `p${paneSeq++}` }))
   const [focused, setFocused] = useState<string>(() => collectLeaves(root)[0])
   const [dragId, setDragId] = useState<string | null>(null)
@@ -37,8 +39,13 @@ export function SplitTerminal({ onChannel, ...paneProps }: SplitTerminalProps) {
   const [historySuggestEnabled, setHistorySuggestEnabled] = useState(true)
   // Latest channel id per pane (so focus changes can re-report to App).
   const paneChan = useRef<Record<string, string | null>>({})
+  const pendingAgentSplits = useRef<Record<string, { requestId: string; originId: string }>>({})
+  const focusedRef = useRef(focused)
+  focusedRef.current = focused
 
   const leafIds = useMemo(() => collectLeaves(root), [root])
+  const leafIdsRef = useRef(leafIds)
+  leafIdsRef.current = leafIds
   const rects = useMemo(() => computeRects(root), [root])
   const multi = leafIds.length > 1
 
@@ -48,14 +55,41 @@ export function SplitTerminal({ onChannel, ...paneProps }: SplitTerminalProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focused])
 
-  function split(id: string, dir: 'row' | 'col') {
+  function split(id: string, dir: 'row' | 'col'): string {
     const newId = `p${paneSeq++}`
     setRoot(prev => splitLeaf(prev, id, dir, newId))
     setFocused(newId)
+    return newId
   }
+
+  useEffect(() => {
+    if (!tabId) return
+    const stopRequest = onAgentTerminalSplitRequest(tabId, requestId => {
+      const newId = `p${paneSeq++}`
+      const originId = focusedRef.current
+      setRoot(prev => splitLeaf(prev, originId, 'row', newId))
+      setFocused(newId)
+      pendingAgentSplits.current[newId] = { requestId, originId }
+    })
+    const stopCancel = onAgentTerminalSplitCancel(tabId, requestId => {
+      const pending = Object.entries(pendingAgentSplits.current).find(([, value]) => value.requestId === requestId)
+      if (!pending) return
+      const [paneId, { originId }] = pending
+      delete pendingAgentSplits.current[paneId]
+      delete paneChan.current[paneId]
+      setRoot(prev => closeLeaf(prev, paneId) ?? prev)
+      const remaining = leafIdsRef.current.filter(id => id !== paneId)
+      setFocused(current => {
+        if (current !== paneId && remaining.includes(current)) return current
+        return remaining.includes(originId) ? originId : (remaining[0] ?? current)
+      })
+    })
+    return () => { stopRequest(); stopCancel() }
+  }, [tabId])
   function close(id: string) {
     const next = closeLeaf(root, id)
     if (!next) return // can't close the last pane
+    delete pendingAgentSplits.current[id]
     delete paneChan.current[id]
     if (focused === id) {
       const remaining = collectLeaves(next)
@@ -124,7 +158,15 @@ export function SplitTerminal({ onChannel, ...paneProps }: SplitTerminalProps) {
               <TerminalPane {...paneProps} isFocused={id === focused}
                 historySuggestEnabled={historySuggestEnabled}
                 onToggleHistorySuggest={() => setHistorySuggestEnabled(v => !v)}
-                onChannel={(sid, chan) => { paneChan.current[id] = chan; if (id === focused) onChannel?.(sid, chan) }}
+                onChannel={(sid, chan) => {
+                  paneChan.current[id] = chan
+                  if (id === focused) onChannel?.(sid, chan)
+                  const pending = pendingAgentSplits.current[id]
+                  if (tabId && chan && pending) {
+                    delete pendingAgentSplits.current[id]
+                    notifyAgentTerminalSplitReady(tabId, pending.requestId, chan)
+                  }
+                }}
                 split={{
                   count: leafIds.length,
                   onSplitRight: () => split(id, 'row'),

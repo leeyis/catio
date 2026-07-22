@@ -18,6 +18,13 @@ pub enum OscEvent {
     Ready,
 }
 
+#[derive(Debug, PartialEq, Clone)]
+pub struct PositionedOscEvent {
+    pub event: OscEvent,
+    /// Byte offset in the visible output at which this stripped OSC marker appeared.
+    pub visible_offset: usize,
+}
+
 /// Defensive cap: if a partial sequence buffer grows past this without a
 /// terminator, flush it as visible and reset rather than buffer unbounded.
 const PENDING_CAP: usize = 64 * 1024;
@@ -45,7 +52,7 @@ pub fn unescape(s: &str) -> String {
 
 /// Stateful scanner: feed chunks; emits events and returns visible bytes
 /// (input minus complete OSC 633/133 sequences). Buffers a partial sequence
-/// across chunk boundaries. `nonce` gates 633;E.
+/// across chunk boundaries. `nonce` gates the command lifecycle markers.
 pub struct Scanner { nonce: String, pending: Vec<u8> }
 
 impl Scanner {
@@ -75,13 +82,20 @@ impl Scanner {
             // prompt end / input start -> emit so the UI knows the prompt is done
             // and the cursor now marks where user input begins.
             events.push(OscEvent::InputStart);
-        } else if rest == "C" {
-            events.push(OscEvent::ExecStart);
-        } else if rest == "D" {
-            events.push(OscEvent::ExecEnd(None));
-        } else if let Some(code) = rest.strip_prefix("D;") {
-            // ExecEnd with exit code; ignore if unparseable -> None.
-            events.push(OscEvent::ExecEnd(code.parse::<i32>().ok()));
+        } else if let Some(nonce) = rest.strip_prefix("C;") {
+            if nonce == self.nonce {
+                events.push(OscEvent::ExecStart);
+            }
+        } else if let Some(after_d) = rest.strip_prefix("D;") {
+            // D;<exitCode>;<nonce>. C/D are nonce-gated just like E so command
+            // output cannot forge an early completion boundary.
+            if let Some(idx) = after_d.rfind(';') {
+                let code = &after_d[..idx];
+                let nonce = &after_d[idx + 1..];
+                if nonce == self.nonce {
+                    events.push(OscEvent::ExecEnd(code.parse::<i32>().ok()));
+                }
+            }
         } else if let Some(after_e) = rest.strip_prefix("E;") {
             // E;<escapedCmd>;<nonce>  (633 only; the cmd is pre-escaped so it
             // has no raw ';' — split on the LAST ';' to isolate the nonce).
@@ -108,7 +122,7 @@ impl Scanner {
         events
     }
 
-    /// Returns `(visible_bytes, events, ready_offset)`.
+    /// Returns `(visible_bytes, positioned_events, ready_offset)`.
     ///
     /// `ready_offset` is `Some(n)` when this call stripped OUR nonce-gated
     /// `633;P;CatioReady=<nonce>` sentinel, where `n` is the length of
@@ -118,12 +132,12 @@ impl Scanner {
     /// line, plus any MOTD), everything at/after is the clean first prompt. `None`
     /// means our sentinel did not appear in this batch — a generic 633/133 marker
     /// (e.g. from a host's own integration) deliberately does NOT set this.
-    pub fn feed(&mut self, chunk: &[u8]) -> (Vec<u8>, Vec<OscEvent>, Option<usize>) {
+    pub fn feed(&mut self, chunk: &[u8]) -> (Vec<u8>, Vec<PositionedOscEvent>, Option<usize>) {
         let mut buf = std::mem::take(&mut self.pending);
         buf.extend_from_slice(chunk);
 
         let mut visible: Vec<u8> = Vec::with_capacity(buf.len());
-        let mut events: Vec<OscEvent> = Vec::new();
+        let mut events: Vec<PositionedOscEvent> = Vec::new();
         // Offset (into `visible`) just before OUR Ready sentinel, once seen.
         let mut ready_offset: Option<usize> = None;
         let mut i = 0;
@@ -159,7 +173,10 @@ impl Scanner {
                                 {
                                     ready_offset = Some(visible.len());
                                 }
-                                events.extend(evs);
+                                events.extend(evs.into_iter().map(|event| PositionedOscEvent {
+                                    event,
+                                    visible_offset: visible.len(),
+                                }));
                             } else {
                                 // Pass-through: copy the full sequence inclusive.
                                 visible.extend_from_slice(&buf[i..seq_end]);
@@ -182,9 +199,9 @@ impl Scanner {
     fn finish(
         &mut self,
         mut visible: Vec<u8>,
-        events: Vec<OscEvent>,
+        events: Vec<PositionedOscEvent>,
         ready_offset: Option<usize>,
-    ) -> (Vec<u8>, Vec<OscEvent>, Option<usize>) {
+    ) -> (Vec<u8>, Vec<PositionedOscEvent>, Option<usize>) {
         if self.pending.len() > PENDING_CAP {
             // No terminator within a reasonable window — flush as visible and reset.
             visible.append(&mut self.pending);
@@ -214,6 +231,9 @@ fn find_terminator(s: &[u8]) -> Option<(usize, usize)> {
 mod tests {
     use super::*;
     fn s(b: &[u8]) -> String { String::from_utf8_lossy(b).into_owned() }
+    fn has(events: &[PositionedOscEvent], expected: &OscEvent) -> bool {
+        events.iter().any(|event| &event.event == expected)
+    }
 
     #[test] fn unescape_basic() {
         assert_eq!(unescape("ls\\x3b cat"), "ls; cat");
@@ -222,70 +242,69 @@ mod tests {
     }
     #[test] fn extracts_command_and_exit_and_strips() {
         let mut sc = Scanner::new("N");
-        let input = b"\x1b]633;E;ls\\x3b cat;N\x07\x1b]633;C\x07hello\r\n\x1b]633;D;0\x07$ ";
+        let input = b"\x1b]633;E;ls\\x3b cat;N\x07\x1b]633;C;N\x07hello\r\n\x1b]633;D;0;N\x07$ ";
         let (vis, ev, _) = sc.feed(input);
         assert_eq!(s(&vis), "hello\r\n$ ");
-        assert!(ev.contains(&OscEvent::CommandLine("ls; cat".into())));
-        assert!(ev.contains(&OscEvent::ExecStart));
-        assert!(ev.contains(&OscEvent::ExecEnd(Some(0))));
+        assert!(has(&ev, &OscEvent::CommandLine("ls; cat".into())));
+        assert!(has(&ev, &OscEvent::ExecStart));
+        assert!(has(&ev, &OscEvent::ExecEnd(Some(0))));
     }
     #[test] fn rejects_wrong_nonce() {
         let mut sc = Scanner::new("GOOD");
         let (_v, ev, _) = sc.feed(b"\x1b]633;E;whoami;BAD\x07");
-        assert!(!ev.iter().any(|e| matches!(e, OscEvent::CommandLine(_))));
+        assert!(!ev.iter().any(|e| matches!(&e.event, OscEvent::CommandLine(_))));
     }
     #[test] fn buffers_split_sequence() {
         let mut sc = Scanner::new("N");
         let (v1, e1, _) = sc.feed(b"out\x1b]633;D;1");
         assert_eq!(s(&v1), "out"); assert!(e1.is_empty());
-        let (v2, e2, _) = sc.feed(b"3\x07more");
+        let (v2, e2, _) = sc.feed(b"3;N\x07more");
         assert_eq!(s(&v2), "more");
-        assert!(e2.contains(&OscEvent::ExecEnd(Some(13))));
+        assert!(has(&e2, &OscEvent::ExecEnd(Some(13))));
     }
     #[test] fn passes_through_other_osc() {
         let mut sc = Scanner::new("N");
         let (v, _e, _) = sc.feed(b"\x1b]0;my title\x07X");
         assert_eq!(s(&v), "\x1b]0;my title\x07X");
     }
-    #[test] fn osc133_exit_and_start() {
+    #[test] fn ignores_ungated_lifecycle_markers() {
         let mut sc = Scanner::new("N");
-        let (_v, ev, _) = sc.feed(b"\x1b]133;C\x07\x1b]133;D;2\x07");
-        assert!(ev.contains(&OscEvent::ExecStart));
-        assert!(ev.contains(&OscEvent::ExecEnd(Some(2))));
+        let (_v, ev, _) = sc.feed(b"\x1b]133;C\x07\x1b]133;D;2\x07\x1b]633;C;BAD\x07\x1b]633;D;0;BAD\x07");
+        assert!(!ev.iter().any(|event| matches!(&event.event, OscEvent::ExecStart | OscEvent::ExecEnd(_))));
     }
     #[test] fn input_start_event_and_stripped() {
         let mut sc = Scanner::new("N");
         // 633;B (prompt end / input start) must emit InputStart and be stripped.
         let (vis, ev, _) = sc.feed(b"$ \x1b]633;B\x07");
         assert_eq!(s(&vis), "$ ");
-        assert!(ev.contains(&OscEvent::InputStart));
+        assert!(has(&ev, &OscEvent::InputStart));
         // 633;A (prompt start) must NOT emit an event but is still stripped.
         let (vis2, ev2, _) = sc.feed(b"\x1b]633;A\x07x");
         assert_eq!(s(&vis2), "x");
-        assert!(!ev2.iter().any(|e| matches!(e, OscEvent::InputStart)));
+        assert!(!ev2.iter().any(|e| matches!(&e.event, OscEvent::InputStart)));
     }
     #[test] fn cwd_event() {
         let mut sc = Scanner::new("N");
         let (_v, ev, _) = sc.feed(b"\x1b]633;P;Cwd=/home/u\x07");
-        assert!(ev.contains(&OscEvent::Cwd("/home/u".into())));
+        assert!(has(&ev, &OscEvent::Cwd("/home/u".into())));
     }
     #[test] fn st_terminator_supported() {
         let mut sc = Scanner::new("N");
         // ST terminator (ESC \) instead of BEL
-        let (vis, ev, _) = sc.feed(b"\x1b]633;C\x1b\\done");
+        let (vis, ev, _) = sc.feed(b"\x1b]633;C;N\x1b\\done");
         assert_eq!(s(&vis), "done");
-        assert!(ev.contains(&OscEvent::ExecStart));
+        assert!(has(&ev, &OscEvent::ExecStart));
     }
     #[test] fn ready_sentinel_emits_event_and_is_nonce_gated() {
         let mut sc = Scanner::new("GOOD");
         // Correct nonce -> Ready event, stripped from visible.
         let (vis, ev, _) = sc.feed(b"x\x1b]633;P;CatioReady=GOOD\x07");
         assert_eq!(s(&vis), "x");
-        assert!(ev.contains(&OscEvent::Ready));
+        assert!(has(&ev, &OscEvent::Ready));
         // Wrong nonce -> NO Ready (a host's own integration can't spoof it).
         let mut sc2 = Scanner::new("GOOD");
         let (_v, ev2, off2) = sc2.feed(b"\x1b]633;P;CatioReady=BAD\x07");
-        assert!(!ev2.contains(&OscEvent::Ready));
+        assert!(!has(&ev2, &OscEvent::Ready));
         assert_eq!(off2, None);
     }
     #[test] fn ready_offset_splits_pre_integration_noise() {
@@ -307,5 +326,22 @@ mod tests {
         // Plain output and even a generic 633 marker leave ready_offset None.
         let (_v, _e, off) = sc.feed(b"plain\x1b]633;A\x07more");
         assert_eq!(off, None);
+    }
+
+    #[test]
+    fn lifecycle_events_keep_their_visible_offsets() {
+        let mut sc = Scanner::new("N");
+        let (visible, events, _) = sc.feed(
+            b"prompt\x1b]633;E;echo hi;N\x07\x1b]633;C;N\x07out\x1b]633;D;0;N\x07next",
+        );
+        assert_eq!(s(&visible), "promptoutnext");
+        assert_eq!(
+            events,
+            vec![
+                PositionedOscEvent { event: OscEvent::CommandLine("echo hi".into()), visible_offset: 6 },
+                PositionedOscEvent { event: OscEvent::ExecStart, visible_offset: 6 },
+                PositionedOscEvent { event: OscEvent::ExecEnd(Some(0)), visible_offset: 9 },
+            ],
+        );
     }
 }

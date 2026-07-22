@@ -59,6 +59,60 @@ impl LocalTermManager {
 type ResizeFn = Box<dyn FnMut(u32, u32) + Send>;
 type CloseFn = Box<dyn FnOnce() + Send>;
 
+fn emit_local_scanned(
+    sink: &dyn crate::events::EventSink,
+    evt: &str,
+    history_evt: &str,
+    scanner: &mut crate::ssh::osc::Scanner,
+    data: &[u8],
+    cur_cmd: &mut Option<String>,
+    cur_start: &mut Instant,
+) {
+    use crate::ssh::osc::OscEvent;
+
+    let (visible, events, _) = scanner.feed(data);
+    let mut visible_pos = 0;
+    for positioned in events {
+        let event_pos = positioned.visible_offset.min(visible.len());
+        let before = &visible[visible_pos..event_pos];
+        let input_start = matches!(&positioned.event, OscEvent::InputStart);
+        if !before.is_empty() {
+            let mut frame = serde_json::json!({ "bytesBase64": B64.encode(before) });
+            if input_start { frame["inputStart"] = serde_json::Value::Bool(true); }
+            sink.emit(evt, frame);
+        } else if input_start {
+            sink.emit(evt, serde_json::json!({ "inputStart": true }));
+        }
+        visible_pos = event_pos;
+
+        match positioned.event {
+            OscEvent::CommandLine(c) => { *cur_cmd = Some(c); *cur_start = Instant::now(); }
+            OscEvent::ExecStart => sink.emit(evt, serde_json::json!({ "execStart": true })),
+            OscEvent::ExecEnd(code) => {
+                if let Some(cmd) = cur_cmd.take() {
+                    sink.emit(evt, serde_json::json!({
+                        "execEnd": true,
+                        "command": &cmd,
+                        "exitCode": code,
+                    }));
+                    sink.emit(history_evt, serde_json::json!({
+                        "id": LOCAL_HIST_IDS.next(),
+                        "command": cmd,
+                        "exitCode": code,
+                        "cwd": "",
+                        "durationMs": cur_start.elapsed().as_millis() as u64,
+                        "host": "local",
+                    }));
+                }
+            }
+            OscEvent::InputStart | OscEvent::Cwd(_) | OscEvent::Ready => {}
+        }
+    }
+    if visible_pos < visible.len() {
+        sink.emit(evt, serde_json::json!({ "bytesBase64": B64.encode(&visible[visible_pos..]) }));
+    }
+}
+
 /// 启动一个终端 owner。
 /// - 阻塞读线程：先等 `ready`（最多 2s 兜底）再读，把字节 emit 给前端；读到 EOF/错误时发
 ///   `{closed:true}` 并通过 `eof_tx` 通知 owner 退出。串口读带超时，TimedOut/WouldBlock 续轮询。
@@ -101,6 +155,7 @@ fn spawn_terminal(
             let history_evt = format!("history://{chan_id}");
             let mut cur_cmd: Option<String> = None;
             let mut cur_start = Instant::now();
+            let sink = crate::events::TauriSink(app.clone());
             loop {
                 if stop.load(Ordering::Relaxed) {
                     break;
@@ -109,54 +164,10 @@ fn spawn_terminal(
                     Ok(0) => break,
                     Ok(n) => {
                         if let Some(sc) = scanner.as_mut() {
-                            // 审计路径:剥离 OSC 序列后 emit 可见字节(无 mute),并抽命令历史。
-                            use crate::ssh::osc::OscEvent;
-                            let (visible, events, _ready) = sc.feed(&buf[..n]);
-                            // 关键(与 SSH term.rs 同款):inputStart(OSC 633;B)必须与提示符可见字节
-                            // **挂在同一帧**发出。若先发字节帧、再单独发 inputStart 帧,前端「在 write
-                            // 回调里 beginInputCapture」的分支收不到 inputStart,会在提示符尚未写完时
-                            // 同步捕获 marker,startCol 记错 → 候选永不出现。故先探测本批是否含 InputStart。
-                            let has_input_start = events.iter().any(|e| matches!(e, OscEvent::InputStart));
-                            let mut input_start_emitted = false;
-                            if !visible.is_empty() {
-                                let mut frame = serde_json::json!({ "bytesBase64": B64.encode(&visible) });
-                                if has_input_start {
-                                    frame["inputStart"] = serde_json::Value::Bool(true);
-                                    input_start_emitted = true;
-                                }
-                                let _ = app.emit(&evt, frame);
-                            }
-                            for ev in events {
-                                match ev {
-                                    OscEvent::CommandLine(c) => { cur_cmd = Some(c); cur_start = Instant::now(); }
-                                    // 输入起点(OSC 633;B):前端据此在提示符结束处打 marker、开始捕获当前输入。
-                                    // 已挂到 bytesBase64 帧时不再单独发;仅当本批无可见字节(marker 单发)时补发。
-                                    OscEvent::InputStart => {
-                                        if !input_start_emitted {
-                                            let _ = app.emit(&evt, serde_json::json!({ "inputStart": true }));
-                                            input_start_emitted = true;
-                                        }
-                                    }
-                                    // 命令开始执行(OSC 633;C):前端据此清掉输入捕获、隐藏候选。
-                                    OscEvent::ExecStart => {
-                                        let _ = app.emit(&evt, serde_json::json!({ "execStart": true }));
-                                    }
-                                    OscEvent::ExecEnd(code) => {
-                                        if let Some(cmd) = cur_cmd.take() {
-                                            let dur = cur_start.elapsed().as_millis() as u64;
-                                            let _ = app.emit(&history_evt, serde_json::json!({
-                                                "id": LOCAL_HIST_IDS.next(),
-                                                "command": cmd,
-                                                "exitCode": code,
-                                                "cwd": "",
-                                                "durationMs": dur,
-                                                "host": "local",
-                                            }));
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            }
+                            emit_local_scanned(
+                                &sink, &evt, &history_evt, sc,
+                                &buf[..n], &mut cur_cmd, &mut cur_start,
+                            );
                         } else {
                             // 纯字节直传(串口/Telnet/Mosh/非 zsh|bash 本地 shell)。
                             let _ = app.emit(&evt, serde_json::json!({ "bytesBase64": B64.encode(&buf[..n]) }));
@@ -240,8 +251,8 @@ fn local_integration_rc(kind: LocalShellKind, nonce: &str, user_rc_source: &str)
 {user_rc_source}
 __catio_n='{nonce}'
 __catio_esc() {{ local s=${{1//\\/\\\\}}; s=${{s//;/\\x3b}}; s=${{s//$'\n'/\\x0a}}; print -rn -- "$s"; }}
-__catio_pe() {{ print -rn -- $'\e]633;E;'"$(__catio_esc "$1")"';'"$__catio_n"$'\a\e]633;C\a'; }}
-__catio_pc() {{ local e=$?; print -rn -- $'\e]633;D;'"$e"$'\a'; }}
+__catio_pe() {{ print -rn -- $'\e]633;E;'"$(__catio_esc "$1")"';'"$__catio_n"$'\a\e]633;C;'"$__catio_n"$'\a'; }}
+__catio_pc() {{ local e=$?; print -rn -- $'\e]633;D;'"$e"';'"$__catio_n"$'\a'; }}
 autoload -Uz add-zsh-hook 2>/dev/null
 add-zsh-hook preexec __catio_pe
 add-zsh-hook precmd __catio_pc
@@ -258,8 +269,8 @@ export ZDOTDIR="$HOME"
 __catio_n='{nonce}'
 __catio_esc() {{ local s=${{1//\\/\\\\}}; s=${{s//;/\\x3b}}; s=${{s//$'\n'/\\x0a}}; printf '%s' "$s"; }}
 __catio_in=0
-__catio_pe() {{ case "$BASH_COMMAND" in __catio_*) return;; esac; if [ "$__catio_in" = 0 ]; then __catio_in=1; local c; c=$(builtin history 1 | sed 's/ *[0-9][0-9]* *//'); printf '\e]633;E;%s;%s\a\e]633;C\a' "$(__catio_esc "$c")" "$__catio_n"; fi; }}
-__catio_pc() {{ local e=$?; __catio_in=0; printf '\e]633;D;%s\a' "$e"; }}
+__catio_pe() {{ case "$BASH_COMMAND" in __catio_*) return;; esac; if [ "$__catio_in" = 0 ]; then __catio_in=1; local c; c=$(builtin history 1 | sed 's/ *[0-9][0-9]* *//'); printf '\e]633;E;%s;%s\a\e]633;C;%s\a' "$(__catio_esc "$c")" "$__catio_n" "$__catio_n"; fi; }}
+__catio_pc() {{ local e=$?; __catio_in=0; printf '\e]633;D;%s;%s\a' "$e" "$__catio_n"; }}
 trap '__catio_pe' DEBUG
 case "${{PROMPT_COMMAND:-}}" in *__catio_pc*) ;; *) PROMPT_COMMAND="__catio_pc${{PROMPT_COMMAND:+;$PROMPT_COMMAND}}";; esac
 # 给 PS1 追加 OSC 633;B(输入起点标记)。\[...\] 是 bash 的「零宽」包裹,避免占用可见列。幂等。
@@ -590,6 +601,40 @@ pub fn term_local_close(
         let _ = tx.send(TermCmd::Close);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct CapturingSink(std::sync::Mutex<Vec<(String, serde_json::Value)>>);
+    impl crate::events::EventSink for CapturingSink {
+        fn emit(&self, topic: &str, payload: serde_json::Value) {
+            self.0.lock().unwrap().push((topic.to_string(), payload));
+        }
+    }
+
+    #[test]
+    fn local_batch_emits_lifecycle_at_the_visible_byte_boundaries() {
+        let sink = CapturingSink::default();
+        let mut scanner = crate::ssh::osc::Scanner::new("N");
+        let mut cur_cmd = None;
+        let mut cur_start = Instant::now();
+        emit_local_scanned(
+            &sink, "term://l1", "history://l1", &mut scanner,
+            b"prompt$ \x1b]633;E;uptime;N\x07\x1b]633;C;N\x07up\r\n\x1b]633;D;0;N\x07next$ ",
+            &mut cur_cmd, &mut cur_start,
+        );
+
+        let frames = sink.0.lock().unwrap();
+        let term: Vec<_> = frames.iter().filter(|(topic, _)| topic == "term://l1").map(|(_, payload)| payload).collect();
+        assert_eq!(B64.decode(term[0]["bytesBase64"].as_str().unwrap()).unwrap(), b"prompt$ ");
+        assert_eq!(term[1]["execStart"], true);
+        assert_eq!(B64.decode(term[2]["bytesBase64"].as_str().unwrap()).unwrap(), b"up\r\n");
+        assert_eq!(term[3]["execEnd"], true);
+        assert_eq!(B64.decode(term[4]["bytesBase64"].as_str().unwrap()).unwrap(), b"next$ ");
+    }
 }
 
 #[cfg(all(test, not(windows)))]

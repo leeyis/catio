@@ -1,5 +1,6 @@
 /* ported from ref-ui/_extract/blob12.txt — verbatim per plan T1-T7 */
 import React, { useState, useRef, useEffect, useCallback } from 'react'
+import { createPortal } from 'react-dom'
 import { Trans, useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { BrandMark } from '../BrandMark'
@@ -10,6 +11,7 @@ import {
   MODEL_PROVIDER_PRESETS,
   useAgentConfig,
   clearStoredCredentials,
+  type AgentConfig,
   type ModelProvider,
 } from '../../state/agentConfig'
 import { forgetAllSecrets } from '../../state/vault'
@@ -291,6 +293,55 @@ function SecuritySettings({ authEnabled, users = [], currentUser, ownerUser, onE
 
 // ---- Agent config block ----
 
+interface DropdownPosition {
+  left: number
+  top?: number
+  bottom?: number
+  width: number
+  maxHeight: number
+}
+
+function getDropdownPosition(anchor: HTMLElement | null): DropdownPosition | null {
+  if (!anchor) return null
+  const rect = anchor.getBoundingClientRect()
+  const gap = 4
+  const viewportPadding = 8
+  const width = Math.min(rect.width || 220, window.innerWidth - viewportPadding * 2)
+  const left = Math.max(viewportPadding, Math.min(rect.left, window.innerWidth - width - viewportPadding))
+  const spaceAbove = Math.max(0, rect.top - viewportPadding - gap)
+  const spaceBelow = Math.max(0, window.innerHeight - rect.bottom - viewportPadding - gap)
+  const openAbove = spaceAbove > spaceBelow
+  return {
+    left,
+    width,
+    maxHeight: Math.min(260, openAbove ? spaceAbove : spaceBelow),
+    ...(openAbove ? { bottom: window.innerHeight - rect.top + gap } : { top: rect.bottom + gap }),
+  }
+}
+
+function handleListboxKeyDown(event: React.KeyboardEvent<HTMLDivElement>, close: () => void) {
+  const options = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="option"]'))
+  const current = options.indexOf(document.activeElement as HTMLButtonElement)
+  let next = current
+  if (event.key === 'ArrowDown') next = current < 0 ? 0 : Math.min(options.length - 1, current + 1)
+  else if (event.key === 'ArrowUp') next = current < 0 ? options.length - 1 : Math.max(0, current - 1)
+  else if (event.key === 'Home') next = 0
+  else if (event.key === 'End') next = options.length - 1
+  else if (event.key === 'Enter' || event.key === ' ') {
+    if (current >= 0) {
+      event.preventDefault()
+      options[current].click()
+    }
+    return
+  } else if (event.key === 'Escape') {
+    event.preventDefault()
+    close()
+    return
+  } else return
+  event.preventDefault()
+  options[next]?.focus()
+}
+
 function AgentConfigBlock() {
   const { t } = useTranslation()
   const { config, update } = useAgentConfig()
@@ -299,29 +350,93 @@ function AgentConfigBlock() {
   const [fetchError, setFetchError] = useState('')
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<ModelTestResult | null>(null)
+  const [providerMenuOpen, setProviderMenuOpen] = useState(false)
+  const [modelMenuOpen, setModelMenuOpen] = useState(false)
+  const [menuPosition, setMenuPosition] = useState<DropdownPosition | null>(null)
+  const configRef = useRef(config)
+  const fetchRequestRef = useRef(0)
+  const testRequestRef = useRef(0)
+  const providerTriggerRef = useRef<HTMLButtonElement>(null)
+  const providerListRef = useRef<HTMLDivElement>(null)
+  const modelPickerRef = useRef<HTMLDivElement>(null)
+  const modelTriggerRef = useRef<HTMLButtonElement>(null)
+  const modelListRef = useRef<HTMLDivElement>(null)
+  configRef.current = config
+
+  useEffect(() => {
+    const listbox = providerMenuOpen ? providerListRef.current : modelMenuOpen ? modelListRef.current : null
+    const selected = listbox?.querySelector<HTMLButtonElement>('[role="option"][aria-selected="true"]')
+    ;(selected ?? listbox?.querySelector<HTMLButtonElement>('[role="option"]'))?.focus()
+  }, [providerMenuOpen, modelMenuOpen])
+
+  useEffect(() => {
+    if (!providerMenuOpen && !modelMenuOpen) return
+    const reposition = () => setMenuPosition(getDropdownPosition(providerMenuOpen ? providerTriggerRef.current : modelPickerRef.current))
+    window.addEventListener('resize', reposition)
+    window.addEventListener('scroll', reposition, true)
+    return () => {
+      window.removeEventListener('resize', reposition)
+      window.removeEventListener('scroll', reposition, true)
+    }
+  }, [providerMenuOpen, modelMenuOpen])
+
+  const sameFetchSource = (left: AgentConfig, right: AgentConfig) => (
+    left.provider === right.provider
+    && left.baseUrl === right.baseUrl
+    && left.apiKey === right.apiKey
+    && left.anthropicAuthMode === right.anthropicAuthMode
+  )
+
+  function invalidateModelSource() {
+    fetchRequestRef.current += 1
+    testRequestRef.current += 1
+    setModels([])
+    setModelMenuOpen(false)
+    setFetchError('')
+    setTestResult(null)
+    setLoading(false)
+    setTesting(false)
+  }
+
+  function invalidateModelTest() {
+    testRequestRef.current += 1
+    setTestResult(null)
+    setTesting(false)
+  }
 
   async function handleFetch() {
+    const snapshot = { ...config }
+    const requestId = ++fetchRequestRef.current
     setLoading(true)
     setFetchError('')
     try {
-      const list = await fetchModels(config)
-      setModels(list)
-      if (!config.model && list.length > 0) {
-        update({ model: list[0] })
+      const list = await fetchModels({ ...snapshot, model: '' })
+      if (requestId !== fetchRequestRef.current || !sameFetchSource(snapshot, configRef.current)) return
+      const currentModel = configRef.current.model
+      const nextModels = [...new Set([...list, ...(currentModel ? [currentModel] : [])])]
+      setModels(nextModels)
+      setMenuPosition(getDropdownPosition(modelPickerRef.current))
+      setModelMenuOpen(nextModels.length > 0)
+      if (!currentModel && nextModels.length > 0) {
+        update({ model: nextModels[0] })
       }
     } catch (err) {
+      if (requestId !== fetchRequestRef.current || !sameFetchSource(snapshot, configRef.current)) return
       setFetchError(t('settings.agentFetchError'))
     } finally {
-      setLoading(false)
+      if (requestId === fetchRequestRef.current) setLoading(false)
     }
   }
 
   async function handleTest() {
+    const snapshot = { ...config }
+    const requestId = ++testRequestRef.current
     setTesting(true)
     setTestResult(null)
-    const result = await testModel(config)
+    const result = await testModel(snapshot)
+    if (requestId !== testRequestRef.current || snapshot.model !== configRef.current.model || !sameFetchSource(snapshot, configRef.current)) return
     setTestResult(result)
-    setTesting(false)
+    if (requestId === testRequestRef.current) setTesting(false)
   }
 
   const inputStyle: React.CSSProperties = {
@@ -357,7 +472,38 @@ function AgentConfigBlock() {
     ollama: t('settings.agentProviderOllama'),
     openai: t('settings.agentProviderOpenai'),
     deepseek: t('settings.agentProviderDeepseek'),
+    zhipu: t('settings.agentProviderZhipu'),
+    kimi: t('settings.agentProviderKimi'),
     anthropic: t('settings.agentProviderAnthropic'),
+  }
+
+  function selectProvider(provider: ModelProvider) {
+    if (provider === config.provider) {
+      setProviderMenuOpen(false)
+      providerTriggerRef.current?.focus()
+      return
+    }
+    invalidateModelSource()
+    update({
+      provider,
+      baseUrl: MODEL_PROVIDER_PRESETS[provider].defaultBaseUrl,
+      apiKey: '',
+      anthropicAuthMode: provider === 'anthropic' ? 'auto' : config.anthropicAuthMode,
+      model: '',
+    })
+    setProviderMenuOpen(false)
+    providerTriggerRef.current?.focus()
+  }
+
+  const menuStyle: React.CSSProperties = {
+    position: 'fixed',
+    zIndex: 1000,
+    padding: 5,
+    overflowY: 'auto',
+    background: 'var(--surface-elevated)',
+    border: '1px solid var(--border-hairline-alt)',
+    borderRadius: 10,
+    boxShadow: 'var(--shadow-dropdown)',
   }
 
   return (
@@ -373,27 +519,64 @@ function AgentConfigBlock() {
               <span style={{ fontSize: 13.5, fontWeight: 600 }}>{t('settings.agentProvider')}</span>
             </div>
           </div>
-          <select
-            aria-label={t('settings.agentProvider')}
-            value={config.provider}
-            onChange={e => {
-              const provider = e.target.value as ModelProvider
-              update({
-                provider,
-                baseUrl: MODEL_PROVIDER_PRESETS[provider].defaultBaseUrl,
-                apiKey: '',
-                model: '',
-              })
-              setModels([])
-              setFetchError('')
-              setTestResult(null)
-            }}
-            style={{ ...inputStyle, width: 190, cursor: 'pointer' }}
-          >
-            {MODEL_PROVIDER_ORDER.map(provider => (
-              <option key={provider} value={provider}>{providerLabels[provider]}</option>
-            ))}
-          </select>
+          <div style={{ position: 'relative', width: 220 }}>
+            <button
+              ref={providerTriggerRef}
+              type="button"
+              aria-label={t('settings.agentProvider')}
+              aria-haspopup="listbox"
+              aria-expanded={providerMenuOpen}
+              aria-controls="agent-provider-options"
+              className="row"
+              onClick={() => {
+                if (providerMenuOpen) setProviderMenuOpen(false)
+                else {
+                  setMenuPosition(getDropdownPosition(providerTriggerRef.current))
+                  setProviderMenuOpen(true)
+                  setModelMenuOpen(false)
+                }
+              }}
+              style={{ ...inputStyle, justifyContent: 'space-between', cursor: 'pointer', textAlign: 'left' }}
+            >
+              <span className="ell">{providerLabels[config.provider]}</span>
+              <Icon name="chevron-down" size={14} style={{ flex: 'none', color: 'var(--text-faint)', transform: providerMenuOpen ? 'rotate(180deg)' : 'none', transition: 'transform .15s' }} />
+            </button>
+            {providerMenuOpen && menuPosition && createPortal(
+              <>
+                <div style={{ position: 'fixed', inset: 0, zIndex: 999 }} onClick={() => setProviderMenuOpen(false)} />
+                <div
+                  ref={providerListRef}
+                  id="agent-provider-options"
+                  role="listbox"
+                  aria-label={t('settings.agentProvider')}
+                  className="pop-in"
+                  onKeyDown={event => handleListboxKeyDown(event, () => { setProviderMenuOpen(false); providerTriggerRef.current?.focus() })}
+                  style={{ ...menuStyle, ...menuPosition }}
+                >
+                  {MODEL_PROVIDER_ORDER.map(provider => {
+                    const active = provider === config.provider
+                    return (
+                      <button
+                        type="button"
+                        role="option"
+                        aria-selected={active}
+                        tabIndex={-1}
+                        key={provider}
+                        className="btn btn-ghost"
+                        onClick={() => selectProvider(provider)}
+                        style={{ width: '100%', height: 34, padding: '0 10px', justifyContent: 'flex-start', background: active ? 'var(--accent-soft)' : 'transparent', color: active ? 'var(--accent-primary)' : 'var(--text-primary)' }}
+                      >
+                        <span className="ell">{providerLabels[provider]}</span>
+                        <span className="grow" />
+                        {active && <Icon name="check" size={13} />}
+                      </button>
+                    )
+                  })}
+                </div>
+              </>,
+              document.body,
+            )}
+          </div>
         </div>
       </div>
 
@@ -404,7 +587,7 @@ function AgentConfigBlock() {
           <input
             style={inputStyle}
             value={config.baseUrl}
-            onChange={e => update({ baseUrl: e.target.value })}
+            onChange={e => { invalidateModelSource(); update({ baseUrl: e.target.value }) }}
             placeholder={MODEL_PROVIDER_PRESETS[config.provider].defaultBaseUrl}
           />
         </label>
@@ -420,7 +603,7 @@ function AgentConfigBlock() {
               <input
                 type="password"
                 value={config.apiKey}
-                onChange={e => update({ apiKey: e.target.value })}
+                onChange={e => { invalidateModelSource(); update({ apiKey: e.target.value }) }}
                 placeholder={t('settings.agentApiKeyPlaceholder')}
                 style={{ flex: 1, height: '100%', border: 'none', background: 'transparent', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }}
               />
@@ -429,37 +612,80 @@ function AgentConfigBlock() {
         </div>
       )}
 
-      {config.provider === 'anthropic' && (
-        <div style={rowWrapStyle}>
-          <label className="col" style={{ gap: 5 }}>
-            <span style={labelStyle}>{t('settings.agentAnthropicAuth')}</span>
-            <select
-              value={config.anthropicAuthMode}
-              onChange={e => update({ anthropicAuthMode: e.target.value as 'api-key' | 'auth-token' })}
-              style={{ ...inputStyle, cursor: 'pointer' }}
-            >
-              <option value="api-key">{t('settings.agentAnthropicApiKey')}</option>
-              <option value="auth-token">{t('settings.agentAnthropicAuthToken')}</option>
-            </select>
-          </label>
-        </div>
-      )}
-
       {/* Model picker + fetch button */}
       <div style={rowWrapStyle}>
         <span style={labelStyle}>{t('settings.agentModelLabel')}</span>
         <div className="row gap8" style={{ alignItems: 'flex-start' }}>
-          <input
-            type="text"
-            list="agent-model-options"
-            value={config.model}
-            onChange={e => update({ model: e.target.value })}
-            placeholder={t('settings.agentSelectModel')}
-            style={{ ...inputStyle, flex: 1 }}
-          />
-          <datalist id="agent-model-options">
-            {models.map(model => <option key={model} value={model} />)}
-          </datalist>
+          <div ref={modelPickerRef} style={{ position: 'relative', flex: 1, minWidth: 0 }}>
+            <input
+              type="text"
+              role="combobox"
+              aria-label={t('settings.agentModelLabel')}
+              aria-autocomplete="none"
+              aria-expanded={modelMenuOpen}
+              aria-controls="agent-model-options"
+              value={config.model}
+              onChange={e => { invalidateModelTest(); update({ model: e.target.value }); setModelMenuOpen(false) }}
+              placeholder={t('settings.agentSelectModel')}
+              style={{ ...inputStyle, paddingRight: 38 }}
+            />
+            <button
+              ref={modelTriggerRef}
+              type="button"
+              aria-label={t('settings.agentSelectModel')}
+              aria-haspopup="listbox"
+              aria-expanded={modelMenuOpen}
+              disabled={models.length === 0}
+              className="icon-btn bare"
+              onClick={() => {
+                if (modelMenuOpen) setModelMenuOpen(false)
+                else {
+                  setMenuPosition(getDropdownPosition(modelPickerRef.current))
+                  setModelMenuOpen(true)
+                  setProviderMenuOpen(false)
+                }
+              }}
+              style={{ position: 'absolute', top: 2, right: 2, width: 32, height: 32, opacity: models.length > 0 ? 1 : 0.45 }}
+            >
+              <Icon name="chevron-down" size={14} style={{ transform: modelMenuOpen ? 'rotate(180deg)' : 'none', transition: 'transform .15s' }} />
+            </button>
+            {modelMenuOpen && menuPosition && createPortal(
+              <>
+                <div style={{ position: 'fixed', inset: 0, zIndex: 999 }} onClick={() => setModelMenuOpen(false)} />
+                <div
+                  ref={modelListRef}
+                  id="agent-model-options"
+                  role="listbox"
+                  aria-label={t('settings.agentModelLabel')}
+                  className="pop-in"
+                  onKeyDown={event => handleListboxKeyDown(event, () => { setModelMenuOpen(false); modelTriggerRef.current?.focus() })}
+                  style={{ ...menuStyle, ...menuPosition }}
+                >
+                  {models.map(model => {
+                    const active = model === config.model
+                    return (
+                      <button
+                        type="button"
+                        role="option"
+                        aria-selected={active}
+                        tabIndex={-1}
+                        key={model}
+                        title={model}
+                        className="btn btn-ghost"
+                        onClick={() => { invalidateModelTest(); update({ model }); setModelMenuOpen(false); modelTriggerRef.current?.focus() }}
+                        style={{ width: '100%', height: 34, padding: '0 10px', justifyContent: 'flex-start', background: active ? 'var(--accent-soft)' : 'transparent', color: active ? 'var(--accent-primary)' : 'var(--text-primary)' }}
+                      >
+                        <span className="ell">{model}</span>
+                        <span className="grow" />
+                        {active && <Icon name="check" size={13} />}
+                      </button>
+                    )
+                  })}
+                </div>
+              </>,
+              document.body,
+            )}
+          </div>
           {/* Fetch button */}
           <Btn
             variant="secondary"

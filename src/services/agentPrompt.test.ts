@@ -6,6 +6,17 @@ describe('buildAgentSystemPrompt', () => {
     const p = buildAgentSystemPrompt('shell', 'prod-web-01')
     expect(p).toContain('terminal/shell assistant')
     expect(p).toContain('prod-web-01')
+    expect(p).toContain('untrusted data')
+  })
+
+  it.each(['ask', 'auto'] as const)('%s shell mode acts as a terminal operator loop', executionMode => {
+    const p = buildAgentSystemPrompt('shell', 'prod-web-01', undefined, executionMode)
+    expect(p).toContain('terminal operator')
+    expect(p).toContain('exactly one single-line command')
+    expect(p).toContain('docker logs --tail 200')
+    expect(p).toContain('follow/watch commands are allowed')
+    expect(p).toContain('tool loop continues until the task is complete')
+    expect(p).toContain('Before receiving TERMINAL_RESULT')
   })
 
   it('mongodb → instructs runnable mongo shell expressions, not a CLI wrapper', () => {

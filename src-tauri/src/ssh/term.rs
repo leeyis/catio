@@ -60,6 +60,21 @@ fn flush_pending(sink: &dyn EventSink, evt: &str, pending: &mut Vec<u8>, input_s
     pending.clear();
 }
 
+fn finish_owner(sink: &dyn EventSink, evt: &str, pending: &mut Vec<u8>) {
+    flush_pending(sink, evt, pending, false);
+    sink.emit(evt, serde_json::json!({ "closed": true }));
+}
+
+fn append_visible(pending: &mut Vec<u8>, visible: &[u8], strip_lead_nl: &mut bool) {
+    let skip = if *strip_lead_nl {
+        visible.iter().take_while(|&&b| b == b'\r' || b == b'\n').count()
+    } else { 0 };
+    if skip < visible.len() {
+        *strip_lead_nl = false;
+        pending.extend_from_slice(&visible[skip..]);
+    }
+}
+
 /// Returns true if `cmd` matches the last-emitted command within `DEDUP_WINDOW_MS`,
 /// i.e. it is a spurious duplicate that should be skipped.
 fn is_duplicate_emit(last_emit: &Option<(String, std::time::Instant)>, cmd: &str) -> bool {
@@ -225,8 +240,6 @@ pub async fn term_open_core(
                         );
                     }
                     Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
-                        flush_pending(sink.as_ref(), &evt, &mut pending, false);
-                        sink.emit(&evt, serde_json::json!({ "closed": true }));
                         break;
                     }
                     // 服务器拒绝 pty/shell 请求(want_reply=true 才会收到)。此前落入 `_ => {}`
@@ -235,13 +248,11 @@ pub async fn term_open_core(
                     Some(ChannelMsg::Failure) => {
                         let msg = "\r\n\x1b[31m[无法打开终端:服务器拒绝了 shell/PTY 请求(可能已达 sshd MaxSessions 上限,请调大服务器 MaxSessions 或减少同一连接的分屏数)]\x1b[0m\r\n";
                         sink.emit(&evt, serde_json::json!({ "bytesBase64": B64.encode(msg.as_bytes()) }));
-                        sink.emit(&evt, serde_json::json!({ "closed": true }));
                         break;
                     }
                     Some(ChannelMsg::OpenFailure(reason)) => {
                         let msg = format!("\r\n\x1b[31m[无法打开终端通道:服务器拒绝(原因 {reason:?})]\x1b[0m\r\n");
                         sink.emit(&evt, serde_json::json!({ "bytesBase64": B64.encode(msg.as_bytes()) }));
-                        sink.emit(&evt, serde_json::json!({ "closed": true }));
                         break;
                     }
                     _ => {}
@@ -249,15 +260,11 @@ pub async fn term_open_core(
                 cmd = rx.recv() => match cmd {
                     Some(TermCmd::Write(bytes)) => {
                         if channel.data(&bytes[..]).await.is_err() {
-                            flush_pending(sink.as_ref(), &evt, &mut pending, false);
-                            sink.emit(&evt, serde_json::json!({ "closed": true }));
                             break;
                         }
                     }
                     Some(TermCmd::Resize(c, r)) => {
                         if channel.window_change(c, r, 0, 0).await.is_err() {
-                            flush_pending(sink.as_ref(), &evt, &mut pending, false);
-                            sink.emit(&evt, serde_json::json!({ "closed": true }));
                             break;
                         }
                     }
@@ -272,6 +279,7 @@ pub async fn term_open_core(
                 },
             }
         }
+        finish_owner(sink.as_ref(), &evt, &mut pending);
         // 退出前把本 channel 彻底 drain 干净:持续读 wait() 直到 None(channel 真正关闭)。
         // 这保证在 close 握手完成前,russh 会话读循环若还往本 channel 投递残留数据,总有消费者
         // 及时取走,buffer 不会填满、不会阻塞整条会话循环(从而不拖垮同连接的其它 channel 与新开)。
@@ -305,57 +313,22 @@ fn emit_scanned(
     strip_lead_nl: &mut bool,
     pending: &mut Vec<u8>,
 ) {
-    let (mut visible, events, ready_offset) = scanner.feed(data);
-    // Decide whether to show this batch's visible bytes.
-    if *muted {
-        // 只在收到「我们自己的、带 nonce 的就绪哨兵」(633;P;CatioReady=<nonce>)时解除 mute。
-        // 关键:不能用「任意 633/133 marker」判断——很多主机(尤其 AI 开发机)已装了 VS Code
-        // Remote 等自带 shell-integration,其登录首个 prompt 就带 OSC 633 标记。若见到任意标记
-        // 就解除 mute,主机自带的标记会在我们的 bootstrap 回显到达之前解除 mute → 整段 base64
-        // 引导回显全部泄漏到终端(用户报告的现象)。哨兵由我们的 bootstrap 在 hook 装好后发出、
-        // 用 nonce 门控,主机自带集成无法伪造,故是唯一可信的「我方集成已生效」信号。
-        if let Some(off) = ready_offset {
-            *muted = false;
-            // 哨兵之前的 visible 是集成生效前的输出——被 PTY 回显的 bootstrap 引导行(base64
-            // 分块 + eval)以及可能的 MOTD。当这些回显与哨兵攒进同一批发回时,按哨兵边界精确
-            // 切割:丢弃哨兵之前的噪声,只保留其后的干净 prompt,不依赖服务端分批时序。
-            visible.drain(..off);
-        } else if started.elapsed() > std::time::Duration::from_millis(MUTE_FALLBACK_MS) {
-            // 无我方集成的 shell(如 ESXi ash,eval 得空串、不发哨兵)靠 3s 兜底解除 mute。
-            *muted = false;
-        }
+    let (visible, events, _) = scanner.feed(data);
+    let has_ready = events.iter().any(|event| matches!(&event.event, osc::OscEvent::Ready));
+    if *muted && !has_ready && started.elapsed() > std::time::Duration::from_millis(MUTE_FALLBACK_MS) {
+        // 无我方集成的 shell(如 ESXi ash)靠 3s 兜底解除 mute。
+        *muted = false;
     }
-    // Does this batch contain a prompt-end / input-start marker? If so we want to
-    // tag it onto the visible frame (when there is one) so the frontend writes the
-    // prompt bytes BEFORE capturing the input-start cursor position.
-    let has_input_start = events.iter().any(|e| matches!(e, osc::OscEvent::InputStart));
     let mut input_start_emitted = false;
-    // 剥掉「定时器解除 mute 时补发的回车」回显出来的前导换行(ash 对空回车回 `\r\n`+提示符),
-    // 否则提示符前会多出一个空行。仅在补回车后的首批可见输出生效,见到真实内容即停止。
-    if *strip_lead_nl && !visible.is_empty() {
-        let skip = visible
-            .iter()
-            .take_while(|&&b| b == b'\r' || b == b'\n')
-            .count();
-        if skip > 0 {
-            visible.drain(..skip);
-        }
-        if !visible.is_empty() {
-            *strip_lead_nl = false;
-        }
-    }
-    if !*muted && !visible.is_empty() {
-        // 攒进 pending;本批含 inputStart 时连同已攒批数据一起立即 flush 并挂标志(提示符字节
-        // 写完前端才 beginInputCapture,保证 startCol 记在输入起点)。无标志则等定时器合帧。
-        pending.extend_from_slice(&visible);
-        if has_input_start {
-            flush_pending(sink, evt, pending, true);
-            input_start_emitted = true;
-        }
-    }
+    let mut visible_pos = 0;
     // Always process events for the audit state machine regardless of mute.
-    for ev in events {
-        match ev {
+    for positioned in events {
+        let event_pos = positioned.visible_offset.min(visible.len());
+        if !*muted {
+            append_visible(pending, &visible[visible_pos..event_pos], strip_lead_nl);
+        }
+        visible_pos = event_pos;
+        match positioned.event {
             osc::OscEvent::CommandLine(c) => {
                 *cur_cmd = Some(c);
                 *cur_start = std::time::Instant::now();
@@ -378,7 +351,19 @@ fn emit_scanned(
                 sink.emit(evt, serde_json::json!({ "execStart": true }));
             }
             osc::OscEvent::ExecEnd(code) => {
+                // 命令完成边界必须落在本 PTY 的 term topic 上：先把最后一批输出发完，
+                // 再发结束帧，Agent 才能按 channel 精确截取本次结果。该事件不能受下面
+                // history 去重影响，否则短时间重复执行同一命令会一直等待完成信号。
+                flush_pending(sink, evt, pending, false);
                 if let Some(cmd) = cur_cmd.take() {
+                    sink.emit(
+                        evt,
+                        serde_json::json!({
+                            "execEnd": true,
+                            "command": &cmd,
+                            "exitCode": code,
+                        }),
+                    );
                     // Definitive dedup: skip emitting if this is the same command we
                     // just emitted within the dedup window (the shell emitted extra
                     // markers for one user command). Still clears cur_cmd above.
@@ -400,10 +385,13 @@ fn emit_scanned(
                     *last_emit = Some((cmd, std::time::Instant::now()));
                 }
             }
-            // Ready is consumed by the mute logic above (via ready_offset); it is
-            // not a command-audit event and carries no history/UI side effect here.
-            osc::OscEvent::Ready => {}
+            // The nonce-gated marker ends mute at its exact byte position: bytes
+            // before it are bootstrap noise; bytes after it are the clean prompt.
+            osc::OscEvent::Ready => *muted = false,
         }
+    }
+    if !*muted {
+        append_visible(pending, &visible[visible_pos..], strip_lead_nl);
     }
 }
 
@@ -531,6 +519,62 @@ mod tests {
         fn emit(&self, topic: &str, payload: serde_json::Value) {
             self.0.lock().unwrap().push((topic.to_string(), payload));
         }
+    }
+
+    #[test]
+    fn exec_end_flushes_output_and_survives_history_dedup() {
+        let sink = CapturingSink::default();
+        let mut scanner = osc::Scanner::new("N");
+        let mut cur_cmd = None;
+        let mut cur_cwd = String::new();
+        let mut cur_start = Instant::now();
+        let mut muted = false;
+        let started = Instant::now();
+        let mut last_emit = Some(("uptime".to_string(), Instant::now()));
+        let mut strip_lead_nl = false;
+        let mut pending = Vec::new();
+
+        emit_scanned(
+            &sink,
+            "term://c1",
+            "history://s1",
+            "host",
+            &mut scanner,
+            b"prompt$ \x1b]633;E;uptime;N\x07\x1b]633;C;N\x07up 3 days\r\n\x1b]633;D;0;N\x07next$ ",
+            &mut cur_cmd,
+            &mut cur_cwd,
+            &mut cur_start,
+            &mut muted,
+            &started,
+            &mut last_emit,
+            &mut strip_lead_nl,
+            &mut pending,
+        );
+
+        let frames = sink.0.lock().unwrap();
+        assert_eq!(B64.decode(frames[0].1["bytesBase64"].as_str().unwrap()).unwrap(), b"prompt$ ");
+        assert_eq!(frames[1].1["execStart"], true);
+        assert_eq!(B64.decode(frames[2].1["bytesBase64"].as_str().unwrap()).unwrap(), b"up 3 days\r\n");
+        assert_eq!(frames[3].1["execEnd"], true);
+        assert_eq!(frames[3].1["command"], "uptime");
+        assert_eq!(frames[3].1["exitCode"], 0);
+        assert!(
+            frames.iter().all(|(topic, _)| topic != "history://s1"),
+            "history stays deduplicated while execEnd remains observable",
+        );
+    }
+
+    #[test]
+    fn owner_finish_flushes_then_emits_one_closed_frame() {
+        let sink = CapturingSink::default();
+        let mut pending = b"last output".to_vec();
+        finish_owner(&sink, "term://c1", &mut pending);
+
+        let frames = sink.0.lock().unwrap();
+        assert_eq!(frames.len(), 2);
+        assert!(frames[0].1.get("bytesBase64").is_some());
+        assert_eq!(frames[1].1["closed"], true);
+        assert_eq!(frames.iter().filter(|(_, payload)| payload["closed"] == true).count(), 1);
     }
 
     /// 用一批数据驱动 emit_scanned,返回该批发往 `term://` 事件的 visible 字节(拼接)。

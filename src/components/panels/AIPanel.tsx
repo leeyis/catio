@@ -1,5 +1,6 @@
 /* ported from ref-ui/_extract/blob9.txt — controlled per-tab conversation view (P2) */
 import React, { useState, useRef, useEffect, useMemo } from 'react'
+import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -379,15 +380,20 @@ export function AIPanel({ onClose, mode = 'sql', conn, connId, engine, attachmen
   const hasTarget = !!conn
   const target = conn?.name ?? ''
   const accent = isSql ? 'var(--signal-blue)' : 'var(--signal-amber)'
-  const executionHint = {
-    manual: t('panels.agentExecutionManualHint'),
-    ask: t('panels.agentExecutionAskHint'),
-    auto: t('panels.agentExecutionAutoHint'),
-  }[cfg.executionMode]
+  const executionOptions = [
+    { value: 'manual' as const, label: t('panels.agentExecutionManual'), hint: t('panels.agentExecutionManualHint') },
+    { value: 'ask' as const, label: t('panels.agentExecutionAsk'), hint: t('panels.agentExecutionAskHint') },
+    { value: 'auto' as const, label: t('panels.agentExecutionAuto'), hint: t('panels.agentExecutionAutoHint') },
+  ]
+  const selectedExecution = executionOptions.find(option => option.value === cfg.executionMode) ?? executionOptions[0]
   const [draft, setDraft] = useState('')
   const [histOpen, setHistOpen] = useState(false)
+  const [executionMenuOpen, setExecutionMenuOpen] = useState(false)
+  const [executionMenuPosition, setExecutionMenuPosition] = useState<{ left: number; top?: number; bottom?: number; maxHeight: number } | null>(null)
   const taRef = useRef<HTMLTextAreaElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const executionTriggerRef = useRef<HTMLButtonElement>(null)
+  const executionMenuRef = useRef<HTMLDivElement>(null)
   // "@ 选表" state — only meaningful in SQL mode with a live connId.
   const [tableList, setTableList] = useState<MentionTable[]>([])
   const [selectedTables, setSelectedTables] = useState<{ schema: string; table: string; kind: 'table' | 'view' }[]>([])
@@ -398,6 +404,73 @@ export function AIPanel({ onClose, mode = 'sql', conn, connId, engine, attachmen
 
   useEffect(() => { if (attachment && taRef.current) taRef.current.focus() }, [attachment])
   useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight }, [msgs])
+
+  function positionExecutionMenu() {
+    const trigger = executionTriggerRef.current
+    if (!trigger) return
+    const rect = trigger.getBoundingClientRect()
+    const width = 276
+    const gap = 6
+    const viewportPadding = 8
+    const left = Math.max(viewportPadding, Math.min(rect.right - width, window.innerWidth - width - viewportPadding))
+    const spaceAbove = rect.top - viewportPadding - gap
+    const spaceBelow = window.innerHeight - rect.bottom - viewportPadding - gap
+    if (spaceAbove >= spaceBelow) {
+      setExecutionMenuPosition({ left, bottom: window.innerHeight - rect.top + gap, maxHeight: Math.max(180, spaceAbove) })
+    } else {
+      setExecutionMenuPosition({ left, top: rect.bottom + gap, maxHeight: Math.max(180, spaceBelow) })
+    }
+  }
+
+  function handleExecutionMenuKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    const options = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]'))
+    const current = options.indexOf(document.activeElement as HTMLButtonElement)
+    let next = current
+    if (event.key === 'ArrowDown') next = current < 0 ? 0 : Math.min(options.length - 1, current + 1)
+    else if (event.key === 'ArrowUp') next = current < 0 ? options.length - 1 : Math.max(0, current - 1)
+    else if (event.key === 'Home') next = 0
+    else if (event.key === 'End') next = options.length - 1
+    else if (event.key === 'Enter' || event.key === ' ') {
+      if (current >= 0) {
+        event.preventDefault()
+        options[current].click()
+      }
+      return
+    } else if (event.key === 'Escape') {
+      event.preventDefault()
+      setExecutionMenuOpen(false)
+      executionTriggerRef.current?.focus()
+      return
+    } else return
+    event.preventDefault()
+    options[next]?.focus()
+  }
+
+  useEffect(() => {
+    if (!executionMenuOpen) return
+    const selected = executionMenuRef.current?.querySelector<HTMLButtonElement>('[role="menuitemradio"][aria-checked="true"]')
+    ;(selected ?? executionMenuRef.current?.querySelector<HTMLButtonElement>('[role="menuitemradio"]'))?.focus()
+    const closeOutside = (event: MouseEvent) => {
+      const target = event.target as Node
+      if (!executionTriggerRef.current?.contains(target) && !executionMenuRef.current?.contains(target)) setExecutionMenuOpen(false)
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !event.defaultPrevented) {
+        setExecutionMenuOpen(false)
+        executionTriggerRef.current?.focus()
+      }
+    }
+    document.addEventListener('mousedown', closeOutside)
+    document.addEventListener('keydown', closeOnEscape)
+    window.addEventListener('resize', positionExecutionMenu)
+    window.addEventListener('scroll', positionExecutionMenu, true)
+    return () => {
+      document.removeEventListener('mousedown', closeOutside)
+      document.removeEventListener('keydown', closeOnEscape)
+      window.removeEventListener('resize', positionExecutionMenu)
+      window.removeEventListener('scroll', positionExecutionMenu, true)
+    }
+  }, [executionMenuOpen])
 
   // Fetch the table/view list for the @ picker when the SQL-mode connection changes.
   useEffect(() => {
@@ -588,28 +661,77 @@ export function AIPanel({ onClose, mode = 'sql', conn, connId, engine, attachmen
           <textarea ref={taRef} value={draft} onChange={e => onDraftChange(e.target.value)} onKeyDown={onKeyDown}
             placeholder={attachment ? t('panels.composerPlaceholderAttached') : (isSql ? t('panels.composerPlaceholderSql') : t('panels.composerPlaceholderShell', { target }))}
             rows={2} style={{ border: 'none', outline: 'none', background: 'transparent', resize: 'none', fontSize: 13, color: 'var(--text-primary)', fontFamily: 'inherit' }} />
-          <div className="row" style={{ justifyContent: 'space-between', marginTop: 4 }}>
-            <div className="row gap4">
-              <button className="icon-btn bare" style={{ width: 26, height: 26 }} title={t('panels.attachContext')}><Icon name="plus" size={15} /></button>
-              <button className="icon-btn bare" style={{ width: 26, height: 26 }} title={t('panels.selectModel')} onClick={() => onOpenSettings?.()}><Icon name="box" size={14} /></button>
-              <span className="ell" style={{ fontSize: 11, color: 'var(--text-faint)', alignSelf: 'center', maxWidth: 84 }}>{cfg.model || t('panels.modelInfo')}</span>
-              {!isSql && <label className="row gap4" title={executionHint} style={{ height: 26, padding: '0 5px', border: '1px solid var(--border-hairline)', borderRadius: 7, color: 'var(--text-tertiary)', background: 'var(--surface-card)' }}>
-                <Icon name="shield" size={12} />
-                <select
+          <div className="row" style={{ gap: 8, marginTop: 4 }}>
+            <div className="row gap4" style={{ flex: 1, minWidth: 0 }}>
+              {!isSql && <div style={{ position: 'relative', flex: 'none' }}>
+                <button
+                  ref={executionTriggerRef}
+                  type="button"
+                  className="row gap4"
                   aria-label={t('panels.agentExecutionMode')}
-                  value={cfg.executionMode}
-                  onChange={e => updateAgentConfig({ executionMode: e.target.value as 'manual' | 'ask' | 'auto' })}
-                  style={{ maxWidth: 88, border: 'none', outline: 'none', background: 'transparent', color: 'var(--text-secondary)', fontSize: 10.5, cursor: 'pointer' }}
+                  aria-haspopup="menu"
+                  aria-expanded={executionMenuOpen}
+                  aria-controls="agent-execution-menu"
+                  title={selectedExecution.hint}
+                  onClick={() => {
+                    if (executionMenuOpen) setExecutionMenuOpen(false)
+                    else {
+                      positionExecutionMenu()
+                      setExecutionMenuOpen(true)
+                    }
+                  }}
+                  style={{ height: 26, padding: '0 7px', border: `1px solid ${executionMenuOpen ? 'var(--accent-border)' : 'var(--border-hairline)'}`, borderRadius: 8, color: executionMenuOpen ? 'var(--accent-primary)' : 'var(--text-tertiary)', background: executionMenuOpen ? 'var(--accent-soft-alt)' : 'var(--surface-card)', boxShadow: executionMenuOpen ? 'var(--glow-selected)' : 'none' }}
                 >
-                  <option value="manual">{t('panels.agentExecutionManual')}</option>
-                  <option value="ask">{t('panels.agentExecutionAsk')}</option>
-                  <option value="auto">{t('panels.agentExecutionAuto')}</option>
-                </select>
-              </label>}
+                  <Icon name="shield" size={12} />
+                  <span style={{ maxWidth: 66, fontSize: 10.5, fontWeight: 600, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>{selectedExecution.label}</span>
+                  <Icon name="chevron-down" size={11} style={{ color: 'var(--text-faint)', transform: executionMenuOpen ? 'rotate(180deg)' : 'none', transition: 'transform .14s' }} />
+                </button>
+                {executionMenuOpen && executionMenuPosition && createPortal(
+                  <div ref={executionMenuRef} id="agent-execution-menu" role="menu" aria-label={t('panels.agentExecutionMode')} className="pop-in" onKeyDown={handleExecutionMenuKeyDown} style={{ position: 'fixed', left: executionMenuPosition.left, top: executionMenuPosition.top, bottom: executionMenuPosition.bottom, zIndex: 1000, width: 276, maxHeight: executionMenuPosition.maxHeight, overflowY: 'auto', padding: 6, background: 'var(--surface-elevated)', border: '1px solid var(--border-hairline-alt)', borderRadius: 12, boxShadow: 'var(--shadow-dropdown)' }}>
+                    <div style={{ padding: '5px 8px 7px', fontSize: 10.5, fontWeight: 700, color: 'var(--text-faint)', letterSpacing: '.02em' }}>{t('panels.agentExecutionMode')}</div>
+                    {executionOptions.map(option => {
+                      const active = option.value === cfg.executionMode
+                      return (
+                        <button
+                          key={option.value}
+                          type="button"
+                          role="menuitemradio"
+                          aria-checked={active}
+                          tabIndex={active ? 0 : -1}
+                          onClick={() => {
+                            updateAgentConfig({ executionMode: option.value })
+                            setExecutionMenuOpen(false)
+                            executionTriggerRef.current?.focus()
+                          }}
+                          style={{ display: 'grid', gridTemplateColumns: '22px 1fr 16px', width: '100%', alignItems: 'start', gap: 8, padding: '9px 8px', textAlign: 'left', borderRadius: 9, background: active ? 'var(--accent-soft-alt)' : 'transparent' }}
+                          onMouseEnter={event => { if (!active) event.currentTarget.style.background = 'var(--surface-sunken)' }}
+                          onMouseLeave={event => { if (!active) event.currentTarget.style.background = 'transparent' }}
+                        >
+                          <span style={{ width: 22, height: 22, display: 'grid', placeItems: 'center', borderRadius: 7, color: active ? 'var(--accent-primary)' : 'var(--text-tertiary)', background: active ? 'var(--accent-soft)' : 'var(--surface-sunken)' }}>
+                            <Icon name="shield" size={12} />
+                          </span>
+                          <span className="col gap2">
+                            <span style={{ fontSize: 12, fontWeight: 650, color: active ? 'var(--accent-primary)' : 'var(--text-primary)' }}>{option.label}</span>
+                            <span style={{ fontSize: 10.5, lineHeight: 1.45, color: 'var(--text-tertiary)' }}>{option.hint}</span>
+                          </span>
+                          {active && <Icon name="check" size={13} style={{ marginTop: 3, color: 'var(--accent-primary)' }} />}
+                        </button>
+                      )
+                    })}
+                    <div className="row gap6" style={{ margin: '5px 4px 1px', padding: '7px 8px', borderRadius: 8, background: 'var(--surface-sunken)', color: 'var(--text-faint)', alignItems: 'flex-start' }}>
+                      <Icon name="info" size={12} style={{ flex: 'none', marginTop: 1 }} />
+                      <span style={{ fontSize: 10, lineHeight: 1.45 }}>{t('panels.agentExecutionOutputHint')}</span>
+                    </div>
+                  </div>,
+                  document.body,
+                )}
+              </div>}
+              <button className="icon-btn bare" style={{ width: 26, height: 26, flex: 'none' }} title={t('panels.selectModel')} onClick={() => onOpenSettings?.()}><Icon name="box" size={14} /></button>
+              <span className="ell" title={cfg.model || t('panels.modelInfo')} style={{ flex: 1, minWidth: 0, fontSize: 11, color: 'var(--text-faint)', alignSelf: 'center' }}>{cfg.model || t('panels.modelInfo')}</span>
             </div>
             {busy
-              ? <button className="btn sm" style={{ width: 32, padding: 0, background: 'var(--signal-red, #e5484d)', color: '#fff', borderColor: 'var(--signal-red, #e5484d)' }} title={t('panels.stop')} onClick={() => onAbort?.()}><Icon name="square" size={13} /></button>
-              : <button className="btn btn-primary sm" style={{ width: 32, padding: 0 }} title={t('panels.send')} disabled={!cfg.model || !draft.trim()} onClick={() => void send()}><Icon name="send" size={14} /></button>}
+              ? <button className="btn sm" style={{ width: 32, padding: 0, flex: 'none', background: 'var(--signal-red, #e5484d)', color: '#fff', borderColor: 'var(--signal-red, #e5484d)' }} title={t('panels.stop')} onClick={() => onAbort?.()}><Icon name="square" size={13} /></button>
+              : <button className="btn btn-primary sm" style={{ width: 32, padding: 0, flex: 'none' }} title={t('panels.send')} disabled={!cfg.model || !draft.trim()} onClick={() => void send()}><Icon name="send" size={14} /></button>}
           </div>
         </div>
       </div>

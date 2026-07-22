@@ -2,8 +2,8 @@
 //!
 //! Builds a single line to write into a freshly-opened PTY shell that installs
 //! OSC 633 hooks for bash AND zsh (self-detecting). The hooks emit:
-//!   * pre-exec: `\e]633;E;<escapedCmd>;<nonce>\a\e]633;C\a`
-//!   * prompt:   `\e]633;D;<exit>\a\e]633;P;Cwd=<escapedPwd>\a`
+//!   * pre-exec: `\e]633;E;<escapedCmd>;<nonce>\a\e]633;C;<nonce>\a`
+//!   * prompt:   `\e]633;D;<exit>;<nonce>\a\e]633;P;Cwd=<escapedPwd>\a`
 //!     which `osc::Scanner` (gated by the same `nonce`) strips and turns into
 //!     command-audit events.
 //!
@@ -17,8 +17,8 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine};
 const INTEGRATION_TEMPLATE: &str = r#"if [ -n "${ZSH_VERSION:-}" ]; then
   __catio_n='__CATIO_NONCE__'
   __catio_esc(){ local s=${1//\\/\\\\}; s=${s//;/\\x3b}; s=${s//$'\n'/\\x0a}; print -rn -- "$s"; }
-  __catio_pe(){ print -rn -- $'\e]633;E;'"$(__catio_esc "$1")"';'"$__catio_n"$'\a\e]633;C\a'; }
-  __catio_pc(){ local e=$?; print -rn -- $'\e]633;D;'"$e"$'\a\e]633;P;Cwd='"$(__catio_esc "$PWD")"$'\a'; }
+  __catio_pe(){ print -rn -- $'\e]633;E;'"$(__catio_esc "$1")"';'"$__catio_n"$'\a\e]633;C;'"$__catio_n"$'\a'; }
+  __catio_pc(){ local e=$?; print -rn -- $'\e]633;D;'"$e"';'"$__catio_n"$'\a\e]633;P;Cwd='"$(__catio_esc "$PWD")"$'\a'; }
   autoload -Uz add-zsh-hook 2>/dev/null
   add-zsh-hook preexec __catio_pe; add-zsh-hook precmd __catio_pc
   case "$PS1" in *'633;B'*) ;; *) PS1="$PS1"$'%{\e]633;B\a%}';; esac
@@ -27,8 +27,8 @@ elif [ -n "${BASH_VERSION:-}" ]; then
   __catio_n='__CATIO_NONCE__'
   __catio_esc(){ local s=${1//\\/\\\\}; s=${s//;/\\x3b}; s=${s//$'\n'/\\x0a}; printf '%s' "$s"; }
   __catio_in=0
-  __catio_pe(){ case "$BASH_COMMAND" in __catio_*) return;; esac; if [ "$__catio_in" = 0 ]; then __catio_in=1; local c; c=$(builtin history 1 | sed 's/ *[0-9][0-9]* *//'); printf '\e]633;E;%s;%s\a\e]633;C\a' "$(__catio_esc "$c")" "$__catio_n"; fi; }
-  __catio_pc(){ local e=$?; __catio_in=0; printf '\e]633;D;%s\a\e]633;P;Cwd=%s\a' "$e" "$(__catio_esc "$PWD")"; }
+  __catio_pe(){ case "$BASH_COMMAND" in __catio_*) return;; esac; if [ "$__catio_in" = 0 ]; then __catio_in=1; local c; c=$(builtin history 1 | sed 's/ *[0-9][0-9]* *//'); printf '\e]633;E;%s;%s\a\e]633;C;%s\a' "$(__catio_esc "$c")" "$__catio_n" "$__catio_n"; fi; }
+  __catio_pc(){ local e=$?; __catio_in=0; printf '\e]633;D;%s;%s\a\e]633;P;Cwd=%s\a' "$e" "$__catio_n" "$(__catio_esc "$PWD")"; }
   trap '__catio_pe' DEBUG
   case "${PROMPT_COMMAND:-}" in *__catio_pc*) ;; *) PROMPT_COMMAND="__catio_pc${PROMPT_COMMAND:+;$PROMPT_COMMAND}";; esac
   case "$PS1" in *'633;B'*) ;; *) PS1="$PS1"$'\[\e]633;B\a\]';; esac

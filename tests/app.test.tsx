@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import { vi, beforeEach } from 'vitest'
 import { LanguageProvider } from '../src/state/LanguageContext'
 import { DataProvider } from '../src/state/DataContext'
@@ -9,7 +9,10 @@ import App from '../src/App'
 const agentMock = vi.hoisted(() => ({ chat: vi.fn() }))
 vi.mock('../src/services/agent', () => ({ chat: agentMock.chat }))
 
-beforeEach(() => localStorage.clear())
+beforeEach(() => {
+  localStorage.clear()
+  agentMock.chat.mockReset()
+})
 
 // Mock xterm so the real library doesn't run in jsdom (avoids HTMLCanvasElement.getContext errors).
 vi.mock('@xterm/xterm', () => ({
@@ -31,6 +34,9 @@ vi.mock('@xterm/xterm', () => ({
 }))
 vi.mock('@xterm/addon-fit', () => ({
   FitAddon: class { fit() {} activate() {} dispose() {} },
+}))
+vi.mock('@xterm/addon-webgl', () => ({
+  WebglAddon: class { onContextLoss() {} dispose() {} },
 }))
 // xterm.css import — stub so the bundler/test doesn't choke
 vi.mock('@xterm/xterm/css/xterm.css', () => ({}))
@@ -54,18 +60,21 @@ it('boots clean: no demo tabs and Agent panel collapsed', () => {
 it('vault is empty on a fresh install, and renders a saved profile', () => {
   // Fresh: no profiles → empty-state in the sidebar.
   const fresh = wrap()
+  fireEvent.click(screen.getByRole('button', { name: '主机' }))
   expect(screen.getByText('还没有连接')).toBeTruthy()
   fresh.unmount()
 
   // With a saved profile in localStorage, the vault renders it.
   saveProfile({ id: 'live-1.2.3.4:22-deploy', name: 'my-server', host: '1.2.3.4', port: 22, user: 'deploy', auth: { method: 'password' } })
   wrap()
+  fireEvent.click(screen.getByRole('button', { name: '主机' }))
   expect(screen.getAllByText('my-server').length).toBeGreaterThan(0)
 })
 
 it('clicking a vault card opens the connection details (not a terminal tab)', () => {
   saveProfile({ id: 'live-1.2.3.4:22-deploy', name: 'my-server', host: '1.2.3.4', port: 22, user: 'deploy', auth: { method: 'password' } })
   wrap()
+  fireEvent.click(screen.getByRole('button', { name: '主机' }))
   // Click the saved card in the sidebar (first occurrence of the name).
   fireEvent.click(screen.getAllByText('my-server')[0])
   // Details panel header should appear (panels.detailsTitle zh).
@@ -185,4 +194,45 @@ it('persists the full streamed assistant reply, not just the conversation title'
   // and the user message is persisted too
   const raw = localStorage.getItem('catio-conversations') ?? '[]'
   expect(raw).toContain('list files')
+})
+
+it('shows Agent command permission target and command as separately labelled regions', async () => {
+  localStorage.setItem('catio-agent-config', JSON.stringify({
+    provider: 'ollama', baseUrl: 'http://localhost:11434', apiKey: '',
+    anthropicAuthMode: 'api-key', model: 'llama3', executionMode: 'manual',
+  }))
+  const command = 'sudo systemctl start ollama.service'
+  const reply = `\`\`\`sh\n${command}\n\`\`\``
+  agentMock.chat
+    .mockImplementationOnce(async (_msgs: unknown, _cfg: unknown, opts: { onToken: (token: string) => void }) => {
+      opts.onToken(reply)
+      return reply
+    })
+    .mockImplementationOnce(async (_msgs: unknown, _cfg: unknown, opts: { onToken: (token: string) => void }) => {
+      opts.onToken('Permission denied; no command was run.')
+      return 'Permission denied; no command was run.'
+    })
+
+  wrap()
+  fireEvent.click(screen.getAllByText('新建连接')[0])
+  fireEvent.click(screen.getByText('主机 / 终端'))
+  const hostLabel = screen.getAllByText('主机').map(el => el.parentElement)
+    .find(parent => parent?.querySelector('input')) as HTMLElement
+  fireEvent.input(hostLabel.querySelector('input') as HTMLInputElement, { target: { value: 'edge-01' } })
+  fireEvent.click(screen.getByText('保存并连接'))
+  fireEvent.click(screen.getByTitle('Catio Agent · 跨终端与数据库'))
+  fireEvent.click(screen.getByRole('button', { name: 'Agent 执行模式' }))
+  fireEvent.click(screen.getByRole('menuitemradio', { name: /半自动/ }))
+  fireEvent.change(screen.getByPlaceholderText(/生成 shell 命令/), { target: { value: 'start Ollama' } })
+  fireEvent.click(screen.getByTitle('发送'))
+
+  expect(await screen.findByText('允许 Agent 执行命令？')).toBeInTheDocument()
+  const targetRegion = screen.getByRole('group', { name: /执行节点/ })
+  const commandRegion = screen.getByRole('group', { name: /执行命令/ })
+  expect(targetRegion).toHaveTextContent('edge-01')
+  expect(targetRegion).not.toHaveTextContent(command)
+  expect(within(commandRegion).getByText(command)).toHaveClass('mono')
+
+  fireEvent.click(screen.getByRole('button', { name: '取消' }))
+  await waitFor(() => expect(screen.queryByText('允许 Agent 执行命令？')).toBeNull())
 })

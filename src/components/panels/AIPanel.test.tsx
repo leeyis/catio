@@ -70,11 +70,46 @@ describe('AIPanel controlled conversation view', () => {
     expect(onSend).toHaveBeenCalledWith('hi', { hasSelection: false })
   })
 
-  it('changes the persisted execution mode from the composer dropdown', () => {
+  it('explains every execution mode and supports keyboard selection', () => {
     wrap(<AIPanel onClose={() => {}} mode="shell" conn={hostConn} attachment={null} onClearAttachment={() => {}}
       conversation={conv([])} />)
-    fireEvent.change(screen.getByLabelText('Agent 执行模式'), { target: { value: 'ask' } })
+    const modeButton = screen.getByRole('button', { name: 'Agent 执行模式' })
+    expect(modeButton.compareDocumentPosition(screen.getByTitle('选择模型')) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+    fireEvent.click(modeButton)
+    let menu = screen.getByRole('menu')
+    expect(menu.parentElement).toBe(document.body)
+    expect(modeButton).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.queryByTitle('附加上下文')).toBeNull()
+    expect(screen.getByText('仅生成命令和解读，不自动执行')).toBeTruthy()
+    expect(screen.getByText(/敏感或写操作/)).toBeTruthy()
+    expect(screen.getByText(/根据每轮结果/)).toBeTruthy()
+    const modelLabel = screen.getByTitle('m')
+    expect(modelLabel.style.maxWidth).toBe('')
+    expect(modelLabel.style.flex).toBe('1 1 0%')
+    expect(screen.getByRole('menuitemradio', { name: /手动/ })).toHaveFocus()
+    fireEvent.keyDown(menu, { key: 'ArrowDown' })
+    expect(screen.getByRole('menuitemradio', { name: /半自动/ })).toHaveFocus()
+    fireEvent.keyDown(menu, { key: 'End' })
+    expect(screen.getByRole('menuitemradio', { name: /全自动/ })).toHaveFocus()
+    fireEvent.keyDown(menu, { key: 'Home' })
+    expect(screen.getByRole('menuitemradio', { name: /手动/ })).toHaveFocus()
+    fireEvent.keyDown(menu, { key: 'ArrowDown' })
+    fireEvent.keyDown(menu, { key: 'Enter' })
     expect(mockUpdate).toHaveBeenCalledWith({ executionMode: 'ask' })
+    expect(modeButton).toHaveFocus()
+
+    fireEvent.click(modeButton)
+    menu = screen.getByRole('menu')
+    fireEvent.keyDown(menu, { key: 'End' })
+    fireEvent.keyDown(menu, { key: ' ' })
+    expect(mockUpdate).toHaveBeenCalledWith({ executionMode: 'auto' })
+
+    fireEvent.click(modeButton)
+    menu = screen.getByRole('menu')
+    fireEvent.keyDown(menu, { key: 'Escape' })
+    expect(screen.queryByRole('menu')).toBeNull()
+    expect(modeButton).toHaveAttribute('aria-expanded', 'false')
+    expect(modeButton).toHaveFocus()
   })
 
   it('renders a shell code block with an insert-into-terminal button that calls onInsert', () => {

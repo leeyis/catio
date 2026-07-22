@@ -1,5 +1,5 @@
 import { MODEL_PROVIDER_PRESETS, type AgentConfig } from '../state/agentConfig'
-import { apiHeaders, providerApiBase, resolveFetch, trimSlash } from './models'
+import { apiHeaders, fetchWithAuthFallback, providerApiBase, resolveFetch, trimSlash } from './models'
 
 export interface ChatMsg { role: 'system' | 'user' | 'assistant'; content: string }
 export interface ChatOptions { onToken?: (t: string) => void; signal?: AbortSignal }
@@ -114,7 +114,7 @@ export async function chat(
     body = JSON.stringify({ model: cfg.model, messages, stream: true })
   }
 
-  const resp = await fetcher(url, { method: 'POST', headers, body, signal })
+  const resp = await fetchWithAuthFallback(fetcher, url, { method: 'POST', headers, body, signal }, cfg)
 
   if (!resp.ok) {
     let snippet = ''

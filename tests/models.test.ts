@@ -29,6 +29,18 @@ const BASE_DEEPSEEK_CFG: AgentConfig = {
   baseUrl: 'https://api.deepseek.com',
 }
 
+const BASE_ZHIPU_CFG: AgentConfig = {
+  ...BASE_OPENAI_CFG,
+  provider: 'zhipu',
+  baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+}
+
+const BASE_KIMI_CFG: AgentConfig = {
+  ...BASE_OPENAI_CFG,
+  provider: 'kimi',
+  baseUrl: 'https://api.moonshot.cn/v1',
+}
+
 const BASE_ANTHROPIC_CFG: AgentConfig = {
   ...BASE_OPENAI_CFG,
   provider: 'anthropic',
@@ -36,14 +48,18 @@ const BASE_ANTHROPIC_CFG: AgentConfig = {
   apiKey: 'sk-ant-test',
 }
 
-function makeFetchMock(status: number, body: unknown, textBody = ''): typeof globalThis.fetch {
-  return vi.fn().mockResolvedValue({
+function makeFetchResponse(status: number, body: unknown, textBody = ''): Response {
+  return {
     ok: status >= 200 && status < 300,
     status,
     statusText: status === 200 ? 'OK' : 'Error',
     json: async () => body,
     text: async () => textBody,
-  }) as unknown as typeof globalThis.fetch
+  } as Response
+}
+
+function makeFetchMock(status: number, body: unknown, textBody = ''): typeof globalThis.fetch {
+  return vi.fn().mockResolvedValue(makeFetchResponse(status, body, textBody)) as unknown as typeof globalThis.fetch
 }
 
 afterEach(() => {
@@ -138,9 +154,31 @@ describe('fetchModels — OpenAI-compatible', () => {
     vi.stubGlobal('fetch', makeFetchMock(401, {}))
     await expect(fetchModels(BASE_OPENAI_CFG)).rejects.toThrow('OpenAI fetch failed: 401')
   })
+
+  it('follows cursor pagination and returns every unique model', async () => {
+    const mockFetch = vi.fn()
+      .mockResolvedValueOnce(makeFetchResponse(200, {
+        data: [{ id: 'model-b' }, { id: 'model-a' }],
+        has_more: true,
+        last_id: 'model-b',
+      }))
+      .mockResolvedValueOnce(makeFetchResponse(200, {
+        data: [{ id: 'model-c' }, { id: 'model-b' }],
+        has_more: false,
+      }))
+    vi.stubGlobal('fetch', mockFetch)
+
+    await expect(fetchModels(BASE_OPENAI_CFG)).resolves.toEqual(['model-a', 'model-b', 'model-c'])
+    expect(mockFetch.mock.calls[1][0]).toBe('https://api.openai.com/v1/models?after_id=model-b')
+  })
+
+  it('rejects malformed model entries instead of returning undefined names', async () => {
+    vi.stubGlobal('fetch', makeFetchMock(200, { data: [{ name: 'missing-id' }] }))
+    await expect(fetchModels(BASE_OPENAI_CFG)).rejects.toThrow('Model response format unexpected')
+  })
 })
 
-describe('fetchModels — DeepSeek and Anthropic', () => {
+describe('fetchModels — provider presets', () => {
   it('uses DeepSeek official paths without adding /v1', async () => {
     const mockFetch = makeFetchMock(200, { data: [{ id: 'deepseek-v4-pro' }] })
     vi.stubGlobal('fetch', mockFetch)
@@ -156,6 +194,67 @@ describe('fetchModels — DeepSeek and Anthropic', () => {
     expect(url).toBe('https://api.anthropic.com/v1/models')
     expect((init.headers as Record<string, string>)['x-api-key']).toBe('sk-ant-test')
     expect((init.headers as Record<string, string>)['anthropic-version']).toBe('2023-06-01')
+  })
+
+  it('uses the discovered Zhipu models and keeps a manually entered model', async () => {
+    const mockFetch = makeFetchMock(200, { data: [{ id: 'glm-5' }, { id: 'custom-glm' }] })
+    vi.stubGlobal('fetch', mockFetch)
+    const result = await fetchModels({ ...BASE_ZHIPU_CFG, model: 'manual-glm' })
+    expect((mockFetch as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe('https://open.bigmodel.cn/api/paas/v4/models')
+    expect(result).toEqual(['custom-glm', 'glm-5', 'manual-glm'])
+  })
+
+  it('falls back to the Zhipu catalog when model discovery is unavailable', async () => {
+    vi.stubGlobal('fetch', makeFetchMock(404, {}))
+    await expect(fetchModels(BASE_ZHIPU_CFG)).resolves.toEqual([
+      'glm-5.2', 'glm-5.1', 'glm-5', 'glm-5-turbo', 'glm-4.7', 'glm-4.7-flashx',
+      'glm-4.6', 'glm-4.5-air',
+    ])
+  })
+
+  it('does not hide a Zhipu authentication failure behind the fallback catalog', async () => {
+    vi.stubGlobal('fetch', makeFetchMock(401, {}))
+    await expect(fetchModels(BASE_ZHIPU_CFG)).rejects.toThrow('Zhipu fetch failed: 401')
+  })
+
+  it('uses the Kimi /v1 model endpoint', async () => {
+    const mockFetch = makeFetchMock(200, { data: [{ id: 'kimi-k2.5' }] })
+    vi.stubGlobal('fetch', mockFetch)
+    await fetchModels(BASE_KIMI_CFG)
+    expect((mockFetch as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe('https://api.moonshot.cn/v1/models')
+  })
+
+  it('detects a Claude Code OAuth token without asking for an auth mode', async () => {
+    const mockFetch = makeFetchMock(200, { data: [{ id: 'claude-sonnet' }] })
+    vi.stubGlobal('fetch', mockFetch)
+    await fetchModels({ ...BASE_ANTHROPIC_CFG, apiKey: 'sk-ant-oat01-test' })
+    const [, init] = (mockFetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit]
+    expect(init.headers).toMatchObject({ Authorization: 'Bearer sk-ant-oat01-test' })
+    expect((init.headers as Record<string, string>)['x-api-key']).toBeUndefined()
+  })
+
+  it('detects an official Anthropic API key in auto mode', async () => {
+    const mockFetch = makeFetchMock(200, { data: [{ id: 'claude-sonnet' }] })
+    vi.stubGlobal('fetch', mockFetch)
+    await fetchModels({ ...BASE_ANTHROPIC_CFG, apiKey: 'sk-ant-api03-test', anthropicAuthMode: 'auto' })
+    const [, init] = (mockFetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit]
+    expect(init.headers).toMatchObject({ 'x-api-key': 'sk-ant-api03-test' })
+    expect((init.headers as Record<string, string>)['Authorization']).toBeUndefined()
+  })
+
+  it('retries the alternate Anthropic auth header for a custom Claude Code endpoint', async () => {
+    const mockFetch = vi.fn()
+      .mockResolvedValueOnce(makeFetchResponse(401, {}))
+      .mockResolvedValueOnce(makeFetchResponse(200, { data: [{ id: 'vendor-claude' }] }))
+    vi.stubGlobal('fetch', mockFetch)
+
+    await expect(fetchModels({
+      ...BASE_ANTHROPIC_CFG,
+      apiKey: 'vendor-key',
+      anthropicAuthMode: 'auto',
+    })).resolves.toEqual(['vendor-claude'])
+    expect(mockFetch.mock.calls[0][1].headers).toMatchObject({ Authorization: 'Bearer vendor-key' })
+    expect(mockFetch.mock.calls[1][1].headers).toMatchObject({ 'x-api-key': 'vendor-key' })
   })
 })
 
@@ -224,6 +323,14 @@ describe('testModel — OpenAI-compatible', () => {
     expect(result.ok).toBe(false)
     expect(result.error).toContain('401')
     expect(result.latencyMs).toBeGreaterThanOrEqual(0)
+  })
+
+  it('2xx with an unexpected payload is not reported as a successful model test', async () => {
+    vi.stubGlobal('fetch', makeFetchMock(200, { ok: true }))
+    await expect(testModel({ ...BASE_OPENAI_CFG, model: 'gpt-4o' })).resolves.toMatchObject({
+      ok: false,
+      error: 'unexpected-response',
+    })
   })
 })
 

@@ -149,6 +149,24 @@ describe('agent.chat', () => {
     expect(body.messages).toEqual([{ role: 'user', content: 'hi' }])
   })
 
+  it('anthropic retries the alternate auth header before streaming a custom endpoint', async () => {
+    const f = vi.fn()
+      .mockResolvedValueOnce(streamResponse(['unauthorized'], 401))
+      .mockResolvedValueOnce(streamResponse([
+        'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"ready"}}\n\n',
+        'data: {"type":"message_stop"}\n\n',
+      ]))
+    vi.stubGlobal('fetch', f)
+    const { chat } = await import('./agent')
+
+    await expect(chat(
+      [{ role: 'user', content: 'hi' }],
+      config({ provider: 'anthropic', baseUrl: 'https://vendor.example', apiKey: 'vendor-key', anthropicAuthMode: 'auto' }),
+    )).resolves.toBe('ready')
+    expect((f.mock.calls[0][1] as RequestInit).headers).toMatchObject({ Authorization: 'Bearer vendor-key' })
+    expect((f.mock.calls[1][1] as RequestInit).headers).toMatchObject({ 'x-api-key': 'vendor-key' })
+  })
+
   it('anthropic surfaces stream error events', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(streamResponse([
       'event: error\n',
