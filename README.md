@@ -11,6 +11,7 @@ Catio is an open-source operations and database client built with **Rust + Tauri
 <br/>
 
 <a href="https://linux.do"><img src="https://shorturl.at/ggSqS" alt="LINUX DO" /></a>
+![License](https://img.shields.io/badge/License-MIT-green)
 
 **English** · [简体中文](README.zh-CN.md)
 
