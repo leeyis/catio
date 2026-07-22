@@ -261,10 +261,25 @@ pub async fn term_open_core(
                             break;
                         }
                     }
-                    Some(TermCmd::Close) | None => { let _ = channel.eof().await; break; }
+                    // 用户关闭 pane:发 CHANNEL_CLOSE(不是仅 eof)。关键——russh 只在收到
+                    // CHANNEL_CLOSE 时才把 channel 从其内部 map 移除(session.rs:channels.remove);
+                    // 仅 eof 会让 channel 残留在 map 里,服务器仍向其推流,而 russh 的单条会话读循环
+                    // 用「阻塞式」send 往该 channel 的 bounded(100) mpsc 投递数据(encrypted.rs
+                    // channel_data 分支)。若该 pane 在跑 watch/top 等高频输出,buffer 100 填满后
+                    // 那个 send().await 会永久阻塞整条会话读循环 → 同一 SSH 连接后续开新 channel 的
+                    // ChannelOpenConfirmation 永远收不到,新分屏/复制标签空白闪光标、永不自愈。
+                    Some(TermCmd::Close) | None => { let _ = channel.close().await; break; }
                 },
             }
         }
+        // 退出前把本 channel 彻底 drain 干净:持续读 wait() 直到 None(channel 真正关闭)。
+        // 这保证在 close 握手完成前,russh 会话读循环若还往本 channel 投递残留数据,总有消费者
+        // 及时取走,buffer 不会填满、不会阻塞整条会话循环(从而不拖垮同连接的其它 channel 与新开)。
+        // 2s 超时兜底,防止个别服务器不回 CHANNEL_CLOSE 时 drain 任务泄漏。
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while channel.wait().await.is_some() {}
+        })
+        .await;
         sess_for_owner.lock().await.remove_term(&chan_for_owner);
     });
     Ok(chan_id)
