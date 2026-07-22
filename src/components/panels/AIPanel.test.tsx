@@ -13,7 +13,7 @@ const hostConn: Connection = { id: 'h1', group: '', kind: 'host', name: 'prod-we
 
 const baseConfig = (): AgentConfig => ({
   provider: 'ollama', baseUrl: 'http://h', apiKey: '', anthropicAuthMode: 'api-key',
-  model: 'm', executionMode: 'manual',
+  model: 'm', executionMode: 'manual', singleLineCommands: true, maxShellSteps: 8,
 })
 let mockConfig: AgentConfig = baseConfig()
 const mockUpdate = vi.fn()
@@ -121,7 +121,7 @@ describe('AIPanel controlled conversation view', () => {
     expect(modeButton).toHaveAttribute('aria-expanded', 'true')
     expect(screen.queryByTitle('附加上下文')).toBeNull()
     expect(screen.getByText('仅生成命令和解读，不自动执行')).toBeTruthy()
-    expect(screen.getByText(/敏感或写操作/)).toBeTruthy()
+    expect(screen.getByText(/仅删除、移动/)).toBeTruthy()
     expect(screen.getByText(/根据每轮结果/)).toBeTruthy()
     const modelLabel = screen.getByTitle('m')
     expect(modelLabel.style.maxWidth).toBe('')

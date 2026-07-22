@@ -29,6 +29,26 @@ describe('SettingsView Agent model', () => {
     expect(JSON.parse(localStorage.getItem('catio-agent-config') ?? '{}').model).toBe('coding-plan-model')
   })
 
+  it('configures execution mode, command format, and maximum rounds', () => {
+    render(
+      <LanguageProvider>
+        <SettingsView theme="dawn" onTheme={vi.fn()} onClose={vi.fn()} initialSection="ai" />
+      </LanguageProvider>,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: '半自动' }))
+    fireEvent.click(screen.getByRole('switch', { name: '单行命令限制' }))
+    fireEvent.click(screen.getByRole('button', { name: '增加最大执行轮数' }))
+    fireEvent.click(screen.getByRole('button', { name: '增加最大执行轮数' }))
+
+    expect(getAgentConfig()).toMatchObject({ executionMode: 'ask', singleLineCommands: false, maxShellSteps: 10 })
+    expect(JSON.parse(localStorage.getItem('catio-agent-config') ?? '{}')).toMatchObject({
+      singleLineCommands: false,
+      maxShellSteps: 10,
+    })
+    expect(JSON.parse(localStorage.getItem('catio-agent-config') ?? '{}')).not.toHaveProperty('executionMode')
+  })
+
   it('fills the provider endpoint and clears credentials when the provider changes', () => {
     setAgentConfig({ provider: 'openai', baseUrl: 'https://custom.example', apiKey: 'secret', model: 'old-model' })
     render(

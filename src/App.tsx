@@ -1812,7 +1812,7 @@ export default function App() {
         ?? liveConns[tab.connId]?.engine ?? D.byId[tab.connId]?.engine
       const system: ChatMsg = {
         role: 'system',
-        content: `${buildAgentSystemPrompt(agentMode, hostName, tabEngine, executionMode)}${sysinfoBlock}${termBlock}`,
+        content: `${buildAgentSystemPrompt(agentMode, hostName, tabEngine, executionMode, config.singleLineCommands)}${sysinfoBlock}${termBlock}`,
       }
       const outgoing: ChatMsg[] = [
         system,
@@ -1842,7 +1842,9 @@ export default function App() {
             feedback = [
               'TOOL_FORMAT_ERROR: No command was executed from the previous response.',
               plan.reason,
-              'If the original task still needs terminal work, reply with exactly one non-empty single-line command in one closed fenced sh or powershell block. Otherwise give the final conclusion without a command block.',
+              config.singleLineCommands
+                ? 'If the original task still needs terminal work, reply with exactly one non-empty single-line command in one closed fenced sh or powershell block. Otherwise give the final conclusion without a command block.'
+                : 'If the original task still needs terminal work, reply with exactly one non-empty command block in one closed fenced sh or powershell block. The command block may contain multiple lines. Otherwise give the final conclusion without a command block.',
             ].join('\n')
           } else {
             let result: TerminalCommandResult
@@ -1892,9 +1894,9 @@ export default function App() {
             appendAgentRunWarning(convId, t('panels.agentRunFollowUpFailed'))
             return null
           }
-        })
+        }, { singleLineCommands: config.singleLineCommands, maxSteps: config.maxShellSteps })
         if (limitReached && !controller.signal.aborted) {
-          appendAgentRunWarning(convId, t('panels.agentRunLimitReached'))
+          appendAgentRunWarning(convId, t('panels.agentRunLimitReached', { count: config.maxShellSteps }))
         }
       }
     } catch (err) {

@@ -21,6 +21,8 @@ describe('Agent config persistence migration', () => {
       anthropicAuthMode: 'auto',
       model: 'legacy-model',
       executionMode: 'manual',
+      singleLineCommands: true,
+      maxShellSteps: 8,
     })
   })
 
@@ -33,6 +35,22 @@ describe('Agent config persistence migration', () => {
     vi.resetModules()
     const freshStore = await import('./agentConfig')
     expect(freshStore.getAgentConfig().executionMode).toBe('manual')
+  })
+
+  it('persists command formatting and loop limits while clamping invalid stored limits', async () => {
+    const { getAgentConfig, setAgentConfig } = await import('./agentConfig')
+    setAgentConfig({ singleLineCommands: false, maxShellSteps: 12 })
+
+    expect(getAgentConfig()).toMatchObject({ singleLineCommands: false, maxShellSteps: 12 })
+    expect(JSON.parse(localStorage.getItem('catio-agent-config') ?? '{}')).toMatchObject({
+      singleLineCommands: false,
+      maxShellSteps: 12,
+    })
+
+    localStorage.setItem('catio-agent-config', JSON.stringify({ maxShellSteps: 999 }))
+    vi.resetModules()
+    const freshStore = await import('./agentConfig')
+    expect(freshStore.getAgentConfig().maxShellSteps).toBe(20)
   })
 
   it('provides ready-to-use Zhipu and Kimi endpoints', async () => {

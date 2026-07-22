@@ -11,7 +11,10 @@ import {
   MODEL_PROVIDER_PRESETS,
   useAgentConfig,
   clearStoredCredentials,
+  MIN_AGENT_SHELL_STEPS,
+  MAX_AGENT_SHELL_STEPS,
   type AgentConfig,
+  type AgentExecutionMode,
   type ModelProvider,
 } from '../../state/agentConfig'
 import { forgetAllSecrets } from '../../state/vault'
@@ -173,13 +176,13 @@ function ThemeSettings({ theme, onTheme }: ThemeSettingsProps) {
 }
 
 // Compact −/＋ stepper for discrete numeric prefs (e.g. terminal font size).
-function Stepper({ value, onDec, onInc, atMin, atMax }: { value: string; onDec: () => void; onInc: () => void; atMin: boolean; atMax: boolean }) {
+function Stepper({ value, onDec, onInc, atMin, atMax, decreaseLabel, increaseLabel }: { value: string; onDec: () => void; onInc: () => void; atMin: boolean; atMax: boolean; decreaseLabel?: string; increaseLabel?: string }) {
   const btn: React.CSSProperties = { width: 28, height: 28, borderRadius: 8, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', color: 'var(--text-secondary)', fontSize: 16, lineHeight: 1, display: 'grid', placeItems: 'center' }
   return (
     <div className="row gap6" style={{ alignItems: 'center' }}>
-      <button style={{ ...btn, opacity: atMin ? 0.4 : 1, cursor: atMin ? 'default' : 'pointer' }} disabled={atMin} onClick={onDec}>−</button>
+      <button aria-label={decreaseLabel} style={{ ...btn, opacity: atMin ? 0.4 : 1, cursor: atMin ? 'default' : 'pointer' }} disabled={atMin} onClick={onDec}>−</button>
       <span className="chip mono" style={{ minWidth: 58, justifyContent: 'center' }}>{value}</span>
-      <button style={{ ...btn, opacity: atMax ? 0.4 : 1, cursor: atMax ? 'default' : 'pointer' }} disabled={atMax} onClick={onInc}>＋</button>
+      <button aria-label={increaseLabel} style={{ ...btn, opacity: atMax ? 0.4 : 1, cursor: atMax ? 'default' : 'pointer' }} disabled={atMax} onClick={onInc}>＋</button>
     </div>
   )
 }
@@ -744,6 +747,7 @@ function AgentConfigBlock() {
 function AISettings() {
   const { t } = useTranslation()
   const { prefs, update } = usePrefs()
+  const { config: agentConfig, update: updateAgentConfig } = useAgentConfig()
   const opts = TERM_BUFFER_LINE_OPTIONS
   const lineIdx = Math.max(0, opts.indexOf(prefs.termBufferLines as typeof opts[number]))
   const stepLines = (dir: number) => {
@@ -758,10 +762,29 @@ function AISettings() {
           <div className="row gap8" style={{ alignItems: 'center' }}>
             {prefs.termBufferEnabled && (
               <Stepper value={t('settings.aiTermBufferLines', { count: prefs.termBufferLines })}
-                onDec={() => stepLines(-1)} onInc={() => stepLines(1)} atMin={lineIdx === 0} atMax={lineIdx === opts.length - 1} />
+                onDec={() => stepLines(-1)} onInc={() => stepLines(1)} atMin={lineIdx === 0} atMax={lineIdx === opts.length - 1}
+                decreaseLabel={t('settings.aiTermBufferDecrease')} increaseLabel={t('settings.aiTermBufferIncrease')} />
             )}
-            <Toggle on={prefs.termBufferEnabled} onChange={v => update({ termBufferEnabled: v })} />
+            <Toggle on={prefs.termBufferEnabled} onChange={v => update({ termBufferEnabled: v })} ariaLabel={t('settings.aiTermBuffer')} />
           </div>
+        } />
+      <SettingRow icon="shield" title={t('settings.agentExecutionMode')} desc={t('settings.agentExecutionModeDesc')}
+        control={
+          <Segmented value={agentConfig.executionMode} onChange={value => updateAgentConfig({ executionMode: value as AgentExecutionMode })} options={[
+            { value: 'manual', label: t('panels.agentExecutionManual') },
+            { value: 'ask', label: t('panels.agentExecutionAsk') },
+            { value: 'auto', label: t('panels.agentExecutionAuto') },
+          ]} />
+        } />
+      <SettingRow icon="code" title={t('settings.agentSingleLineCommands')} desc={t('settings.agentSingleLineCommandsDesc')}
+        control={<Toggle on={agentConfig.singleLineCommands} onChange={value => updateAgentConfig({ singleLineCommands: value })} ariaLabel={t('settings.agentSingleLineCommands')} />} />
+      <SettingRow icon="refresh-cw" title={t('settings.agentMaxShellSteps')} desc={t('settings.agentMaxShellStepsDesc')}
+        control={
+          <Stepper value={t('settings.agentShellSteps', { count: agentConfig.maxShellSteps })}
+            onDec={() => updateAgentConfig({ maxShellSteps: Math.max(MIN_AGENT_SHELL_STEPS, agentConfig.maxShellSteps - 1) })}
+            onInc={() => updateAgentConfig({ maxShellSteps: Math.min(MAX_AGENT_SHELL_STEPS, agentConfig.maxShellSteps + 1) })}
+            atMin={agentConfig.maxShellSteps <= MIN_AGENT_SHELL_STEPS} atMax={agentConfig.maxShellSteps >= MAX_AGENT_SHELL_STEPS}
+            decreaseLabel={t('settings.agentMaxShellStepsDecrease')} increaseLabel={t('settings.agentMaxShellStepsIncrease')} />
         } />
     </Block>
   )

@@ -52,6 +52,7 @@ export interface ToggleProps {
   onChange?: (value: boolean) => void
   size?: 'sm' | 'md'
   accent?: boolean
+  ariaLabel?: string
 }
 
 export interface ChipProps {
@@ -128,10 +129,10 @@ export function IconBtn({ name, size = 16, variant = '', onClick, title, style, 
   )
 }
 
-export function Toggle({ on, onChange, size = 'md', accent }: ToggleProps) {
+export function Toggle({ on, onChange, size = 'md', accent, ariaLabel }: ToggleProps) {
   return (
     <div className={`toggle ${size === 'sm' ? 'sm' : ''} ${on ? 'on' : ''} ${accent ? 'accent' : ''}`}
-      onClick={(e) => { e.stopPropagation(); onChange && onChange(!on) }} role="switch" aria-checked={on}>
+      onClick={(e) => { e.stopPropagation(); onChange && onChange(!on) }} role="switch" aria-checked={on} aria-label={ariaLabel}>
       <div className="knob" />
     </div>
   )

@@ -36,7 +36,13 @@ export interface AgentConfig {
   anthropicAuthMode: AnthropicAuthMode
   model: string
   executionMode: AgentExecutionMode
+  singleLineCommands: boolean
+  maxShellSteps: number
 }
+
+export const DEFAULT_AGENT_SHELL_STEPS = 8
+export const MIN_AGENT_SHELL_STEPS = 1
+export const MAX_AGENT_SHELL_STEPS = 20
 
 export const DEFAULT_AGENT_CONFIG: AgentConfig = {
   provider: 'deepseek',
@@ -45,6 +51,8 @@ export const DEFAULT_AGENT_CONFIG: AgentConfig = {
   anthropicAuthMode: 'auto',
   model: '',
   executionMode: 'manual',
+  singleLineCommands: true,
+  maxShellSteps: DEFAULT_AGENT_SHELL_STEPS,
 }
 
 const STORAGE_KEY = 'catio-agent-config'
@@ -81,6 +89,12 @@ function readFromStorage(): AgentConfig {
       // Execution permission is session-only. Restarting Catio always returns to
       // the safest default instead of preserving a stale Full Access grant.
       executionMode: 'manual',
+      singleLineCommands: typeof parsed.singleLineCommands === 'boolean'
+        ? parsed.singleLineCommands
+        : DEFAULT_AGENT_CONFIG.singleLineCommands,
+      maxShellSteps: typeof parsed.maxShellSteps === 'number' && Number.isFinite(parsed.maxShellSteps)
+        ? Math.min(MAX_AGENT_SHELL_STEPS, Math.max(MIN_AGENT_SHELL_STEPS, Math.round(parsed.maxShellSteps)))
+        : DEFAULT_AGENT_SHELL_STEPS,
     }
   } catch {
     return { ...DEFAULT_AGENT_CONFIG }
@@ -96,6 +110,8 @@ function writeToStorage(cfg: AgentConfig): void {
       apiKey: cfg.apiKey,
       anthropicAuthMode: cfg.anthropicAuthMode,
       model: cfg.model,
+      singleLineCommands: cfg.singleLineCommands,
+      maxShellSteps: cfg.maxShellSteps,
     }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(persisted))
   } catch { /* ignore quota errors */ }

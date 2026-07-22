@@ -12,6 +12,8 @@ const BASE_OLLAMA_CFG: AgentConfig = {
   anthropicAuthMode: 'api-key',
   model: '',
   executionMode: 'manual',
+  singleLineCommands: true,
+  maxShellSteps: 8,
 }
 
 const BASE_OPENAI_CFG: AgentConfig = {
@@ -21,6 +23,8 @@ const BASE_OPENAI_CFG: AgentConfig = {
   anthropicAuthMode: 'api-key',
   model: '',
   executionMode: 'manual',
+  singleLineCommands: true,
+  maxShellSteps: 8,
 }
 
 const BASE_DEEPSEEK_CFG: AgentConfig = {

@@ -19,6 +19,12 @@ describe('buildAgentSystemPrompt', () => {
     expect(p).toContain('Before receiving TERMINAL_RESULT')
   })
 
+  it('allows a multi-line command block when the single-line limit is disabled', () => {
+    const p = buildAgentSystemPrompt('shell', 'prod-web-01', undefined, 'ask', false)
+    expect(p).toContain('A multi-line command block is allowed')
+    expect(p).not.toContain('exactly one single-line command')
+  })
+
   it('mongodb → instructs runnable mongo shell expressions, not a CLI wrapper', () => {
     const p = buildAgentSystemPrompt('sql', '253-Copilot', 'mongodb')
     expect(p).toContain('MongoDB')

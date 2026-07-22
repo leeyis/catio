@@ -8,6 +8,8 @@ const config = (patch: Partial<AgentConfig> = {}): AgentConfig => ({
   anthropicAuthMode: 'api-key',
   model: 'm',
   executionMode: 'manual',
+  singleLineCommands: true,
+  maxShellSteps: 8,
   ...patch,
 })
 
