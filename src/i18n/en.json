@@ -1047,8 +1047,6 @@
     "aiTermBufferLines": "{{count}} lines",
     "aiTermBufferDecrease": "Decrease terminal buffer lines",
     "aiTermBufferIncrease": "Increase terminal buffer lines",
-    "agentExecutionMode": "Execution mode",
-    "agentExecutionModeDesc": "Manual only generates commands; semi-auto asks only for high-risk operations; full access does not ask. Restarting always returns to Manual.",
     "agentSingleLineCommands": "Single-line command limit",
     "agentSingleLineCommandsDesc": "When enabled, each round accepts one line only (recommended for reliable result capture); disable to allow multi-line command blocks.",
     "agentMaxShellSteps": "Maximum execution rounds per session",

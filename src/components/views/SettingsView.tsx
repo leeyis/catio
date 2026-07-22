@@ -14,7 +14,6 @@ import {
   MIN_AGENT_SHELL_STEPS,
   MAX_AGENT_SHELL_STEPS,
   type AgentConfig,
-  type AgentExecutionMode,
   type ModelProvider,
 } from '../../state/agentConfig'
 import { forgetAllSecrets } from '../../state/vault'
@@ -767,14 +766,6 @@ function AISettings() {
             )}
             <Toggle on={prefs.termBufferEnabled} onChange={v => update({ termBufferEnabled: v })} ariaLabel={t('settings.aiTermBuffer')} />
           </div>
-        } />
-      <SettingRow icon="shield" title={t('settings.agentExecutionMode')} desc={t('settings.agentExecutionModeDesc')}
-        control={
-          <Segmented value={agentConfig.executionMode} onChange={value => updateAgentConfig({ executionMode: value as AgentExecutionMode })} options={[
-            { value: 'manual', label: t('panels.agentExecutionManual') },
-            { value: 'ask', label: t('panels.agentExecutionAsk') },
-            { value: 'auto', label: t('panels.agentExecutionAuto') },
-          ]} />
         } />
       <SettingRow icon="code" title={t('settings.agentSingleLineCommands')} desc={t('settings.agentSingleLineCommandsDesc')}
         control={<Toggle on={agentConfig.singleLineCommands} onChange={value => updateAgentConfig({ singleLineCommands: value })} ariaLabel={t('settings.agentSingleLineCommands')} />} />

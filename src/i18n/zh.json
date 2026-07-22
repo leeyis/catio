@@ -1047,8 +1047,6 @@
     "aiTermBufferLines": "{{count}} 行",
     "aiTermBufferDecrease": "减少终端缓冲行数",
     "aiTermBufferIncrease": "增加终端缓冲行数",
-    "agentExecutionMode": "执行模式",
-    "agentExecutionModeDesc": "手动仅生成命令；半自动仅在高风险操作前确认；全自动不确认。重启后始终回到手动模式。",
     "agentSingleLineCommands": "单行命令限制",
     "agentSingleLineCommandsDesc": "开启时每轮只接受一行命令（推荐，便于可靠捕获结果）；关闭后允许多行命令块。",
     "agentMaxShellSteps": "单会话最大执行轮数",
