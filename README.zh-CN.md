@@ -303,5 +303,6 @@ Catio 基于 [MIT License](LICENSE) 开源发布。
 - [`russh`](https://github.com/Eugeny/russh) 与 [Reach](https://github.com/alexandrosnt/Reach) 为 SSH/SFTP/隧道设计提供参考。
 - [dbx](https://github.com/t8y2/dbx) 为数据库侧实现模式提供参考。
 - [xterm.js](https://xtermjs.org) 与 [CodeMirror](https://codemirror.net) 提供终端和编辑器基础。
+- 感谢 [Linux.do](https://linux.do/) 社区提供的讨论、反馈与支持。
 
 <div align="center"><sub>为常年在 shell prompt 与 query console 之间切换的人打造。</sub></div>

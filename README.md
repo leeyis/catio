@@ -303,5 +303,6 @@ Catio is released under the [MIT License](LICENSE).
 - [`russh`](https://github.com/Eugeny/russh) and [Reach](https://github.com/alexandrosnt/Reach) as references for SSH/SFTP/tunneling ideas.
 - [dbx](https://github.com/t8y2/dbx) as a reference for database-side patterns.
 - [xterm.js](https://xtermjs.org) and [CodeMirror](https://codemirror.net) for the terminal and editor foundations.
+- Thanks to the [Linux.do](https://linux.do/) community for its discussions, feedback, and support.
 
 <div align="center"><sub>Built for people who live between the shell prompt and the query console.</sub></div>
