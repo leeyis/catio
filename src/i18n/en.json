@@ -632,6 +632,7 @@
     "agentNeedConnTitle": "Connect a host or database first",
     "agentNeedConnHint": "Catio Agent follows the active terminal or database tab. Once connected, generate commands / SQL, explain, and troubleshoot right here.",
     "agentThinking": "Thinking…",
+    "agentThought": "Reasoning",
     "agentError": "Error: {{message}}",
     "send": "Send",
     "stop": "Stop",

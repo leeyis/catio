@@ -288,9 +288,66 @@ interface AssistantMessageProps {
   conn?: Connection
   onInsert?: (code: string) => void
   canInsert?: boolean
+  isStreaming?: boolean
 }
 
-function AssistantMessage({ text, mode, conn, onInsert, canInsert }: AssistantMessageProps) {
+const REASONING_TAGS = ['think', 'thinking', 'reasoning', 'thought', 'seed:think'] as const
+
+function splitReasoning(text: string, isStreaming: boolean) {
+  const source = text.trimStart()
+  const lower = source.toLowerCase()
+  if (isStreaming && lower && REASONING_TAGS.some(tag => `<${tag}>`.startsWith(lower))) {
+    return { reasoning: '', answer: '', hasReasoning: true, isThinking: true }
+  }
+
+  const open = /^<(think|thinking|reasoning|thought|seed:think)>\s*/i.exec(source)
+  if (!open) return { reasoning: '', answer: text, hasReasoning: false, isThinking: false }
+
+  const body = source.slice(open[0].length)
+  const close = new RegExp(`</${open[1]}>`, 'i').exec(body)
+  if (!close) {
+    return { reasoning: body.trim(), answer: '', hasReasoning: true, isThinking: isStreaming }
+  }
+  return {
+    reasoning: body.slice(0, close.index).trim(),
+    answer: body.slice(close.index + close[0].length).trimStart(),
+    hasReasoning: true,
+    isThinking: false,
+  }
+}
+
+interface ThinkingBlockProps {
+  content: string
+  isThinking: boolean
+  components: Components
+}
+
+function ThinkingBlock({ content, isThinking, components }: ThinkingBlockProps) {
+  const { t } = useTranslation()
+  const [expanded, setExpanded] = useState(isThinking)
+
+  useEffect(() => setExpanded(isThinking), [isThinking])
+
+  const label = t(isThinking ? 'panels.agentThinking' : 'panels.agentThought')
+  return (
+    <details open={expanded} onToggle={event => setExpanded(event.currentTarget.open)}
+      style={{ width: '100%', border: '1px solid var(--border-hairline-alt)', borderRadius: 12, background: 'var(--surface-subtle)', overflow: 'hidden' }}>
+      <summary title={label}
+        style={{ width: '100%', minHeight: 38, display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', border: 'none', background: 'transparent', color: 'var(--text-tertiary)', cursor: 'pointer', textAlign: 'left' }}>
+        <Icon name={isThinking ? 'loader' : 'sparkles'} size={13}
+          style={{ flex: 'none', color: isThinking ? 'var(--accent-primary)' : 'var(--text-faint)', animation: isThinking ? 'spin 1s linear infinite' : undefined }} />
+        <span style={{ flex: 1, fontSize: 12.5, fontWeight: 600, color: 'var(--text-secondary)' }}>{label}</span>
+        <Icon name="chevron-down" size={13}
+          style={{ flex: 'none', color: 'var(--text-faint)', transition: 'transform .15s', transform: expanded ? 'rotate(180deg)' : 'none' }} />
+      </summary>
+      <div style={{ maxHeight: 180, overflowY: 'auto', padding: '2px 10px 9px', borderTop: '1px solid var(--border-hairline)', background: 'var(--surface-card)' }}>
+        {content && <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>{content}</ReactMarkdown>}
+      </div>
+    </details>
+  )
+}
+
+function AssistantMessage({ text, mode, conn, onInsert, canInsert, isStreaming = false }: AssistantMessageProps) {
   // Memoize components so react-markdown doesn't remount its subtree on every token update.
   // onInsert and canInsert are stable per conversation turn, so this is safe.
   const components = useMemo(
@@ -298,11 +355,13 @@ function AssistantMessage({ text, mode, conn, onInsert, canInsert }: AssistantMe
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [mode, conn, onInsert, canInsert],
   )
+  const parts = splitReasoning(text, isStreaming)
   return (
     <div className="col gap4" style={{ maxWidth: '94%' }}>
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
-        {text}
-      </ReactMarkdown>
+      {parts.hasReasoning && (parts.reasoning || parts.isThinking) && (
+        <ThinkingBlock content={parts.reasoning} isThinking={parts.isThinking} components={components} />
+      )}
+      {parts.answer && <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>{parts.answer}</ReactMarkdown>}
     </div>
   )
 }
@@ -602,7 +661,8 @@ export function AIPanel({ onClose, mode = 'sql', conn, connId, engine, attachmen
         <div ref={scrollRef} className="grow" style={{ overflowY: 'auto', padding: '14px 12px', display: 'flex', flexDirection: 'column', gap: 14 }}>
           {msgs.map((m, i) => m.role === 'user'
             ? <div key={i} style={{ alignSelf: 'flex-end', maxWidth: '88%', background: 'var(--accent-primary)', color: 'var(--on-accent)', padding: '9px 12px', borderRadius: '14px 14px 4px 14px', fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{m.content}</div>
-            : <AssistantMessage key={i} text={m.content} mode={mode} conn={conn} onInsert={onInsert} canInsert={canInsert} />)}
+            : <AssistantMessage key={i} text={m.content} mode={mode} conn={conn} onInsert={onInsert} canInsert={canInsert}
+                isStreaming={busy && i === msgs.length - 1} />)}
           {busy && msgs.length > 0 && msgs[msgs.length - 1].content === '' && (
             <div className="row gap6" style={{ color: 'var(--text-tertiary)', fontSize: 12 }}>
               <Icon name="loader" size={13} style={{ animation: 'spin 1s linear infinite' }} /> {t('panels.agentThinking')}

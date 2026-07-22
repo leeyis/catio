@@ -60,6 +60,36 @@ describe('AIPanel controlled conversation view', () => {
     expect(screen.getByText('world')).toBeTruthy() // inside <strong>
   })
 
+  it('separates completed reasoning from the answer and lets the user expand it', () => {
+    const { container } = wrap(<AIPanel onClose={() => {}} mode="shell" conn={hostConn} attachment={null} onClearAttachment={() => {}}
+      conversation={conv([{ role: 'assistant', content: '<think>check the service logs</think>\n\n## Result\n\nRunning' }])} />)
+    const details = screen.getByText('思考过程').closest('details') as HTMLDetailsElement
+    expect(details.open).toBe(false)
+    expect(screen.getByRole('heading', { name: 'Result' })).toBeTruthy()
+    expect(container.textContent).not.toContain('<think>')
+    fireEvent.click(details.querySelector('summary')!)
+    expect(details.open).toBe(true)
+    expect(screen.getByText('check the service logs')).toBeTruthy()
+  })
+
+  it('shows streaming reasoning in a fixed block and collapses it when the answer starts', () => {
+    const panel = (content: string, busy: boolean) => (
+      <LanguageProvider>
+        <AIPanel onClose={() => {}} mode="shell" conn={hostConn} attachment={null} onClearAttachment={() => {}}
+          conversation={conv([{ role: 'assistant', content }])} busy={busy} />
+      </LanguageProvider>
+    )
+    const { rerender } = render(panel('<think>checking **status**', true))
+    let details = screen.getByText('思考中…').closest('details') as HTMLDetailsElement
+    expect(details.open).toBe(true)
+    expect(screen.getByText('status')).toBeTruthy()
+
+    rerender(panel('<think>checking **status**</think>\n\nService is healthy', false))
+    details = screen.getByText('思考过程').closest('details') as HTMLDetailsElement
+    expect(details.open).toBe(false)
+    expect(screen.getByText('Service is healthy')).toBeTruthy()
+  })
+
   it('typing and sending calls onSend with the draft text', () => {
     const onSend = vi.fn()
     wrap(<AIPanel onClose={() => {}} mode="shell" conn={hostConn} attachment={null} onClearAttachment={() => {}}

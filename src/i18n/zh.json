@@ -632,6 +632,7 @@
     "agentNeedConnTitle": "请先连接主机或数据库",
     "agentNeedConnHint": "Catio Agent 跟随当前激活的终端或数据库标签工作。连接后即可在这里生成命令 / SQL、解释与排错。",
     "agentThinking": "思考中…",
+    "agentThought": "思考过程",
     "agentError": "出错了：{{message}}",
     "send": "发送",
     "stop": "停止",
