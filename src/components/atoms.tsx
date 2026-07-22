@@ -44,6 +44,7 @@ export interface IconBtnProps {
   title?: string
   style?: React.CSSProperties
   active?: boolean
+  disabled?: boolean
 }
 
 export interface ToggleProps {
@@ -118,10 +119,10 @@ export function Btn({ variant = 'secondary', size = 'md', icon, iconR, children,
   )
 }
 
-export function IconBtn({ name, size = 16, variant = '', onClick, title, style, active }: IconBtnProps) {
+export function IconBtn({ name, size = 16, variant = '', onClick, title, style, active, disabled }: IconBtnProps) {
   return (
     <button className={`icon-btn ${variant}`} onClick={onClick} title={title} style={style}
-      data-active={active ? '1' : undefined}>
+      data-active={active ? '1' : undefined} disabled={disabled}>
       <Icon name={name} size={size} />
     </button>
   )

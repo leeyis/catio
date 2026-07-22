@@ -1,4 +1,4 @@
-import type { AgentConfig } from '../state/agentConfig'
+import { MODEL_PROVIDER_PRESETS, type AgentConfig } from '../state/agentConfig'
 
 // ---- Tauri guard (same pattern as src/components/shell/Sidebar.tsx) ----
 const isTauri: boolean =
@@ -19,13 +19,27 @@ export function trimSlash(url: string): string {
   return url.replace(/\/+$/, '')
 }
 
-/**
- * 规范化 OpenAI-compatible 服务端点：去掉尾部斜杠并剥离已有的 `/v1` 后缀。
- * 这样无论用户填 `https://api.openai.com` 还是 `https://api.openai.com/v1`,
- * 再拼接 `/v1/...` 都不会出现 `/v1/v1`。
- */
-export function openaiBase(url: string): string {
-  return trimSlash(url).replace(/\/v1$/i, '')
+/** Append `/v1` for native OpenAI/Anthropic endpoints while preserving custom
+ * versioned endpoints and DeepSeek's official unversioned base URL. */
+export function providerApiBase(cfg: AgentConfig): string {
+  const base = trimSlash(cfg.baseUrl)
+  if (cfg.provider === 'ollama' || cfg.provider === 'deepseek' || /\/v1$/i.test(base)) return base
+  return `${base}/v1`
+}
+
+export function apiHeaders(cfg: AgentConfig, json = false): Record<string, string> {
+  const protocol = MODEL_PROVIDER_PRESETS[cfg.provider].protocol
+  const headers: Record<string, string> = json ? { 'Content-Type': 'application/json' } : {}
+  if (protocol === 'anthropic') {
+    headers['anthropic-version'] = '2023-06-01'
+    if (cfg.apiKey) {
+      if (cfg.anthropicAuthMode === 'auth-token') headers['Authorization'] = `Bearer ${cfg.apiKey}`
+      else headers['x-api-key'] = cfg.apiKey
+    }
+  } else if (protocol === 'openai' && cfg.apiKey) {
+    headers['Authorization'] = `Bearer ${cfg.apiKey}`
+  }
+  return headers
 }
 
 function isOllamaTagsResponse(v: unknown): v is OllamaTagsResponse {
@@ -77,6 +91,10 @@ interface OpenAIChatResponse {
   choices: Array<{ message: { content: string } }>
 }
 
+interface AnthropicChatResponse {
+  content: Array<{ type: string; text?: string }>
+}
+
 function isOllamaChatResponse(v: unknown): v is OllamaChatResponse {
   return (
     typeof v === 'object' &&
@@ -96,6 +114,15 @@ function isOpenAIChatResponse(v: unknown): v is OpenAIChatResponse {
   )
 }
 
+function isAnthropicChatResponse(v: unknown): v is AnthropicChatResponse {
+  return (
+    typeof v === 'object' &&
+    v !== null &&
+    'content' in v &&
+    Array.isArray((v as AnthropicChatResponse).content)
+  )
+}
+
 export async function testModel(cfg: AgentConfig): Promise<ModelTestResult> {
   if (!cfg.model) {
     return { ok: false, latencyMs: 0, error: 'no-model' }
@@ -103,10 +130,11 @@ export async function testModel(cfg: AgentConfig): Promise<ModelTestResult> {
 
   const fetcher = await resolveFetch()
   const start = Date.now()
+  const protocol = MODEL_PROVIDER_PRESETS[cfg.provider].protocol
 
   try {
-    if (cfg.provider === 'ollama') {
-      const base = trimSlash(cfg.ollamaBaseUrl)
+    if (protocol === 'ollama') {
+      const base = trimSlash(cfg.baseUrl)
       const url = `${base}/api/chat`
       const body = JSON.stringify({
         model: cfg.model,
@@ -132,20 +160,12 @@ export async function testModel(cfg: AgentConfig): Promise<ModelTestResult> {
       return { ok: true, latencyMs, reply }
     }
 
-    // OpenAI-compatible
-    const base = openaiBase(cfg.openaiBaseUrl)
-    const url = `${base}/v1/chat/completions`
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-    if (cfg.openaiKey) {
-      headers['Authorization'] = `Bearer ${cfg.openaiKey}`
-    }
-    const body = JSON.stringify({
-      model: cfg.model,
-      messages: [{ role: 'user', content: 'ping' }],
-      max_tokens: 16,
-      temperature: 0,
-      stream: false,
-    })
+    const base = providerApiBase(cfg)
+    const url = protocol === 'anthropic' ? `${base}/messages` : `${base}/chat/completions`
+    const headers = apiHeaders(cfg, true)
+    const body = protocol === 'anthropic'
+      ? JSON.stringify({ model: cfg.model, messages: [{ role: 'user', content: 'ping' }], max_tokens: 16, stream: false })
+      : JSON.stringify({ model: cfg.model, messages: [{ role: 'user', content: 'ping' }], max_tokens: 16, temperature: 0, stream: false })
     const resp = await fetcher(url, { method: 'POST', headers, body })
     const latencyMs = Date.now() - start
     if (!resp.ok) {
@@ -157,7 +177,9 @@ export async function testModel(cfg: AgentConfig): Promise<ModelTestResult> {
       return { ok: false, latencyMs, error: `HTTP ${resp.status}${detail ? ': ' + detail : ''}` }
     }
     const json: unknown = await resp.json()
-    const reply = isOpenAIChatResponse(json) ? json.choices[0].message.content : undefined
+    const reply = protocol === 'anthropic'
+      ? (isAnthropicChatResponse(json) ? json.content.find(block => block.type === 'text')?.text : undefined)
+      : (isOpenAIChatResponse(json) ? json.choices[0].message.content : undefined)
     return { ok: true, latencyMs, reply }
   } catch (err) {
     const latencyMs = Date.now() - start
@@ -168,9 +190,10 @@ export async function testModel(cfg: AgentConfig): Promise<ModelTestResult> {
 
 export async function fetchModels(cfg: AgentConfig): Promise<string[]> {
   const fetcher = await resolveFetch()
+  const protocol = MODEL_PROVIDER_PRESETS[cfg.provider].protocol
 
-  if (cfg.provider === 'ollama') {
-    const base = trimSlash(cfg.ollamaBaseUrl)
+  if (protocol === 'ollama') {
+    const base = trimSlash(cfg.baseUrl)
     const url = `${base}/api/tags`
     const resp = await fetcher(url)
     if (!resp.ok) {
@@ -183,20 +206,16 @@ export async function fetchModels(cfg: AgentConfig): Promise<string[]> {
     return json.models.map(m => m.name)
   }
 
-  // OpenAI-compatible
-  const base = openaiBase(cfg.openaiBaseUrl)
-  const url = `${base}/v1/models`
-  const headers: Record<string, string> = {}
-  if (cfg.openaiKey) {
-    headers['Authorization'] = `Bearer ${cfg.openaiKey}`
-  }
+  const url = `${providerApiBase(cfg)}/models`
+  const headers = apiHeaders(cfg)
   const resp = await fetcher(url, { headers })
   if (!resp.ok) {
-    throw new Error(`OpenAI fetch failed: ${resp.status} ${resp.statusText}`)
+    const providerName = cfg.provider === 'deepseek' ? 'DeepSeek' : cfg.provider === 'anthropic' ? 'Anthropic' : 'OpenAI'
+    throw new Error(`${providerName} fetch failed: ${resp.status} ${resp.statusText}`)
   }
   const json: unknown = await resp.json()
   if (!isOpenAIModelsResponse(json)) {
-    throw new Error('OpenAI response format unexpected')
+    throw new Error('Model response format unexpected')
   }
   return json.data.map(d => d.id).sort()
 }

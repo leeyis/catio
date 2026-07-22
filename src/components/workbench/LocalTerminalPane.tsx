@@ -526,13 +526,13 @@ export function LocalTerminalPane({ conn, active, onHistory, onChannel, split }:
     // (用户反馈:插入有效、运行无反应)。本地一个 tab 仅一个终端,无分屏误发风险。
     function onInsert(e: Event) {
       if (!activeRef.current) return
-      const text = (e as CustomEvent<{ text?: string }>).detail?.text
-      if (typeof text === 'string') writeToPty(text)
+      const detail = (e as CustomEvent<{ kind?: string; text?: string }>).detail
+      if (detail?.kind === 'shell' && typeof detail.text === 'string') writeToPty(detail.text)
     }
     function onRun(e: Event) {
       if (!activeRef.current) return
-      const text = (e as CustomEvent<{ text?: string }>).detail?.text
-      if (typeof text === 'string') { writeToPty(text); writeToPty('\r') }
+      const detail = (e as CustomEvent<{ kind?: string; text?: string }>).detail
+      if (detail?.kind === 'shell' && typeof detail.text === 'string') { writeToPty(detail.text); writeToPty('\r') }
     }
     window.addEventListener('catio-insert', onInsert)
     window.addEventListener('catio-run', onRun)

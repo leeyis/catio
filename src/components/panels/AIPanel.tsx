@@ -372,13 +372,18 @@ interface MentionTable {
 
 export function AIPanel({ onClose, mode = 'sql', conn, connId, engine, attachment, onClearAttachment, onInsert, canInsert, onOpenSettings, conversation, busy = false, history = [], onSend, onAbort, onNewConversation, onRestoreConversation, onDeleteConversation }: AIPanelProps) {
   const { t } = useTranslation()
-  const { config: cfg } = useAgentConfig()
+  const { config: cfg, update: updateAgentConfig } = useAgentConfig()
   const isSql = mode !== 'shell'
   // Strictly follows the active workbench tab — no mock fallback. When there is
   // no active host/db tab, the panel shows a connect-first empty state instead.
   const hasTarget = !!conn
   const target = conn?.name ?? ''
   const accent = isSql ? 'var(--signal-blue)' : 'var(--signal-amber)'
+  const executionHint = {
+    manual: t('panels.agentExecutionManualHint'),
+    ask: t('panels.agentExecutionAskHint'),
+    auto: t('panels.agentExecutionAutoHint'),
+  }[cfg.executionMode]
   const [draft, setDraft] = useState('')
   const [histOpen, setHistOpen] = useState(false)
   const taRef = useRef<HTMLTextAreaElement>(null)
@@ -461,6 +466,7 @@ export function AIPanel({ onClose, mode = 'sql', conn, connId, engine, attachmen
       }
       setSelectedTables([])
     }
+    setHistOpen(false)
     onSend?.(userContent, { hasSelection })
     setDraft('')
   }
@@ -479,9 +485,9 @@ export function AIPanel({ onClose, mode = 'sql', conn, connId, engine, attachmen
       actions={hasTarget
         ? (
           <>
-            <IconBtn name="plus" size={15} variant="bare" title={t('panels.newConversation')} onClick={() => onNewConversation?.()} />
+            <IconBtn name="plus" size={15} variant="bare" title={t('panels.newConversation')} disabled={busy} onClick={() => onNewConversation?.()} />
             <div style={{ position: 'relative' }}>
-              <IconBtn name="history" size={15} variant="bare" title={t('panels.conversationHistory')} active={histOpen} onClick={() => setHistOpen(o => !o)} />
+              <IconBtn name="history" size={15} variant="bare" title={t('panels.conversationHistory')} active={histOpen} disabled={busy} onClick={() => setHistOpen(o => !o)} />
               {histOpen && (
                 <HistoryDropdown history={history} currentId={conversation?.id} onClose={() => setHistOpen(false)}
                   onRestore={onRestoreConversation} onDelete={onDeleteConversation} />
@@ -586,7 +592,20 @@ export function AIPanel({ onClose, mode = 'sql', conn, connId, engine, attachmen
             <div className="row gap4">
               <button className="icon-btn bare" style={{ width: 26, height: 26 }} title={t('panels.attachContext')}><Icon name="plus" size={15} /></button>
               <button className="icon-btn bare" style={{ width: 26, height: 26 }} title={t('panels.selectModel')} onClick={() => onOpenSettings?.()}><Icon name="box" size={14} /></button>
-              <span style={{ fontSize: 11, color: 'var(--text-faint)', alignSelf: 'center' }}>{cfg.model || t('panels.modelInfo')}</span>
+              <span className="ell" style={{ fontSize: 11, color: 'var(--text-faint)', alignSelf: 'center', maxWidth: 84 }}>{cfg.model || t('panels.modelInfo')}</span>
+              {!isSql && <label className="row gap4" title={executionHint} style={{ height: 26, padding: '0 5px', border: '1px solid var(--border-hairline)', borderRadius: 7, color: 'var(--text-tertiary)', background: 'var(--surface-card)' }}>
+                <Icon name="shield" size={12} />
+                <select
+                  aria-label={t('panels.agentExecutionMode')}
+                  value={cfg.executionMode}
+                  onChange={e => updateAgentConfig({ executionMode: e.target.value as 'manual' | 'ask' | 'auto' })}
+                  style={{ maxWidth: 88, border: 'none', outline: 'none', background: 'transparent', color: 'var(--text-secondary)', fontSize: 10.5, cursor: 'pointer' }}
+                >
+                  <option value="manual">{t('panels.agentExecutionManual')}</option>
+                  <option value="ask">{t('panels.agentExecutionAsk')}</option>
+                  <option value="auto">{t('panels.agentExecutionAuto')}</option>
+                </select>
+              </label>}
             </div>
             {busy
               ? <button className="btn sm" style={{ width: 32, padding: 0, background: 'var(--signal-red, #e5484d)', color: '#fff', borderColor: 'var(--signal-red, #e5484d)' }} title={t('panels.stop')} onClick={() => onAbort?.()}><Icon name="square" size={13} /></button>

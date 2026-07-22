@@ -5,7 +5,13 @@ import { Icon } from '../Icon'
 import { BrandMark } from '../BrandMark'
 import { Btn, IconBtn, Toggle, Segmented } from '../atoms'
 import { useLang } from '../../state/LanguageContext'
-import { useAgentConfig, clearStoredCredentials } from '../../state/agentConfig'
+import {
+  MODEL_PROVIDER_ORDER,
+  MODEL_PROVIDER_PRESETS,
+  useAgentConfig,
+  clearStoredCredentials,
+  type ModelProvider,
+} from '../../state/agentConfig'
 import { forgetAllSecrets } from '../../state/vault'
 import { ConfirmModal } from '../modals/ConfirmModal'
 import { usePrefs, UI_FONTS, MONO_FONTS, TERM_FONT_SIZES, TERM_BUFFER_LINE_OPTIONS } from '../../state/preferences'
@@ -347,6 +353,13 @@ function AgentConfigBlock() {
     marginBottom: 8,
   }
 
+  const providerLabels: Record<ModelProvider, string> = {
+    ollama: t('settings.agentProviderOllama'),
+    openai: t('settings.agentProviderOpenai'),
+    deepseek: t('settings.agentProviderDeepseek'),
+    anthropic: t('settings.agentProviderAnthropic'),
+  }
+
   return (
     <div style={{ marginBottom: 20 }}>
       {/* Provider */}
@@ -360,14 +373,27 @@ function AgentConfigBlock() {
               <span style={{ fontSize: 13.5, fontWeight: 600 }}>{t('settings.agentProvider')}</span>
             </div>
           </div>
-          <Segmented
+          <select
+            aria-label={t('settings.agentProvider')}
             value={config.provider}
-            onChange={v => update({ provider: v as 'ollama' | 'openai' })}
-            options={[
-              { value: 'ollama', label: t('settings.agentProviderOllama') },
-              { value: 'openai', label: t('settings.agentProviderOpenai') },
-            ]}
-          />
+            onChange={e => {
+              const provider = e.target.value as ModelProvider
+              update({
+                provider,
+                baseUrl: MODEL_PROVIDER_PRESETS[provider].defaultBaseUrl,
+                apiKey: '',
+                model: '',
+              })
+              setModels([])
+              setFetchError('')
+              setTestResult(null)
+            }}
+            style={{ ...inputStyle, width: 190, cursor: 'pointer' }}
+          >
+            {MODEL_PROVIDER_ORDER.map(provider => (
+              <option key={provider} value={provider}>{providerLabels[provider]}</option>
+            ))}
+          </select>
         </div>
       </div>
 
@@ -377,21 +403,15 @@ function AgentConfigBlock() {
           <span style={labelStyle}>{t('settings.agentEndpointUrl')}</span>
           <input
             style={inputStyle}
-            value={config.provider === 'ollama' ? config.ollamaBaseUrl : config.openaiBaseUrl}
-            onChange={e => {
-              if (config.provider === 'ollama') {
-                update({ ollamaBaseUrl: e.target.value })
-              } else {
-                update({ openaiBaseUrl: e.target.value })
-              }
-            }}
-            placeholder={config.provider === 'ollama' ? 'http://localhost:11434' : 'https://api.openai.com'}
+            value={config.baseUrl}
+            onChange={e => update({ baseUrl: e.target.value })}
+            placeholder={MODEL_PROVIDER_PRESETS[config.provider].defaultBaseUrl}
           />
         </label>
       </div>
 
-      {/* API Key — only for openai */}
-      {config.provider === 'openai' && (
+      {/* API credential — Ollama is local and does not need one. */}
+      {config.provider !== 'ollama' && (
         <div style={rowWrapStyle}>
           <label className="col" style={{ gap: 5 }}>
             <span style={labelStyle}>{t('settings.agentApiKey')}</span>
@@ -399,12 +419,28 @@ function AgentConfigBlock() {
               <Icon name="lock" size={12} style={{ color: 'var(--text-faint)', flex: 'none' }} />
               <input
                 type="password"
-                value={config.openaiKey}
-                onChange={e => update({ openaiKey: e.target.value })}
+                value={config.apiKey}
+                onChange={e => update({ apiKey: e.target.value })}
                 placeholder={t('settings.agentApiKeyPlaceholder')}
                 style={{ flex: 1, height: '100%', border: 'none', background: 'transparent', fontSize: 13, color: 'var(--text-primary)', outline: 'none' }}
               />
             </div>
+          </label>
+        </div>
+      )}
+
+      {config.provider === 'anthropic' && (
+        <div style={rowWrapStyle}>
+          <label className="col" style={{ gap: 5 }}>
+            <span style={labelStyle}>{t('settings.agentAnthropicAuth')}</span>
+            <select
+              value={config.anthropicAuthMode}
+              onChange={e => update({ anthropicAuthMode: e.target.value as 'api-key' | 'auth-token' })}
+              style={{ ...inputStyle, cursor: 'pointer' }}
+            >
+              <option value="api-key">{t('settings.agentAnthropicApiKey')}</option>
+              <option value="auth-token">{t('settings.agentAnthropicAuthToken')}</option>
+            </select>
           </label>
         </div>
       )}

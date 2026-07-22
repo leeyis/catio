@@ -11,9 +11,14 @@ const hostConn: Connection = { id: 'h1', group: '', kind: 'host', name: 'prod-we
 
 // ---- Mocks ----
 
-let mockConfig: AgentConfig = { provider: 'ollama', ollamaBaseUrl: 'http://h', openaiBaseUrl: '', openaiKey: '', model: 'm' }
+const baseConfig = (): AgentConfig => ({
+  provider: 'ollama', baseUrl: 'http://h', apiKey: '', anthropicAuthMode: 'api-key',
+  model: 'm', executionMode: 'manual',
+})
+let mockConfig: AgentConfig = baseConfig()
+const mockUpdate = vi.fn()
 vi.mock('../../state/agentConfig', () => ({
-  useAgentConfig: () => ({ config: mockConfig, update: () => {} }),
+  useAgentConfig: () => ({ config: mockConfig, update: mockUpdate }),
 }))
 
 // db service — drives the "@ 选表" dropdown (getSchema) and DDL context (tableStructure).
@@ -43,7 +48,8 @@ function conv(messages: Conversation['messages'], id = 'c1'): Conversation {
 }
 
 beforeEach(() => {
-  mockConfig = { provider: 'ollama', ollamaBaseUrl: 'http://h', openaiBaseUrl: '', openaiKey: '', model: 'm' }
+  mockConfig = baseConfig()
+  mockUpdate.mockReset()
 })
 
 describe('AIPanel controlled conversation view', () => {
@@ -62,6 +68,13 @@ describe('AIPanel controlled conversation view', () => {
     fireEvent.click(screen.getByTitle('发送'))
     // 发送时附带 hasSelection 标记(无选中文本附件时为 false)
     expect(onSend).toHaveBeenCalledWith('hi', { hasSelection: false })
+  })
+
+  it('changes the persisted execution mode from the composer dropdown', () => {
+    wrap(<AIPanel onClose={() => {}} mode="shell" conn={hostConn} attachment={null} onClearAttachment={() => {}}
+      conversation={conv([])} />)
+    fireEvent.change(screen.getByLabelText('Agent 执行模式'), { target: { value: 'ask' } })
+    expect(mockUpdate).toHaveBeenCalledWith({ executionMode: 'ask' })
   })
 
   it('renders a shell code block with an insert-into-terminal button that calls onInsert', () => {
@@ -232,7 +245,7 @@ describe('AIPanel controlled conversation view', () => {
   })
 
   it('shows the no-model hint and wires the configure button', () => {
-    mockConfig = { provider: 'ollama', ollamaBaseUrl: 'http://h', openaiBaseUrl: '', openaiKey: '', model: '' }
+    mockConfig = { ...baseConfig(), model: '' }
     const onOpenSettings = vi.fn()
     wrap(<AIPanel onClose={() => {}} mode="shell" conn={hostConn} attachment={null} onClearAttachment={() => {}}
       conversation={conv([])} onOpenSettings={onOpenSettings} />)

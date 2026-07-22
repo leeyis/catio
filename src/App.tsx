@@ -68,6 +68,7 @@ import type { Conversation } from './state/conversations'
 import { chat } from './services/agent'
 import type { ChatMsg } from './services/agent'
 import { useAgentConfig } from './state/agentConfig'
+import { planAgentShellExecution } from './components/workbench/agentExecution'
 import type { ConnectionProfile } from './state/connections'
 import type { Tab, Connection, Snippet } from './services/types'
 import type { AuthUser } from './components/auth/AuthGate'
@@ -132,6 +133,7 @@ export default function App() {
 
   // ---- Catio Agent conversations (P2): per-host persisted, per-tab current ----
   const { config: agentCfg } = useAgentConfig()
+  const [pendingAgentRun, setPendingAgentRun] = useState<{ tabId: string; convId: string; target: string; command: string } | null>(null)
   const [conversations, setConversations] = useState<Conversation[]>(() => loadConversations())
   // Authoritative mirror of `conversations` for mutations/persistence. React 18
   // does not guarantee a setState updater runs synchronously during streaming,
@@ -1468,24 +1470,29 @@ export default function App() {
     ? listActiveDbConnections().find(a => a.profileId === cur.connId)?.connId
     : undefined
 
-  // Write text into the active terminal's live PTY channel (no trailing newline).
-  // 本地终端(local/serial/telnet/mosh)无 sessionId,走 termLocalWrite(chan);
-  // SSH 终端走 termWrite(sessionId, chan)。chanMap 按 tab.id 键,分屏时各自解析到自己的 channel。
-  async function insertToTerminal(code: string) {
-    const chan = cur ? chanMap[cur.id] : undefined
-    if (!chan) return
-    const curConn = cur ? (liveConns[cur.connId] ?? vaultConns.find(c => c.id === cur.connId)) : undefined
-    const isLocalProto = curConn && (curConn.proto === 'local' || curConn.proto === 'serial' || curConn.proto === 'telnet' || curConn.proto === 'mosh')
-    const b64 = btoa(unescape(encodeURIComponent(code)))
+  // Write to the terminal that owns tabId. Agent responses may finish after the
+  // user switches tabs, so automatic execution must never target `cur`.
+  async function writeToTerminalTab(tabId: string, code: string, run = false): Promise<boolean> {
+    const tab = tabsRef.current.find(item => item.id === tabId && item.kind === 'terminal')
+    const chan = chanMapRef.current[tabId]
+    if (!tab || !chan) return false
+    const conn = liveConns[tab.connId] ?? vaultConns.find(item => item.id === tab.connId)
+    const isLocalProto = conn && (conn.proto === 'local' || conn.proto === 'serial' || conn.proto === 'telnet' || conn.proto === 'mosh')
+    const payload = run ? `${code}\r` : code
+    const b64 = btoa(unescape(encodeURIComponent(payload)))
     if (isLocalProto) {
       const { termLocalWrite } = await import('./services/ssh')
       await termLocalWrite(chan, b64)
-      return
+      return true
     }
-    const sid = cur?.sessionId
-    if (!sid) return
+    if (!tab.sessionId) return false
     const { termWrite } = await import('./services/ssh')
-    await termWrite(sid, chan, b64)
+    await termWrite(tab.sessionId, chan, b64)
+    return true
+  }
+
+  async function insertToTerminal(code: string) {
+    if (cur) await writeToTerminalTab(cur.id, code)
   }
   // 可插入:本地终端只需 channel(有 chanMap 条目即已连);SSH 还需 sessionId。
   const canInsert = (() => {
@@ -1529,6 +1536,20 @@ export default function App() {
     saveConversation(updated)
   }
 
+  async function runAgentCommand(tabId: string, convId: string, command: string): Promise<void> {
+    try {
+      if (await writeToTerminalTab(tabId, command, true)) return
+    } catch { /* surface the safe user-facing message below */ }
+    patchConversation(convId, conversation => {
+      const messages = [...conversation.messages]
+      const last = messages.length - 1
+      if (last >= 0 && messages[last].role === 'assistant') {
+        messages[last] = { ...messages[last], content: `${messages[last].content}\n\n⚠️ ${t('panels.agentRunFailed')}` }
+      }
+      return { ...conversation, messages }
+    })
+  }
+
   // Fetch sysinfo for a session once and cache it; subsequent calls return the
   // cached string immediately. If the fetch fails, '' is cached so we don't retry
   // on every message (the LLM just won't have that context for this session).
@@ -1548,60 +1569,61 @@ export default function App() {
 
   async function sendAgentMessage(tabId: string, text: string, opts?: { hasSelection?: boolean }) {
     const tab = tabs.find(tb => tb.id === tabId)
-    if (!tab) return
-    const convId = ensureConvId(tab)
-    const tabConn = D.byId[tab.connId] ?? liveConns[tab.connId] ?? null
-    const hostName = tabConn?.name ?? tab.title
-
-    // Snapshot the prior messages for the outgoing payload BEFORE appending.
-    const prior = conversationsRef.current.find(c => c.id === convId)?.messages ?? []
-
-    // Append the user message + an empty assistant placeholder; persist.
-    patchConversation(convId, c => ({
-      ...c,
-      messages: [...c.messages, { role: 'user', content: text }, { role: 'assistant', content: '' }],
-    }))
-
-    // ---- P3 SEAM: enrich the system prompt with host sysinfo (OS/time/CPU/mem/disk/GPU).
-    // Fetch once per session (cached); await before building outgoing payload so the
-    // system message is complete. If the tab has no live session or fetch fails, the
-    // prompt falls back to the base shell-assistant instruction unchanged.
-    const liveSessionId = tab.sessionId
-    const sysinfo = liveSessionId ? await getSysinfo(liveSessionId) : ''
-    const sysinfoBlock = sysinfo
-      ? `\n\n系统会话上下文（当前连接的主机信息，供参考）:\n${sysinfo}\n回答时可据此结合该主机的实际环境（操作系统/时间/CPU/内存/磁盘/GPU）。`
-      : ''
-    // ---- Read terminal buffer (opt-in pref): feed the agent the active
-    // terminal's most recent output so it can reason about what just happened.
-    // Skip it when the message already carries user-selected text — the user
-    // pointed at exactly the context they want, so dumping N more lines is noise.
-    const termTail = prefs.termBufferEnabled && liveSessionId && !opts?.hasSelection
-      ? readTermBufferTail(liveSessionId, prefs.termBufferLines)
-      : ''
-    const termBlock = termTail
-      ? `\n\n当前终端最近输出（最多 ${prefs.termBufferLines} 行，供参考）:\n\`\`\`\n${termTail}\n\`\`\``
-      : ''
-    // Database tabs (kind !== 'terminal') get the engine-aware DB assistant prompt
-    // so the model answers in the connection's real query syntax (mongo shell /
-    // ES REST+DSL / SQL dialect) — runnable directly in the editor, not a CLI.
-    const agentMode = tab.kind === 'terminal' ? 'shell' : 'sql'
-    const tabEngine = vaultConns.find(c => c.id === tab.connId)?.engine
-      ?? liveConns[tab.connId]?.engine ?? D.byId[tab.connId]?.engine
-    const system: ChatMsg = {
-      role: 'system',
-      content: `${buildAgentSystemPrompt(agentMode, hostName, tabEngine)}${sysinfoBlock}${termBlock}`,
-    }
-    const outgoing: ChatMsg[] = [
-      system,
-      ...prior.map(m => ({ role: m.role, content: m.content } as ChatMsg)),
-      { role: 'user', content: text },
-    ]
-
+    if (!tab || agentAborts.current[tabId]) return
+    const executionMode = agentCfg.executionMode
     const controller = new AbortController()
     agentAborts.current[tabId] = controller
+    const convId = ensureConvId(tab)
     setBusyConvs(prev => ({ ...prev, [convId]: true }))
     try {
-      await chat(outgoing, agentCfg, {
+      const tabConn = D.byId[tab.connId] ?? liveConns[tab.connId] ?? null
+      const hostName = tabConn?.name ?? tab.title
+
+      // Snapshot the prior messages for the outgoing payload BEFORE appending.
+      const prior = conversationsRef.current.find(c => c.id === convId)?.messages ?? []
+
+      // Append the user message + an empty assistant placeholder; persist.
+      patchConversation(convId, c => ({
+        ...c,
+        messages: [...c.messages, { role: 'user', content: text }, { role: 'assistant', content: '' }],
+      }))
+
+      // ---- P3 SEAM: enrich the system prompt with host sysinfo (OS/time/CPU/mem/disk/GPU).
+      // Fetch once per session (cached); await before building outgoing payload so the
+      // system message is complete. If the tab has no live session or fetch fails, the
+      // prompt falls back to the base shell-assistant instruction unchanged.
+      const liveSessionId = tab.sessionId
+      const sysinfo = liveSessionId ? await getSysinfo(liveSessionId) : ''
+      const sysinfoBlock = sysinfo
+        ? `\n\n系统会话上下文（当前连接的主机信息，供参考）:\n${sysinfo}\n回答时可据此结合该主机的实际环境（操作系统/时间/CPU/内存/磁盘/GPU）。`
+        : ''
+      // ---- Read terminal buffer (opt-in pref): feed the agent the active
+      // terminal's most recent output so it can reason about what just happened.
+      // Skip it when the message already carries user-selected text — the user
+      // pointed at exactly the context they want, so dumping N more lines is noise.
+      const termTail = prefs.termBufferEnabled && liveSessionId && !opts?.hasSelection
+        ? readTermBufferTail(liveSessionId, prefs.termBufferLines)
+        : ''
+      const termBlock = termTail
+        ? `\n\n当前终端最近输出（最多 ${prefs.termBufferLines} 行，供参考）:\n\`\`\`\n${termTail}\n\`\`\``
+        : ''
+      // Database tabs (kind !== 'terminal') get the engine-aware DB assistant prompt
+      // so the model answers in the connection's real query syntax (mongo shell /
+      // ES REST+DSL / SQL dialect) — runnable directly in the editor, not a CLI.
+      const agentMode = tab.kind === 'terminal' ? 'shell' : 'sql'
+      const tabEngine = vaultConns.find(c => c.id === tab.connId)?.engine
+        ?? liveConns[tab.connId]?.engine ?? D.byId[tab.connId]?.engine
+      const system: ChatMsg = {
+        role: 'system',
+        content: `${buildAgentSystemPrompt(agentMode, hostName, tabEngine)}${sysinfoBlock}${termBlock}`,
+      }
+      const outgoing: ChatMsg[] = [
+        system,
+        ...prior.map(m => ({ role: m.role, content: m.content } as ChatMsg)),
+        { role: 'user', content: text },
+      ]
+
+      const reply = await chat(outgoing, agentCfg, {
         signal: controller.signal,
         onToken: tok => patchConversation(convId, c => {
           const msgs = [...c.messages]
@@ -1612,6 +1634,14 @@ export default function App() {
           return { ...c, messages: msgs }
         }),
       })
+      if (!controller.signal.aborted && tab.kind === 'terminal') {
+        const plan = planAgentShellExecution(reply, executionMode)
+        if (plan.action === 'run') {
+          await runAgentCommand(tabId, convId, plan.command)
+        } else if (plan.action === 'confirm') {
+          setPendingAgentRun(current => current ?? { tabId, convId, target: hostName, command: plan.command })
+        }
+      }
     } catch (err) {
       if (controller.signal.aborted) return
       const message = (err as { message?: string } | null)?.message ?? String(err)
@@ -1624,7 +1654,7 @@ export default function App() {
         return { ...c, messages: msgs }
       })
     } finally {
-      delete agentAborts.current[tabId]
+      if (agentAborts.current[tabId] === controller) delete agentAborts.current[tabId]
       setBusyConvs(prev => { const n = { ...prev }; delete n[convId]; return n })
     }
   }
@@ -1661,6 +1691,7 @@ export default function App() {
   const activeConvId = cur ? currentConvByTab[cur.id] : undefined
   const activeConversation = activeConvId ? conversations.find(c => c.id === activeConvId) : undefined
   const activeConvBusy = activeConvId ? !!busyConvs[activeConvId] : false
+  const activeTabBusy = cur ? !!agentAborts.current[cur.id] : false
   const agentHistory = cur ? conversationsForHost(cur.connId) : []
 
   // Lazily create a conversation for the active tab so the panel has one to show.
@@ -1765,7 +1796,7 @@ export default function App() {
           {panelOpen && (aiForm === 'side' || activePanel !== 'ai') && (
             <div className="fade-in" style={{ display: 'flex' }}>
               {activePanel === 'ai' && <AIPanel onClose={() => setPanelOpen(false)} mode={aiMode} conn={curConn ?? undefined} connId={aiConnId} engine={curConn?.engine} attachment={aiAttachment} onClearAttachment={() => setAiAttachment(null)} onInsert={insertToTerminal} canInsert={canInsert} onOpenSettings={() => goSettings('ai')}
-                conversation={activeConversation} busy={activeConvBusy} history={agentHistory}
+                conversation={activeConversation} busy={activeConvBusy || activeTabBusy} history={agentHistory}
                 onSend={cur ? ((text, opts) => void sendAgentMessage(cur.id, text, opts)) : undefined}
                 onAbort={cur ? (() => agentAborts.current[cur.id]?.abort()) : undefined}
                 onNewConversation={cur ? (() => newAgentConversation(cur.id)) : undefined}
@@ -1891,6 +1922,21 @@ export default function App() {
             syncMcpTargets()
             void openConn(dbProfileToConnection(profile, true))
           }}
+        />
+      )}
+
+      {pendingAgentRun && (
+        <ConfirmModal
+          title={t('panels.agentRunPermissionTitle')}
+          message={t('panels.agentRunPermissionBody', { target: pendingAgentRun.target, command: pendingAgentRun.command })}
+          confirmLabel={t('panels.agentRunPermissionAllow')}
+          danger
+          onConfirm={() => {
+            const pending = pendingAgentRun
+            setPendingAgentRun(null)
+            void runAgentCommand(pending.tabId, pending.convId, pending.command)
+          }}
+          onCancel={() => setPendingAgentRun(null)}
         />
       )}
 

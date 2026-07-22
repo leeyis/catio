@@ -1,5 +1,5 @@
 // Agent configuration state with localStorage persistence.
-// NOTE: openaiKey is stored in localStorage in plaintext for this UI-shell stage.
+// NOTE: apiKey is stored in localStorage in plaintext for this UI-shell stage.
 // Real OS keychain encryption (Tauri stronghold / Windows Credential Manager) is a later sub-project.
 //
 // Backed by a tiny subscribable store (module-level state + listeners) so every
@@ -8,22 +8,41 @@
 
 import { useSyncExternalStore } from 'react'
 
-export type ModelProvider = 'ollama' | 'openai'
+export type ModelProvider = 'ollama' | 'openai' | 'deepseek' | 'anthropic'
+export type ModelProtocol = 'ollama' | 'openai' | 'anthropic'
+export type AnthropicAuthMode = 'api-key' | 'auth-token'
+export type AgentExecutionMode = 'manual' | 'ask' | 'auto'
+
+export interface ModelProviderPreset {
+  protocol: ModelProtocol
+  defaultBaseUrl: string
+}
+
+export const MODEL_PROVIDER_PRESETS: Record<ModelProvider, ModelProviderPreset> = {
+  ollama: { protocol: 'ollama', defaultBaseUrl: 'http://localhost:11434' },
+  openai: { protocol: 'openai', defaultBaseUrl: 'https://api.openai.com' },
+  deepseek: { protocol: 'openai', defaultBaseUrl: 'https://api.deepseek.com' },
+  anthropic: { protocol: 'anthropic', defaultBaseUrl: 'https://api.anthropic.com' },
+}
+
+export const MODEL_PROVIDER_ORDER: ModelProvider[] = ['ollama', 'openai', 'deepseek', 'anthropic']
 
 export interface AgentConfig {
   provider: ModelProvider
-  ollamaBaseUrl: string  // default 'http://localhost:11434'
-  openaiBaseUrl: string  // default 'https://api.openai.com'
-  openaiKey: string      // default ''
-  model: string          // selected model id, default ''
+  baseUrl: string
+  apiKey: string
+  anthropicAuthMode: AnthropicAuthMode
+  model: string
+  executionMode: AgentExecutionMode
 }
 
 export const DEFAULT_AGENT_CONFIG: AgentConfig = {
   provider: 'ollama',
-  ollamaBaseUrl: 'http://localhost:11434',
-  openaiBaseUrl: 'https://api.openai.com',
-  openaiKey: '',
+  baseUrl: MODEL_PROVIDER_PRESETS.ollama.defaultBaseUrl,
+  apiKey: '',
+  anthropicAuthMode: 'api-key',
   model: '',
+  executionMode: 'manual',
 }
 
 const STORAGE_KEY = 'catio-agent-config'
@@ -33,8 +52,31 @@ function readFromStorage(): AgentConfig {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return { ...DEFAULT_AGENT_CONFIG }
-    const parsed = JSON.parse(raw) as Partial<AgentConfig>
-    return { ...DEFAULT_AGENT_CONFIG, ...parsed }
+    const parsed = JSON.parse(raw) as Partial<AgentConfig> & {
+      ollamaBaseUrl?: unknown
+      openaiBaseUrl?: unknown
+      openaiKey?: unknown
+    }
+    const provider = MODEL_PROVIDER_ORDER.includes(parsed.provider as ModelProvider)
+      ? parsed.provider as ModelProvider
+      : DEFAULT_AGENT_CONFIG.provider
+    const legacyBaseUrl = provider === 'ollama' ? parsed.ollamaBaseUrl : parsed.openaiBaseUrl
+    return {
+      provider,
+      baseUrl: typeof parsed.baseUrl === 'string'
+        ? parsed.baseUrl
+        : typeof legacyBaseUrl === 'string'
+          ? legacyBaseUrl
+          : MODEL_PROVIDER_PRESETS[provider].defaultBaseUrl,
+      apiKey: typeof parsed.apiKey === 'string'
+        ? parsed.apiKey
+        : typeof parsed.openaiKey === 'string' ? parsed.openaiKey : '',
+      anthropicAuthMode: parsed.anthropicAuthMode === 'auth-token' ? 'auth-token' : 'api-key',
+      model: typeof parsed.model === 'string' ? parsed.model : '',
+      // Execution permission is session-only. Restarting Catio always returns to
+      // the safest default instead of preserving a stale Full Access grant.
+      executionMode: 'manual',
+    }
   } catch {
     return { ...DEFAULT_AGENT_CONFIG }
   }
@@ -43,7 +85,14 @@ function readFromStorage(): AgentConfig {
 function writeToStorage(cfg: AgentConfig): void {
   if (typeof localStorage === 'undefined') return
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg))
+    const persisted: Omit<AgentConfig, 'executionMode'> = {
+      provider: cfg.provider,
+      baseUrl: cfg.baseUrl,
+      apiKey: cfg.apiKey,
+      anthropicAuthMode: cfg.anthropicAuthMode,
+      model: cfg.model,
+    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(persisted))
   } catch { /* ignore quota errors */ }
 }
 
@@ -86,7 +135,7 @@ function subscribe(cb: () => void): () => void {
  * the agent config (provider / endpoints / model) intact.
  */
 export function clearStoredCredentials(): void {
-  setAgentConfig({ openaiKey: '' })
+  setAgentConfig({ apiKey: '' })
 }
 
 // ---- Hook ----

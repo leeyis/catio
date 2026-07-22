@@ -148,8 +148,8 @@ it('persists the terminal pane across a view switch (settings overlay, body stay
 it('persists the full streamed assistant reply, not just the conversation title', async () => {
   // a model must be configured for the composer to allow sending
   localStorage.setItem('catio-agent-config', JSON.stringify({
-    provider: 'ollama', ollamaBaseUrl: 'http://localhost:11434',
-    openaiBaseUrl: 'https://api.openai.com', openaiKey: '', model: 'llama3',
+    provider: 'ollama', baseUrl: 'http://localhost:11434', apiKey: '',
+    anthropicAuthMode: 'api-key', model: 'llama3', executionMode: 'manual',
   }))
   agentMock.chat.mockImplementation(async (_msgs: unknown, _cfg: unknown, opts: { onToken: (t: string) => void }) => {
     opts.onToken('Hello')

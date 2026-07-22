@@ -7,18 +7,33 @@ import { fetchModels, testModel } from '../src/services/models'
 
 const BASE_OLLAMA_CFG: AgentConfig = {
   provider: 'ollama',
-  ollamaBaseUrl: 'http://localhost:11434',
-  openaiBaseUrl: 'https://api.openai.com',
-  openaiKey: '',
+  baseUrl: 'http://localhost:11434',
+  apiKey: '',
+  anthropicAuthMode: 'api-key',
   model: '',
+  executionMode: 'manual',
 }
 
 const BASE_OPENAI_CFG: AgentConfig = {
   provider: 'openai',
-  ollamaBaseUrl: 'http://localhost:11434',
-  openaiBaseUrl: 'https://api.openai.com',
-  openaiKey: 'sk-test-key',
+  baseUrl: 'https://api.openai.com',
+  apiKey: 'sk-test-key',
+  anthropicAuthMode: 'api-key',
   model: '',
+  executionMode: 'manual',
+}
+
+const BASE_DEEPSEEK_CFG: AgentConfig = {
+  ...BASE_OPENAI_CFG,
+  provider: 'deepseek',
+  baseUrl: 'https://api.deepseek.com',
+}
+
+const BASE_ANTHROPIC_CFG: AgentConfig = {
+  ...BASE_OPENAI_CFG,
+  provider: 'anthropic',
+  baseUrl: 'https://api.anthropic.com',
+  apiKey: 'sk-ant-test',
 }
 
 function makeFetchMock(status: number, body: unknown, textBody = ''): typeof globalThis.fetch {
@@ -53,12 +68,12 @@ describe('fetchModels — Ollama', () => {
     expect(mockFetch).toHaveBeenCalledWith('http://localhost:11434/api/tags')
   })
 
-  it('trims trailing slash from ollamaBaseUrl', async () => {
+  it('trims trailing slash from the Ollama base URL', async () => {
     const body = { models: [{ name: 'phi3' }] }
     const mockFetch = makeFetchMock(200, body)
     vi.stubGlobal('fetch', mockFetch)
 
-    await fetchModels({ ...BASE_OLLAMA_CFG, ollamaBaseUrl: 'http://localhost:11434/' })
+    await fetchModels({ ...BASE_OLLAMA_CFG, baseUrl: 'http://localhost:11434/' })
     expect(mockFetch).toHaveBeenCalledWith('http://localhost:11434/api/tags')
   })
 
@@ -93,7 +108,7 @@ describe('fetchModels — OpenAI-compatible', () => {
     const mockFetch = makeFetchMock(200, body)
     vi.stubGlobal('fetch', mockFetch)
 
-    await fetchModels({ ...BASE_OPENAI_CFG, openaiKey: '' })
+    await fetchModels({ ...BASE_OPENAI_CFG, apiKey: '' })
     const callArgs = (mockFetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit]
     const headers = callArgs[1]?.headers as Record<string, string>
     expect(headers['Authorization']).toBeUndefined()
@@ -109,12 +124,12 @@ describe('fetchModels — OpenAI-compatible', () => {
     expect(callArgs[0]).toBe('https://api.openai.com/v1/models')
   })
 
-  it('trims trailing slash from openaiBaseUrl', async () => {
+  it('trims trailing slash from the OpenAI base URL', async () => {
     const body = { data: [{ id: 'gpt-4o' }] }
     const mockFetch = makeFetchMock(200, body)
     vi.stubGlobal('fetch', mockFetch)
 
-    await fetchModels({ ...BASE_OPENAI_CFG, openaiBaseUrl: 'https://api.openai.com/' })
+    await fetchModels({ ...BASE_OPENAI_CFG, baseUrl: 'https://api.openai.com/' })
     const callArgs = (mockFetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit]
     expect(callArgs[0]).toBe('https://api.openai.com/v1/models')
   })
@@ -122,6 +137,25 @@ describe('fetchModels — OpenAI-compatible', () => {
   it('throws on non-2xx OpenAI response', async () => {
     vi.stubGlobal('fetch', makeFetchMock(401, {}))
     await expect(fetchModels(BASE_OPENAI_CFG)).rejects.toThrow('OpenAI fetch failed: 401')
+  })
+})
+
+describe('fetchModels — DeepSeek and Anthropic', () => {
+  it('uses DeepSeek official paths without adding /v1', async () => {
+    const mockFetch = makeFetchMock(200, { data: [{ id: 'deepseek-v4-pro' }] })
+    vi.stubGlobal('fetch', mockFetch)
+    await fetchModels(BASE_DEEPSEEK_CFG)
+    expect((mockFetch as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe('https://api.deepseek.com/models')
+  })
+
+  it('uses Anthropic model endpoint and x-api-key headers', async () => {
+    const mockFetch = makeFetchMock(200, { data: [{ id: 'claude-opus-4-6' }] })
+    vi.stubGlobal('fetch', mockFetch)
+    expect(await fetchModels(BASE_ANTHROPIC_CFG)).toEqual(['claude-opus-4-6'])
+    const [url, init] = (mockFetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('https://api.anthropic.com/v1/models')
+    expect((init.headers as Record<string, string>)['x-api-key']).toBe('sk-ant-test')
+    expect((init.headers as Record<string, string>)['anthropic-version']).toBe('2023-06-01')
   })
 })
 
@@ -177,7 +211,7 @@ describe('testModel — OpenAI-compatible', () => {
     const mockFetch = makeFetchMock(200, body)
     vi.stubGlobal('fetch', mockFetch)
 
-    await testModel({ ...BASE_OPENAI_CFG, model: 'gpt-4o', openaiKey: '' })
+    await testModel({ ...BASE_OPENAI_CFG, model: 'gpt-4o', apiKey: '' })
     const callArgs = (mockFetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit]
     const headers = callArgs[1]?.headers as Record<string, string>
     expect(headers['Authorization']).toBeUndefined()
@@ -220,5 +254,17 @@ describe('testModel — Ollama', () => {
     const result = await testModel({ ...BASE_OLLAMA_CFG, model: 'llama3:8b' })
     expect(result.ok).toBe(false)
     expect(result.error).toContain('500')
+  })
+})
+
+describe('testModel — Anthropic', () => {
+  it('POSTs a native Messages API body and parses text content', async () => {
+    const mockFetch = makeFetchMock(200, { content: [{ type: 'text', text: 'pong' }] })
+    vi.stubGlobal('fetch', mockFetch)
+    const result = await testModel({ ...BASE_ANTHROPIC_CFG, model: 'claude-opus-4-6' })
+    expect(result).toMatchObject({ ok: true, reply: 'pong' })
+    const [url, init] = (mockFetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('https://api.anthropic.com/v1/messages')
+    expect(JSON.parse(String(init.body))).toMatchObject({ model: 'claude-opus-4-6', max_tokens: 16, stream: false })
   })
 })
