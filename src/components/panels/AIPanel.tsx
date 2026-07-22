@@ -325,8 +325,17 @@ interface ThinkingBlockProps {
 function ThinkingBlock({ content, isThinking, components }: ThinkingBlockProps) {
   const { t } = useTranslation()
   const [expanded, setExpanded] = useState(isThinking)
+  const contentRef = useRef<HTMLDivElement>(null)
+  const autoScrollRef = useRef(true)
 
   useEffect(() => setExpanded(isThinking), [isThinking])
+  useEffect(() => {
+    if (isThinking) autoScrollRef.current = true
+  }, [isThinking])
+  useEffect(() => {
+    const el = contentRef.current
+    if (isThinking && expanded && autoScrollRef.current && el) el.scrollTop = el.scrollHeight
+  }, [content, isThinking, expanded])
 
   const label = t(isThinking ? 'panels.agentThinking' : 'panels.agentThought')
   return (
@@ -340,7 +349,8 @@ function ThinkingBlock({ content, isThinking, components }: ThinkingBlockProps) 
         <Icon name="chevron-down" size={13}
           style={{ flex: 'none', color: 'var(--text-faint)', transition: 'transform .15s', transform: expanded ? 'rotate(180deg)' : 'none' }} />
       </summary>
-      <div style={{ maxHeight: 180, overflowY: 'auto', padding: '2px 10px 9px', borderTop: '1px solid var(--border-hairline)', background: 'var(--surface-card)' }}>
+      <div ref={contentRef} onWheel={() => { if (isThinking) autoScrollRef.current = false }}
+        style={{ maxHeight: 180, overflowY: 'auto', padding: '2px 10px 9px', borderTop: '1px solid var(--border-hairline)', background: 'var(--surface-card)' }}>
         {content && <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>{content}</ReactMarkdown>}
       </div>
     </details>

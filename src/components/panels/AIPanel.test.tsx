@@ -83,6 +83,16 @@ describe('AIPanel controlled conversation view', () => {
     let details = screen.getByText('思考中…').closest('details') as HTMLDetailsElement
     expect(details.open).toBe(true)
     expect(screen.getByText('status')).toBeTruthy()
+    const scrollArea = details.lastElementChild as HTMLDivElement
+    Object.defineProperty(scrollArea, 'scrollHeight', { configurable: true, value: 240 })
+    rerender(panel('<think>checking **status**\n\nmore output', true))
+    expect(scrollArea.scrollTop).toBe(240)
+
+    fireEvent.wheel(scrollArea, { deltaY: -20 })
+    Object.defineProperty(scrollArea, 'scrollHeight', { configurable: true, value: 480 })
+    scrollArea.scrollTop = 80
+    rerender(panel('<think>checking **status**\n\nmore output\n\nfinal thought', true))
+    expect(scrollArea.scrollTop).toBe(80)
 
     rerender(panel('<think>checking **status**</think>\n\nService is healthy', false))
     details = screen.getByText('思考过程').closest('details') as HTMLDetailsElement
