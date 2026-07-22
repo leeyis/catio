@@ -1,6 +1,7 @@
 name: release
 
-# 打 v* 标签(如 v0.6.1)即自动构建并发布 macOS(通用包)与 Windows 客户端到 GitHub Release。
+# 打 v* 标签即自动构建并发布 Windows 与 Ubuntu 客户端到 GitHub Release。
+# macOS 不在 CI 中构建，需要的用户按 Release 说明从源码本地编译。
 on:
   push:
     tags:
@@ -16,15 +17,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macOS 通用包:一个 .dmg 同时支持 Apple Silicon 与 Intel。仅打 dmg。
-          - platform: macos-latest
-            args: '--target universal-apple-darwin --bundles app,dmg'
           # Windows:固定 windows-2022(稳定 VS 2022)。windows-latest 现指向带 VS18 preview
           # 的镜像,其新版 MSVC 移除了 stdext::checked_array_iterator,导致 duckdb 捆绑的 fmt
           # 编译失败(error C2653 'stdext')。x64。仅打 NSIS(.exe):MSI 的 WiX light.exe
           # 在本地与 CI 均反复失败(与 duckdb 无关的 WiX 环境问题),而 NSIS 安装包已足够分发。
           - platform: windows-2022
             args: '--bundles nsis'
+          # Ubuntu 22.04 是 WebKitGTK 4.1 可用的较低 glibc 构建基线。
+          # 使用 GitHub 原生 x64/ARM64 runner，避免 QEMU 模拟构建缓慢且不稳定。
+          - platform: ubuntu-22.04
+            args: '--bundles deb'
+          - platform: ubuntu-22.04-arm
+            args: '--bundles deb'
 
     runs-on: ${{ matrix.platform }}
     timeout-minutes: 90
@@ -40,9 +44,6 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
-        with:
-          # macOS 通用包需要同时安装两个 target;Windows 用默认 host target。
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -51,10 +52,19 @@ jobs:
             ~/.cargo/git
             ~/.cargo/registry
             src-tauri/target
-          key: ${{ runner.os }}-cargo-release-${{ hashFiles('src-tauri/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-release-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-release-
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-${{ runner.arch }}-cargo-release-
+            ${{ runner.os }}-${{ runner.arch }}-cargo-
+
+      - name: Install Tauri/Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev libssl-dev libxdo-dev pkg-config libudev-dev \
+            patchelf dpkg-dev xdg-utils
 
       - name: Install frontend dependencies
         run: npm ci
@@ -68,34 +78,24 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: 'Catio v__VERSION__'
           releaseBody: |
-            下载对应平台的安装包:Windows 用 `.exe`,macOS 用 `.dmg`。
+            下载对应架构的安装包:Windows x64 使用 `.exe`;Ubuntu/Debian 使用
+            `amd64.deb` 或 `arm64.deb`。
 
-            ## ⚠️ 应用未做代码签名
+            ## Windows 未做代码签名
 
-            为控制成本本应用暂未接入 Apple/Windows 代码签名,这**不是**病毒或恶意软件。
+            SmartScreen 提示「Windows 已保护你的电脑」时,请点「更多信息」→「仍要运行」。
 
-            ### Windows 打开方法
+            ## macOS 本地构建
 
-            SmartScreen 提示「Windows 已保护你的电脑」时,点「更多信息」→「仍要运行」。
+            Release 不提供 GitHub Actions 编译的 macOS 包。请在目标 Mac 上从源码构建:
 
-            ### macOS 说明(重要)
-
-            > 在 Apple 芯片(M 系列)+ macOS Sequoia 上,从网络下载的未公证应用会被系统判为
-            > 「恶意软件」并直接移入废纸篓。`xattr` 去隔离、`codesign` ad-hoc 签名、
-            > `spctl --master-disable` 关 Gatekeeper 均已无法绕过——Sequoia 拦的就是
-            > 「下载来的未公证应用」本身。
-
-            因此本 Release 的 `.dmg` 无法在 Apple 芯片 Mac 上直接打开。两条可行路径:
-
-            1. 本地构建(推荐,自用)—— 本地编译产物不带下载隔离标记,双击即开:
-               ```bash
-               git clone https://github.com/leeyis/catio.git && cd catio
-               npm ci
-               npm run tauri build -- --bundles app
-               # 产物: src-tauri/target/release/bundle/macos/Catio.app
-               ```
-
-            2. Apple 公证 —— 面向普通用户分发的唯一正规方案,需付费 Apple Developer 账号。
+            ```bash
+            git clone --branch ${{ github.ref_name }} --depth 1 https://github.com/leeyis/catio.git
+            cd catio
+            npm ci
+            npm run tauri build -- --bundles app
+            # 产物: src-tauri/target/release/bundle/macos/Catio.app
+            ```
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
