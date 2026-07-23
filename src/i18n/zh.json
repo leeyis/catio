@@ -878,7 +878,6 @@
     "fieldPassword": "密码",
     "fieldPassphrase": "密钥口令（可空）",
     "fieldPassphrasePlaceholder": "私钥口令，可留空",
-    "credentialStorageEnabled": "连接成功后，此凭据将加密保存，下次无需再次输入。",
     "credentialStorageDisabled": "当前不会保存此凭据。开启「用户身份校验」后，连接成功的密码或密钥口令将加密保存，下次无需再次输入。",
     "openSecuritySettings": "前往安全设置",
     "cancel": "取消",

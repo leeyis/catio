@@ -921,7 +921,7 @@ export function NewConnectionModal({
               </div>
             )}
             {/* Database name field — DB kind only */}
-            {(kind === 'db' || (kind === 'host' && (proto === 'ssh' || proto === 'vnc'))) && (
+            {!credentialStorageEnabled && (kind === 'db' || (kind === 'host' && (proto === 'ssh' || proto === 'vnc'))) && (
               <div
                 role="note"
                 className="row gap6"
@@ -929,18 +929,16 @@ export function NewConnectionModal({
                   alignItems: 'flex-start',
                   padding: '8px 10px',
                   borderRadius: 10,
-                  border: `1px solid ${credentialStorageEnabled ? 'var(--accent-border)' : 'color-mix(in srgb, var(--signal-amber) 38%, var(--border-hairline))'}`,
-                  background: credentialStorageEnabled ? 'var(--accent-soft-alt)' : 'color-mix(in srgb, var(--signal-amber) 9%, var(--surface-card))',
-                  color: credentialStorageEnabled ? 'var(--accent-primary)' : 'var(--text-secondary)',
+                  border: '1px solid color-mix(in srgb, var(--signal-amber) 38%, var(--border-hairline))',
+                  background: 'color-mix(in srgb, var(--signal-amber) 9%, var(--surface-card))',
+                  color: 'var(--text-secondary)',
                   fontSize: 11,
                   lineHeight: 1.5,
                 }}
               >
                 <Icon name="shield" size={13} style={{ flex: 'none', marginTop: 2 }} />
-                <span className="grow">
-                  {t(credentialStorageEnabled ? 'modals.credentialStorageEnabled' : 'modals.credentialStorageDisabled')}
-                </span>
-                {!credentialStorageEnabled && onOpenSecuritySettings && (
+                <span className="grow">{t('modals.credentialStorageDisabled')}</span>
+                {onOpenSecuritySettings && (
                   <button
                     type="button"
                     onClick={onOpenSecuritySettings}

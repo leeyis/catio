@@ -83,6 +83,7 @@ describe('NewConnectionModal', () => {
     // Host kind shows the protocol segmented control (SSH) instead of the DB engine picker.
     expect(screen.getByText('SSH')).toBeTruthy()
     expect(screen.queryByText('PostgreSQL')).toBeNull()
+    expect(screen.queryByRole('note')).toBeNull()
   })
 
   it('explains disabled credential storage and opens Security settings', () => {

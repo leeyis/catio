@@ -878,7 +878,6 @@
     "fieldPassword": "Password",
     "fieldPassphrase": "Key passphrase (optional)",
     "fieldPassphrasePlaceholder": "Private-key passphrase, may be empty",
-    "credentialStorageEnabled": "After a successful connection, this credential will be encrypted and saved so you do not need to enter it again.",
     "credentialStorageDisabled": "This credential will not be saved. Enable user identity verification to encrypt and save passwords or key passphrases after a successful connection.",
     "openSecuritySettings": "Open Security Settings",
     "cancel": "Cancel",
