@@ -85,6 +85,38 @@ describe('NewConnectionModal', () => {
     expect(screen.queryByText('PostgreSQL')).toBeNull()
   })
 
+  it('explains disabled credential storage and opens Security settings', () => {
+    const onOpenSecuritySettings = vi.fn()
+    wrap(
+      <NewConnectionModal
+        onClose={() => {}}
+        initialKind="host"
+        credentialStorageEnabled={false}
+        onOpenSecuritySettings={onOpenSecuritySettings}
+      />,
+    )
+
+    expect(screen.getByRole('note').textContent).toMatch(/当前不会保存此凭据|This credential will not be saved/)
+    fireEvent.click(screen.getByRole('button', { name: /前往安全设置|Open Security Settings/ }))
+    expect(onOpenSecuritySettings).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the credential draft while temporarily hidden', () => {
+    const modal = (hidden: boolean) => (
+      <LanguageProvider>
+        <DataProvider><NewConnectionModal onClose={() => {}} hidden={hidden} /></DataProvider>
+      </LanguageProvider>
+    )
+    const { container, rerender } = render(modal(false))
+    const secret = container.querySelector<HTMLInputElement>('input[type="password"]')!
+    fireEvent.change(secret, { target: { value: 'draft-secret' } })
+
+    rerender(modal(true))
+    expect((container.firstElementChild as HTMLElement).style.display).toBe('none')
+    rerender(modal(false))
+    expect(container.querySelector<HTMLInputElement>('input[type="password"]')!.value).toBe('draft-secret')
+  })
+
   it('port field rejects non-digit input', () => {
     const { container } = wrap(<NewConnectionModal onClose={() => {}} />)
     const inputs = Array.from(container.querySelectorAll('input')) as HTMLInputElement[]

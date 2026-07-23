@@ -42,6 +42,12 @@ export interface NewConnectionModalProps {
   editProfile?: ConnectionProfile | DbProfile
   /** Called after a successful save in host/SSH edit mode (App uses it to reloadProfiles). */
   onSaved?: () => void
+  /** Whether successful connections can persist their primary secret in an encrypted vault. */
+  credentialStorageEnabled?: boolean
+  /** Opens Settings → Security so local identity verification can be enabled. */
+  onOpenSecuritySettings?: () => void
+  /** Temporarily hide without unmounting, preserving the draft while Settings is open. */
+  hidden?: boolean
 }
 
 // `editProfile` is a union — DbProfile carries `dbType`, ConnectionProfile carries `auth`.
@@ -158,7 +164,20 @@ function shortVersion(v: string): string {
 
 // ---- Component ----
 
-export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onOpenTerminal, onSaveVnc, onSaveRdp, onConnected, editProfile, onSaved }: NewConnectionModalProps) {
+export function NewConnectionModal({
+  onClose,
+  initialKind = 'db',
+  onConnect,
+  onOpenTerminal,
+  onSaveVnc,
+  onSaveRdp,
+  onConnected,
+  editProfile,
+  onSaved,
+  credentialStorageEnabled = true,
+  onOpenSecuritySettings,
+  hidden = false,
+}: NewConnectionModalProps) {
   const D = useData()
   const { t } = useTranslation()
   const isEdit = !!editProfile
@@ -620,7 +639,7 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onO
     .filter(({ engines }) => engines.length > 0)
 
   return (
-    <div style={{ position: 'absolute', inset: 0, zIndex: 60, background: 'color-mix(in srgb, var(--cta-bg) 42%, transparent)', backdropFilter: 'blur(3px)', display: 'grid', placeItems: 'center' }}>
+    <div style={{ position: 'absolute', inset: 0, zIndex: 60, background: 'color-mix(in srgb, var(--cta-bg) 42%, transparent)', backdropFilter: 'blur(3px)', display: hidden ? 'none' : 'grid', placeItems: 'center' }}>
       <div className="pop-in" style={{ width: 620, maxHeight: '86%', background: 'var(--surface-card)', borderRadius: 18, border: '1px solid var(--border-hairline)', boxShadow: 'var(--shadow-window)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
         {/* header */}
         <div className="row" style={{ justifyContent: 'space-between', padding: '18px 20px 14px', borderBottom: '1px solid var(--border-hairline)' }}>
@@ -902,6 +921,36 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onO
               </div>
             )}
             {/* Database name field — DB kind only */}
+            {(kind === 'db' || (kind === 'host' && (proto === 'ssh' || proto === 'vnc'))) && (
+              <div
+                role="note"
+                className="row gap6"
+                style={{
+                  alignItems: 'flex-start',
+                  padding: '8px 10px',
+                  borderRadius: 10,
+                  border: `1px solid ${credentialStorageEnabled ? 'var(--accent-border)' : 'color-mix(in srgb, var(--signal-amber) 38%, var(--border-hairline))'}`,
+                  background: credentialStorageEnabled ? 'var(--accent-soft-alt)' : 'color-mix(in srgb, var(--signal-amber) 9%, var(--surface-card))',
+                  color: credentialStorageEnabled ? 'var(--accent-primary)' : 'var(--text-secondary)',
+                  fontSize: 11,
+                  lineHeight: 1.5,
+                }}
+              >
+                <Icon name="shield" size={13} style={{ flex: 'none', marginTop: 2 }} />
+                <span className="grow">
+                  {t(credentialStorageEnabled ? 'modals.credentialStorageEnabled' : 'modals.credentialStorageDisabled')}
+                </span>
+                {!credentialStorageEnabled && onOpenSecuritySettings && (
+                  <button
+                    type="button"
+                    onClick={onOpenSecuritySettings}
+                    style={{ flex: 'none', padding: 0, background: 'none', color: 'var(--accent-primary)', fontSize: 11, fontWeight: 700, textDecoration: 'underline', textUnderlineOffset: 2 }}
+                  >
+                    {t('modals.openSecuritySettings')}
+                  </button>
+                )}
+              </div>
+            )}
             {kind === 'db' && (
               <Field label={t('modals.fieldDatabase')} value={dbDatabase} onChange={setDbDatabase} placeholder="e.g. orders" />
             )}

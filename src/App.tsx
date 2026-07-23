@@ -2191,6 +2191,9 @@ export default function App() {
           initialKind={sidebarFilter === 'host' ? 'host' : sidebarFilter === 'db' ? 'db' : undefined}
           onSaved={reloadProfiles}
           onClose={() => { setShowNew(false); setEditing(null); setEditProfile(null) }}
+          credentialStorageEnabled={isServer() || authEnabled}
+          onOpenSecuritySettings={() => goSettings('security')}
+          hidden={view === 'settings'}
           onConnect={connectProfile}
           onOpenTerminal={openTerminalConn}
           onSaveVnc={d => {
