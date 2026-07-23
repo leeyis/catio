@@ -202,6 +202,7 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onO
   const [driverBusy, setDriverBusy] = useState(false)
   const [driverErr, setDriverErr] = useState<string | null>(null)
   const [engineOpen, setEngineOpen] = useState(false)
+  const [engineSearch, setEngineSearch] = useState('')
   const engineRef = useRef<HTMLDivElement>(null)
   const [proto, setProto] = useState('ssh')
   // Serial config (proto === 'serial'): baud + discovered port list.
@@ -286,6 +287,7 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onO
   const handleEngineChange = (id: string) => {
     setEngine(id)
     setEngineOpen(false)
+    setEngineSearch('')
     const eng = findEngine(id)
     if (eng) setDbPort(eng.defaultPort > 0 ? String(eng.defaultPort) : '')
     // Connection params changed — any prior test result is stale.
@@ -505,6 +507,7 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onO
     function handleClickOutside(e: MouseEvent) {
       if (engineRef.current && !engineRef.current.contains(e.target as Node)) {
         setEngineOpen(false)
+        setEngineSearch('')
       }
     }
     window.addEventListener('mousedown', handleClickOutside)
@@ -602,6 +605,20 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onO
     }
   }
 
+  const engineSearchQuery = engineSearch.trim().toLocaleLowerCase()
+  const visibleEngineGroups = enginesByGroup()
+    .map(({ group, engines }) => ({
+      group,
+      engines: engineSearchQuery
+        ? engines.filter(item => (
+            `${item.label} ${item.id} ${String(t(`modals.engineGroup.${group}` as const))}`
+              .toLocaleLowerCase()
+              .includes(engineSearchQuery)
+          ))
+        : engines,
+    }))
+    .filter(({ engines }) => engines.length > 0)
+
   return (
     <div style={{ position: 'absolute', inset: 0, zIndex: 60, background: 'color-mix(in srgb, var(--cta-bg) 42%, transparent)', backdropFilter: 'blur(3px)', display: 'grid', placeItems: 'center' }}>
       <div className="pop-in" style={{ width: 620, maxHeight: '86%', background: 'var(--surface-card)', borderRadius: 18, border: '1px solid var(--border-hairline)', boxShadow: 'var(--shadow-window)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
@@ -653,7 +670,13 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onO
               <div ref={engineRef} style={{ position: 'relative' }}>
                 {/* closed trigger */}
                 <button
-                  onClick={() => setEngineOpen(o => !o)}
+                  type="button"
+                  aria-haspopup="dialog"
+                  aria-expanded={engineOpen}
+                  onClick={() => {
+                    if (engineOpen) setEngineSearch('')
+                    setEngineOpen(!engineOpen)
+                  }}
                   style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8, height: 36, padding: '0 12px', borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', cursor: 'pointer', textAlign: 'left' }}>
                   {(() => {
                     const sel = findEngine(engine) || findEngine('postgres')!
@@ -669,8 +692,28 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onO
                 </button>
                 {/* dropdown menu — grouped by engine family */}
                 {engineOpen && (
-                  <div style={{ position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0, zIndex: 80, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', borderRadius: 10, boxShadow: 'var(--shadow-dropdown)', maxHeight: 320, overflowY: 'auto' }}>
-                    {enginesByGroup().map(({ group, engines }) => (
+                  <div role="dialog" aria-label={t('modals.engine')} style={{ position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0, zIndex: 80, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', borderRadius: 10, boxShadow: 'var(--shadow-dropdown)', maxHeight: 320, overflowY: 'auto' }}>
+                    <div style={{ position: 'sticky', top: 0, zIndex: 1, padding: 8, background: 'var(--surface-card)', borderBottom: '1px solid var(--border-hairline)' }}>
+                      <div style={{ position: 'relative' }}>
+                        <Icon name="search" size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-faint)', pointerEvents: 'none' }} />
+                        <input
+                          autoFocus
+                          type="search"
+                          aria-label={t('modals.engineSearch')}
+                          placeholder={t('modals.engineSearch')}
+                          value={engineSearch}
+                          onChange={e => setEngineSearch(e.target.value)}
+                          onKeyDown={e => {
+                            if (e.key === 'Escape') {
+                              setEngineOpen(false)
+                              setEngineSearch('')
+                            }
+                          }}
+                          style={{ width: '100%', height: 32, padding: '0 10px 0 30px', borderRadius: 8, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', color: 'var(--text-primary)', fontSize: 12.5, outline: 'none' }}
+                        />
+                      </div>
+                    </div>
+                    {visibleEngineGroups.map(({ group, engines }) => (
                       <div key={group}>
                         <div style={{ padding: '7px 12px 3px', fontSize: 10.5, fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--text-faint)' }}>
                           {t(`modals.engineGroup.${group}` as const)}
@@ -680,6 +723,7 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onO
                           const m = D.engineMeta[e.id] || {}
                           return (
                             <button key={e.id}
+                              type="button"
                               onClick={() => handleEngineChange(e.id)}
                               style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', border: 'none', background: active ? 'var(--accent-soft)' : 'transparent', cursor: 'pointer', textAlign: 'left' }}>
                               <EngineGlyph id={e.id} short={e.short} color={m.color || 'var(--text-secondary)'} />
@@ -690,6 +734,11 @@ export function NewConnectionModal({ onClose, initialKind = 'db', onConnect, onO
                         })}
                       </div>
                     ))}
+                    {visibleEngineGroups.length === 0 && (
+                      <div style={{ padding: '22px 12px', textAlign: 'center', fontSize: 12.5, color: 'var(--text-faint)' }}>
+                        {t('modals.engineNoResults')}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

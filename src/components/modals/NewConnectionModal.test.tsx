@@ -142,6 +142,19 @@ describe('NewConnectionModal — multi-engine catalog', () => {
     expect(screen.getByText('JDBC（需驱动 JAR）')).toBeTruthy()
   })
 
+  it('filters the engine catalog by name and selects the result', () => {
+    const { container } = wrap(<NewConnectionModal onClose={() => {}} />)
+    fireEvent.click(screen.getByText('PostgreSQL'))
+
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'mysql' } })
+
+    expect(screen.getByText('MySQL')).toBeTruthy()
+    expect(screen.queryByText('Oracle')).toBeNull()
+    fireEvent.click(screen.getByText('MySQL'))
+    expect(screen.queryByRole('searchbox')).toBeNull()
+    expect(Array.from(container.querySelectorAll('input')).some(input => input.value === '3306')).toBe(true)
+  })
+
   it('threads the selected variant driverProfile through testConnection', async () => {
     h.testConnection.mockResolvedValue({ version: 'CockroachDB CCL v23', latencyMs: 5 })
     const { container } = wrap(<NewConnectionModal onClose={() => {}} />)

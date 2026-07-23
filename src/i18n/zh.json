@@ -814,6 +814,8 @@
     "kindDb": "数据库",
     "kindDbSub": "40+ 引擎 · 经隧道直连",
     "engine": "引擎",
+    "engineSearch": "搜索数据库引擎",
+    "engineNoResults": "没有匹配的数据库引擎",
     "engineGroup": {
       "relational": "关系型",
       "distributed": "分布式 / NewSQL",
