@@ -22,6 +22,11 @@ export interface Conversation extends StoreItem {
 const STORE = 'conversations'
 const KEY = 'catio-conversations'
 
+function hasContent(c: Conversation): boolean {
+  return Array.isArray(c.messages)
+    && c.messages.some(message => typeof message.content === 'string' && message.content.trim().length > 0)
+}
+
 /** Trim/normalize a derived title from the first user message. */
 function deriveTitle(messages: ConvMessage[]): string {
   const firstUser = messages.find(m => m.role === 'user')
@@ -31,7 +36,7 @@ function deriveTitle(messages: ConvMessage[]): string {
 }
 
 export function loadConversations(): Conversation[] {
-  return storeLoad<Conversation>(STORE, KEY)
+  return storeLoad<Conversation>(STORE, KEY).filter(hasContent)
 }
 
 // Monotonic clock: guarantees strictly-increasing updatedAt even for multiple
@@ -45,9 +50,10 @@ function nextTimestamp(): number {
 
 /**
  * Upsert a conversation by id. Sets `updatedAt` and, when the stored title is
- * empty, derives one from the first user message.
+ * empty, derives one from the first user message. Empty drafts are not persisted.
  */
 export function saveConversation(c: Conversation): void {
+  if (!hasContent(c)) return
   storeUpsert(STORE, KEY, {
     ...c,
     title: c.title || deriveTitle(c.messages),

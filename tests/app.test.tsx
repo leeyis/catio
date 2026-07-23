@@ -120,6 +120,24 @@ it('new host connection opens a demo terminal tab without Tauri', () => {
   expect(screen.getAllByText(/edge-01/).length).toBeGreaterThan(0)
 })
 
+it('does not add empty Agent conversations when opening tabs or starting over', () => {
+  wrap()
+  fireEvent.click(screen.getAllByText('新建连接')[0])
+  fireEvent.click(screen.getByText('主机 / 终端'))
+  const hostLabel = screen.getAllByText('主机').map(el => el.parentElement)
+    .find(p => p?.querySelector('input')) as HTMLElement
+  fireEvent.input(hostLabel.querySelector('input') as HTMLInputElement, { target: { value: 'edge-01' } })
+  fireEvent.click(screen.getByText('保存并连接'))
+
+  fireEvent.click(screen.getByTitle('Catio Agent · 跨终端与数据库'))
+  fireEvent.click(screen.getByTitle('新建对话'))
+  fireEvent.click(screen.getByTitle('新建对话'))
+  fireEvent.click(screen.getByTitle('会话历史'))
+
+  expect(screen.getByText('暂无历史会话')).toBeTruthy()
+  expect(JSON.parse(localStorage.getItem('catio-conversations') ?? '[]')).toEqual([])
+})
+
 // PERSISTENCE: the workbench body (incl. the terminal pane) stays MOUNTED when
 // switching to Settings and back — the body is no longer torn down on view change,
 // so the live PTY + xterm buffer survive. We assert the pane container persists by
