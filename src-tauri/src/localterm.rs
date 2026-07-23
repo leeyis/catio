@@ -269,10 +269,12 @@ export ZDOTDIR="$HOME"
 __catio_n='{nonce}'
 __catio_esc() {{ local s=${{1//\\/\\\\}}; s=${{s//;/\\x3b}}; s=${{s//$'\n'/\\x0a}}; printf '%s' "$s"; }}
 __catio_in=0
+__catio_e=0
 __catio_pe() {{ case "$BASH_COMMAND" in __catio_*) return;; esac; if [ "$__catio_in" = 0 ]; then __catio_in=1; local c; c=$(builtin history 1 | sed 's/ *[0-9][0-9]* *//'); printf '\e]633;E;%s;%s\a\e]633;C;%s\a' "$(__catio_esc "$c")" "$__catio_n" "$__catio_n"; fi; }}
-__catio_pc() {{ local e=$?; __catio_in=0; printf '\e]633;D;%s;%s\a' "$e" "$__catio_n"; }}
+__catio_ps() {{ __catio_e=$?; return "$__catio_e"; }}
+__catio_pc() {{ local e=$__catio_e; printf '\e]633;D;%s;%s\a' "$e" "$__catio_n"; __catio_in=0; }}
 trap '__catio_pe' DEBUG
-case "${{PROMPT_COMMAND:-}}" in *__catio_pc*) ;; *) PROMPT_COMMAND="__catio_pc${{PROMPT_COMMAND:+;$PROMPT_COMMAND}}";; esac
+case "${{PROMPT_COMMAND:-}}" in *__catio_pc*) ;; *) PROMPT_COMMAND="__catio_ps${{PROMPT_COMMAND:+;$PROMPT_COMMAND}};__catio_pc";; esac
 # 给 PS1 追加 OSC 633;B(输入起点标记)。\[...\] 是 bash 的「零宽」包裹,避免占用可见列。幂等。
 case "$PS1" in *'633;B'*) ;; *) PS1="$PS1"'\[\e]633;B\a\]';; esac
 "#
@@ -674,6 +676,36 @@ mod tests {
         assert!(rc.contains("NONCE123"), "nonce not embedded");
         // 防自身命令进审计(镜像 SSH 端逻辑)。
         assert!(rc.contains(r#"case "$BASH_COMMAND" in __catio_*)"#), "bash self-skip guard missing");
+    }
+
+    #[test]
+    fn local_rc_bash_finishes_lifecycle_after_host_prompt_command() {
+        let rc = local_integration_rc(LocalShellKind::Bash, "NONCE123", "source ~/.bashrc");
+        assert!(
+            rc.contains(r#"__catio_ps() { __catio_e=$?; return "$__catio_e"; }"#),
+            "bash prompt hook must save and restore the user command status: {rc}"
+        );
+        let prompt_line = rc
+            .lines()
+            .find(|line| line.contains("PROMPT_COMMAND="))
+            .expect("bash PROMPT_COMMAND assignment missing");
+        let saver = prompt_line
+            .find("__catio_ps")
+            .expect("status saver missing from PROMPT_COMMAND");
+        let host_hooks = prompt_line
+            .find("${PROMPT_COMMAND:+;$PROMPT_COMMAND}")
+            .expect("host PROMPT_COMMAND must be preserved");
+        let finisher = prompt_line
+            .rfind("__catio_pc")
+            .expect("lifecycle finisher missing from PROMPT_COMMAND");
+        assert!(
+            saver < host_hooks && host_hooks < finisher,
+            "prompt lifecycle must save status, run host hooks, then finish: {prompt_line}"
+        );
+        assert!(
+            rc.contains("local e=$__catio_e;"),
+            "bash lifecycle finisher must emit the saved user exit status: {rc}"
+        );
     }
 
     #[test]
