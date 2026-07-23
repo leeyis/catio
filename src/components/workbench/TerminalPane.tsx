@@ -20,6 +20,7 @@ import { planHistoryCompletion, type ShellHistoryEntry, type HistoryMatch } from
 import { HistorySuggest } from '../shell/HistorySuggest'
 import { isSensitiveCommand, type RiskCode } from './sensitiveCommands'
 import { BroadcastConfirmModal } from './BroadcastConfirmModal'
+import { installXtermImeInputFix } from './xtermImeInputFix'
 
 export interface TerminalPaneProps {
   conn: Connection | null
@@ -549,6 +550,7 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
     searchAddonRef.current = searchAddon
     try { term.loadAddon(searchAddon) } catch { /* mocked terminal in tests */ }
     term.open(hostEl)
+    const imeInputFix = installXtermImeInputFix(term)
     // WebGL renderer:把每个字符严格画进等宽 cell 网格,并对 ─│┼ 及 +|=- 等框线字符做矢量
     // 自绘填满 cell,得到「方方正正、边框连续、列严格对齐」的专业终端观感——这是 xterm 默认
     // DOM renderer 做不到的(DOM 靠字体在文档流里自然排版,既受外部 CSS 污染又不自绘框线)。
@@ -893,6 +895,7 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
     // 测试里 xterm mock 没有这个方法 → 存在性保护。
     if (typeof term.attachCustomKeyEventHandler === 'function') {
       term.attachCustomKeyEventHandler((ev) => {
+        if (imeInputFix.handleKeyEvent(ev)) return false
         if (ev.type !== 'keydown') return true
         // 吞键:让 xterm 不处理(return false)并 preventDefault 阻止浏览器默认行为,
         // stopPropagation 阻止冒泡到可能切换面板的全局快捷键。最后把焦点收回终端。
@@ -1112,6 +1115,7 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
       // Only call termClose if the channel is still live (not already closed by server).
       if (live && sessionId && chanIdRef.current) { termClose(sessionId, chanIdRef.current); chanIdRef.current = null }
       if (live && sessionId) { onChannelRef.current?.(sessionId, null) }
+      imeInputFix.dispose()
       term.dispose()
       termRef.current = null
       fitAddonRef.current = null

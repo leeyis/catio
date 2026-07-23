@@ -19,6 +19,7 @@ import {
   type HistoryEvent,
 } from '../../services/ssh'
 import { HistorySuggest } from '../shell/HistorySuggest'
+import { installXtermImeInputFix } from './xtermImeInputFix'
 import { planHistoryCompletion, type HistoryMatch } from '../shell/historyCompletion'
 import { loadHistory } from '../../state/history'
 import type { Connection } from '../../services/types'
@@ -178,6 +179,7 @@ export function LocalTerminalPane({ conn, active, onHistory, onChannel, split }:
     fitRef.current = fit
     term.loadAddon(fit)
     term.open(hostEl)
+    const imeInputFix = installXtermImeInputFix(term)
     try {
       const webgl = new WebglAddon()
       webgl.onContextLoss(() => { try { webgl.dispose() } catch { /* already disposed */ } })
@@ -421,6 +423,7 @@ export function LocalTerminalPane({ conn, active, onHistory, onChannel, split }:
         // 键盘导航候选:↑↓ 移动、→ 接受补全、Esc 关闭;候选不可见时一律放行给 PTY。
         if (typeof term.attachCustomKeyEventHandler === 'function') {
           term.attachCustomKeyEventHandler((ev) => {
+            if (imeInputFix.handleKeyEvent(ev)) return false
             if (ev.type !== 'keydown') return true
             if (!historySuggestEnabledRef.current) return true
             const sg = suggestRef.current
@@ -487,6 +490,7 @@ export function LocalTerminalPane({ conn, active, onHistory, onChannel, split }:
       if (chanIdRef.current) markTerminalChannelExecution(chanIdRef.current, false)
       if (chanIdRef.current) { termLocalClose(chanIdRef.current); chanIdRef.current = null }
       onChannelRef.current?.(null)
+      imeInputFix.dispose()
       term.dispose()
       termRef.current = null
       fitRef.current = null
