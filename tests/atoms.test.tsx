@@ -28,6 +28,6 @@ it('centers connection brand marks in a theme-independent logo tile', () => {
   const tile = container.firstElementChild
   expect(tile).toHaveClass('connection-logo')
   expect(tile).toHaveStyle({ padding: '4px' })
-  expect(tile?.firstElementChild).toHaveStyle({ width: '100%', height: '100%' })
+  expect(tile?.firstElementChild).toHaveStyle({ width: '100%', height: '100%', borderRadius: '22%' })
   expect(tile?.firstElementChild?.tagName).toBe('IMG')
 })

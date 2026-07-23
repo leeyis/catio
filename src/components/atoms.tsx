@@ -202,7 +202,7 @@ export function ConnGlyph({ conn, size = 42, radius = 10 }: ConnGlyphProps) {
       <div className="icon-badge connection-logo" style={{ width: size, height: size, borderRadius: radius, padding: small ? 4 : 6 }}>
         {ol.color
           ? <span style={{ display: 'block', width: '100%', height: '100%', backgroundColor: ol.color, WebkitMaskImage: `url(${ol.url})`, maskImage: `url(${ol.url})`, WebkitMaskRepeat: 'no-repeat', maskRepeat: 'no-repeat', WebkitMaskPosition: 'center', maskPosition: 'center', WebkitMaskSize: 'contain', maskSize: 'contain' }} />
-          : <img src={ol.url} alt={conn.os ?? 'OS'} style={{ width: '100%', height: '100%', objectFit: 'contain' }} />}
+          : <img src={ol.url} alt={conn.os ?? 'OS'} style={{ width: '100%', height: '100%', objectFit: 'contain', borderRadius: '22%' }} />}
       </div>
     )
   }
