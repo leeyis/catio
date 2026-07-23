@@ -129,7 +129,7 @@ describe('terminal command capture', () => {
     expect(isStreamingOrInteractiveCommand(command)).toBe(true)
   })
 
-  it.each(['docker logs --tail 200 api', 'docker stats --no-stream', 'tail -n 50 app.log'])('keeps bounded commands on the normal path: %s', command => {
+  it.each(['lsblk', 'docker logs --tail 200 api', 'docker stats --no-stream', 'tail -n 50 app.log'])('keeps bounded commands on the normal path: %s', command => {
     expect(isStreamingOrInteractiveCommand(command)).toBe(false)
   })
 

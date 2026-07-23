@@ -235,4 +235,5 @@ it('shows Agent command permission target and command as separately labelled reg
 
   fireEvent.click(screen.getByRole('button', { name: '取消' }))
   await waitFor(() => expect(screen.queryByText('允许 Agent 执行命令？')).toBeNull())
+  expect(agentMock.chat).toHaveBeenCalledTimes(1)
 })

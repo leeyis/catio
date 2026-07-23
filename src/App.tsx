@@ -1867,6 +1867,10 @@ export default function App() {
               loopTarget = executed.target
               result = executed.result
             }
+            // A user denial or an execution block ends this interaction. Sending
+            // it back as tool feedback makes the model propose the same command
+            // again, reopening the permission/split modal and keeping Agent busy.
+            if (result.status === 'denied' || result.status === 'blocked') return null
             feedback = buildTerminalResultPrompt(plan.command, result)
           }
           loopMessages.push({ role: 'user', content: feedback })

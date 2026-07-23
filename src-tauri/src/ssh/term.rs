@@ -321,13 +321,23 @@ fn emit_scanned(
     }
     let mut input_start_emitted = false;
     let mut visible_pos = 0;
-    // Always process events for the audit state machine regardless of mute.
+    // Bootstrap lifecycle markers are private setup traffic. In particular,
+    // CentOS bash may fire the newly-installed DEBUG trap while `eval` is still
+    // running, before the nonce-gated Ready sentinel. Exposing those markers
+    // makes a freshly-connected, idle terminal look busy to the Agent.
     for positioned in events {
         let event_pos = positioned.visible_offset.min(visible.len());
         if !*muted {
             append_visible(pending, &visible[visible_pos..event_pos], strip_lead_nl);
         }
         visible_pos = event_pos;
+        if *muted {
+            if matches!(positioned.event, osc::OscEvent::Ready) {
+                *cur_cmd = None;
+                *muted = false;
+            }
+            continue;
+        }
         match positioned.event {
             osc::OscEvent::CommandLine(c) => {
                 *cur_cmd = Some(c);
@@ -387,7 +397,7 @@ fn emit_scanned(
             }
             // The nonce-gated marker ends mute at its exact byte position: bytes
             // before it are bootstrap noise; bytes after it are the clean prompt.
-            osc::OscEvent::Ready => *muted = false,
+            osc::OscEvent::Ready => {}
         }
     }
     if !*muted {
@@ -561,6 +571,66 @@ mod tests {
         assert!(
             frames.iter().all(|(topic, _)| topic != "history://s1"),
             "history stays deduplicated while execEnd remains observable",
+        );
+    }
+
+    #[test]
+    fn bootstrap_lifecycle_is_not_exposed_as_terminal_execution() {
+        let sink = CapturingSink::default();
+        let mut scanner = osc::Scanner::new("N");
+        let mut cur_cmd = None;
+        let mut cur_cwd = String::new();
+        let mut cur_start = Instant::now();
+        let mut muted = true;
+        let started = Instant::now();
+        let mut last_emit = None;
+        let mut strip_lead_nl = false;
+        let mut pending = Vec::new();
+
+        // CentOS bash can run the DEBUG trap while the integration bootstrap is
+        // still being evaluated. Those private E/C markers arrive before Ready.
+        emit_scanned(
+            &sink,
+            "term://c1",
+            "history://s1",
+            "host",
+            &mut scanner,
+            b"\x1b]633;E;eval bootstrap;N\x07\x1b]633;C;N\x07\x1b]633;P;CatioReady=N\x07",
+            &mut cur_cmd,
+            &mut cur_cwd,
+            &mut cur_start,
+            &mut muted,
+            &started,
+            &mut last_emit,
+            &mut strip_lead_nl,
+            &mut pending,
+        );
+        // The prompt hook may close that private execution after Ready.
+        emit_scanned(
+            &sink,
+            "term://c1",
+            "history://s1",
+            "host",
+            &mut scanner,
+            b"\x1b]633;D;0;N\x07root@centos:~# \x1b]633;B\x07",
+            &mut cur_cmd,
+            &mut cur_cwd,
+            &mut cur_start,
+            &mut muted,
+            &started,
+            &mut last_emit,
+            &mut strip_lead_nl,
+            &mut pending,
+        );
+
+        let frames = sink.0.lock().unwrap();
+        assert!(
+            frames.iter().all(|(topic, payload)| {
+                topic != "history://s1"
+                    && payload.get("execStart").is_none()
+                    && payload.get("execEnd").is_none()
+            }),
+            "bootstrap markers must not make an idle terminal look busy: {frames:?}",
         );
     }
 
