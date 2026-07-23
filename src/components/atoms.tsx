@@ -170,9 +170,9 @@ export function StatusDot({ status, size = 7 }: StatusDotProps) {
   )
 }
 
-/* Connection glyph: real brand LOGO when available, else a tinted fallback.
+/* Connection glyph: real brand logo when available, else a tinted fallback.
    - DB: full-colour engine logo on a clean tile; falls back to the engine short code.
-   - Host: OS logo tinted to the brand colour (CSS mask); falls back to the OS-tinted
+   - Host: full-colour artwork or a brand-tinted CSS mask; falls back to the OS-tinted
      generic icon until the backend detects the real OS post-connect. */
 export function ConnGlyph({ conn, size = 42, radius = 10 }: ConnGlyphProps) {
   const D = useData()
@@ -200,7 +200,9 @@ export function ConnGlyph({ conn, size = 42, radius = 10 }: ConnGlyphProps) {
   if (ol) {
     return (
       <div className="icon-badge connection-logo" style={{ width: size, height: size, borderRadius: radius, padding: small ? 4 : 6 }}>
-        <span style={{ display: 'block', width: '100%', height: '100%', backgroundColor: ol.color, WebkitMaskImage: `url(${ol.url})`, maskImage: `url(${ol.url})`, WebkitMaskRepeat: 'no-repeat', maskRepeat: 'no-repeat', WebkitMaskPosition: 'center', maskPosition: 'center', WebkitMaskSize: 'contain', maskSize: 'contain' }} />
+        {ol.color
+          ? <span style={{ display: 'block', width: '100%', height: '100%', backgroundColor: ol.color, WebkitMaskImage: `url(${ol.url})`, maskImage: `url(${ol.url})`, WebkitMaskRepeat: 'no-repeat', maskRepeat: 'no-repeat', WebkitMaskPosition: 'center', maskPosition: 'center', WebkitMaskSize: 'contain', maskSize: 'contain' }} />
+          : <img src={ol.url} alt={conn.os ?? 'OS'} style={{ width: '100%', height: '100%', objectFit: 'contain' }} />}
       </div>
     )
   }

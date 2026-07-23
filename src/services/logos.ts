@@ -81,9 +81,9 @@ const DB_LOGO: Record<string, string> = {
   h2: 'h2.svg',
 }
 
-/** OS id → monochrome logo file + brand colour (for the CSS-mask tint). */
-const OS_LOGO: Record<string, { file: string; color: string }> = {
-  ubuntu: { file: 'ubuntu.svg', color: '#E95420' },
+/** OS id → logo file; color is present only for monochrome CSS-mask assets. */
+const OS_LOGO: Record<string, { file: string; color?: string }> = {
+  ubuntu: { file: 'ubuntu.png' },
   debian: { file: 'debian.svg', color: '#A81D33' },
   alpine: { file: 'alpinelinux.svg', color: '#0D597F' },
   centos: { file: 'centos.svg', color: '#262577' },
@@ -92,7 +92,7 @@ const OS_LOGO: Record<string, { file: string; color: string }> = {
   rhel: { file: 'redhat.svg', color: '#EE0000' },
   redhat: { file: 'redhat.svg', color: '#EE0000' },
   // Generic Linux and Apple marks still use stable brand colours.
-  linux: { file: 'linux.svg', color: '#FCC624' },
+  linux: { file: 'linux.png' },
   macos: { file: 'apple.svg', color: '#A2AAAD' },
 }
 
@@ -104,7 +104,7 @@ export function dbLogo(engine?: string | null): string | null {
 }
 
 /** Resolve an OS id to its logo URL + tint colour, or null when none is bundled. */
-export function osLogo(os?: string | null): { url: string; color: string } | null {
+export function osLogo(os?: string | null): { url: string; color?: string } | null {
   if (!os) return null
   const m = OS_LOGO[os]
   return m ? { url: `/logos/os/${m.file}`, color: m.color } : null

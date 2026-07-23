@@ -18,8 +18,8 @@ describe('dbLogo', () => {
 
 describe('osLogo', () => {
   it('resolves a known OS to a url + tint colour', () => {
-    expect(osLogo('ubuntu')).toEqual({ url: '/logos/os/ubuntu.svg', color: '#E95420' })
-    expect(osLogo('linux')).toEqual({ url: '/logos/os/linux.svg', color: '#FCC624' })
+    expect(osLogo('ubuntu')).toEqual({ url: '/logos/os/ubuntu.png', color: undefined })
+    expect(osLogo('linux')).toEqual({ url: '/logos/os/linux.png', color: undefined })
     expect(osLogo('macos')).toEqual({ url: '/logos/os/apple.svg', color: '#A2AAAD' })
   })
   it('returns null for unknown / missing OS', () => {
