@@ -168,7 +168,7 @@ export default function App() {
   // sessionId -> cached sysinfo string (fetched once per session on first agent send).
   const sysinfoCache = useRef<Record<string, string>>({})
 
-  // Upsert into the ref (source of truth), localStorage, and render state.
+  // Upsert into the ref and render state; the store ignores it until it has content.
   function upsertConversation(conv: Conversation) {
     const next = [...conversationsRef.current.filter(c => c.id !== conv.id), conv]
     conversationsRef.current = next
@@ -1528,8 +1528,8 @@ export default function App() {
 
   // ---- Agent conversation controller (P2) ----
 
-  // Resolve the conversation id for a tab, lazily creating + persisting a fresh
-  // one for the tab's host (connId) if none is mapped yet. Returns the id.
+  // Resolve the conversation id for a tab, lazily creating a fresh in-memory one
+  // for the tab's host (connId) if none is mapped yet. Returns the id.
   function ensureConvId(tab: Tab): string {
     const existing = currentConvByTab[tab.id]
     if (existing) return existing
