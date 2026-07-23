@@ -13,8 +13,9 @@ export function installXtermImeInputFix(term: Terminal): XtermImeInputFix {
   if (!textarea) return { handleKeyEvent: () => false, dispose() {} }
 
   let dataSentDuringInput = false
-  let lastKeyDown: { key: string; code: string; at: number } | null = null
-  const pendingInputs: Array<{ data: string; sent: boolean; at: number }> = []
+  let lastKeyDown: { key: string; code: string; keyCode: number; at: number; pairedWithPriorInput: boolean } | null = null
+  const pendingInputs: Array<{ data: string; at: number }> = []
+  const deferredCleanupTimers = new Set<ReturnType<typeof setTimeout>>()
   const ownerDocument = textarea.ownerDocument
 
   const expirePending = (now: number) => {
@@ -32,17 +33,23 @@ export function installXtermImeInputFix(term: Terminal): XtermImeInputFix {
     const now = Date.now()
     expirePending(now)
     const followsKeyDown = lastKeyDown !== null
+      && !lastKeyDown.pairedWithPriorInput
       && now - lastKeyDown.at <= INPUT_KEYDOWN_WINDOW_MS
-      && lastKeyDown.key === inputEvent.data
-    if (!followsKeyDown) {
-      pendingInputs.push({ data: inputEvent.data, sent: dataSentDuringInput, at: now })
-    }
+      && (lastKeyDown.key === inputEvent.data || lastKeyDown.keyCode === 229)
+    if (followsKeyDown) return
+    if (!dataSentDuringInput) term.input(inputEvent.data, true)
+    pendingInputs.push({ data: inputEvent.data, at: now })
   }
   const onCompositionStart = () => {
     lastKeyDown = null
     pendingInputs.length = 0
   }
-  const dataListener = term.onData(() => { dataSentDuringInput = true })
+  const dataListener = term.onData(() => {
+    dataSentDuringInput = true
+    if (lastKeyDown?.keyCode === 229 && !lastKeyDown.pairedWithPriorInput) {
+      lastKeyDown = null
+    }
+  })
 
   ownerDocument.addEventListener('input', onInputCapture, true)
   textarea.addEventListener('input', onInput)
@@ -60,12 +67,33 @@ export function installXtermImeInputFix(term: Terminal): XtermImeInputFix {
 
       const now = Date.now()
       expirePending(now)
-      const pendingIndex = pendingInputs.findIndex(input => input.data === event.key)
-      lastKeyDown = { key: event.key, code: event.code, at: now }
+      const canPairPending = event.keyCode === 229
+        && !event.ctrlKey
+        && !event.altKey
+        && !event.metaKey
+      const pendingIndex = canPairPending && pendingInputs.length > 0 ? 0 : -1
+      const keyDownState = {
+        key: event.key,
+        code: event.code,
+        keyCode: event.keyCode,
+        at: now,
+        pairedWithPriorInput: pendingIndex !== -1,
+      }
+      lastKeyDown = keyDownState
+      if (pendingIndex === -1 && event.keyCode === 229) {
+        const outerTimer = setTimeout(() => {
+          deferredCleanupTimers.delete(outerTimer)
+          const innerTimer = setTimeout(() => {
+            deferredCleanupTimers.delete(innerTimer)
+            if (lastKeyDown === keyDownState) lastKeyDown = null
+          }, 0)
+          deferredCleanupTimers.add(innerTimer)
+        }, 0)
+        deferredCleanupTimers.add(outerTimer)
+      }
       if (pendingIndex === -1) return false
 
-      const [pending] = pendingInputs.splice(pendingIndex, 1)
-      if (!pending.sent) term.input(pending.data, true)
+      pendingInputs.splice(pendingIndex, 1)
       return true
     },
     dispose() {
@@ -73,6 +101,8 @@ export function installXtermImeInputFix(term: Terminal): XtermImeInputFix {
       textarea.removeEventListener('input', onInput)
       textarea.removeEventListener('compositionstart', onCompositionStart)
       dataListener.dispose()
+      for (const timer of deferredCleanupTimers) clearTimeout(timer)
+      deferredCleanupTimers.clear()
     },
   }
 }

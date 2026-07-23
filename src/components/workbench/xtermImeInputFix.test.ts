@@ -13,8 +13,14 @@ function input(data: string, isComposing = false): InputEvent {
   return event
 }
 
-function key(type: 'keydown' | 'keyup', value: string, keyCode: number): KeyboardEvent {
-  const event = new KeyboardEvent(type, { key: value, code: `Key${value.toUpperCase()}` })
+function key(
+  type: 'keydown' | 'keyup',
+  value: string,
+  keyCode: number,
+  code = `Key${value.toUpperCase()}`,
+  init: KeyboardEventInit = {},
+): KeyboardEvent {
+  const event = new KeyboardEvent(type, { key: value, code, ...init })
   Object.defineProperty(event, 'keyCode', { value: keyCode })
   return event
 }
@@ -86,6 +92,124 @@ describe('installXtermImeInputFix', () => {
 
     expect(h.emitted.join('')).toBe('ls -alh')
     h.dispose()
+  })
+
+  it('preserves repeated input when the next input arrives before keyup', () => {
+    const h = createHarness()
+    const fix = installXtermImeInputFix(h.terminal)
+
+    h.textarea.dispatchEvent(input('l'))
+    expect(fix.handleKeyEvent(key('keydown', 'l', 229))).toBe(true)
+    h.setXtermState(true, false)
+    h.textarea.dispatchEvent(input('l'))
+    expect(fix.handleKeyEvent(key('keydown', 'l', 229))).toBe(true)
+
+    expect(h.emitted.join('')).toBe('ll')
+    h.dispose()
+  })
+
+  it('preserves direct-commit punctuation when key and input data differ', () => {
+    const h = createHarness()
+    const fix = installXtermImeInputFix(h.terminal)
+
+    expect(fix.handleKeyEvent(key('keydown', 'Shift', 16, 'ShiftLeft'))).toBe(false)
+    h.setXtermState(true, false)
+    h.textarea.dispatchEvent(input('「'))
+    expect(fix.handleKeyEvent(key('keydown', '{', 229, 'BracketLeft'))).toBe(true)
+
+    expect(h.emitted).toEqual(['「'])
+    h.dispose()
+  })
+
+  it('sends multi-character input even when the next keydown is unrelated', () => {
+    const h = createHarness()
+    const fix = installXtermImeInputFix(h.terminal)
+
+    h.textarea.dispatchEvent(input('a'))
+    expect(fix.handleKeyEvent(key('keydown', 'a', 229))).toBe(true)
+    h.setXtermState(true, false)
+    h.textarea.dispatchEvent(input('bc'))
+    expect(fix.handleKeyEvent(key('keydown', ' ', 32, 'Space'))).toBe(false)
+    h.emit(' ')
+
+    expect(h.emitted.join('')).toBe('abc ')
+    expect(h.terminal.input).toHaveBeenCalledWith('bc', true)
+    h.dispose()
+  })
+
+  it('does not swallow an ordinary keydown after standalone input', () => {
+    const h = createHarness()
+    const fix = installXtermImeInputFix(h.terminal)
+
+    h.textarea.dispatchEvent(input('a'))
+    expect(fix.handleKeyEvent(key('keydown', 'a', 65))).toBe(false)
+    h.emit('a')
+
+    expect(h.emitted.join('')).toBe('aa')
+    h.dispose()
+  })
+
+  it('does not swallow a control chord after standalone input', () => {
+    const h = createHarness()
+    const fix = installXtermImeInputFix(h.terminal)
+
+    h.textarea.dispatchEvent(input('c'))
+    expect(fix.handleKeyEvent(key('keydown', 'c', 67, 'KeyC', { ctrlKey: true }))).toBe(false)
+    h.emit('\x03')
+
+    expect(h.emitted).toEqual(['c', '\x03'])
+    h.dispose()
+  })
+
+  it('handles a keydown-first character followed by input-first input', () => {
+    const h = createHarness()
+    const fix = installXtermImeInputFix(h.terminal)
+
+    expect(fix.handleKeyEvent(key('keydown', 'a', 229))).toBe(false)
+    h.setXtermState(true, false)
+    h.textarea.dispatchEvent(input('a'))
+    h.emit('a') // xterm's deferred textarea diff fallback
+    h.textarea.dispatchEvent(input('b'))
+    expect(fix.handleKeyEvent(key('keydown', 'b', 229))).toBe(true)
+
+    expect(h.emitted.join('')).toBe('ab')
+    h.dispose()
+  })
+
+  it('does not duplicate input that arrives before xterm deferred fallback runs', () => {
+    const h = createHarness()
+    const fix = installXtermImeInputFix(h.terminal)
+
+    expect(fix.handleKeyEvent(key('keydown', 'a', 229))).toBe(false)
+    h.setXtermState(true, false)
+    h.textarea.dispatchEvent(input('a'))
+    h.textarea.dispatchEvent(input('b'))
+    expect(fix.handleKeyEvent(key('keydown', 'b', 229))).toBe(false)
+    h.emit('ab') // first keydown's deferred textarea diff sees both characters
+
+    expect(h.emitted.join('')).toBe('ab')
+    expect(h.terminal.input).not.toHaveBeenCalled()
+    h.dispose()
+  })
+
+  it('clears a keydown with an empty deferred diff before the next input', () => {
+    vi.useFakeTimers()
+    const h = createHarness()
+    const fix = installXtermImeInputFix(h.terminal)
+
+    try {
+      expect(fix.handleKeyEvent(key('keydown', 'Process', 229))).toBe(false)
+      vi.runAllTimers()
+      h.setXtermState(true, false)
+      h.textarea.dispatchEvent(input('b'))
+      expect(fix.handleKeyEvent(key('keydown', 'b', 229))).toBe(true)
+
+      expect(h.emitted).toEqual(['b'])
+    } finally {
+      fix.dispose()
+      h.dispose()
+      vi.useRealTimers()
+    }
   })
 
   it('does not duplicate normal keydown-first input', () => {
