@@ -30,6 +30,7 @@ import { ServerAccountBlock } from '../auth/ServerAccountBlock'
 import { useServerAuth } from '../auth/ServerAuthGate'
 import { isServer } from '../../services/transport'
 import { copyTextToClipboard } from '../../services/clipboard'
+import { diagnosticLogDir } from '../../services/diagnostics'
 
 // ---- Prop types ----
 
@@ -1485,6 +1486,25 @@ function AboutSettings() {
             <Icon name="external-link" size={13} />
             <span>{t('settings.aboutRepo')}</span>
           </a>
+          {isTauri() && (
+            <button
+              type="button"
+              onClick={() => {
+                diagnosticLogDir()
+                  .then(async path => {
+                    if (!path) return
+                    const { openPath } = await import('@tauri-apps/plugin-opener')
+                    await openPath(path)
+                  })
+                  .catch(error => console.warn('[catio:diagnostics] 无法打开诊断日志目录。', error))
+              }}
+              className="row gap6"
+              style={{ marginTop: 2, fontSize: 12.5, fontWeight: 500, color: 'var(--accent-primary)', width: 'fit-content' }}
+            >
+              <Icon name="folder-open" size={13} />
+              <span>{t('settings.aboutLogs')}</span>
+            </button>
+          )}
         </div>
       </div>
     </Block>

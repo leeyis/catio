@@ -7,6 +7,10 @@ const terminalMock = vi.hoisted(() => ({
   termLocalWrite: vi.fn(),
 }))
 
+const diagnosticsMock = vi.hoisted(() => ({
+  log: vi.fn(),
+}))
+
 vi.mock('./ssh', () => ({
   listen: vi.fn(async (_event: string, listener: (event: Record<string, unknown>) => void) => {
     terminalMock.listener = listener
@@ -14,6 +18,10 @@ vi.mock('./ssh', () => ({
   }),
   termWrite: terminalMock.termWrite,
   termLocalWrite: terminalMock.termLocalWrite,
+}))
+
+vi.mock('./diagnostics', () => ({
+  diagnosticLog: diagnosticsMock.log,
 }))
 
 import {
@@ -37,6 +45,7 @@ beforeEach(() => {
   terminalMock.unlisten.mockReset()
   terminalMock.termWrite.mockReset()
   terminalMock.termLocalWrite.mockReset()
+  diagnosticsMock.log.mockReset()
 })
 
 describe('terminal command capture', () => {
@@ -104,8 +113,35 @@ describe('terminal command capture', () => {
   it('reports a command started manually in a mounted terminal as busy', () => {
     markTerminalChannelExecution('manual-1', true)
     expect(isTerminalChannelBusy('manual-1')).toBe(true)
+    expect(diagnosticsMock.log).toHaveBeenCalledWith({
+      level: 'debug',
+      area: 'terminal',
+      event: 'busy-detected',
+      channelId: 'manual-1',
+      source: 'busy-check',
+      active: true,
+      capture: false,
+      busy: true,
+    })
     markTerminalChannelExecution('manual-1', false)
     expect(isTerminalChannelBusy('manual-1')).toBe(false)
+  })
+
+  it('logs only structured capture metadata, never command or host content', async () => {
+    terminalMock.termWrite.mockImplementation(async () => {
+      terminalMock.listener?.({ execStart: true })
+      terminalMock.listener?.({ execEnd: true, command: 'printf super-secret', exitCode: 0 })
+    })
+
+    await runTerminalCommandAndCapture(
+      { kind: 'ssh', sessionId: 'private-session', chanId: 'safe-channel' },
+      'printf super-secret',
+    )
+
+    const serialized = JSON.stringify(diagnosticsMock.log.mock.calls)
+    expect(serialized).toContain('safe-channel')
+    expect(serialized).not.toContain('super-secret')
+    expect(serialized).not.toContain('private-session')
   })
 
   it.each([

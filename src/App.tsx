@@ -76,6 +76,7 @@ import {
   type TerminalCommandResult,
 } from './services/terminalCapture'
 import { requestAgentTerminalSplit } from './services/agentTerminalSplit'
+import { diagnosticLog } from './services/diagnostics'
 import { runAgentShellLoop } from './components/workbench/agentExecution'
 import type { ConnectionProfile } from './state/connections'
 import type { Tab, Connection, Snippet } from './services/types'
@@ -1606,7 +1607,27 @@ export default function App() {
     }
     let runTarget = target
     if (runTarget.kind !== 'uncaptured' && isTerminalChannelBusy(runTarget.chanId)) {
+      diagnosticLog({
+        level: 'info',
+        area: 'agent',
+        event: 'split-requested',
+        channelId: runTarget.chanId,
+        source: 'split-request',
+        busy: true,
+      })
       const splitAllowed = await requestAgentSplitPermission(targetName, command, controller.signal)
+      diagnosticLog({
+        level: 'info',
+        area: 'agent',
+        event: splitAllowed === true
+          ? 'split-request-approved'
+          : splitAllowed === false
+            ? 'split-request-declined'
+            : 'split-request-unavailable',
+        channelId: runTarget.chanId,
+        source: 'split-request',
+        busy: true,
+      })
       if (splitAllowed !== true || controller.signal.aborted) {
         if (controller.signal.aborted) return null
         appendAgentRunWarning(convId, t('panels.agentRunBusySkipped'))

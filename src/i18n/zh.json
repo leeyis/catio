@@ -1136,6 +1136,7 @@
     "aboutTitle": "关于 Catio",
     "aboutDesc": "把<b>安全 SSH 终端</b>、端口隧道、<b>多引擎数据库客户端</b>与 <b>AI 助手</b>整合进一个跨平台桌面应用——主机、隧道、数据库与 AI，一处搞定。",
     "aboutRepo": "代码仓库",
+    "aboutLogs": "打开诊断日志目录",
     "themeDawnSub": "Dawn · 明亮通透",
     "themeAmberSub": "Amber · 暖笺香槟",
     "themeGroveSub": "Grove · 荧林静默",

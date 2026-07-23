@@ -1,4 +1,5 @@
 import { listen, termLocalWrite, termWrite } from './ssh'
+import { diagnosticLog } from './diagnostics'
 
 export type CapturableTerminalTarget =
   | { kind: 'ssh'; chanId: string; sessionId: string }
@@ -56,13 +57,38 @@ export function isStreamingOrInteractiveCommand(command: string): boolean {
 }
 
 export function isTerminalChannelBusy(chanId: string): boolean {
-  return runningChannels.has(chanId) || activeTerminalChannels.has(chanId)
+  const capture = runningChannels.has(chanId)
+  const active = activeTerminalChannels.has(chanId)
+  const busy = capture || active
+  if (busy) {
+    diagnosticLog({
+      level: 'debug',
+      area: 'terminal',
+      event: 'busy-detected',
+      channelId: chanId,
+      source: 'busy-check',
+      active,
+      capture,
+      busy,
+    })
+  }
+  return busy
 }
 
 /** Track shell lifecycle events from every mounted pane, including manual runs. */
 export function markTerminalChannelExecution(chanId: string, active: boolean): void {
   if (active) activeTerminalChannels.add(chanId)
   else activeTerminalChannels.delete(chanId)
+  diagnosticLog({
+    level: 'debug',
+    area: 'terminal',
+    event: 'shell-execution-state',
+    channelId: chanId,
+    source: 'shell-lifecycle',
+    active,
+    capture: runningChannels.has(chanId),
+    busy: active || runningChannels.has(chanId),
+  })
 }
 
 function abortError(): Error {
@@ -141,6 +167,16 @@ export async function runTerminalCommandAndCapture(
   if (runningChannels.has(target.chanId)) throw new Error('A terminal command is already running on this channel')
   if (options.signal?.aborted) throw abortError()
   runningChannels.add(target.chanId)
+  diagnosticLog({
+    level: 'debug',
+    area: 'terminal',
+    event: 'capture-state',
+    channelId: target.chanId,
+    source: 'agent-capture',
+    active: activeTerminalChannels.has(target.chanId),
+    capture: true,
+    busy: true,
+  })
 
   const decoder = new TextDecoder()
   let rawOutput = ''
@@ -172,6 +208,16 @@ export async function runTerminalCommandAndCapture(
     released = true
     clearWaiters()
     runningChannels.delete(target.chanId)
+    diagnosticLog({
+      level: 'debug',
+      area: 'terminal',
+      event: 'capture-state',
+      channelId: target.chanId,
+      source: 'agent-capture',
+      active: activeTerminalChannels.has(target.chanId),
+      capture: false,
+      busy: activeTerminalChannels.has(target.chanId),
+    })
     if (unlisten) {
       unlisten()
       unlisten = null

@@ -2,17 +2,50 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { LanguageProvider } from '../../state/LanguageContext'
 import { DEFAULT_AGENT_CONFIG, getAgentConfig, setAgentConfig } from '../../state/agentConfig'
+
+const diagnosticMocks = vi.hoisted(() => ({
+  logDir: vi.fn(),
+  openPath: vi.fn(),
+}))
+
+vi.mock('../../services/diagnostics', () => ({
+  diagnosticLogDir: diagnosticMocks.logDir,
+}))
+
+vi.mock('@tauri-apps/plugin-opener', () => ({
+  openPath: diagnosticMocks.openPath,
+  openUrl: vi.fn(),
+}))
+
 import { SettingsView } from './SettingsView'
 
 describe('SettingsView Agent model', () => {
   beforeEach(() => {
     localStorage.clear()
     setAgentConfig(DEFAULT_AGENT_CONFIG)
+    diagnosticMocks.logDir.mockReset()
+    diagnosticMocks.openPath.mockReset()
   })
 
   afterEach(() => {
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
+  })
+
+  it('opens the persistent diagnostic log directory from About', async () => {
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
+    diagnosticMocks.logDir.mockResolvedValue('C:\\logs\\catio')
+    diagnosticMocks.openPath.mockResolvedValue(undefined)
+    render(
+      <LanguageProvider>
+        <SettingsView theme="dawn" onTheme={vi.fn()} onClose={vi.fn()} initialSection="about" />
+      </LanguageProvider>,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: '打开诊断日志目录' }))
+
+    await waitFor(() => expect(diagnosticMocks.openPath).toHaveBeenCalledWith('C:\\logs\\catio'))
   })
 
   it('accepts and persists a model name that is not returned by the provider', () => {

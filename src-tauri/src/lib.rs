@@ -13,6 +13,7 @@ pub mod localterm;
 pub mod vnc;
 pub mod vncconn;
 pub mod rdp;
+pub mod diagnostics;
 
 use ssh::manager::SessionManager;
 use db::manager::ConnManager;
@@ -189,7 +190,9 @@ pub fn run() {
             mcp::mcp_set_live_log,
             scan::commands::scan_start,
             scan::commands::scan_cancel,
-            scan::commands::scan_read_text_file
+            scan::commands::scan_read_text_file,
+            diagnostics::diagnostics_log,
+            diagnostics::diagnostics_log_dir
         ])
         .on_window_event(|window, event| {
             #[cfg(desktop)]
