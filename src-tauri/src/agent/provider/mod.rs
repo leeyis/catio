@@ -144,14 +144,13 @@ pub(crate) fn redact_diagnostics(text: &str, credential: &ApiCredential) -> Stri
 
 /// Shared HTTP error classification across the three production adapters.
 ///
-/// Only an explicit capability status (a small, closed set of client
-/// statuses) COMBINED with an explicit "tools not supported" body becomes
-/// `ToolsUnsupported` (the sole trigger for the legacy fallback). 5xx and all
-/// other 4xx are transport failures even when the body mentions tools; auth,
-/// rate-limit and malformed bodies never fall back. Error bodies are
-/// length-limited, only ever read from the response — never constructed from
-/// the request credential — and the exact credential value is redacted from
-/// diagnostics.
+/// Only a 400 BAD_REQUEST COMBINED with an explicit "tools not supported"
+/// body becomes `ToolsUnsupported` (the sole trigger for the legacy
+/// fallback). 5xx and all other 4xx are transport failures even when the
+/// body mentions tools; auth, rate-limit, 404 endpoint/model-not-found and
+/// malformed bodies never fall back. Error bodies are length-limited, only
+/// ever read from the response — never constructed from the request
+/// credential — and the exact credential value is redacted from diagnostics.
 pub fn classify_error_response(
     status: reqwest::StatusCode,
     body: &[u8],
@@ -160,17 +159,17 @@ pub fn classify_error_response(
     match status.as_u16() {
         401 | 403 => ProviderError::Auth,
         429 => ProviderError::RateLimit,
-        // Explicit capability statuses: providers signal "tool use not
-        // enabled for this model/deployment" with exactly these client
-        // statuses. Everything else stays a transport failure.
-        code @ (400 | 404) => {
+        // Explicit capability status: providers signal "tool use not enabled
+        // for this model/deployment" with a 400 BAD_REQUEST. Everything else
+        // (404 endpoint/model not found included) stays a transport failure.
+        400 => {
             let limited: String =
                 String::from_utf8_lossy(&body[..body.len().min(ERROR_BODY_LIMIT)]).into();
             if looks_like_tools_unsupported(limited.as_bytes()) {
                 ProviderError::ToolsUnsupported
             } else {
                 ProviderError::Http(format!(
-                    "status {code}: {}",
+                    "status 400: {}",
                     redact_diagnostics(&limited, credential)
                 ))
             }

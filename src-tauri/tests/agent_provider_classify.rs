@@ -64,6 +64,37 @@ fn explicit_tools_capability_error_classifies_as_tools_unsupported() {
 }
 
 #[test]
+fn not_found_never_becomes_tools_unsupported() {
+    // 404 means the endpoint/model was not found, not that tools are
+    // unavailable: even an explicit capability body must stay Http.
+    let variants: Vec<&[u8]> = vec![
+        br#"{"error":{"message":"this model does not support tools"}}"#,
+        br#"{"error":"tools are not supported by this model"}"#,
+        br#"{"error":"model does not support tool calling"}"#,
+        br#"{"error":"unsupported tool"}"#,
+        br#"{"error":"tool use not enabled for this deployment"}"#,
+        br#"{"error":"tools not available on endpoint"}"#,
+    ];
+    for body in variants {
+        let err = classify_error_response(
+            StatusCode::NOT_FOUND,
+            body,
+            &ApiCredential::from("sk-test".to_string()),
+        );
+        assert!(
+            matches!(err, ProviderError::Http(_)),
+            "404 with a tools-unsupported body must stay ProviderError::Http, got {err:?} (body: {})",
+            String::from_utf8_lossy(body)
+        );
+        assert!(
+            !matches!(err, ProviderError::ToolsUnsupported),
+            "404 must never become ToolsUnsupported, got {err:?} (body: {})",
+            String::from_utf8_lossy(body)
+        );
+    }
+}
+
+#[test]
 fn server_errors_never_become_tools_unsupported_even_with_capability_body() {
     // 5xx means the service is broken or the gateway failed: the body must
     // never turn it into a capability error (and never trigger fallback).
