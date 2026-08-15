@@ -1,0 +1,179 @@
+# small-rust-hermes-v3 对 Catio Agent 后端的可复用性分析
+
+> 研究日期：2026-08-15  
+> Hermes 基线：[`bdd400deb8ba56e30c87b6916348db73f828aded`](https://github.com/leeyis/small-rust-hermes-v3/tree/bdd400deb8ba56e30c87b6916348db73f828aded)（仓库 `main` 在研究时的 HEAD）  
+> Catio 基线：[`3adf8d984f54f6bfc01f3c7716a8e70bfa605f28`](https://github.com/leeyis/catio/tree/3adf8d984f54f6bfc01f3c7716a8e70bfa605f28)  
+> 资料范围：Hermes README、Cargo manifests、Rust 源码、许可证、提交历史；该仓库关闭了 GitHub Issues，研究时没有可用 issue。本文只评价后端执行逻辑，不评价其记忆/反思产品方向。
+
+## 结论
+
+Hermes **可以显著启发 Catio Agent 后端重构，但不能直接作为依赖或整段搬入**。
+
+最值得采用的是它的四个结构性设计：
+
+1. 用 typed `ContentBlock::ToolUse/ToolResult` 和 JSON Schema 工具定义取代 Catio 目前的 Markdown fenced-code 解析。
+2. 把 provider streaming、tool loop、权限决策、确认桥接、取消与事件输出收敛到一个与 UI 无关的 Rust `turn engine`。
+3. 对一次模型响应中的只读/安全工具并行执行，对需确认的副作用工具串行执行，并始终按 tool-use ID 配对结果。
+4. 以 typed event stream 向前端报告 `TextDelta`、`ToolExecStart`、`ToolUseResult`、`Usage`、`Error` 和 `Done`，让桌面与 server mode 复用同一执行内核。
+
+但 Catio 不应照搬 Hermes 的 shell runner、server state 或许可代码：Hermes 的 Bash 工具并非沙箱，timeout/取消不保证杀死子进程；server 使用单 bearer token、进程级共享 session map，缺少 Catio 所需的多用户 owner 隔离；同 session 并发 turn 也没有显式互斥。更关键的是 Hermes 使用 **PolyForm Noncommercial 1.0.0**，而 Catio 是 MIT；若 Catio 有任何商业用途或希望保持 MIT 分发，必须采取 clean-room 方式只借鉴思想、重新设计实现，或先取得单独商业授权。[Hermes LICENSE L1-L28](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/LICENSE#L1-L28) [Catio LICENSE L1-L13](https://github.com/leeyis/catio/blob/3adf8d984f54f6bfc01f3c7716a8e70bfa605f28/LICENSE#L1-L13)
+
+## 1. Hermes 架构
+
+Hermes 是一个 15-crate Cargo workspace，核心 seam 清晰：`hermes-core` 定义消息、provider、session、tool host；`hermes-llm` 适配 Anthropic/OpenAI-compatible；`hermes-turn` 实现共享 turn/tool loop；`hermes-tools` 与 `hermes-mcp` 提供工具；`hermes-store` 做 JSONL session；CLI、Tauri GUI、Axum server 均位于外围。[workspace Cargo.toml L1-L16](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/Cargo.toml#L1-L16) [README L239-L255](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/README.md#L239-L255)
+
+核心依赖是 Tokio、`futures`、Serde、`thiserror`/`anyhow`、`reqwest`/rustls、`rmcp`，server 使用 Axum；workspace 禁止 unsafe code。[Cargo.toml L25-L60](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/Cargo.toml#L25-L60) [Cargo.toml L80-L90](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/Cargo.toml#L80-L90)
+
+这个分层比 Catio 当前 Agent 更适合作为长期后端。Catio 的请求/流解析在前端 [`src/services/agent.ts` L81-L216](https://github.com/leeyis/catio/blob/3adf8d984f54f6bfc01f3c7716a8e70bfa605f28/src/services/agent.ts#L81-L216)，shell loop 在 [`agentExecution.ts` L21-L82](https://github.com/leeyis/catio/blob/3adf8d984f54f6bfc01f3c7716a8e70bfa605f28/src/components/workbench/agentExecution.ts#L21-L82)，而编排、会话 patch、权限 UI 和终端调度集中在 [`App.tsx` L1786-L1949](https://github.com/leeyis/catio/blob/3adf8d984f54f6bfc01f3c7716a8e70bfa605f28/src/App.tsx#L1786-L1949)。这让桌面和 Web server 很难共享完全一致的 Agent 语义，也使 React 生命周期承担了业务编排职责。
+
+## 2. Agent loop 与 tool execution
+
+### 2.1 两层循环
+
+Hermes 有两个不同层级：
+
+- `run_turn()` 是面向一次用户 turn 的工具循环，默认最多 25 个 tool rounds；每轮向 provider 发送完整 typed history 和 tool schemas，消费流，加入 assistant message，执行 tool calls，再将 typed tool results 作为下一条 user message继续请求，直到模型不再以 `ToolUse` 停止。[`hermes-turn/src/lib.rs` L20-L20](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-turn/src/lib.rs#L20) [`lib.rs` L163-L199](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-turn/src/lib.rs#L163-L199) [`lib.rs` L270-L344](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-turn/src/lib.rs#L270-L344)
+- `run_agent()` 是更外层的 goal loop：重复调用 `run_turn()`，注入进度检查，用文本 marker `[GOAL_COMPLETE]`/`[GOAL_FAILED]` 判定结束，默认最多 50 iterations，并在 turn 间做 context compaction。[`agent.rs` L1-L6](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-turn/src/agent.rs#L1-L6) [`agent.rs` L45-L74](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-turn/src/agent.rs#L45-L74) [`agent.rs` L193-L274](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-turn/src/agent.rs#L193-L274)
+
+Catio 当前更接近 `run_turn()`：从 assistant Markdown 中找第一个 shell fenced block，执行并把结果伪装为 user 文本，再循环；最大步数可配置。[Catio `agentExecution.ts` L21-L59](https://github.com/leeyis/catio/blob/3adf8d984f54f6bfc01f3c7716a8e70bfa605f28/src/components/workbench/agentExecution.ts#L21-L59) [Catio `App.tsx` L1855-L1925](https://github.com/leeyis/catio/blob/3adf8d984f54f6bfc01f3c7716a8e70bfa605f28/src/App.tsx#L1855-L1925)
+
+**建议**：先只迁移 `run_turn()` 思想，不迁移外层 `run_agent()`。Catio 是交互式 SSH/DB 客户端，用户 turn 边界、权限确认和终端占用比“自主完成代码 goal”更重要。外层 agent 的完成 marker 仍是脆弱文本协议，而且其取消只在 iterations 之间检查，源码明确说明 inner turn 不会收到外层 cancel；不适合直接成为 Catio 的取消模型。[`agent.rs` L110-L126](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-turn/src/agent.rs#L110-L126) [`agent.rs` L151-L181](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-turn/src/agent.rs#L151-L181)
+
+### 2.2 Typed tools 是最大收益点
+
+Hermes 的 provider-neutral message 由 `Text`、`Thinking`、`ToolUse { id, name, input }`、`ToolResult { tool_use_id, content, is_error }` 等 block 组成；工具由 name、description、JSON Schema 和 `requires_confirmation` 定义。[`message.rs` L34-L69](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-core/src/message.rs#L34-L69) [`provider.rs` L31-L43](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-core/src/provider.rs#L31-L43)
+
+OpenAI adapter 将同一模型翻译为 `tool_calls`/`role: tool`，Anthropic adapter 原生序列化 content blocks，因此 turn engine 无需理解供应商 wire protocol。[`openai.rs` L1-L13](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-llm/src/openai.rs#L1-L13) [`openai.rs` L138-L179](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-llm/src/openai.rs#L138-L179) [`anthropic.rs` L152-L174](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-llm/src/anthropic.rs#L152-L174)
+
+这会直接消除 Catio 当前协议的主要歧义：漏闭合 code fence、多命令 block、回答里多个 block、shell 方言识别与 Markdown 内容误触发。Catio 已经为这些问题写了 repair 分支，[`agentExecution.ts` L31-L59](https://github.com/leeyis/catio/blob/3adf8d984f54f6bfc01f3c7716a8e70bfa605f28/src/components/workbench/agentExecution.ts#L31-L59)；迁移到 native tool calling 后，这类 repair 可退化为兼容不支持 tools 的 provider fallback，而不是主路径。
+
+### 2.3 并行执行应采用，但必须加资源冲突域
+
+Hermes 先做 `Deny/Allow/Prompt` 分类；safe calls 以 `join_all` 并行，需确认的 calls 逐个确认、逐个执行。[`hermes-turn/src/lib.rs` L346-L423](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-turn/src/lib.rs#L346-L423) [`lib.rs` L426-L506](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-turn/src/lib.rs#L426-L506)
+
+这个原则适合 Catio 的 `sysinfo`、DB metadata、只读查询等工具，但不能把“无需用户确认”简单等同于“可并行”：两个读操作可能争用同一 PTY；事务内 SQL 即使只读也可能有顺序语义；SSH command 必须按 channel/session 仲裁。Catio 已有单 PTY capture 锁和 busy/split 策略，[`terminalCapture.ts` L23-L32](https://github.com/leeyis/catio/blob/3adf8d984f54f6bfc01f3c7716a8e70bfa605f28/src/services/terminalCapture.ts#L23-L32) [`App.tsx` L1608-L1662](https://github.com/leeyis/catio/blob/3adf8d984f54f6bfc01f3c7716a8e70bfa605f28/src/App.tsx#L1608-L1662)，迁移后应保留并下沉为 `resource_key`（例如 `pty:{chan_id}`、`db:{connection_id}:{transaction_id}`）上的互斥，而不是复制 Hermes 的全量 `join_all`。
+
+### 2.4 边界完整性处理值得原样重做
+
+Hermes 对两个 API 易错边界处理得好：
+
+- tool input 被 token limit 截断时，生成 error `ToolResult`，避免 orphan `tool_use`。[`lib.rs` L276-L340](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-turn/src/lib.rs#L276-L340)
+- 取消发生在部分工具完成后时，为所有未配对 tool-use ID 补 `cancelled` result，使历史仍满足 Anthropic“assistant tool_use 后必须立即有 tool_result”的约束。[`lib.rs` L79-L121](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-turn/src/lib.rs#L79-L121) [`lib.rs` L409-L419](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-turn/src/lib.rs#L409-L419)
+
+Catio 当前只持久化 user/assistant 文本，terminal result 仅存在内存 loop history，[`App.tsx` L1855-L1859](https://github.com/leeyis/catio/blob/3adf8d984f54f6bfc01f3c7716a8e70bfa605f28/src/App.tsx#L1855-L1859)，所以尚未遇到 typed history 配对问题；一旦支持原生工具调用，这一 invariant 必须从第一版就建模并测试。
+
+## 3. Streaming 与事件模型
+
+Hermes 定义 provider-neutral `StreamEvent`：message start、text/thinking delta、tool start/input delta、block stop、唯一 final；`LlmProvider::stream` 对不支持 native streaming 的 provider 还提供 buffered fallback。[`provider.rs` L93-L115](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-core/src/provider.rs#L93-L115) [`provider.rs` L117-L138](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-core/src/provider.rs#L117-L138)
+
+`run_turn()` 再把 provider events 收敛为 UI-facing `TurnEvent`（text/thinking、tool lifecycle、usage、error、done），server 序列化成 tagged JSON WebSocket event。[`hermes-turn/src/lib.rs` L123-L144](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-turn/src/lib.rs#L123-L144) [`hermes-server/src/events.rs` L9-L53](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-server/src/events.rs#L9-L53)
+
+**建议采用双层 event 模型**：provider event 只在 Rust 内部使用，向 Catio UI 暴露稳定的 domain events。推荐至少含 `TurnStarted`、`TextDelta`、`ToolProposed(input/risk)`、`ApprovalRequested`、`ToolStarted`、`ToolOutputDelta`、`ToolFinished(status/exit_code)`、`UsageUpdated`、`TurnFinished/Cancelled/Failed`，并给每个 event 增加 `turn_id`、`sequence`、`session_id`、`owner_id`。Hermes event 没有 turn/sequence envelope；同一 WS 上并发 turn 时事件不可可靠归属，这是 Catio 不应复制的缺口。[`chat.rs` L65-L78](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-server/src/routes/chat.rs#L65-L78) [`events.rs` L9-L53](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-server/src/events.rs#L9-L53)
+
+还应避免照搬两个解析细节：Hermes Anthropic parser 对跨 chunk 的无效 UTF-8 使用逐 chunk lossy decode，理论上可能把一个恰好跨 chunk 的合法多字节字符替换为 `�`；Catio 当前 `TextDecoder.decode(value, { stream: true })` 更正确。[Hermes `anthropic.rs` L308-L367](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-llm/src/anthropic.rs#L308-L367) [Catio `agent.ts` L45-L74](https://github.com/leeyis/catio/blob/3adf8d984f54f6bfc01f3c7716a8e70bfa605f28/src/services/agent.ts#L45-L74)
+
+## 4. Concurrency 与 cancellation
+
+### Hermes 做对的部分
+
+- 模型 streaming、并行 safe tools、等待确认、最终 synthesis 都通过 `tokio::select!` 响应 turn cancel。[`lib.rs` L213-L248](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-turn/src/lib.rs#L213-L248) [`lib.rs` L409-L423](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-turn/src/lib.rs#L409-L423) [`lib.rs` L450-L462](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-turn/src/lib.rs#L450-L462)
+- server 在收到 WS cancel frame 后取出对应 sender 并触发取消；confirmation 也是以 tool-use ID 映射 oneshot sender。[`chat.rs` L26-L48](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-server/src/routes/chat.rs#L26-L48) [`chat.rs` L389-L420](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-server/src/routes/chat.rs#L389-L420)
+
+### 不能复制的部分
+
+1. **取消不等于停止副作用。** `select!` drop 掉 `host.call()` future，但 Bash 使用 `tokio::process::Command::output()`，未设置 `kill_on_drop(true)`；工具 timeout 也只是 `tokio::time::timeout` 包裹 future。因此父 future 停止等待后，OS 子进程可能继续运行。这一点对 Catio 远程 SSH 命令尤其危险。[`bash.rs` L59-L72](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-tools/src/bash.rs#L59-L72) [`bash.rs` L102-L109](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-tools/src/bash.rs#L102-L109)
+2. **Agent outer loop 不能 mid-turn cancel。** 源码明确用一个永不触发的 per-turn channel，只在 iteration 边界检查外层 cancel。[`agent.rs` L151-L181](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-turn/src/agent.rs#L151-L181)
+3. **同 session 并发存在竞态风险（源码推断）。** 每个 `send` 都 `tokio::spawn` 一个 turn，cancel map 以 `session_id` 为唯一键，后来的 send 会覆盖旧 sender；多个 turn 会从相近 history snapshot 独立运行，结束时再追加各自消息。代码没有 per-session busy/turn lock。[`chat.rs` L247-L263](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-server/src/routes/chat.rs#L247-L263) [`chat.rs` L337-L386](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-server/src/routes/chat.rs#L337-L386)
+4. WS outbound 使用 unbounded channel，慢客户端没有 backpressure/容量上限。[`chat.rs` L65-L75](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-server/src/routes/chat.rs#L65-L75)
+5. `propose_messages`/`propose_queue` 是全局 AppState，而不是 session keyed；一个 session 会覆盖上下文，另一个完成中的 turn 可 drain 全局 queue，存在跨 session 串状态的风险（源码推断）。[`state.rs` L30-L48](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-server/src/state.rs#L30-L48) [`chat.rs` L242-L245](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-server/src/routes/chat.rs#L242-L245) [`chat.rs` L368-L383](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-server/src/routes/chat.rs#L368-L383)
+
+**Catio 目标模型**应是：每个 `turn_id` 一个 `CancellationToken`；per-conversation 单写者；每个资源有独立 execution lease；provider request、权限等待、terminal capture 和真正的远程 command/process lifecycle 都接收同一取消信号；取消后执行显式 interrupt/close/kill（能力不足则返回 `cancel_requested_but_execution_may_continue`），而不是把 UI 停流误报成命令已停止。Catio 当前 `AbortController` 已贯穿模型、权限 UI 与 terminal capture，[`App.tsx` L1786-L1795](https://github.com/leeyis/catio/blob/3adf8d984f54f6bfc01f3c7716a8e70bfa605f28/src/App.tsx#L1786-L1795) [`terminalCapture.ts` L162-L178](https://github.com/leeyis/catio/blob/3adf8d984f54f6bfc01f3c7716a8e70bfa605f28/src/services/terminalCapture.ts#L162-L178)，迁移时不应丢失这条链路。
+
+## 5. Session、state 与 error handling
+
+Hermes session 是 `Meta/Message/Usage` 事件的 append-only JSONL；每次 append 都 `sync_data()`，读取时 replay，malformed line 会跳过并告警。[`hermes-store/src/session.rs` L1-L38](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-store/src/session.rs#L1-L38) [`session.rs` L81-L100](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-store/src/session.rs#L81-L100) [`session.rs` L109-L152](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-store/src/session.rs#L109-L152)
+
+这个 event-log 思路适合提高 Catio 当前 localStorage 文本快照的可恢复性和可观测性，[Catio `conversations.ts` L1-L23](https://github.com/leeyis/catio/blob/3adf8d984f54f6bfc01f3c7716a8e70bfa605f28/src/state/conversations.ts#L1-L23)；但不建议照搬“每 token/每事件 fsync”。推荐 server SQLite 内使用 append-only `agent_events`，以 turn 边界事务批量提交；桌面模式通过同一 Rust repository API 写 SQLite。event payload 应区分可持久化数据和瞬时 UI delta，避免把 secrets、完整终端输出、base64 图片或 reasoning 原样长期保存。
+
+Hermes server 对 user message 先持久化，但 `run_turn` 产生的所有新消息是在 turn 返回后才批量 append；进程在中途崩溃会保留 user message，却丢失已执行工具的结果和 partial assistant state。[`chat.rs` L222-L240](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-server/src/routes/chat.rs#L222-L240) [`chat.rs` L351-L360](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-server/src/routes/chat.rs#L351-L360)。Catio 应在 `ToolStarted` 前写意图记录、`ToolFinished` 后写结果摘要，以便 crash recovery 明确呈现“执行状态未知”，不能简单重放。
+
+错误处理方面，Hermes 的正确模式是 provider/turn 返回 typed `Result`，同时向 UI 发 `Error/Done`；单个 tool failure 被转换成 `ToolCallOutcome { is_error: true }` 反馈模型，从而允许 agent 自我修复。[`lib.rs` L202-L258](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-turn/src/lib.rs#L202-L258) [`lib.rs` L384-L405](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-turn/src/lib.rs#L384-L405)。不正确之处是 server 多处忽略 session append 错误，可能导致 UI 成功但历史未落盘。[`chat.rs` L234-L238](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-server/src/routes/chat.rs#L234-L238) [`chat.rs` L353-L357](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-server/src/routes/chat.rs#L353-L357)。Catio 应将“模型失败、工具失败、持久化失败、取消、权限拒绝、执行结果未知”作为不同终态。
+
+Provider resilience 也没有统一：Anthropic 对 429/5xx/network 做三次 retry，支持 `Retry-After` 与 backoff，而 OpenAI adapter 没有 retry。Catio 若下沉 provider，应在 provider-neutral policy 中统一可重试分类、deadline、jitter 与幂等边界，不能让 UI 行为随供应商漂移。[`anthropic.rs` L20-L51](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-llm/src/anthropic.rs#L20-L51) [`anthropic.rs` L177-L245](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-llm/src/anthropic.rs#L177-L245) [`openai.rs` L107-L133](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-llm/src/openai.rs#L107-L133)
+
+## 6. 安全边界
+
+### 可借鉴
+
+- 未知工具默认视为危险（fail-safe）。[`hermes-turn/src/lib.rs` L40-L50](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-turn/src/lib.rs#L40-L50)
+- deny 规则优先于 allow，规则可按 tool 和关键参数 glob 匹配。[`permissions.rs` L27-L55](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-turn/src/permissions.rs#L27-L55) [`permissions.rs` L81-L121](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-turn/src/permissions.rs#L81-L121)
+- 文件工具对 canonical path 做 workspace containment 校验，包含 `..` 和 symlink 边界。[`safety.rs` L8-L57](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-tools/src/safety.rs#L8-L57)
+- 工具输出有 head/tail 上限，防止上下文被无限 stdout 填满。[`bash.rs` L21-L40](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-tools/src/bash.rs#L21-L40) [`bash.rs` L93-L100](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-tools/src/bash.rs#L93-L100)
+
+### 风险与不适用
+
+- `bash` 的 workspace 只是 current directory，不是 capability sandbox；`sh -c 'cat /etc/passwd'`、网络访问、绝对路径和环境变量读取仍可发生。工具声明为需确认不能替代 OS/SSH 层约束。[`bash.rs` L43-L70](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-tools/src/bash.rs#L43-L70)
+- Hermes 的 allow rule 是字符串 glob，无法可靠理解 shell 管道、重定向、变量展开或多命令；Catio 当前敏感命令分类更丰富，但仍是 regex heuristic。[Hermes `permissions.rs` L98-L121](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-turn/src/permissions.rs#L98-L121) [Catio `sensitiveCommands.ts` L29-L105](https://github.com/leeyis/catio/blob/3adf8d984f54f6bfc01f3c7716a8e70bfa605f28/src/components/workbench/sensitiveCommands.ts#L29-L105)。Catio 应保留“默认确认 + 风险分类”，只对结构化、范围明确的工具做持久 allow，避免 `bash:*` 级授权。
+- server 是一个共享 bearer token；所有 sessions、tools、memories 位于一个 `AppState`，没有 `owner_id`。这不能用于 Catio server mode 的多用户边界。[`state.rs` L22-L49](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-server/src/state.rs#L22-L49) [`routes/mod.rs` L22-L78](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-server/src/routes/mod.rs#L22-L78)
+- bearer token 可出现在 WS query string，而且 server 启动时把完整 token 记到 info log；在代理、shell history 或日志采集中会泄露。服务本身没有 TLS 终止。[`auth.rs` L1-L7](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-server/src/auth.rs#L1-L7) [`hermes-server/src/lib.rs` L21-L38](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-server/src/lib.rs#L21-L38)
+- `AlwaysAllow` 只按 tool name 加到整个 server 进程的集合，不按 user/session/target/argument scope；对 Catio 的远程主机命令权限过宽。[`state.rs` L26-L29](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-server/src/state.rs#L26-L29) [`chat.rs` L395-L419](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-server/src/routes/chat.rs#L395-L419)
+- **确认通道缺失时 fail-open。** `confirm_tx == None` 时，分类为危险的工具会跳过确认直接执行；Catio 无头/server 模式必须反过来 fail-closed，只有显式 policy grant 才能绕过交互确认。[`hermes-turn/src/lib.rs` L426-L489](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-turn/src/lib.rs#L426-L489)
+- **权限参数匹配存在实现错位。** `write`/`edit` 的 schema 参数名是 `path`，但 permission extractor 查询 `file_path`，所以文档/测试暗示的路径 glob 规则不能实际命中这些工具。这说明 Catio 不应让权限层自行猜测“关键参数”，而应由每个 `ToolSpec` 提供规范化 scope。[`write.rs` L24-L31](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-tools/src/write.rs#L24-L31) [`permissions.rs` L98-L121](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-turn/src/permissions.rs#L98-L121)
+
+## 7. 对 Catio 的推荐落地顺序
+
+### P0：先建立 Rust agent-core seam（高收益、低产品风险）
+
+定义 Catio 自有、clean-room 的：
+
+- `AgentMessage` / `ContentBlock` / `ToolCall` / `ToolResult`
+- `ToolSpec` + JSON Schema
+- `AgentEventEnvelope { owner_id, session_id, turn_id, sequence, event }`
+- `Provider` trait 与 OpenAI/Anthropic/Ollama adapters
+- `ToolHost` trait；第一阶段只有 `terminal_exec`、`terminal_context` 和 DB read-only tools
+
+Rust engine 通过现有 Tauri command/event 与 server WS 暴露，React 仅渲染事件和提交用户决策。保留 Catio 当前 Markdown 解析作为 provider 不支持 tools 时的显式 fallback。
+
+成功标准：桌面和 server mode 对同一 scripted provider fixture 产生完全相同的 ordered events；React 组件不再拥有 tool loop 状态机。
+
+### P1：将执行 invariant 下沉
+
+- per-conversation 单 active turn；重复 send 返回明确 busy/conflict。
+- per-resource lease 保留现有 PTY busy/split 能力。
+- typed cancellation 穿透 provider、approval、SSH/PTY/DB；区分“停止等待”和“已停止远端执行”。
+- tool-use/result ID 配对、截断输入、round cap 后的无工具 final synthesis。Hermes 在 round cap 后强制追加一次无工具请求以给用户结论，这一点值得采用。[`hermes-turn/src/lib.rs` L515-L591](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-turn/src/lib.rs#L515-L591)
+
+成功标准：属性测试保证每个已持久化 `ToolUse` 恰有一个 terminal `ToolResult`；取消、timeout、deny、断线、provider EOF 均不会产生无法重放的历史。
+
+### P2：权限与持久化
+
+- 权限键至少包含 `owner_id + target_id + tool + normalized_scope`；deny 永远优先。
+- shell 仍默认 confirmation；只给真正结构化的只读工具 auto-allow。
+- SQLite event/audit log 分开保存 transcript、执行意图、审批人、结果摘要；terminal output 做限长、secret redaction 和 retention。
+- 不复制 Hermes 的 memory/reflection/subagent，除非 Catio 后续有明确需求；它们显著扩大数据留存、prompt injection 和供应链边界，不是当前 shell loop 的必要优化。
+
+成功标准：两个 server 用户无法读取、取消、确认或复用对方的 turn/session/tool approval；crash 重启后能区分 completed、failed、cancelled 和 outcome-unknown。
+
+## 8. 不建议采用的内容
+
+| Hermes 设计 | 判断 | 原因 |
+|---|---|---|
+| `hermes-turn` 的整体源码直接复制/作为依赖 | 不采用 | PolyForm Noncommercial 与 Catio MIT/潜在商业用途不兼容；应 clean-room 重写接口和 invariant。 |
+| Markdown `[GOAL_COMPLETE]` 外层 agent loop | 暂不采用 | 仍是文本协议；取消只能在 iteration 间生效；Catio 当前需求是可靠 turn/tool execution。 |
+| `bash` runner | 不采用 | 不是沙箱，timeout/cancel 不保证结束 OS process，也不符合 Catio 的 SSH/PTY 交互执行语义。 |
+| 全部 safe tools `join_all` | 修改后采用 | 必须加 target/resource conflict key、并发上限和 backpressure。 |
+| JSONL + 每条 `sync_data()` | 只借鉴 event sourcing | Catio 已有 SQLite 和多用户 server；事务批量写更合适。 |
+| 单 bearer token + global `AppState` | 不采用 | 无 owner 隔离，token query/log 泄露面，不满足 Catio server mode。 |
+| 全局按 tool name `AlwaysAllow` | 不采用 | scope 过宽，应绑定用户、目标和规范化参数范围。 |
+| memory/reflection/self-evolution | 不在本次范围 | 与执行可靠性无直接关系，带来额外隐私、注入和长期状态风险。 |
+
+## 9. 验证与成熟度备注
+
+- 研究固定在 2026-07-04 的 commit `bdd400d`；该 commit message 是 “add Flutter client + hermes-server (bearer-token auth)”，server 是很新的表层，不能把 README 的完整度等同于生产成熟度。[commit](https://github.com/leeyis/small-rust-hermes-v3/commit/bdd400deb8ba56e30c87b6916348db73f828aded)
+- 本地对固定 commit 执行 `cargo test -p hermes-turn -p hermes-tools -p hermes-server`：54 tests / 8 suites 全部通过。测试能支持“核心模块有单元覆盖”，不能证明多用户隔离、同 session 并发、进程级取消或公网部署安全。
+- GitHub Issues 在研究时关闭，因此没有可用于交叉验证已知缺陷或 roadmap 的 issue 资料。
+- 后台研究 agent 另执行了完整 `cargo test --workspace`：184 passed、1 ignored、30 suites；仓库没有 `.github` CI workflow。完整测试结果提高了对纯函数与 happy-path 行为的信心，但不能替代并发、进程取消和安全集成测试。
+
+## 最终建议
+
+把 Hermes 当作**架构样板与测试用例来源**，而不是可集成代码库。Catio 下一轮 Agent 优化的最小正确切片应是：在 `src-tauri` 新建一个 provider-neutral turn engine，先支持单个 structured `terminal_exec` tool，把 current `AbortController`、PTY capture、busy/split、敏感命令确认能力接入 Rust event loop，再让前端只消费 typed events。这个切片已经能解决现有 Markdown tool protocol 和 `App.tsx` 编排耦合的主要问题，同时不会引入 Hermes 的自治 agent、memory、MCP 和许可风险。
