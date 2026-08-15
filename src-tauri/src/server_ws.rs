@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 use tokio::sync::mpsc::Sender;
@@ -26,6 +26,9 @@ struct Conn {
     /// letting `emit` queue JSON without limit and blow up server memory.
     tx: Sender<Value>,
     topics: HashSet<String>,
+    /// Authenticated user id this connection belongs to. Agent events are delivered only to
+    /// connections of the same owner (admin connections still only receive their own).
+    owner_id: Option<String>,
 }
 
 /// Connection registry + topic routing. One instance lives in `AppState`, shared by every
@@ -37,10 +40,18 @@ pub struct WsHub {
 }
 
 impl WsHub {
-    /// Register a connection's writer channel; returns its id (used for sub/unsub/unregister).
-    pub fn register(&self, tx: Sender<Value>) -> u64 {
+    /// Register a connection's writer channel and its authenticated owner;
+    /// returns its id (used for sub/unsub/unregister).
+    pub fn register(&self, tx: Sender<Value>, owner_id: Option<String>) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.conns.lock().unwrap().insert(id, Conn { tx, topics: HashSet::new() });
+        self.conns.lock().unwrap().insert(
+            id,
+            Conn {
+                tx,
+                topics: HashSet::new(),
+                owner_id,
+            },
+        );
         id
     }
 
@@ -75,7 +86,63 @@ impl WsHub {
     /// path uses this as its emit gate (replacing the desktop's `live_log` AtomicBool): no
     /// subscriber → no log payload is built or emitted.
     pub fn has_subscriber(&self, topic: &str) -> bool {
-        self.conns.lock().unwrap().values().any(|c| c.topics.contains(topic))
+        self.conns
+            .lock()
+            .unwrap()
+            .values()
+            .any(|c| c.topics.contains(topic))
+    }
+
+    /// Emits `payload` on `topic` to exactly the connections whose authenticated owner matches
+    /// `owner_id` AND that are subscribed to `topic`. A normal user never sees another user's
+    /// Agent events; an admin sees only their own too (identity is the owner, not the role).
+    pub fn emit_to_owner(&self, owner_id: &str, topic: &str, payload: Value) {
+        let env = json!({ "type": "event", "topic": topic, "payload": payload });
+        let mut dead = Vec::new();
+        {
+            let conns = self.conns.lock().unwrap();
+            for (id, c) in conns.iter() {
+                if c.owner_id.as_deref() == Some(owner_id)
+                    && c.topics.contains(topic)
+                    && c.tx.try_send(env.clone()).is_err()
+                {
+                    dead.push(*id);
+                }
+            }
+        }
+        if !dead.is_empty() {
+            let mut conns = self.conns.lock().unwrap();
+            for id in dead {
+                conns.remove(&id);
+            }
+        }
+    }
+}
+
+/// Agent event sink scoped to one authenticated user: envelopes are delivered
+/// only to that user's own WebSocket connections.
+pub struct OwnedWsAgentSink {
+    hub: Arc<WsHub>,
+    owner_id: String,
+}
+
+impl OwnedWsAgentSink {
+    pub fn new(hub: Arc<WsHub>, owner_id: String) -> Self {
+        Self { hub, owner_id }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::agent::AgentEventSink for OwnedWsAgentSink {
+    async fn emit(
+        &self,
+        envelope: crate::agent::AgentEventEnvelope,
+    ) -> Result<(), crate::agent::AgentError> {
+        let payload = serde_json::to_value(envelope)
+            .map_err(|e| crate::agent::AgentError::Internal(e.to_string()))?;
+        self.hub
+            .emit_to_owner(&self.owner_id, "agent://events", payload);
+        Ok(())
     }
 }
 
@@ -112,8 +179,8 @@ mod tests {
         let hub = WsHub::default();
         let (tx_a, mut rx_a) = channel(16);
         let (tx_b, mut rx_b) = channel(16);
-        let a = hub.register(tx_a);
-        let b = hub.register(tx_b);
+        let a = hub.register(tx_a, Some("owner-a".into()));
+        let b = hub.register(tx_b, None);
 
         hub.subscribe(a, "term://chan-1");
         // b is NOT subscribed → must not receive.

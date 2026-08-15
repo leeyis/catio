@@ -49,7 +49,11 @@ pub enum AgentRole {
 
 /// A typed, provider-neutral content block.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ContentBlock {
     Text {
         text: String,
@@ -142,7 +146,11 @@ pub struct ToolSpec {
 
 /// Human decision or client fact submitted for a waiting Turn.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ClientTurnResponse {
     ApprovalDecision {
         tool_use_id: String,
@@ -257,7 +265,11 @@ pub struct TurnHandle {
 
 /// Stable UI-facing event; provider wire events never cross this boundary.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum AgentEvent {
     TurnStarted,
     AssistantMessageStarted {
