@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
 import { isSensitiveCommand, type RiskCode } from './sensitiveCommands'
+import policyFixture from '../../../src-tauri/tests/fixtures/agent/policy_commands.json?raw'
 
 interface PolicyCase {
   command: string
@@ -9,9 +8,7 @@ interface PolicyCase {
   reasons: RiskCode[]
 }
 
-const cases = JSON.parse(
-  readFileSync(resolve('src-tauri/tests/fixtures/agent/policy_commands.json'), 'utf8'),
-) as PolicyCase[]
+const cases = JSON.parse(policyFixture) as PolicyCase[]
 
 describe('sensitive command classifier parity fixture', () => {
   it('classifies every shared fixture case identically', () => {

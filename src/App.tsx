@@ -65,11 +65,20 @@ import {
   newConversation as makeConversation,
 } from './state/conversations'
 import type { Conversation } from './state/conversations'
-import { chat } from './services/agent'
-import type { ChatMsg } from './services/agent'
 import { useAgentConfig } from './state/agentConfig'
 import {
-  buildTerminalResultPrompt,
+  subscribeAgentEvents,
+  startAgentTurn,
+  respondToAgentTurn,
+  cancelAgentTurn,
+  isAgentEventEnvelope,
+  type AgentEventEnvelope,
+  type AgentTurnRequest,
+  type ToolExecutionOutcome,
+  type ToolExecutionStatus,
+} from './services/agentRuntime'
+import { projectAgentEvent, initialProjectorState, type AgentProjectorState } from './services/agentProjector'
+import {
   isTerminalChannelBusy,
   runTerminalCommandAndCapture,
   type CapturableTerminalTarget,
@@ -77,7 +86,6 @@ import {
 } from './services/terminalCapture'
 import { requestAgentTerminalSplit } from './services/agentTerminalSplit'
 import { diagnosticLog } from './services/diagnostics'
-import { runAgentShellLoop } from './components/workbench/agentExecution'
 import type { ConnectionProfile } from './state/connections'
 import type { Tab, Connection, Snippet } from './services/types'
 import type { AuthUser } from './components/auth/AuthGate'
@@ -167,6 +175,26 @@ export default function App() {
   const [busyConvs, setBusyConvs] = useState<Record<string, boolean>>({})
   // sessionId -> cached sysinfo string (fetched once per session on first agent send).
   const sysinfoCache = useRef<Record<string, string>>({})
+  // ---- Rust AgentRuntime wiring: single subscription + per-turn routing ----
+  // Single subscription promise; `startAgentTurn` never runs before it resolves.
+  const agentSubReady = useRef<Promise<void> | null>(null)
+  // turnId -> active turn metadata (routing by envelope conversationId, not tab).
+  const activeAgentTurn = useRef<Record<string, {
+    conversationId: string
+    tabId: string
+    hostName: string
+    target: AgentRunTarget | null
+    controller: AbortController
+    turnId: string
+  }>>({})
+  // turnId -> projector state (sequence/effect dedupe per turn).
+  const agentProjection = useRef<Record<string, AgentProjectorState>>({})
+  // toolUseId -> tool input snapshot (approval modal shows the command text).
+  const agentToolInputs = useRef<Record<string, unknown>>({})
+  // Envelopes that arrived before their turn was registered (start in flight).
+  const pendingAgentEvents = useRef<Record<string, AgentEventEnvelope[]>>({})
+  // Serializes agent event handling so ordered envelopes never interleave.
+  const agentEventQueue = useRef<Promise<void>>(Promise.resolve())
 
   // Upsert into the ref and render state; the store ignores it until it has content.
   function upsertConversation(conv: Conversation) {
@@ -1082,7 +1110,7 @@ export default function App() {
   function reapSession(closing: Tab | undefined, remaining: Tab[]) {
     // Abort any in-flight agent stream + drop this tab's current-conversation map.
     if (closing) {
-      agentAborts.current[closing.id]?.abort()
+      abortAgentStream(closing.id)
       delete agentAborts.current[closing.id]
       setCurrentConvByTab(prev => {
         if (!(closing.id in prev)) return prev
@@ -1783,6 +1811,166 @@ export default function App() {
     }
   }
 
+  // ---- Rust AgentRuntime event wiring (single subscription, per-turn routing) ----
+
+  function ensureAgentSubscription(): Promise<void> {
+    if (!agentSubReady.current) {
+      agentSubReady.current = subscribeAgentEvents(payload => {
+        if (!isAgentEventEnvelope(payload)) return
+        const entry = activeAgentTurn.current[payload.turnId]
+        if (!entry) {
+          // The start request is still in flight; buffer until registered.
+          const buffered = pendingAgentEvents.current[payload.turnId] ?? []
+          buffered.push(payload)
+          pendingAgentEvents.current[payload.turnId] = buffered
+          return
+        }
+        enqueueAgentEvent(payload)
+      }).then(() => undefined)
+    }
+    return agentSubReady.current
+  }
+
+  function enqueueAgentEvent(envelope: AgentEventEnvelope): void {
+    agentEventQueue.current = agentEventQueue.current
+      .then(() => handleAgentEnvelope(envelope))
+      .catch(() => diagnosticLog({
+        level: 'warn',
+        area: 'agent',
+        event: 'event-handler',
+        source: 'agent-capture',
+      }))
+  }
+
+  /** Aborts the local controller AND asks the backend to cancel the tab's
+   *  active Turn (the engine then decides Cancelled vs OutcomeUnknown). */
+  function abortAgentStream(tabId: string): void {
+    agentAborts.current[tabId]?.abort()
+    for (const [turnId, entry] of Object.entries(activeAgentTurn.current)) {
+      if (entry.tabId === tabId) {
+        void cancelAgentTurn(turnId).catch(() => {})
+      }
+    }
+  }
+
+  /** Maps a client PTY result to the engine's `ToolExecutionOutcome`. The
+   *  client reports facts only; `denied` never crosses this boundary. */
+  function toToolExecutionResponse(result: TerminalCommandResult): ToolExecutionOutcome {
+    const status: ToolExecutionStatus =
+      result.status === 'completed' ? 'succeeded'
+      : result.status === 'timeout' ? 'failed'
+      : result.status === 'streaming' ? 'outcomeUnknown'
+      : result.status === 'unsupported' ? 'unsupported'
+      : 'blocked'
+    return {
+      status,
+      content: JSON.stringify({ exitCode: result.exitCode, output: result.output }),
+    }
+  }
+
+  async function handleAgentEnvelope(envelope: AgentEventEnvelope): Promise<void> {
+    const { turnId, conversationId, event } = envelope
+    const entry = activeAgentTurn.current[turnId]
+    if (!entry) return
+
+    const prev = agentProjection.current[turnId] ?? initialProjectorState
+    const { state, effects } = projectAgentEvent(prev, envelope, () =>
+      diagnosticLog({ level: 'warn', area: 'agent', event: 'projection-error', source: 'agent-capture' }))
+    agentProjection.current[turnId] = state
+
+    // Streaming text lands in the conversation's trailing assistant message.
+    if (event.type === 'assistantMessageStarted') {
+      patchConversation(conversationId, c => {
+        const msgs = [...c.messages]
+        const last = msgs[msgs.length - 1]
+        if (last?.role !== 'assistant' || last.content.trim()) {
+          msgs.push({ role: 'assistant', content: '' })
+        }
+        return { ...c, messages: msgs }
+      })
+      return
+    }
+    if (event.type === 'textDelta') {
+      patchConversation(conversationId, c => {
+        const msgs = [...c.messages]
+        const last = msgs.length - 1
+        if (last >= 0 && msgs[last].role === 'assistant') {
+          msgs[last] = { ...msgs[last], content: msgs[last].content + event.delta }
+        }
+        return { ...c, messages: msgs }
+      })
+      return
+    }
+    if (event.type === 'toolProposed') {
+      agentToolInputs.current[event.toolUseId] = event.input
+      return
+    }
+
+    for (const effect of effects) {
+      if (effect.type === 'requestApproval') {
+        if (entry.controller.signal.aborted) {
+          void cancelAgentTurn(turnId).catch(() => {})
+          continue
+        }
+        const input = agentToolInputs.current[effect.toolUseId]
+        const command = (input as { command?: string } | undefined)?.command ?? ''
+        const allowed = await requestAgentRunPermission(entry.hostName, command, entry.controller.signal)
+        if (entry.controller.signal.aborted) continue
+        await respondToAgentTurn(turnId, {
+          type: 'approvalDecision',
+          toolUseId: effect.toolUseId,
+          decision: allowed === true ? 'allow' : 'deny',
+        })
+      } else if (effect.type === 'executeTool') {
+        if (entry.controller.signal.aborted) {
+          // Dispatch may already have happened; never fake `cancelled`.
+          appendAgentRunWarning(conversationId, t('panels.agentOutcomeUnknown'))
+          await respondToAgentTurn(turnId, {
+            type: 'toolExecutionResult',
+            toolUseId: effect.toolUseId,
+            outcome: { status: 'outcomeUnknown', content: 'aborted; outcome unknown' },
+          })
+          continue
+        }
+        const command = (effect.input as { command?: string } | undefined)?.command ?? ''
+        const executed = await executeAgentCommand(
+          entry.tabId,
+          entry.hostName,
+          entry.target,
+          conversationId,
+          command,
+          entry.controller,
+        )
+        if (!executed) {
+          if (entry.controller.signal.aborted) {
+            appendAgentRunWarning(conversationId, t('panels.agentOutcomeUnknown'))
+            await respondToAgentTurn(turnId, {
+              type: 'toolExecutionResult',
+              toolUseId: effect.toolUseId,
+              outcome: { status: 'outcomeUnknown', content: 'aborted; outcome unknown' },
+            })
+          }
+          continue
+        }
+        entry.target = executed.target
+        await respondToAgentTurn(turnId, {
+          type: 'toolExecutionResult',
+          toolUseId: effect.toolUseId,
+          outcome: toToolExecutionResponse(executed.result),
+        })
+      } else if (effect.type === 'showWarning') {
+        appendAgentRunWarning(conversationId, t(`panels.${effect.code}`))
+      } else if (effect.type === 'turnSettled') {
+        setBusyConvs(prev => { const n = { ...prev }; delete n[conversationId]; return n })
+        if (agentAborts.current[entry.tabId] === entry.controller) {
+          delete agentAborts.current[entry.tabId]
+        }
+        delete activeAgentTurn.current[turnId]
+        delete agentProjection.current[turnId]
+      }
+    }
+  }
+
   async function sendAgentMessage(tabId: string, text: string, opts?: { hasSelection?: boolean }) {
     const tab = tabs.find(tb => tb.id === tabId)
     if (!tab || agentAborts.current[tabId]) return
@@ -1831,99 +2019,61 @@ export default function App() {
       const agentMode = tab.kind === 'terminal' ? 'shell' : 'sql'
       const tabEngine = vaultConns.find(c => c.id === tab.connId)?.engine
         ?? liveConns[tab.connId]?.engine ?? D.byId[tab.connId]?.engine
-      const system: ChatMsg = {
-        role: 'system',
-        content: `${buildAgentSystemPrompt(agentMode, hostName, tabEngine, executionMode, config.singleLineCommands)}${sysinfoBlock}${termBlock}`,
-      }
-      const outgoing: ChatMsg[] = [
-        system,
-        ...prior.map(m => ({ role: m.role, content: m.content } as ChatMsg)),
-        { role: 'user', content: text },
-      ]
+      // Subscribe BEFORE start so the ordered stream is never lost.
+      await ensureAgentSubscription()
 
-      const reply = await chat(outgoing, config, {
-        signal: controller.signal,
-        onToken: tok => patchConversation(convId, c => {
-          const msgs = [...c.messages]
-          const last = msgs.length - 1
-          if (last >= 0 && msgs[last].role === 'assistant') {
-            msgs[last] = { ...msgs[last], content: msgs[last].content + tok }
-          }
-          return { ...c, messages: msgs }
-        }),
-      })
-      if (!controller.signal.aborted && tab.kind === 'terminal') {
-        // Mirror pi's assistant → tool result → assistant loop. Terminal results
-        // stay in this in-memory context; only assistant interpretations persist.
-        const loopMessages: ChatMsg[] = [...outgoing, { role: 'assistant', content: reply }]
-        let loopTarget = terminalTarget
-        const { limitReached } = await runAgentShellLoop(reply, executionMode, async plan => {
-          let feedback: string
-          if (plan.action === 'repair') {
-            feedback = [
-              'TOOL_FORMAT_ERROR: No command was executed from the previous response.',
-              plan.reason,
-              config.singleLineCommands
-                ? 'If the original task still needs terminal work, reply with exactly one non-empty single-line command in one closed fenced sh or powershell block. Otherwise give the final conclusion without a command block.'
-                : 'If the original task still needs terminal work, reply with exactly one non-empty command block in one closed fenced sh or powershell block. The command block may contain multiple lines. Otherwise give the final conclusion without a command block.',
-            ].join('\n')
-          } else {
-            let result: TerminalCommandResult
-            if (plan.action === 'confirm') {
-              const allowed = await requestAgentRunPermission(hostName, plan.command, controller.signal)
-              if (controller.signal.aborted) return null
-              if (allowed === null) {
-                result = { status: 'blocked', exitCode: null, output: 'Another Agent action is already waiting for user permission. This command was not executed.' }
-              } else if (!allowed) {
-                result = { status: 'denied', exitCode: null, output: 'The user denied permission. This command was not executed.' }
-              } else {
-                const executed = await executeAgentCommand(tabId, hostName, loopTarget, convId, plan.command, controller)
-                if (!executed || controller.signal.aborted) return null
-                loopTarget = executed.target
-                result = executed.result
-              }
-            } else {
-              const executed = await executeAgentCommand(tabId, hostName, loopTarget, convId, plan.command, controller)
-              if (!executed || controller.signal.aborted) return null
-              loopTarget = executed.target
-              result = executed.result
-            }
-            // A user denial or an execution block ends this interaction. Sending
-            // it back as tool feedback makes the model propose the same command
-            // again, reopening the permission/split modal and keeping Agent busy.
-            if (result.status === 'denied' || result.status === 'blocked') return null
-            feedback = buildTerminalResultPrompt(plan.command, result)
-          }
-          loopMessages.push({ role: 'user', content: feedback })
-          patchConversation(convId, conversation => ({
-            ...conversation,
-            messages: [...conversation.messages, { role: 'assistant', content: '' }],
-          }))
-          try {
-            const nextReply = await chat(loopMessages, config, {
-              signal: controller.signal,
-              onToken: token => patchConversation(convId, conversation => {
-                const messages = [...conversation.messages]
-                const last = messages.length - 1
-                if (last >= 0 && messages[last].role === 'assistant') {
-                  messages[last] = { ...messages[last], content: messages[last].content + token }
-                }
-                return { ...conversation, messages }
-              }),
-            })
-            if (controller.signal.aborted) return null
-            loopMessages.push({ role: 'assistant', content: nextReply })
-            return nextReply
-          } catch (error) {
-            if (controller.signal.aborted) throw error
-            appendAgentRunWarning(convId, t('panels.agentRunFollowUpFailed'))
-            return null
-          }
-        }, { singleLineCommands: config.singleLineCommands, maxSteps: config.maxShellSteps })
-        if (limitReached && !controller.signal.aborted) {
-          appendAgentRunWarning(convId, t('panels.agentRunLimitReached', { count: config.maxShellSteps }))
-        }
+      const systemPrompt = `${buildAgentSystemPrompt(agentMode, hostName, tabEngine, executionMode, config.singleLineCommands)}${sysinfoBlock}${termBlock}`
+      // P0: prior history enters as text snapshots; this Turn's tool blocks stay typed.
+      const priorMessages: AgentTurnRequest['messages'] = prior.map(m => ({
+        role: m.role === 'assistant' ? 'assistant' : 'user',
+        content: [{ type: 'text', text: m.content }],
+      }))
+
+      const request: AgentTurnRequest = {
+        conversationId: convId,
+        messages: priorMessages,
+        systemPrompt,
+        terminalContext: termTail,
+        targetRef: tab.kind === 'terminal' ? (terminalTarget?.chanId ?? '') : '',
+        provider: {
+          protocol: config.provider === 'anthropic'
+            ? 'anthropic'
+            : config.provider === 'ollama'
+              ? 'ollama'
+              : 'openai',
+          baseUrl: config.baseUrl,
+          model: config.model,
+          credential: config.apiKey,
+          anthropicAuthMode: config.anthropicAuthMode === 'auth-token'
+            ? 'authToken'
+            : config.anthropicAuthMode === 'api-key'
+              ? 'apiKey'
+              : 'auto',
+        },
+        executionMode,
+        singleLineCommands: config.singleLineCommands,
+        roundCap: config.maxShellSteps,
       }
+      const handle = await startAgentTurn(request)
+      const turnId = handle.turnId
+      // Register routing before any buffered event is flushed; the request
+      // reference (and its credential) is not retained past this point.
+      activeAgentTurn.current[turnId] = {
+        conversationId: convId,
+        tabId,
+        hostName,
+        target: terminalTarget,
+        controller,
+        turnId,
+      }
+      agentProjection.current[turnId] = initialProjectorState
+      const buffered = pendingAgentEvents.current[turnId]
+      delete pendingAgentEvents.current[turnId]
+      for (const bufferedEvent of buffered ?? []) {
+        enqueueAgentEvent(bufferedEvent)
+      }
+      // The Turn runs fully event-driven: the terminal event clears busy state
+      // via the turnSettled effect, so no await here.
     } catch (err) {
       if (controller.signal.aborted) return
       const message = (err as { message?: string } | null)?.message ?? String(err)
@@ -1935,6 +2085,9 @@ export default function App() {
         }
         return { ...c, messages: msgs }
       })
+      // Start failed: the Turn never exists, so nothing will settle it.
+      if (agentAborts.current[tabId] === controller) delete agentAborts.current[tabId]
+      setBusyConvs(prev => { const n = { ...prev }; delete n[convId]; return n })
     } finally {
       if (controller.signal.aborted) {
         patchConversation(convId, conversation => {
@@ -1944,8 +2097,9 @@ export default function App() {
           return { ...conversation, messages }
         })
       }
-      if (agentAborts.current[tabId] === controller) delete agentAborts.current[tabId]
-      setBusyConvs(prev => { const n = { ...prev }; delete n[convId]; return n })
+      // Abort/busy state is owned by the turnSettled effect: the backend emits
+      // the terminal event after cancel, so the panel's stop button stays
+      // visible until the Turn actually settles.
     }
   }
 
@@ -2088,7 +2242,7 @@ export default function App() {
               {activePanel === 'ai' && <AIPanel onClose={() => setPanelOpen(false)} mode={aiMode} conn={curConn ?? undefined} connId={aiConnId} engine={curConn?.engine} attachment={aiAttachment} onClearAttachment={() => setAiAttachment(null)} onInsert={insertToTerminal} canInsert={canInsert} onOpenSettings={() => goSettings('ai')}
                 conversation={activeConversation} busy={activeConvBusy || activeTabBusy} history={agentHistory}
                 onSend={cur ? ((text, opts) => void sendAgentMessage(cur.id, text, opts)) : undefined}
-                onAbort={cur ? (() => agentAborts.current[cur.id]?.abort()) : undefined}
+                onAbort={cur ? (() => abortAgentStream(cur.id)) : undefined}
                 onNewConversation={cur ? (() => newAgentConversation(cur.id)) : undefined}
                 onRestoreConversation={cur ? (convId => restoreConversation(cur.id, convId)) : undefined}
                 onDeleteConversation={cur ? (convId => deleteAgentConversation(cur.id, convId)) : undefined} />}

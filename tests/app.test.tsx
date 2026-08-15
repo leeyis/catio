@@ -5,14 +5,86 @@ import { DataProvider } from '../src/state/DataContext'
 import { saveProfile } from '../src/state/connections'
 import App from '../src/App'
 
-// Mock the agent so chat() streams deterministic tokens through onToken.
-const agentMock = vi.hoisted(() => ({ chat: vi.fn() }))
-vi.mock('../src/services/agent', () => ({ chat: agentMock.chat }))
+// Mock the Rust AgentRuntime transport: subscribe captures the event handler,
+// start returns a fixed turn id, respond/cancel record calls. The real
+// projector + App effect runner run against scripted envelopes.
+const agentRuntimeMock = vi.hoisted(() => {
+  const isAgentEventEnvelope = (v: unknown): v is {
+    ownerId: string
+    conversationId: string
+    turnId: string
+    sequence: number
+    event: { type: string }
+  } => {
+    if (typeof v !== 'object' || v === null) return false
+    const x = v as Record<string, unknown>
+    return (
+      typeof x.ownerId === 'string' &&
+      typeof x.conversationId === 'string' &&
+      typeof x.turnId === 'string' &&
+      typeof x.sequence === 'number' &&
+      typeof (x.event as Record<string, unknown>)?.type === 'string'
+    )
+  }
+  return {
+    subscribeAgentEvents: vi.fn(),
+    startAgentTurn: vi.fn(),
+    respondToAgentTurn: vi.fn(),
+    cancelAgentTurn: vi.fn(),
+    isAgentEventEnvelope,
+  }
+})
+vi.mock('../src/services/agentRuntime', () => agentRuntimeMock)
+// PTY capture adapter: no real terminal in jsdom. The busy check stays false so
+// executeAgentCommand never asks for a split.
+vi.mock('../src/services/terminalCapture', () => ({
+  isTerminalChannelBusy: () => false,
+  runTerminalCommandAndCapture: vi.fn(async () => ({ status: 'completed', exitCode: 0, output: '/tmp' })),
+  buildTerminalResultPrompt: () => '',
+}))
+
+// Records whether subscribe completed before start (the required ordering).
+const agentOrder: string[] = []
+let agentEventHandler: ((payload: unknown) => void) | null = null
 
 beforeEach(() => {
   localStorage.clear()
-  agentMock.chat.mockReset()
+  agentRuntimeMock.subscribeAgentEvents.mockReset()
+  agentRuntimeMock.startAgentTurn.mockReset()
+  agentRuntimeMock.respondToAgentTurn.mockReset()
+  agentRuntimeMock.cancelAgentTurn.mockReset()
+  agentOrder.length = 0
+  agentEventHandler = null
+  agentRuntimeMock.subscribeAgentEvents.mockImplementation(async handler => {
+    agentOrder.push('subscribe')
+    agentEventHandler = handler
+    return () => { agentEventHandler = null }
+  })
+  agentRuntimeMock.startAgentTurn.mockImplementation(async () => {
+    agentOrder.push('start')
+    return { turnId: 'turn-1' }
+  })
+  agentRuntimeMock.respondToAgentTurn.mockResolvedValue(undefined)
+  agentRuntimeMock.cancelAgentTurn.mockResolvedValue(undefined)
 })
+
+// The conversation id is generated at send time; read it from the persisted
+// store (the user message is written synchronously before startAgentTurn).
+function currentConversationId(): string {
+  const raw = localStorage.getItem('catio-conversations') ?? '[]'
+  const convs = JSON.parse(raw) as Array<{ id: string }>
+  return convs[0].id
+}
+
+function emitAgent(sequence: number, event: unknown): void {
+  agentEventHandler?.({
+    ownerId: 'local',
+    conversationId: currentConversationId(),
+    turnId: 'turn-1',
+    sequence,
+    event,
+  })
+}
 
 // Mock xterm so the real library doesn't run in jsdom (avoids HTMLCanvasElement.getContext errors).
 vi.mock('@xterm/xterm', () => ({
@@ -169,20 +241,14 @@ it('persists the terminal pane across a view switch (settings overlay, body stay
 })
 
 // REGRESSION: a streamed agent reply must be PERSISTED in full (not just the
-// conversation title). Previously patchConversation relied on the setState
-// updater's return value, which React 18 doesn't run synchronously under
-// streaming bursts, so assistant tokens never reached localStorage.
+// conversation title). The Rust runtime streams ordered envelopes; the App
+// projector appends text deltas to the trailing assistant message.
 it('persists the full streamed assistant reply, not just the conversation title', async () => {
   // a model must be configured for the composer to allow sending
   localStorage.setItem('catio-agent-config', JSON.stringify({
     provider: 'ollama', baseUrl: 'http://localhost:11434', apiKey: '',
     anthropicAuthMode: 'api-key', model: 'llama3', executionMode: 'manual',
   }))
-  agentMock.chat.mockImplementation(async (_msgs: unknown, _cfg: unknown, opts: { onToken: (t: string) => void }) => {
-    opts.onToken('Hello')
-    opts.onToken(', ')
-    opts.onToken('world!')
-  })
 
   wrap()
   // open a demo terminal tab so there's an active host context for the Agent
@@ -202,6 +268,18 @@ it('persists the full streamed assistant reply, not just the conversation title'
   fireEvent.change(composer, { target: { value: 'list files' } })
   fireEvent.click(screen.getByTitle('发送'))
 
+  // subscribe must resolve before startAgentTurn is issued.
+  await waitFor(() => expect(agentOrder).toEqual(['subscribe', 'start']))
+
+  // Script the ordered envelopes of a text-only turn.
+  emitAgent(1, { type: 'turnStarted' })
+  emitAgent(2, { type: 'assistantMessageStarted', messageId: 'm0', round: 0 })
+  emitAgent(3, { type: 'textDelta', messageId: 'm0', delta: 'Hello' })
+  emitAgent(4, { type: 'textDelta', messageId: 'm0', delta: ', ' })
+  emitAgent(5, { type: 'textDelta', messageId: 'm0', delta: 'world!' })
+  emitAgent(6, { type: 'assistantMessageFinished', messageId: 'm0' })
+  emitAgent(7, { type: 'turnFinished' })
+
   // the conversation in localStorage must contain the FULL assistant reply
   await waitFor(() => {
     const raw = localStorage.getItem('catio-conversations') ?? '[]'
@@ -217,19 +295,9 @@ it('persists the full streamed assistant reply, not just the conversation title'
 it('shows Agent command permission target and command as separately labelled regions', async () => {
   localStorage.setItem('catio-agent-config', JSON.stringify({
     provider: 'ollama', baseUrl: 'http://localhost:11434', apiKey: '',
-    anthropicAuthMode: 'api-key', model: 'llama3', executionMode: 'manual',
+    anthropicAuthMode: 'api-key', model: 'llama3', executionMode: 'ask',
   }))
   const command = 'sudo systemctl start ollama.service'
-  const reply = `\`\`\`sh\n${command}\n\`\`\``
-  agentMock.chat
-    .mockImplementationOnce(async (_msgs: unknown, _cfg: unknown, opts: { onToken: (token: string) => void }) => {
-      opts.onToken(reply)
-      return reply
-    })
-    .mockImplementationOnce(async (_msgs: unknown, _cfg: unknown, opts: { onToken: (token: string) => void }) => {
-      opts.onToken('Permission denied; no command was run.')
-      return 'Permission denied; no command was run.'
-    })
 
   wrap()
   fireEvent.click(screen.getAllByText('新建连接')[0])
@@ -239,10 +307,15 @@ it('shows Agent command permission target and command as separately labelled reg
   fireEvent.input(hostLabel.querySelector('input') as HTMLInputElement, { target: { value: 'edge-01' } })
   fireEvent.click(screen.getByText('保存并连接'))
   fireEvent.click(screen.getByTitle('Catio Agent · 跨终端与数据库'))
-  fireEvent.click(screen.getByRole('button', { name: 'Agent 执行模式' }))
-  fireEvent.click(screen.getByRole('menuitemradio', { name: /半自动/ }))
   fireEvent.change(screen.getByPlaceholderText(/生成 shell 命令/), { target: { value: 'start Ollama' } })
   fireEvent.click(screen.getByTitle('发送'))
+  await waitFor(() => expect(agentOrder).toEqual(['subscribe', 'start']))
+
+  // Script a sensitive tool proposal + approval request.
+  emitAgent(1, { type: 'turnStarted' })
+  emitAgent(2, { type: 'assistantMessageStarted', messageId: 'm0', round: 0 })
+  emitAgent(3, { type: 'toolProposed', toolUseId: 'tool-1', name: 'terminal_exec', input: { command }, risk: ['service'] })
+  emitAgent(4, { type: 'approvalRequested', toolUseId: 'tool-1', reason: 'sensitiveCommand' })
 
   expect(await screen.findByText('允许 Agent 执行命令？')).toBeInTheDocument()
   const targetRegion = screen.getByRole('group', { name: /执行节点/ })
@@ -251,7 +324,82 @@ it('shows Agent command permission target and command as separately labelled reg
   expect(targetRegion).not.toHaveTextContent(command)
   expect(within(commandRegion).getByText(command)).toHaveClass('mono')
 
+  // Deny flows back to the engine as an approvalDecision.
   fireEvent.click(screen.getByRole('button', { name: '取消' }))
   await waitFor(() => expect(screen.queryByText('允许 Agent 执行命令？')).toBeNull())
-  expect(agentMock.chat).toHaveBeenCalledTimes(1)
+  await waitFor(() => {
+    expect(agentRuntimeMock.respondToAgentTurn).toHaveBeenCalledWith('turn-1', {
+      type: 'approvalDecision',
+      toolUseId: 'tool-1',
+      decision: 'deny',
+    })
+  })
+})
+
+it('executes each ToolExecutionRequested exactly once and replies with the outcome', async () => {
+  localStorage.setItem('catio-agent-config', JSON.stringify({
+    provider: 'ollama', baseUrl: 'http://localhost:11434', apiKey: '',
+    anthropicAuthMode: 'api-key', model: 'llama3', executionMode: 'manual',
+  }))
+  wrap()
+  fireEvent.click(screen.getAllByText('新建连接')[0])
+  fireEvent.click(screen.getByText('主机 / 终端'))
+  const hostLabel = screen.getAllByText('主机').map(el => el.parentElement)
+    .find(parent => parent?.querySelector('input')) as HTMLElement
+  fireEvent.input(hostLabel.querySelector('input') as HTMLInputElement, { target: { value: 'edge-01' } })
+  fireEvent.click(screen.getByText('保存并连接'))
+  fireEvent.click(screen.getByTitle('Catio Agent · 跨终端与数据库'))
+  fireEvent.change(screen.getByPlaceholderText(/生成 shell 命令/), { target: { value: 'run pwd' } })
+  fireEvent.click(screen.getByTitle('发送'))
+  await waitFor(() => expect(agentOrder).toEqual(['subscribe', 'start']))
+
+  emitAgent(1, { type: 'turnStarted' })
+  emitAgent(2, { type: 'assistantMessageStarted', messageId: 'm0', round: 0 })
+  emitAgent(3, { type: 'toolProposed', toolUseId: 'tool-1', name: 'terminal_exec', input: { command: 'pwd' }, risk: [] })
+  emitAgent(4, { type: 'toolExecutionRequested', toolUseId: 'tool-1', target: 'target-1', input: { command: 'pwd' } })
+
+  await waitFor(() => {
+    expect(agentRuntimeMock.respondToAgentTurn).toHaveBeenCalledWith('turn-1', expect.objectContaining({
+      type: 'toolExecutionResult',
+      toolUseId: 'tool-1',
+      outcome: expect.objectContaining({ content: expect.stringContaining('exitCode') }),
+    }))
+  })
+  expect(agentRuntimeMock.respondToAgentTurn).toHaveBeenCalledTimes(1)
+})
+
+it('abort cancels the backend turn and outcome-unknown shows a localized warning', async () => {
+  localStorage.setItem('catio-agent-config', JSON.stringify({
+    provider: 'ollama', baseUrl: 'http://localhost:11434', apiKey: '',
+    anthropicAuthMode: 'api-key', model: 'llama3', executionMode: 'manual',
+  }))
+  wrap()
+  fireEvent.click(screen.getAllByText('新建连接')[0])
+  fireEvent.click(screen.getByText('主机 / 终端'))
+  const hostLabel = screen.getAllByText('主机').map(el => el.parentElement)
+    .find(parent => parent?.querySelector('input')) as HTMLElement
+  fireEvent.input(hostLabel.querySelector('input') as HTMLInputElement, { target: { value: 'edge-01' } })
+  fireEvent.click(screen.getByText('保存并连接'))
+  fireEvent.click(screen.getByTitle('Catio Agent · 跨终端与数据库'))
+  fireEvent.change(screen.getByPlaceholderText(/生成 shell 命令/), { target: { value: 'run pwd' } })
+  fireEvent.click(screen.getByTitle('发送'))
+  await waitFor(() => expect(agentOrder).toEqual(['subscribe', 'start']))
+
+  // Stop button → backend cancel.
+  fireEvent.click(await screen.findByTitle('停止'))
+  await waitFor(() => expect(agentRuntimeMock.cancelAgentTurn).toHaveBeenCalledWith('turn-1'))
+
+  // A tool dispatch that arrives after abort must report outcomeUnknown, never "cancelled".
+  emitAgent(1, { type: 'turnStarted' })
+  emitAgent(2, { type: 'assistantMessageStarted', messageId: 'm0', round: 0 })
+  emitAgent(3, { type: 'toolExecutionRequested', toolUseId: 'tool-1', target: 'target-1', input: { command: 'pwd' } })
+
+  await waitFor(() => {
+    expect(agentRuntimeMock.respondToAgentTurn).toHaveBeenCalledWith('turn-1', {
+      type: 'toolExecutionResult',
+      toolUseId: 'tool-1',
+      outcome: { status: 'outcomeUnknown', content: 'aborted; outcome unknown' },
+    })
+  })
+  await waitFor(() => expect(screen.getByText(/命令可能仍在目标终端运行/)).toBeInTheDocument())
 })
