@@ -15,8 +15,8 @@ use crate::agent::policy::{PolicyDecision, ToolPolicy};
 use crate::agent::provider::{Provider, ProviderError, ProviderRequest, ProviderRound};
 use crate::agent::types::{
     AgentError, AgentEvent, AgentEventEnvelope, AgentMessage, ApprovalDecision, ContentBlock,
-    ExecutionMode, StartTurnRequest, ToolExecutionStatus, ToolResult, ToolResultStatus, ToolSpec,
-    ToolUse,
+    ExecutionMode, ExpectedResponse, StartTurnRequest, ToolExecutionStatus, ToolResult,
+    ToolResultStatus, ToolSpec, ToolUse,
 };
 
 /// The only structured tool supported by P0.
@@ -37,6 +37,9 @@ pub struct TurnContext {
     pub sink: Arc<dyn AgentEventSink>,
     pub bridge: Arc<dyn ClientBridge>,
     pub cancel_token: CancellationToken,
+    /// Set by the engine before the matching UI event; `respond` validates
+    /// against it without racing the engine task.
+    pub expected: Arc<Mutex<ExpectedResponse>>,
 }
 
 /// The only component that can create `AgentEventEnvelope`s. Emits a strictly
@@ -142,6 +145,8 @@ impl crate::agent::provider::ProviderObserver for EngineObserver {
 pub struct TurnEngine;
 
 impl TurnEngine {
+    /// Runs the turn to a single terminal event: `TurnFinished`,
+    /// `TurnCancelled` or `TurnFailed`.
     pub async fn run(&self, ctx: TurnContext) -> Result<(), AgentError> {
         let mut emitter = SequenceEmitter::new(
             ctx.owner_id.clone(),
@@ -150,7 +155,29 @@ impl TurnEngine {
             ctx.sink.clone(),
         );
         emitter.emit(AgentEvent::TurnStarted).await?;
+        let result = self.run_loop(&ctx, &mut emitter).await;
+        match &result {
+            Ok(()) => emitter.emit(AgentEvent::TurnFinished).await?,
+            Err(AgentError::TurnCancelled) => {
+                emitter.emit(AgentEvent::TurnCancelled).await?;
+            }
+            Err(err) => {
+                emitter
+                    .emit(AgentEvent::TurnFailed {
+                        code: err.code().into(),
+                        message: err.to_string(),
+                    })
+                    .await?;
+            }
+        }
+        result
+    }
 
+    async fn run_loop(
+        &self,
+        ctx: &TurnContext,
+        emitter: &mut SequenceEmitter,
+    ) -> Result<(), AgentError> {
         let mut messages = ctx.request.messages.clone();
         let round_cap = ctx.request.round_cap.max(1);
         let mode = ctx.request.execution_mode;
@@ -164,7 +191,6 @@ impl TurnEngine {
 
         loop {
             if ctx.cancel_token.is_cancelled() {
-                emitter.emit(AgentEvent::TurnCancelled).await?;
                 return Err(AgentError::TurnCancelled);
             }
             if used_rounds >= round_cap {
@@ -196,16 +222,13 @@ impl TurnEngine {
                 .await?;
 
             let observer = EngineObserver::new(message_id.clone());
-            let round = match ctx.provider.complete(provider_request, &observer).await {
+            let round = tokio::select! {
+                result = ctx.provider.complete(provider_request, &observer) => result,
+                _ = ctx.cancel_token.cancelled() => return Err(AgentError::TurnCancelled),
+            };
+            let round = match round {
                 Ok(round) => round,
-                Err(err) => {
-                    let code = err.code().to_string();
-                    let message = err.to_string();
-                    emitter
-                        .emit(AgentEvent::TurnFailed { code, message })
-                        .await?;
-                    return Err(map_provider_error(err));
-                }
+                Err(err) => return Err(map_provider_error(err)),
             };
 
             for delta in observer.drain() {
@@ -252,28 +275,20 @@ impl TurnEngine {
                 .collect();
 
             if tool_uses.is_empty() {
-                emitter.emit(AgentEvent::TurnFinished).await?;
                 return Ok(());
             }
 
             if tools_disabled {
-                let message =
-                    "provider requested tools during tools-disabled synthesis".to_string();
-                emitter
-                    .emit(AgentEvent::TurnFailed {
-                        code: "toolsDisabledSynthesisViolated".into(),
-                        message: message.clone(),
-                    })
-                    .await?;
-                return Err(AgentError::ToolsDisabledSynthesisViolated(message));
+                return Err(AgentError::ToolsDisabledSynthesisViolated(
+                    "provider requested tools during tools-disabled synthesis".into(),
+                ));
             }
 
             let mut any_denied = false;
             let mut results = Vec::new();
             for tool_use in &tool_uses {
                 let result =
-                    Self::process_tool(&ctx, &mut emitter, tool_use, mode, single_line, &target)
-                        .await?;
+                    Self::process_tool(ctx, emitter, tool_use, mode, single_line, &target).await?;
                 if result.status == ToolResultStatus::Denied {
                     any_denied = true;
                 }
@@ -404,13 +419,36 @@ impl TurnEngine {
                         risk: risk.reasons,
                     })
                     .await?;
+                // Publish the expected response before the UI-facing event so
+                // `respond` can validate without racing the engine task.
+                *ctx.expected.lock() = ExpectedResponse::Approval {
+                    tool_use_id: tool_use_id.clone(),
+                };
                 emitter
                     .emit(AgentEvent::ApprovalRequested {
                         tool_use_id: tool_use_id.clone(),
                         reason: reason.clone(),
                     })
                     .await?;
-                let decision = ctx.bridge.request_approval(&tool_use_id, &reason).await?;
+                let decision = match ctx.bridge.request_approval(&tool_use_id, &reason).await {
+                    Ok(decision) => decision,
+                    Err(AgentError::TurnCancelled) => {
+                        // Cancellation before dispatch is safely `Cancelled`.
+                        let result = ToolResult {
+                            tool_use_id: tool_use_id.clone(),
+                            content: "turn cancelled before dispatch".into(),
+                            status: ToolResultStatus::Cancelled,
+                        };
+                        emitter
+                            .emit(AgentEvent::ToolFinished {
+                                tool_use_id: tool_use_id.clone(),
+                                result: result.clone(),
+                            })
+                            .await?;
+                        return Err(AgentError::TurnCancelled);
+                    }
+                    Err(err) => return Err(err),
+                };
                 match decision {
                     ApprovalDecision::Allow => {}
                     ApprovalDecision::Deny => {
@@ -431,6 +469,9 @@ impl TurnEngine {
             }
         }
 
+        *ctx.expected.lock() = ExpectedResponse::ToolResult {
+            tool_use_id: tool_use_id.clone(),
+        };
         emitter
             .emit(AgentEvent::ToolExecutionRequested {
                 tool_use_id: tool_use_id.clone(),

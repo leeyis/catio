@@ -1,7 +1,6 @@
 use std::collections::VecDeque;
-use std::sync::Arc;
-
-use parking_lot::Mutex;
+use std::sync::{Arc, Weak};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use catio_lib::agent::bridge::{ClientBridge, NoopBridge};
@@ -10,11 +9,14 @@ use catio_lib::agent::provider::{
     Provider, ProviderError, ProviderObserver, ProviderRequest, ProviderRound, ProviderStop,
 };
 use catio_lib::agent::{
-    AgentError, AgentEvent, AgentEventEnvelope, AgentMessage, AgentRole, AnthropicAuthMode,
-    ApiCredential, ApprovalDecision, ContentBlock, ExecutionMode, ProviderConfig, ProviderProtocol,
-    StartTurnRequest, ToolExecutionOutcome, ToolExecutionStatus, ToolResultStatus,
+    ActorContext, AgentError, AgentEvent, AgentEventEnvelope, AgentMessage, AgentRole,
+    AgentRuntime, AnthropicAuthMode, ApiCredential, ApprovalDecision, ClientTurnResponse,
+    ContentBlock, ExecutionMode, ProviderConfig, ProviderFactory, ProviderProtocol,
+    StartTurnRequest, ToolExecutionOutcome, ToolExecutionStatus, ToolResultStatus, TurnHandle,
 };
+use parking_lot::Mutex;
 use serde_json::{json, Value};
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 // ---------------------------------------------------------------------------
@@ -55,6 +57,7 @@ struct ScriptedProvider {
     rounds: Arc<Mutex<VecDeque<ScriptedRound>>>,
     fail: Option<ProviderError>,
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
+    pending_when_empty: bool,
 }
 
 fn text_round(text: &str) -> ProviderRound {
@@ -79,6 +82,7 @@ impl ScriptedProvider {
             }]))),
             fail: None,
             requests: Arc::new(Mutex::new(Vec::new())),
+            pending_when_empty: false,
         }
     }
 
@@ -106,6 +110,7 @@ impl ScriptedProvider {
             rounds: Arc::new(Mutex::new(VecDeque::from([tool_round, synthesis_round]))),
             fail: None,
             requests: Arc::new(Mutex::new(Vec::new())),
+            pending_when_empty: false,
         }
     }
 
@@ -142,6 +147,7 @@ impl ScriptedProvider {
             rounds: Arc::new(Mutex::new(VecDeque::from([invalid_round, synthesis_round]))),
             fail: None,
             requests: Arc::new(Mutex::new(Vec::new())),
+            pending_when_empty: false,
         }
     }
 
@@ -173,6 +179,7 @@ impl ScriptedProvider {
             rounds: Arc::new(Mutex::new(rounds)),
             fail: None,
             requests: Arc::new(Mutex::new(Vec::new())),
+            pending_when_empty: false,
         }
     }
 
@@ -215,6 +222,7 @@ impl ScriptedProvider {
             rounds: Arc::new(Mutex::new(rounds)),
             fail: None,
             requests: Arc::new(Mutex::new(Vec::new())),
+            pending_when_empty: false,
         }
     }
 
@@ -223,6 +231,33 @@ impl ScriptedProvider {
             rounds: Arc::new(Mutex::new(VecDeque::new())),
             fail: Some(err),
             requests: Arc::new(Mutex::new(Vec::new())),
+            pending_when_empty: false,
+        }
+    }
+
+    /// One tool round followed by an indefinitely blocked provider (used to
+    /// keep a Turn alive after dispatch).
+    fn tool_then_blocked(command: &str) -> Self {
+        let tool_round = ScriptedRound {
+            round: ProviderRound {
+                message: AgentMessage {
+                    role: AgentRole::Assistant,
+                    content: vec![ContentBlock::ToolUse {
+                        id: "tool-1".into(),
+                        name: "terminal_exec".into(),
+                        input: json!({ "command": command }),
+                    }],
+                },
+                stop: ProviderStop::ToolUse,
+                usage: None,
+            },
+            deltas: vec![],
+        };
+        Self {
+            rounds: Arc::new(Mutex::new(VecDeque::from([tool_round]))),
+            fail: None,
+            requests: Arc::new(Mutex::new(Vec::new())),
+            pending_when_empty: true,
         }
     }
 
@@ -246,15 +281,68 @@ impl Provider for ScriptedProvider {
         if let Some(err) = &self.fail {
             return Err(err.clone());
         }
-        let scripted = self
-            .rounds
-            .lock()
-            .pop_front()
-            .ok_or_else(|| ProviderError::Protocol("no scripted round".into()))?;
+        let scripted = self.rounds.lock().pop_front();
+        let scripted = match scripted {
+            Some(scripted) => scripted,
+            None if self.pending_when_empty => std::future::pending().await,
+            None => return Err(ProviderError::Protocol("no scripted round".into())),
+        };
         for delta in &scripted.deltas {
             observer.text_delta(delta);
         }
         Ok(scripted.round)
+    }
+}
+
+/// Provider that blocks forever after notifying it entered `complete`.
+#[derive(Clone, Default)]
+struct BlockingProvider {
+    entered: Arc<Notify>,
+}
+
+#[async_trait]
+impl Provider for BlockingProvider {
+    async fn complete(
+        &self,
+        _request: ProviderRequest,
+        _observer: &dyn ProviderObserver,
+    ) -> Result<ProviderRound, ProviderError> {
+        self.entered.notify_waiters();
+        std::future::pending().await
+    }
+}
+
+/// Factory returning a fixed scripted provider.
+#[derive(Clone)]
+struct ScriptedFactory {
+    provider: Arc<dyn Provider>,
+}
+
+#[async_trait]
+impl ProviderFactory for ScriptedFactory {
+    async fn create(&self, _config: &ProviderConfig) -> Result<Arc<dyn Provider>, AgentError> {
+        Ok(self.provider.clone())
+    }
+}
+
+/// Factory that weak-tracks the provider it creates (leak detection).
+#[derive(Clone, Default)]
+struct WeakTrackingFactory {
+    last: Arc<Mutex<Option<Weak<ScriptedProvider>>>>,
+}
+
+impl WeakTrackingFactory {
+    fn last_weak(&self) -> Option<Weak<ScriptedProvider>> {
+        self.last.lock().clone()
+    }
+}
+
+#[async_trait]
+impl ProviderFactory for WeakTrackingFactory {
+    async fn create(&self, _config: &ProviderConfig) -> Result<Arc<dyn Provider>, AgentError> {
+        let provider = Arc::new(ScriptedProvider::text(&["leak check"]));
+        *self.last.lock() = Some(Arc::downgrade(&provider));
+        Ok(provider)
     }
 }
 
@@ -458,6 +546,24 @@ impl RecordingSink {
             })
             .collect()
     }
+
+    /// Polls until `predicate` holds, failing the test after 5 seconds.
+    async fn wait_for(&self, predicate: impl Fn(&RecordingSink) -> bool) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if predicate(self) {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("timed out waiting for sink state");
+    }
+
+    async fn wait_for_terminal(&self) {
+        self.wait_for(|sink| sink.terminal_count() == 1).await;
+    }
 }
 
 async fn run_turn_with(
@@ -473,6 +579,9 @@ async fn run_turn_with(
         sink: Arc::new(sink),
         bridge: Arc::new(NoopBridge),
         cancel_token: CancellationToken::new(),
+        expected: Arc::new(parking_lot::Mutex::new(
+            catio_lib::agent::ExpectedResponse::None,
+        )),
     };
     TurnEngine.run(ctx).await
 }
@@ -495,6 +604,9 @@ async fn run_tool_turn_with_provider(
         sink: Arc::new(sink),
         bridge: Arc::new(bridge),
         cancel_token: CancellationToken::new(),
+        expected: Arc::new(parking_lot::Mutex::new(
+            catio_lib::agent::ExpectedResponse::None,
+        )),
     };
     TurnEngine.run(ctx).await
 }
@@ -527,6 +639,219 @@ async fn run_invalid_tools_turn(
         sink,
     )
     .await
+}
+
+fn actor(owner: &str) -> ActorContext {
+    ActorContext {
+        owner_id: owner.into(),
+    }
+}
+
+fn allow_response(tool_use_id: &str) -> ClientTurnResponse {
+    ClientTurnResponse::ApprovalDecision {
+        tool_use_id: tool_use_id.into(),
+        decision: ApprovalDecision::Allow,
+    }
+}
+
+fn deny_response(tool_use_id: &str) -> ClientTurnResponse {
+    ClientTurnResponse::ApprovalDecision {
+        tool_use_id: tool_use_id.into(),
+        decision: ApprovalDecision::Deny,
+    }
+}
+
+/// Starts a Turn whose first tool round awaits approval, then stays alive on a
+/// blocked provider round.
+async fn runtime_waiting_for_approval(
+    owner: ActorContext,
+) -> (Arc<AgentRuntime>, TurnHandle, RecordingSink) {
+    let provider = ScriptedProvider::tool_then_blocked("rm -rf /tmp/demo");
+    let factory = Arc::new(ScriptedFactory {
+        provider: Arc::new(provider),
+    });
+    let runtime = Arc::new(AgentRuntime::new(factory));
+    let sink = RecordingSink::default();
+    let turn = runtime
+        .start_turn(
+            owner.clone(),
+            valid_request(ExecutionMode::Ask),
+            Arc::new(sink.clone()),
+        )
+        .await
+        .unwrap();
+    sink.wait_for(|s| s.event_types().contains(&"approvalRequested"))
+        .await;
+    (runtime, turn, sink)
+}
+
+/// Runs a completed Turn and waits until the registry entry is gone.
+async fn completed_runtime(owner: ActorContext) -> (Arc<AgentRuntime>, TurnHandle, RecordingSink) {
+    let provider = ScriptedProvider::text(&["done"]);
+    let factory = Arc::new(ScriptedFactory {
+        provider: Arc::new(provider),
+    });
+    let runtime = Arc::new(AgentRuntime::new(factory));
+    let sink = RecordingSink::default();
+    let turn = runtime
+        .start_turn(
+            owner.clone(),
+            valid_request(ExecutionMode::Ask),
+            Arc::new(sink.clone()),
+        )
+        .await
+        .unwrap();
+    sink.wait_for_terminal().await;
+    loop {
+        if runtime.cancel(owner.clone(), turn.clone()).await == Err(AgentError::TurnNotFound) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    (runtime, turn, sink)
+}
+
+// ---------------------------------------------------------------------------
+// AgentRuntime registry: owner, idempotency, cancellation
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn wrong_owner_cannot_respond_or_cancel() {
+    let (runtime, turn, _sink) = runtime_waiting_for_approval(actor("owner-a")).await;
+    let response = allow_response("tool-1");
+    assert_eq!(
+        runtime
+            .respond(actor("owner-b"), turn.clone(), response)
+            .await,
+        Err(AgentError::OwnerMismatch)
+    );
+    assert_eq!(
+        runtime.cancel(actor("owner-b"), turn).await,
+        Err(AgentError::OwnerMismatch)
+    );
+}
+
+#[tokio::test]
+async fn duplicate_equal_response_is_noop_but_conflict_fails() {
+    let (runtime, turn, sink) = runtime_waiting_for_approval(actor("owner-a")).await;
+    runtime
+        .respond(actor("owner-a"), turn.clone(), allow_response("tool-1"))
+        .await
+        .unwrap();
+    runtime
+        .respond(actor("owner-a"), turn.clone(), allow_response("tool-1"))
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime
+            .respond(actor("owner-a"), turn.clone(), deny_response("tool-1"))
+            .await,
+        Err(AgentError::ResponseConflict)
+    );
+    // The tool executes exactly once; the replay must not re-dispatch.
+    sink.wait_for(|s| s.event_types().contains(&"toolStarted"))
+        .await;
+    assert_eq!(
+        sink.event_types()
+            .iter()
+            .filter(|t| **t == "toolStarted")
+            .count(),
+        1
+    );
+    runtime.cancel(actor("owner-a"), turn).await.unwrap();
+}
+
+#[tokio::test]
+async fn cancel_before_dispatch_is_cancelled() {
+    let provider = Arc::new(BlockingProvider::default());
+    let entered = provider.entered.notified();
+    let factory = Arc::new(ScriptedFactory {
+        provider: provider.clone(),
+    });
+    let runtime = Arc::new(AgentRuntime::new(factory));
+    let sink = RecordingSink::default();
+    let turn = runtime
+        .start_turn(
+            actor("owner-a"),
+            valid_request(ExecutionMode::Ask),
+            Arc::new(sink.clone()),
+        )
+        .await
+        .unwrap();
+    entered.await;
+    runtime.cancel(actor("owner-a"), turn).await.unwrap();
+    sink.wait_for_terminal().await;
+    assert_eq!(sink.terminal_types(), ["turnCancelled"]);
+}
+
+#[tokio::test]
+async fn cancel_after_dispatch_without_stop_proof_is_outcome_unknown() {
+    let provider = ScriptedProvider::tool_then_blocked("echo hi");
+    let factory = Arc::new(ScriptedFactory {
+        provider: Arc::new(provider),
+    });
+    let runtime = Arc::new(AgentRuntime::new(factory));
+    let sink = RecordingSink::default();
+    let turn = runtime
+        .start_turn(
+            actor("owner-a"),
+            valid_request(ExecutionMode::Ask),
+            Arc::new(sink.clone()),
+        )
+        .await
+        .unwrap();
+    // Ordinary command in ask mode dispatches without approval.
+    sink.wait_for(|s| s.event_types().contains(&"toolStarted"))
+        .await;
+    runtime.cancel(actor("owner-a"), turn).await.unwrap();
+    sink.wait_for_terminal().await;
+    assert_eq!(
+        sink.tool_finished_statuses(),
+        [ToolResultStatus::OutcomeUnknown]
+    );
+    assert_eq!(sink.terminal_count(), 1);
+}
+
+#[tokio::test]
+async fn terminal_turn_cannot_be_reactivated() {
+    let (runtime, turn, _sink) = completed_runtime(actor("owner-a")).await;
+    assert_eq!(
+        runtime
+            .respond(actor("owner-a"), turn.clone(), allow_response("tool-1"))
+            .await,
+        Err(AgentError::TurnNotFound)
+    );
+    assert_eq!(
+        runtime.cancel(actor("owner-a"), turn).await,
+        Err(AgentError::TurnNotFound)
+    );
+}
+
+#[tokio::test]
+async fn terminal_turn_drops_provider_and_clears_registry() {
+    let factory = Arc::new(WeakTrackingFactory::default());
+    let runtime = Arc::new(AgentRuntime::new(factory.clone()));
+    let sink = RecordingSink::default();
+    let turn = runtime
+        .start_turn(
+            actor("owner-a"),
+            valid_request(ExecutionMode::Ask),
+            Arc::new(sink.clone()),
+        )
+        .await
+        .unwrap();
+    sink.wait_for_terminal().await;
+    loop {
+        if runtime.cancel(actor("owner-a"), turn.clone()).await == Err(AgentError::TurnNotFound) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let weak = factory.last_weak();
+    assert!(
+        weak.as_ref().is_none_or(|w| w.upgrade().is_none()),
+        "provider must be dropped after the terminal event"
+    );
 }
 
 // ---------------------------------------------------------------------------

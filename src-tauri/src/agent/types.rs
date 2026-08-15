@@ -419,3 +419,43 @@ pub struct TokenUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
 }
+
+/// The response the engine is currently waiting for. Set by the engine before
+/// the matching UI event is emitted, so `respond` can validate against it
+/// without racing the engine task.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExpectedResponse {
+    None,
+    Approval { tool_use_id: String },
+    ToolResult { tool_use_id: String },
+}
+
+impl ExpectedResponse {
+    /// True when `response` is exactly what the engine is waiting for.
+    pub fn matches(&self, response: &ClientTurnResponse) -> bool {
+        match (self, response) {
+            (
+                ExpectedResponse::Approval { tool_use_id },
+                ClientTurnResponse::ApprovalDecision {
+                    tool_use_id: id, ..
+                },
+            ) => tool_use_id == id,
+            (
+                ExpectedResponse::ToolResult { tool_use_id },
+                ClientTurnResponse::ToolExecutionResult {
+                    tool_use_id: id, ..
+                },
+            ) => tool_use_id == id,
+            _ => false,
+        }
+    }
+
+    /// Stable key for response deduplication.
+    pub fn key(&self) -> (&'static str, Option<&str>) {
+        match self {
+            ExpectedResponse::None => ("none", None),
+            ExpectedResponse::Approval { tool_use_id } => ("approval", Some(tool_use_id)),
+            ExpectedResponse::ToolResult { tool_use_id } => ("toolResult", Some(tool_use_id)),
+        }
+    }
+}
