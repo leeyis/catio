@@ -3,6 +3,7 @@
 
 use async_trait::async_trait;
 
+pub mod anthropic;
 pub mod openai;
 
 use crate::agent::types::{AgentMessage, TokenUsage, ToolSpec};
