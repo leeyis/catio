@@ -91,6 +91,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(SessionManager::default())
         .manage(ConnManager::default())
+        .manage(agent::AgentRuntime::production())
         .manage(mcp::McpState::default())
         .manage(scan::ScanState::default())
         .manage(db::SqlFileState::default())
@@ -193,7 +194,10 @@ pub fn run() {
             scan::commands::scan_cancel,
             scan::commands::scan_read_text_file,
             diagnostics::diagnostics_log,
-            diagnostics::diagnostics_log_dir
+            diagnostics::diagnostics_log_dir,
+            agent::commands::agent_start_turn,
+            agent::commands::agent_respond,
+            agent::commands::agent_cancel
         ])
         .on_window_event(|window, event| {
             #[cfg(desktop)]

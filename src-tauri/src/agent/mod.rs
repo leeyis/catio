@@ -4,6 +4,7 @@
 //! This module is the only public surface for the Rust agent engine.
 
 pub mod bridge;
+pub mod commands;
 pub mod engine;
 pub mod legacy;
 pub mod policy;
