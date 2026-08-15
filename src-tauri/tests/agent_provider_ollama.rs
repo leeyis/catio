@@ -186,6 +186,7 @@ fn encode_request_preserves_full_assistant_message_and_tool_results() {
     let body = encode_chat_request(&provider_request, "llama3");
     assert_eq!(body["model"], "llama3");
     assert_eq!(body["stream"], true);
+    assert_eq!(body["system"], "sys");
     let assistant = &body["messages"][1];
     assert_eq!(assistant["role"], "assistant");
     assert_eq!(assistant["content"], "ok");

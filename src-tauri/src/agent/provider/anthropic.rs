@@ -119,7 +119,7 @@ pub fn encode_messages_request(request: &ProviderRequest, model: &str) -> Value 
     let mut body = json!({
         "model": model,
         "system": request.system_prompt,
-        "max_tokens": 1024,
+        "max_tokens": 4096,
         "messages": encode_messages(&request.messages),
         "stream": true,
     });

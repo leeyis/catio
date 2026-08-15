@@ -175,20 +175,33 @@ fn encode_request_body_matches_openai_wire_shape() {
     let body = encode_chat_request(&request, "model-x");
     assert_eq!(body["model"], "model-x");
     assert_eq!(body["stream"], true);
-    assert_eq!(body["messages"][0]["role"], "user");
-    assert_eq!(body["messages"][0]["content"], "run pwd");
+    // system prompt leads the messages
+    assert_eq!(body["messages"][0]["role"], "system");
+    assert_eq!(body["messages"][0]["content"], "sys");
+    assert_eq!(body["messages"][1]["role"], "user");
+    assert_eq!(body["messages"][1]["content"], "run pwd");
     // assistant tool call + tool role result pairing
-    assert_eq!(body["messages"][1]["role"], "assistant");
+    assert_eq!(body["messages"][2]["role"], "assistant");
     assert_eq!(
-        body["messages"][1]["tool_calls"][0]["function"]["name"],
+        body["messages"][2]["tool_calls"][0]["function"]["name"],
         "terminal_exec"
     );
-    assert_eq!(body["messages"][2]["role"], "tool");
-    assert_eq!(body["messages"][2]["tool_call_id"], "call_1");
+    assert_eq!(body["messages"][3]["role"], "tool");
+    assert_eq!(body["messages"][3]["tool_call_id"], "call_1");
     // tools only present when non-empty
     assert!(body["tools"][0]["function"]["name"] == "terminal_exec");
     let no_tools = encode_chat_request(&text_request(), "model-x");
     assert!(no_tools.get("tools").is_none());
+}
+
+#[test]
+fn encode_request_prepends_the_system_message() {
+    let body = encode_chat_request(&text_request(), "model-x");
+    // The system prompt is never dropped: it leads the wire messages.
+    assert_eq!(body["messages"][0]["role"], "system");
+    assert_eq!(body["messages"][0]["content"], "sys");
+    assert_eq!(body["messages"][1]["role"], "user");
+    assert_eq!(body["messages"][1]["content"], "hi");
 }
 
 #[test]

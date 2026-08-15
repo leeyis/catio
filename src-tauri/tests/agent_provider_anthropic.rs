@@ -307,6 +307,7 @@ fn encode_request_separates_system_and_pairs_tool_results() {
     assert_eq!(body["model"], "claude-x");
     assert_eq!(body["system"], "system prompt");
     assert_eq!(body["stream"], true);
+    assert_eq!(body["max_tokens"], 4096);
     assert_eq!(body["messages"][0]["role"], "user");
     assert_eq!(body["messages"][1]["role"], "assistant");
     assert_eq!(body["messages"][1]["content"][0]["type"], "tool_use");

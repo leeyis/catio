@@ -74,11 +74,17 @@ fn classify_http_error(status: reqwest::StatusCode) -> ProviderError {
     }
 }
 
-/// Pure request encoder: stable wire shape for tests.
+/// Pure request encoder: stable wire shape for tests. The system prompt leads
+/// the messages as the first `system` message (never dropped).
 pub fn encode_chat_request(request: &ProviderRequest, model: &str) -> Value {
+    let mut messages = vec![json!({
+        "role": "system",
+        "content": request.system_prompt,
+    })];
+    messages.extend(encode_messages(&request.messages));
     let mut body = json!({
         "model": model,
-        "messages": encode_messages(&request.messages),
+        "messages": messages,
         "stream": true,
         "stream_options": { "include_usage": true },
     });

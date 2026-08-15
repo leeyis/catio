@@ -86,6 +86,7 @@ fn request_round(_request: &ProviderRequest) -> u32 {
 pub fn encode_chat_request(request: &ProviderRequest, model: &str) -> Value {
     let mut body = json!({
         "model": model,
+        "system": request.system_prompt,
         "messages": encode_messages(&request.messages),
         "stream": true,
     });
