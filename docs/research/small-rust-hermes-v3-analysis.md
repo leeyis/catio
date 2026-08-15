@@ -3,11 +3,11 @@
 > 研究日期：2026-08-15  
 > Hermes 基线：[`bdd400deb8ba56e30c87b6916348db73f828aded`](https://github.com/leeyis/small-rust-hermes-v3/tree/bdd400deb8ba56e30c87b6916348db73f828aded)（仓库 `main` 在研究时的 HEAD）  
 > Catio 基线：[`3adf8d984f54f6bfc01f3c7716a8e70bfa605f28`](https://github.com/leeyis/catio/tree/3adf8d984f54f6bfc01f3c7716a8e70bfa605f28)  
-> 资料范围：Hermes README、Cargo manifests、Rust 源码、许可证、提交历史；该仓库关闭了 GitHub Issues，研究时没有可用 issue。本文只评价后端执行逻辑，不评价其记忆/反思产品方向。
+> 资料范围：Hermes README、Cargo manifests、Rust 源码、许可证、提交历史；该仓库关闭了 GitHub Issues，研究时没有可用 issue。本文以 Agent 后端执行逻辑为主，同时评估 Catio 后续技能/记忆入口所需的架构预留；反思和自我进化不在当前范围。
 
 ## 结论
 
-Hermes **可以显著启发 Catio Agent 后端重构，但不能直接作为依赖或整段搬入**。
+Hermes **可以显著优化 Catio Agent 后端**。在本项目明确为个人自用、非商业用途的前提下，PolyForm Noncommercial 允许研究、修改和复用，因此许可证不是本次决策阻碍。技术上可以选择性吸收其后端代码；但不建议把整个 Hermes workspace 直接作为 Catio 依赖或原样搬入，因为两者的执行目标、状态边界和已有基础设施不同，且 Hermes 核心路径仍有需要先修复的并发与取消缺陷。
 
 最值得采用的是它的四个结构性设计：
 
@@ -16,7 +16,21 @@ Hermes **可以显著启发 Catio Agent 后端重构，但不能直接作为依�
 3. 对一次模型响应中的只读/安全工具并行执行，对需确认的副作用工具串行执行，并始终按 tool-use ID 配对结果。
 4. 以 typed event stream 向前端报告 `TextDelta`、`ToolExecStart`、`ToolUseResult`、`Usage`、`Error` 和 `Done`，让桌面与 server mode 复用同一执行内核。
 
-但 Catio 不应照搬 Hermes 的 shell runner、server state 或许可代码：Hermes 的 Bash 工具并非沙箱，timeout/取消不保证杀死子进程；server 使用单 bearer token、进程级共享 session map，缺少 Catio 所需的多用户 owner 隔离；同 session 并发 turn 也没有显式互斥。更关键的是 Hermes 使用 **PolyForm Noncommercial 1.0.0**，而 Catio 是 MIT；若 Catio 有任何商业用途或希望保持 MIT 分发，必须采取 clean-room 方式只借鉴思想、重新设计实现，或先取得单独商业授权。[Hermes LICENSE L1-L28](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/LICENSE#L1-L28) [Catio LICENSE L1-L13](https://github.com/leeyis/catio/blob/3adf8d984f54f6bfc01f3c7716a8e70bfa605f28/LICENSE#L1-L13)
+但 Catio 不应照搬 Hermes 的 shell runner、server state 或权限实现：Hermes 的 Bash 工具并非沙箱，timeout/取消不保证杀死子进程；server 使用单 bearer token、进程级共享 session map，缺少 Catio 所需的多用户 owner 隔离；同 session 并发 turn 也没有显式互斥。许可证仅作为未来边界备注：当前个人非商业用途属于许可范围；如果以后改变为商业用途或要以 MIT 重新分发复制的 Hermes 代码，再单独处理授权或重写问题。[Hermes LICENSE L1-L28](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/LICENSE#L1-L28) [Catio LICENSE L1-L13](https://github.com/leeyis/catio/blob/3adf8d984f54f6bfc01f3c7716a8e70bfa605f28/LICENSE#L1-L13)
+
+### UI 兼容原则
+
+本次优化应坚持 **UI-first 渐进迁移**：保留 Catio 当前 Agent 面板、conversation、terminal split、权限弹窗与流式 Markdown 体验，把后端输出映射回现有 UI 状态；只有当 typed tool lifecycle 引入现有界面无法表达的状态时，才增加 tool card、thinking、usage、取消结果未知等增量 UI。第一阶段不重做 Agent 页面，也不引入 Hermes GUI/Flutter。
+
+技能和记忆是已明确的后续产品入口，但不应阻塞第一阶段后端迁移。界面上应在现有 `IconRail` 顶部区域新增 `skills` 与 `memory`，与 `snippets`、`history` 平级，并各自挂载独立 `SkillsPanel` / `MemoryPanel`；不应把它们藏进 Agent 设置或复用同一个混合面板。当前导航本来就是 rail item 驱动的平级 panel switch，因此这条演进路径与现有 UI 结构一致，且能自然继承主题变量与 i18n 机制。[Catio `Sidebar.tsx` L535-L584](https://github.com/leeyis/catio/blob/3adf8d984f54f6bfc01f3c7716a8e70bfa605f28/src/components/shell/Sidebar.tsx#L535-L584) [Catio `App.tsx` L2117-L2118](https://github.com/leeyis/catio/blob/3adf8d984f54f6bfc01f3c7716a8e70bfa605f28/src/App.tsx#L2117-L2118)
+
+四类数据需要保持清晰边界：片段是用户显式维护、可插入终端的命令或 SQL；历史是已经发生的活动记录；技能是可被 Agent 选择和执行的过程性说明；记忆是可检索、可固定、可淘汰或被新事实取代的长期上下文。它们可以共享搜索、标签和 owner scope 基础设施，但不应共享含混的数据模型。
+
+代码吸收有三种方式：
+
+1. **选择性移植（推荐）**：提取 Hermes 的 typed message/provider/turn loop 代码到 Catio 自有 `agent` module；第一阶段不带入 memory/reflection/subagent，接入 Catio 已有 MCP、SSH、DB 与事件基础设施，并在上线前修复本文列出的取消、fail-open 和并发问题。收益与改动面最平衡。
+2. **直接依赖 Hermes crates**：最快做出 spike，但 private git dependency、Hermes 类型泄漏、无关 crate 演进和补丁维护会长期耦合两项目，不适合作为最终结构。
+3. **完全重新实现**：接口最贴合 Catio，但会重复 provider streaming、tool pairing 和 round-cap 等已经存在的工作；除非未来许可前提改变，否则当前没有必要从零开始。
 
 ## 1. Hermes 架构
 
@@ -124,7 +138,7 @@ Provider resilience 也没有统一：Anthropic 对 429/5xx/network 做三次 re
 
 ### P0：先建立 Rust agent-core seam（高收益、低产品风险）
 
-定义 Catio 自有、clean-room 的：
+保留现有 Catio Agent UI，在 `src-tauri` 内建立 Catio 自有 `agent` module；类型和 loop 可以从 Hermes 选择性移植并按 Catio 语义改造：
 
 - `AgentMessage` / `ContentBlock` / `ToolCall` / `ToolResult`
 - `ToolSpec` + JSON Schema
@@ -132,7 +146,7 @@ Provider resilience 也没有统一：Anthropic 对 429/5xx/network 做三次 re
 - `Provider` trait 与 OpenAI/Anthropic/Ollama adapters
 - `ToolHost` trait；第一阶段只有 `terminal_exec`、`terminal_context` 和 DB read-only tools
 
-Rust engine 通过现有 Tauri command/event 与 server WS 暴露，React 仅渲染事件和提交用户决策。保留 Catio 当前 Markdown 解析作为 provider 不支持 tools 时的显式 fallback。
+Rust engine 通过现有 Tauri command/event 与 server WS 暴露，再由兼容 adapter 映射到当前 React conversation/streaming 状态；React 逐步退化为渲染事件和提交用户决策。保留 Catio 当前 Markdown 解析作为 provider 不支持 tools 时的显式 fallback。
 
 成功标准：桌面和 server mode 对同一 scripted provider fixture 产生完全相同的 ordered events；React 组件不再拥有 tool loop 状态机。
 
@@ -150,22 +164,33 @@ Rust engine 通过现有 Tauri command/event 与 server WS 暴露，React 仅渲
 - 权限键至少包含 `owner_id + target_id + tool + normalized_scope`；deny 永远优先。
 - shell 仍默认 confirmation；只给真正结构化的只读工具 auto-allow。
 - SQLite event/audit log 分开保存 transcript、执行意图、审批人、结果摘要；terminal output 做限长、secret redaction 和 retention。
-- 不复制 Hermes 的 memory/reflection/subagent，除非 Catio 后续有明确需求；它们显著扩大数据留存、prompt injection 和供应链边界，不是当前 shell loop 的必要优化。
+- 技能和记忆的 owner scope、数据来源和命中理由必须进入审计信息；反思、自我进化和 subagent 仍暂缓，它们不是当前 shell loop 的必要优化。
 
 成功标准：两个 server 用户无法读取、取消、确认或复用对方的 turn/session/tool approval；crash 重启后能区分 completed、failed、cancelled 和 outcome-unknown。
+
+### P3：新增技能与记忆模块，但不污染 turn engine
+
+Hermes 已经把两类能力分别建模为 `SkillStore` 与 `MemoryStore`。前者提供按名称的 list/get/put/delete 和 user/project scope 覆盖；后者提供 active、pinned、superseded 与 top-k search。这两个 store seam 和相关 relevance 实现可以选择性吸收，但 Catio 应换成带 `owner_id` 的 repository，并优先复用现有 SQLite/server 数据层，而不是直接沿用单机文件目录。[Hermes `SkillStore` L45-L63](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-skills/src/store.rs#L45-L63) [Hermes `MemoryStore` L54-L75](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-memory/src/store.rs#L54-L75) [技能 relevance L62-L121](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-skills/src/relevance.rs#L62-L121) [记忆 relevance L31-L76](https://github.com/leeyis/small-rust-hermes-v3/blob/bdd400deb8ba56e30c87b6916348db73f828aded/crates/hermes-memory/src/relevance.rs#L31-L76)
+
+建议的数据流是 `Skills/Memory Repository -> Context Assembler -> immutable TurnContext -> turn engine`。`run_turn()` 只接收本 turn 已选中的技能/记忆快照，不负责 CRUD、检索或自我写入。这样同一个上下文装配器可服务桌面与 server，UI 也能解释“本次用了哪些技能/记忆、为什么命中”，并允许用户在发起 turn 前固定、排除或编辑内容。
+
+界面落地顺序：先增加两个 rail 入口和只读列表/详情，再增加编辑、标签与搜索，最后接 Agent 的自动检索和命中解释。所有新增文案同步更新语言文件，样式沿用现有 CSS variables；这能保证功能上线时继续满足 Catio 的 i18n 与主题切换约束。
+
+成功标准：技能/记忆面板可以独立使用；关闭自动注入后 Agent 行为与 P0 完全一致；每个 turn 能重放当时实际使用的知识快照，而不会被后续编辑悄然改变。
 
 ## 8. 不建议采用的内容
 
 | Hermes 设计 | 判断 | 原因 |
 |---|---|---|
-| `hermes-turn` 的整体源码直接复制/作为依赖 | 不采用 | PolyForm Noncommercial 与 Catio MIT/潜在商业用途不兼容；应 clean-room 重写接口和 invariant。 |
+| `hermes-turn` 整体作为长期 git dependency | 不采用 | 个人用途许可允许复用，但类型与生命周期不贴合 Catio，且会把已知取消/并发缺陷和上游演进一起耦合进来；推荐选择性移植并修正。 |
 | Markdown `[GOAL_COMPLETE]` 外层 agent loop | 暂不采用 | 仍是文本协议；取消只能在 iteration 间生效；Catio 当前需求是可靠 turn/tool execution。 |
 | `bash` runner | 不采用 | 不是沙箱，timeout/cancel 不保证结束 OS process，也不符合 Catio 的 SSH/PTY 交互执行语义。 |
 | 全部 safe tools `join_all` | 修改后采用 | 必须加 target/resource conflict key、并发上限和 backpressure。 |
 | JSONL + 每条 `sync_data()` | 只借鉴 event sourcing | Catio 已有 SQLite 和多用户 server；事务批量写更合适。 |
 | 单 bearer token + global `AppState` | 不采用 | 无 owner 隔离，token query/log 泄露面，不满足 Catio server mode。 |
 | 全局按 tool name `AlwaysAllow` | 不采用 | scope 过宽，应绑定用户、目标和规范化参数范围。 |
-| memory/reflection/self-evolution | 不在本次范围 | 与执行可靠性无直接关系，带来额外隐私、注入和长期状态风险。 |
+| skills / memory | 后续阶段选择性采用 | 两者已有明确的平级 UI 入口规划；可吸收独立 store/relevance 思想，但需补 owner scope、SQLite repository、命中解释与快照审计，且不能耦合进 turn loop。 |
+| reflection / self-evolution | 暂不采用 | 与执行可靠性无直接关系，带来额外隐私、注入和长期状态风险。 |
 
 ## 9. 验证与成熟度备注
 
@@ -176,4 +201,4 @@ Rust engine 通过现有 Tauri command/event 与 server WS 暴露，React 仅渲
 
 ## 最终建议
 
-把 Hermes 当作**架构样板与测试用例来源**，而不是可集成代码库。Catio 下一轮 Agent 优化的最小正确切片应是：在 `src-tauri` 新建一个 provider-neutral turn engine，先支持单个 structured `terminal_exec` tool，把 current `AbortController`、PTY capture、busy/split、敏感命令确认能力接入 Rust event loop，再让前端只消费 typed events。这个切片已经能解决现有 Markdown tool protocol 和 `App.tsx` 编排耦合的主要问题，同时不会引入 Hermes 的自治 agent、memory、MCP 和许可风险。
+把 Hermes 当作**可选择性吸收的后端实现来源**，而不是整体运行时。Catio 下一轮 Agent 优化的最小正确切片应是：保持现有 UI 不变，在 `src-tauri` 新建一个 provider-neutral turn engine，先支持单个 structured `terminal_exec` tool，把 current `AbortController`、PTY capture、busy/split、敏感命令确认能力接入 Rust event loop，再用兼容 adapter 把 typed events 投影到当前 conversation UI。技能与记忆作为后续独立模块，在现有片段库/历史区域增加平级入口，并经 `Context Assembler` 向 turn 提供可审计的不可变快照；第一阶段只预留这条 seam，不提前把 memory、reflection 或 Hermes GUI 耦合进执行内核。
