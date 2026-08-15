@@ -231,13 +231,12 @@ fn generate_turn_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::bridge::NoopBridge;
     use crate::agent::engine::AgentEventSink;
     use crate::agent::provider::{
         ProviderError, ProviderObserver, ProviderRequest, ProviderRound, ProviderStop,
     };
     use crate::agent::types::{
-        AgentEvent, AgentEventEnvelope, AgentMessage, AgentRole, AnthropicAuthMode, ApiCredential,
+        AgentEventEnvelope, AgentMessage, AgentRole, AnthropicAuthMode, ApiCredential,
         ContentBlock, ExecutionMode, ProviderProtocol,
     };
     use std::sync::Weak;

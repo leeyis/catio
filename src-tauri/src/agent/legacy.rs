@@ -34,7 +34,7 @@ pub fn first_shell_tool(
 
     for capture in fence.captures_iter(markdown) {
         let lang = capture.get(1).expect("lang group").as_str();
-        let lang = lang.trim().split_whitespace().next().unwrap_or("");
+        let lang = lang.split_whitespace().next().unwrap_or("");
         let lower = lang.to_ascii_lowercase();
         if !SHELL_LANGS.contains(&lower.as_str()) {
             continue;

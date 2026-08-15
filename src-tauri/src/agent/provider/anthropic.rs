@@ -14,7 +14,7 @@ use crate::agent::provider::{
 };
 use crate::agent::types::{
     AgentMessage, AgentRole, AnthropicAuthMode, ContentBlock, ProviderConfig, TokenUsage,
-    ToolResultStatus, ToolUse,
+    ToolResultStatus,
 };
 
 /// Anthropic-compatible provider over `/v1/messages`.
@@ -442,6 +442,12 @@ impl AnthropicDecoder {
             _ => {}
         }
         Ok(())
+    }
+}
+
+impl Default for AnthropicDecoder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

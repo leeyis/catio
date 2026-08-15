@@ -208,7 +208,6 @@ impl DecodedSse {
 /// Accumulating tool-call fragment during decoding.
 #[derive(Debug, Default)]
 struct AccumulatingToolCall {
-    index: usize,
     id: Option<String>,
     name: Option<String>,
     arguments: String,
@@ -317,10 +316,7 @@ impl OpenAiDecoder {
                 for call in tool_calls {
                     let index = call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
                     while self.tool_calls.len() <= index {
-                        self.tool_calls.push(AccumulatingToolCall {
-                            index: self.tool_calls.len(),
-                            ..Default::default()
-                        });
+                        self.tool_calls.push(AccumulatingToolCall::default());
                     }
                     let slot = &mut self.tool_calls[index];
                     if let Some(id) = call.get("id").and_then(Value::as_str) {
@@ -373,6 +369,12 @@ impl OpenAiDecoder {
             }
         }
         Ok(())
+    }
+}
+
+impl Default for OpenAiDecoder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

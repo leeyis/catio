@@ -17,9 +17,9 @@ use crate::agent::legacy::first_shell_tool;
 use crate::agent::policy::{PolicyDecision, ToolPolicy};
 use crate::agent::provider::{Provider, ProviderError, ProviderRequest, ProviderRound};
 use crate::agent::types::{
-    AgentError, AgentEvent, AgentEventEnvelope, AgentMessage, ApprovalDecision, ContentBlock,
-    ExecutionMode, ExpectedResponse, StartTurnRequest, ToolExecutionOutcome, ToolExecutionStatus,
-    ToolResult, ToolResultStatus, ToolSpec, ToolUse,
+    AgentError, AgentEvent, AgentEventEnvelope, ApprovalDecision, ContentBlock, ExecutionMode,
+    ExpectedResponse, StartTurnRequest, ToolExecutionOutcome, ToolExecutionStatus, ToolResult,
+    ToolResultStatus, ToolSpec, ToolUse,
 };
 
 /// The only structured tool supported by P0.

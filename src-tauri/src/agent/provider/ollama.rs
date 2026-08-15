@@ -11,9 +11,7 @@ use crate::agent::provider::{
     classify_error_response, Provider, ProviderError, ProviderObserver, ProviderRequest,
     ProviderRound, ProviderStop,
 };
-use crate::agent::types::{
-    AgentMessage, AgentRole, ContentBlock, ProviderConfig, TokenUsage, ToolUse,
-};
+use crate::agent::types::{AgentMessage, AgentRole, ContentBlock, ProviderConfig};
 
 /// Ollama-compatible provider over `/api/chat`.
 pub struct OllamaProvider {
@@ -311,6 +309,12 @@ impl OllamaDecoder {
             }
         }
         Ok(())
+    }
+}
+
+impl Default for OllamaDecoder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
