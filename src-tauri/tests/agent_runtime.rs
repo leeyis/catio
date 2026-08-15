@@ -334,6 +334,28 @@ impl Provider for BlockingProvider {
     }
 }
 
+/// Provider that emits one delta, signals, then blocks until released. Used to
+/// prove deltas are forwarded to the sink BEFORE the completion returns.
+#[derive(Clone, Default)]
+struct GatedDeltaProvider {
+    delta_emitted: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+#[async_trait]
+impl Provider for GatedDeltaProvider {
+    async fn complete(
+        &self,
+        _request: ProviderRequest,
+        observer: &dyn ProviderObserver,
+    ) -> Result<ProviderRound, ProviderError> {
+        observer.text_delta("early ");
+        self.delta_emitted.notify_waiters();
+        self.release.notified().await;
+        Ok(text_round("early world"))
+    }
+}
+
 /// Factory returning a fixed scripted provider.
 #[derive(Clone)]
 struct ScriptedFactory {
@@ -898,6 +920,47 @@ async fn text_only_turn_emits_ordered_single_terminal_sequence() {
     );
     assert_eq!(sink.sequences(), [1, 2, 3, 4, 5, 6]);
     assert_eq!(sink.terminal_count(), 1);
+}
+
+#[tokio::test]
+async fn text_delta_is_emitted_before_completion_releases() {
+    let provider = GatedDeltaProvider::default();
+    let emitted = provider.delta_emitted.notified();
+    let sink = RecordingSink::default();
+    let ctx = TurnContext {
+        owner_id: "owner-a".into(),
+        turn_id: "turn-1".into(),
+        request: valid_request(ExecutionMode::Ask),
+        provider: Arc::new(provider.clone()),
+        sink: Arc::new(sink.clone()),
+        bridge: Arc::new(NoopBridge),
+        cancel_token: CancellationToken::new(),
+        expected: Arc::new(parking_lot::Mutex::new(
+            catio_lib::agent::ExpectedResponse::None,
+        )),
+    };
+    let task = tokio::spawn(TurnEngine.run(ctx));
+    // The provider has produced a delta and is still blocked inside `complete`:
+    // the delta must already be on the sink (real-time streaming).
+    emitted.await;
+    sink.wait_for(|s| s.event_types().contains(&"textDelta")).await;
+    assert_eq!(
+        sink.event_types(),
+        ["turnStarted", "assistantMessageStarted", "textDelta"]
+    );
+    // Release completion; the rest of the turn then finishes normally.
+    provider.release.notify_waiters();
+    task.await.unwrap().unwrap();
+    assert_eq!(
+        sink.event_types(),
+        [
+            "turnStarted",
+            "assistantMessageStarted",
+            "textDelta",
+            "assistantMessageFinished",
+            "turnFinished",
+        ]
+    );
 }
 
 #[tokio::test]

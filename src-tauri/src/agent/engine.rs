@@ -3,11 +3,13 @@
 //! provider, event sink, client bridge and cancel token; the engine reads no
 //! global state.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use serde_json::{json, Value};
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::bridge::ClientBridge;
@@ -107,11 +109,16 @@ impl Drop for SequenceEmitter {
     }
 }
 
-/// Synchronous provider observer buffering deltas; the engine drains them in
-/// arrival order after the round completes (the sink is async).
+/// Provider observer with a live delta queue: the provider's synchronous
+/// `text_delta`/`thinking_delta` calls push into a `VecDeque` and wake the
+/// engine via `Notify`. The engine drains and emits deltas WHILE the provider
+/// is still inside `complete`, preserving real-time streaming, arrival order
+/// and the strict per-turn sequence. The queue is explicitly bounded by the
+/// engine draining it continuously; the sink's async `emit` provides back
+/// pressure.
 struct EngineObserver {
-    deltas: Mutex<Vec<Delta>>,
-    message_id: String,
+    deltas: Arc<Mutex<VecDeque<Delta>>>,
+    notify: Arc<Notify>,
 }
 
 enum Delta {
@@ -120,32 +127,114 @@ enum Delta {
 }
 
 impl EngineObserver {
-    fn new(message_id: String) -> Self {
+    fn new() -> Self {
         Self {
-            deltas: Mutex::new(Vec::new()),
-            message_id,
+            deltas: Arc::new(Mutex::new(VecDeque::new())),
+            notify: Arc::new(Notify::new()),
         }
     }
 
-    fn drain(self) -> Vec<Delta> {
-        self.deltas.into_inner()
+    fn push(&self, delta: Delta) {
+        self.deltas.lock().push_back(delta);
+        self.notify.notify_waiters();
+    }
+
+    /// Returns the next delta, waiting for the provider to produce one.
+    async fn next_delta(&self) -> Option<Delta> {
+        loop {
+            if let Some(delta) = self.deltas.lock().pop_front() {
+                return Some(delta);
+            }
+            self.notify.notified().await;
+        }
+    }
+
+    /// Returns a delta if one is already queued (used after completion).
+    fn try_next(&self) -> Option<Delta> {
+        self.deltas.lock().pop_front()
     }
 }
 
 impl crate::agent::provider::ProviderObserver for EngineObserver {
     fn text_delta(&self, delta: &str) {
-        self.deltas.lock().push(Delta::Text(delta.to_string()));
+        self.push(Delta::Text(delta.to_string()));
     }
 
     fn thinking_delta(&self, delta: &str) {
-        self.deltas.lock().push(Delta::Thinking(delta.to_string()));
+        self.push(Delta::Thinking(delta.to_string()));
     }
 }
 
 /// Provider/tool loop for one Turn.
 pub struct TurnEngine;
 
+/// Result of one provider round: a provider error (fallback may react to it)
+/// or an engine-side failure (sink/cancel).
+enum RoundOutcome {
+    ProviderErr(ProviderError),
+    Engine(AgentError),
+}
+
+impl From<AgentError> for RoundOutcome {
+    fn from(err: AgentError) -> Self {
+        Self::Engine(err)
+    }
+}
+
 impl TurnEngine {
+    /// Drives one provider round with real-time delta forwarding: deltas are
+    /// emitted to the sink as they arrive, while `complete` is still running.
+    /// On completion any remaining queued deltas are drained in arrival order.
+    /// Cancellation during the round returns `TurnCancelled`.
+    async fn complete_round_live(
+        ctx: &TurnContext,
+        emitter: &mut SequenceEmitter,
+        message_id: &str,
+        observer: &EngineObserver,
+        request: ProviderRequest,
+    ) -> Result<ProviderRound, RoundOutcome> {
+        let complete = ctx.provider.complete(request, observer);
+        tokio::pin!(complete);
+        loop {
+            tokio::select! {
+                result = &mut complete => {
+                    // Deltas produced just before completion must still be
+                    // delivered, in arrival order.
+                    while let Some(delta) = observer.try_next() {
+                        Self::emit_delta(emitter, message_id, delta).await?;
+                    }
+                    return result.map_err(RoundOutcome::ProviderErr);
+                }
+                delta = observer.next_delta() => {
+                    if let Some(delta) = delta {
+                        Self::emit_delta(emitter, message_id, delta).await?;
+                    }
+                }
+                _ = ctx.cancel_token.cancelled() => {
+                    return Err(RoundOutcome::Engine(AgentError::TurnCancelled));
+                }
+            }
+        }
+    }
+
+    async fn emit_delta(
+        emitter: &mut SequenceEmitter,
+        message_id: &str,
+        delta: Delta,
+    ) -> Result<(), AgentError> {
+        let event = match delta {
+            Delta::Text(delta) => AgentEvent::TextDelta {
+                message_id: message_id.to_string(),
+                delta,
+            },
+            Delta::Thinking(delta) => AgentEvent::ThinkingDelta {
+                message_id: message_id.to_string(),
+                delta,
+            },
+        };
+        emitter.emit(event).await
+    }
+
     /// Runs the turn to a single terminal event: `TurnFinished`,
     /// `TurnCancelled` or `TurnFailed`.
     pub async fn run(&self, ctx: TurnContext) -> Result<(), AgentError> {
@@ -224,14 +313,18 @@ impl TurnEngine {
                 })
                 .await?;
 
-            let observer = EngineObserver::new(message_id.clone());
-            let mut round = tokio::select! {
-                result = ctx.provider.complete(provider_request, &observer) => result,
-                _ = ctx.cancel_token.cancelled() => return Err(AgentError::TurnCancelled),
-            };
-            let round = match round {
+            let observer = EngineObserver::new();
+            let round = match Self::complete_round_live(
+                ctx,
+                emitter,
+                &message_id,
+                &observer,
+                provider_request,
+            )
+            .await
+            {
                 Ok(round) => round,
-                Err(ProviderError::ToolsUnsupported) => {
+                Err(RoundOutcome::ProviderErr(ProviderError::ToolsUnsupported)) => {
                     // Explicit legacy fallback: exactly one tools-disabled
                     // retry of the current round; other errors never fall back.
                     emitter
@@ -251,27 +344,25 @@ impl TurnEngine {
                         single_line_commands: single_line,
                         round: round_index,
                     };
-                    match ctx.provider.complete(retry, &observer).await {
+                    match Self::complete_round_live(
+                        ctx,
+                        emitter,
+                        &message_id,
+                        &observer,
+                        retry,
+                    )
+                    .await
+                    {
                         Ok(round) => round,
-                        Err(err) => return Err(map_provider_error(err)),
+                        Err(RoundOutcome::ProviderErr(err)) => {
+                            return Err(map_provider_error(err))
+                        }
+                        Err(RoundOutcome::Engine(err)) => return Err(err),
                     }
                 }
-                Err(err) => return Err(map_provider_error(err)),
+                Err(RoundOutcome::ProviderErr(err)) => return Err(map_provider_error(err)),
+                Err(RoundOutcome::Engine(err)) => return Err(err),
             };
-
-            for delta in observer.drain() {
-                let event = match delta {
-                    Delta::Text(delta) => AgentEvent::TextDelta {
-                        message_id: message_id.clone(),
-                        delta,
-                    },
-                    Delta::Thinking(delta) => AgentEvent::ThinkingDelta {
-                        message_id: message_id.clone(),
-                        delta,
-                    },
-                };
-                emitter.emit(event).await?;
-            }
 
             emitter
                 .emit(AgentEvent::AssistantMessageFinished {
