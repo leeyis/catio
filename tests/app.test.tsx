@@ -7,34 +7,26 @@ import App from '../src/App'
 
 // Mock the Rust AgentRuntime transport: subscribe captures the event handler,
 // start returns a fixed turn id, respond/cancel record calls. The real
-// projector + App effect runner run against scripted envelopes.
+// `isAgentEventEnvelope` guard + projector + App effect runner run against
+// scripted envelopes.
 const agentRuntimeMock = vi.hoisted(() => {
-  const isAgentEventEnvelope = (v: unknown): v is {
-    ownerId: string
-    conversationId: string
-    turnId: string
-    sequence: number
-    event: { type: string }
-  } => {
-    if (typeof v !== 'object' || v === null) return false
-    const x = v as Record<string, unknown>
-    return (
-      typeof x.ownerId === 'string' &&
-      typeof x.conversationId === 'string' &&
-      typeof x.turnId === 'string' &&
-      typeof x.sequence === 'number' &&
-      typeof (x.event as Record<string, unknown>)?.type === 'string'
-    )
-  }
   return {
     subscribeAgentEvents: vi.fn(),
     startAgentTurn: vi.fn(),
     respondToAgentTurn: vi.fn(),
     cancelAgentTurn: vi.fn(),
-    isAgentEventEnvelope,
   }
 })
-vi.mock('../src/services/agentRuntime', () => agentRuntimeMock)
+vi.mock('../src/services/agentRuntime', async () => {
+  const actual = await vi.importActual<typeof import('../src/services/agentRuntime')>('../src/services/agentRuntime')
+  return {
+    ...actual,
+    subscribeAgentEvents: agentRuntimeMock.subscribeAgentEvents,
+    startAgentTurn: agentRuntimeMock.startAgentTurn,
+    respondToAgentTurn: agentRuntimeMock.respondToAgentTurn,
+    cancelAgentTurn: agentRuntimeMock.cancelAgentTurn,
+  }
+})
 // PTY capture adapter: no real terminal in jsdom. The busy check stays false so
 // executeAgentCommand never asks for a split.
 vi.mock('../src/services/terminalCapture', () => ({
@@ -456,4 +448,43 @@ it('sends the current user message as the last request message (new + existing c
   })
   expect(secondMessages.some(m => m.role === 'user' && m.content[0]?.text === 'first message')).toBe(true)
   expect(secondMessages.some(m => m.role === 'assistant' && m.content.length === 0)).toBe(false)
+})
+
+it('drops malformed envelopes before they touch the conversation', async () => {
+  localStorage.setItem('catio-agent-config', JSON.stringify({
+    provider: 'ollama', baseUrl: 'http://localhost:11434', apiKey: '',
+    anthropicAuthMode: 'api-key', model: 'llama3', executionMode: 'manual',
+  }))
+  wrap()
+  fireEvent.click(screen.getAllByText('新建连接')[0])
+  fireEvent.click(screen.getByText('主机 / 终端'))
+  const hostLabel = screen.getAllByText('主机').map(el => el.parentElement)
+    .find(parent => parent?.querySelector('input')) as HTMLElement
+  fireEvent.input(hostLabel.querySelector('input') as HTMLInputElement, { target: { value: 'edge-01' } })
+  fireEvent.click(screen.getByText('保存并连接'))
+  fireEvent.click(screen.getByTitle('Catio Agent · 跨终端与数据库'))
+  fireEvent.change(screen.getByPlaceholderText(/生成 shell 命令/), { target: { value: 'list' } })
+  fireEvent.click(screen.getByTitle('发送'))
+  await waitFor(() => expect(agentOrder).toEqual(['subscribe', 'start']))
+
+  const convId = currentConversationId()
+  // Malformed: missing sequence, NaN sequence, unknown event type, missing field.
+  agentEventHandler?.({ ownerId: 'local', conversationId: convId, turnId: 'turn-1', event: { type: 'turnStarted' } } as never)
+  agentEventHandler?.({ ownerId: 'local', conversationId: convId, turnId: 'turn-1', sequence: NaN, event: { type: 'turnStarted' } } as never)
+  agentEventHandler?.({ ownerId: 'local', conversationId: convId, turnId: 'turn-1', sequence: 1, event: { type: 'teleport' } } as never)
+  agentEventHandler?.({ ownerId: 'local', conversationId: convId, turnId: 'turn-1', sequence: 2, event: { type: 'textDelta', messageId: 'm0' } } as never)
+
+  // A valid turn still streams normally after the malformed payloads.
+  emitAgent(1, { type: 'turnStarted' })
+  emitAgent(2, { type: 'assistantMessageStarted', messageId: 'm0', round: 0 })
+  emitAgent(3, { type: 'textDelta', messageId: 'm0', delta: 'ok' })
+  emitAgent(4, { type: 'turnFinished' })
+  await waitFor(() => expect(screen.queryByTitle('停止')).toBeNull())
+
+  const raw = localStorage.getItem('catio-conversations') ?? '[]'
+  const convs = JSON.parse(raw) as Array<{ messages: Array<{ role: string; content: string }> }>
+  const assistant = convs.flatMap(c => c.messages).filter(m => m.role === 'assistant')
+  // Exactly one assistant message, fed only by the valid deltas.
+  expect(assistant).toHaveLength(1)
+  expect(assistant[0].content).toBe('ok')
 })

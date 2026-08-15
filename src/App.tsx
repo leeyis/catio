@@ -1816,7 +1816,15 @@ export default function App() {
   function ensureAgentSubscription(): Promise<void> {
     if (!agentSubReady.current) {
       agentSubReady.current = subscribeAgentEvents(payload => {
-        if (!isAgentEventEnvelope(payload)) return
+        if (!isAgentEventEnvelope(payload)) {
+          diagnosticLog({
+            level: 'warn',
+            area: 'agent',
+            event: 'malformed-envelope-dropped',
+            source: 'agent-capture',
+          })
+          return
+        }
         const entry = activeAgentTurn.current[payload.turnId]
         if (!entry) {
           // The start request is still in flight; buffer until registered.
