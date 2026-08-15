@@ -1,4 +1,5 @@
 pub mod ssh;
+pub mod agent;
 pub mod db;
 pub mod server;
 pub mod server_mcp;
