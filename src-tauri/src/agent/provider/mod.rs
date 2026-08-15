@@ -90,6 +90,60 @@ impl ProviderError {
     }
 }
 
+/// Upper bound for error bodies embedded in diagnostics (kept small, so they
+/// can never smuggle credentials or huge payloads into logs).
+const ERROR_BODY_LIMIT: usize = 4096;
+
+/// Shared HTTP error classification across the three production adapters.
+///
+/// Only an explicit, testable "tools not supported" capability response
+/// becomes `ToolsUnsupported` (the sole trigger for the legacy fallback).
+/// Auth, rate-limit, generic 4xx/5xx and malformed bodies never fall back.
+/// Error bodies are length-limited and only ever read from the response —
+/// never constructed from the request credential.
+pub fn classify_error_response(status: reqwest::StatusCode, body: &[u8]) -> ProviderError {
+    match status.as_u16() {
+        401 | 403 => ProviderError::Auth,
+        429 => ProviderError::RateLimit,
+        code => {
+            let limited: String =
+                String::from_utf8_lossy(&body[..body.len().min(ERROR_BODY_LIMIT)]).into();
+            if looks_like_tools_unsupported(limited.as_bytes()) {
+                ProviderError::ToolsUnsupported
+            } else {
+                ProviderError::Http(format!(
+                    "status {code}: {}",
+                    redact_credentials(&limited)
+                ))
+            }
+        }
+    }
+}
+
+/// Strips credential-shaped substrings (`sk-…`, `Bearer …`) from error
+/// diagnostics, so a provider echoing a secret back can never leak it into
+/// logs.
+fn redact_credentials(text: &str) -> String {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r"(?i)(sk-[a-z0-9_-]{8,}|bearer [a-z0-9._-]{8,})")
+            .expect("static credential-redaction regex is valid")
+    });
+    re.replace_all(text, "[REDACTED]").into_owned()
+}
+
+/// True when the (already length-limited) error body explicitly says tool
+/// capability is unavailable. Conservative: generic bodies never match.
+fn looks_like_tools_unsupported(body: &[u8]) -> bool {
+    let lower = body.to_ascii_lowercase();
+    let has_tool = lower.windows(4).any(|w| w == b"tool");
+    has_tool
+        && (lower.windows(11).any(|w| w == b"not support")
+            || lower.windows(11).any(|w| w == b"unsupported")
+            || lower.windows(13).any(|w| w == b"not available")
+            || lower.windows(11).any(|w| w == b"not enabled"))
+}
+
 /// True external dependency, injected; production adapters implement this
 /// behind `ProviderFactory`.
 #[async_trait]

@@ -6,7 +6,8 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::agent::provider::{
-    Provider, ProviderError, ProviderObserver, ProviderRequest, ProviderRound, ProviderStop,
+    classify_error_response, Provider, ProviderError, ProviderObserver, ProviderRequest,
+    ProviderRound, ProviderStop,
 };
 use crate::agent::types::{
     AgentMessage, AgentRole, ContentBlock, ProviderConfig, TokenUsage, ToolUse,
@@ -48,7 +49,11 @@ impl Provider for OpenAiProvider {
             .map_err(|e| ProviderError::Network(e.to_string()))?;
         let status = response.status();
         if status.is_client_error() || status.is_server_error() {
-            return Err(classify_http_error(status));
+            let body = response
+                .bytes()
+                .await
+                .map_err(|e| ProviderError::Network(e.to_string()))?;
+            return Err(classify_error_response(status, &body));
         }
 
         let mut stream = response.bytes_stream();
@@ -62,15 +67,6 @@ impl Provider for OpenAiProvider {
         }
         let decoded = decoder.finish()?;
         Ok(decoded.into_round())
-    }
-}
-
-/// HTTP error classification: auth/rate-limit/generic http.
-fn classify_http_error(status: reqwest::StatusCode) -> ProviderError {
-    match status.as_u16() {
-        401 | 403 => ProviderError::Auth,
-        429 => ProviderError::RateLimit,
-        code => ProviderError::Http(format!("status {code}")),
     }
 }
 
