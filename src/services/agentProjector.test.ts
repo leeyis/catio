@@ -90,6 +90,30 @@ describe('agent event projector', () => {
     }
   })
 
+  it('never executes a tool from a malformed toolExecutionRequested', () => {
+    // Missing `input` (required by the wire contract) must not be projected
+    // into an executeTool effect, so the App cannot run an empty/forged tool.
+    const malformed = projectAgentEvent(initial, env('t1', 1, {
+      type: 'toolExecutionRequested',
+      toolUseId: 'u1',
+      target: 'target-1',
+    } as never))
+    expect(malformed.accepted).toBe(false)
+    expect(malformed.effects).toEqual([])
+  })
+
+  it('never proposes a tool from a malformed toolProposed', () => {
+    const malformed = projectAgentEvent(initial, env('t1', 1, {
+      type: 'toolProposed',
+      toolUseId: 'u1',
+      name: 'terminal_exec',
+      input: { command: 'pwd' },
+      risk: ['fileDelete', 42],
+    } as never))
+    expect(malformed.accepted).toBe(false)
+    expect(malformed.effects).toEqual([])
+  })
+
   it('drops malformed envelopes and reports diagnostics', () => {
     const diagnostics: string[] = []
     const missingType = projectAgentEvent(initial, { ownerId: 'x', turnId: 't1', sequence: 1 } as never, (d) => diagnostics.push(d))

@@ -100,6 +100,48 @@ describe('agent event envelope wire validation', () => {
     }
   })
 
+  it('rejects tool payloads with missing input property', () => {
+    // `input` may be ANY JSON (including null), but the property is required
+    // by the Rust wire contract: an absent input must never reach projection.
+    const missingInput = [
+      { type: 'toolProposed', toolUseId: 'u1', name: 'terminal_exec', risk: [] },
+      { type: 'toolExecutionRequested', toolUseId: 'u1', target: 't' },
+    ]
+    for (const event of missingInput) {
+      expect(isAgentEventEnvelope({ ...valid, event }), JSON.stringify(event)).toBe(false)
+    }
+  })
+
+  it('accepts null input when the property is present', () => {
+    const nullInput = [
+      { type: 'toolProposed', toolUseId: 'u1', name: 'terminal_exec', input: null, risk: [] },
+      { type: 'toolExecutionRequested', toolUseId: 'u1', target: 't', input: null },
+    ]
+    for (const event of nullInput) {
+      expect(isAgentEventEnvelope({ ...valid, event }), JSON.stringify(event)).toBe(true)
+    }
+  })
+
+  it('rejects toolProposed risk entries that are not strings', () => {
+    const event = {
+      type: 'toolProposed',
+      toolUseId: 'u1',
+      name: 'terminal_exec',
+      input: { command: 'pwd' },
+      risk: ['fileDelete', 42],
+    }
+    expect(isAgentEventEnvelope({ ...valid, event })).toBe(false)
+  })
+
+  it('rejects toolFinished whose result belongs to a different tool use', () => {
+    const event = {
+      type: 'toolFinished',
+      toolUseId: 'u1',
+      result: { toolUseId: 'u2', content: '', status: 'succeeded' },
+    }
+    expect(isAgentEventEnvelope({ ...valid, event })).toBe(false)
+  })
+
   it('accepts fully-specified events of each discriminated type', () => {
     const events = [
       { type: 'turnStarted' },

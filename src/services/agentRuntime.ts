@@ -143,11 +143,16 @@ function isNonNegativeInt(v: unknown): v is number {
   return typeof v === 'number' && Number.isInteger(v) && v >= 0
 }
 
-function isToolResult(v: unknown): boolean {
+/**
+ * True when `result` is a valid `ToolResult` paired with the SAME tool use as
+ * the outer event — the Rust engine always pairs them by `tool_use_id`.
+ */
+function isPairedToolResult(v: unknown, outerToolUseId: string): boolean {
   if (typeof v !== 'object' || v === null) return false
   const r = v as Record<string, unknown>
   return (
     isNonEmptyString(r.toolUseId) &&
+    r.toolUseId === outerToolUseId &&
     typeof r.content === 'string' &&
     typeof r.status === 'string' &&
     TOOL_RESULT_STATUSES.has(r.status)
@@ -161,12 +166,19 @@ const EVENT_FIELD_GUARDS: Record<string, (v: Record<string, unknown>) => boolean
   textDelta: (v) => isNonEmptyString(v.messageId) && typeof v.delta === 'string',
   thinkingDelta: (v) => isNonEmptyString(v.messageId) && typeof v.delta === 'string',
   assistantMessageFinished: (v) => isNonEmptyString(v.messageId),
-  toolProposed: (v) => isNonEmptyString(v.toolUseId) && isNonEmptyString(v.name) && Array.isArray(v.risk),
+  toolProposed: (v) =>
+    isNonEmptyString(v.toolUseId) &&
+    isNonEmptyString(v.name) &&
+    'input' in v && // any JSON (including null), but the property is required
+    Array.isArray(v.risk) &&
+    v.risk.every((entry) => isNonEmptyString(entry)),
   approvalRequested: (v) => isNonEmptyString(v.toolUseId) && isNonEmptyString(v.reason),
-  toolExecutionRequested: (v) => isNonEmptyString(v.toolUseId) && isNonEmptyString(v.target),
+  toolExecutionRequested: (v) =>
+    isNonEmptyString(v.toolUseId) && isNonEmptyString(v.target) && 'input' in v,
   toolStarted: (v) => isNonEmptyString(v.toolUseId),
   toolOutputDelta: (v) => isNonEmptyString(v.toolUseId) && typeof v.delta === 'string',
-  toolFinished: (v) => isNonEmptyString(v.toolUseId) && isToolResult(v.result),
+  toolFinished: (v) =>
+    isNonEmptyString(v.toolUseId) && isPairedToolResult(v.result, v.toolUseId as string),
   usageUpdated: (v) => isNonNegativeInt(v.inputTokens) && isNonNegativeInt(v.outputTokens),
   compatibilityFallbackActivated: (v) => isNonEmptyString(v.provider) && isNonEmptyString(v.reason),
   turnFinished: () => true,
