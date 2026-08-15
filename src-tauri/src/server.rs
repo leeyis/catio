@@ -22,10 +22,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::{
-    extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
-        DefaultBodyLimit, Json, Multipart, Query, State,
-    },
+    extract::{ws::{Message, WebSocket, WebSocketUpgrade}, DefaultBodyLimit, Json, Multipart, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode, Uri},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
@@ -37,6 +34,12 @@ use serde_json::{json, Value};
 
 use crate::auth::{new_session_token, AuthDb, User};
 use crate::db::commands::{self, ConnectResult};
+use crate::events::EventSink;
+use crate::server_ws::WsHub;
+use crate::ssh::conn::{connect_checked, test_connection, ConnectArgs as SshConnectArgs};
+use crate::ssh::manager::{Session as SshSession, SessionManager};
+use crate::ssh::term::{term_close_core, term_open_core, term_resize_core, term_write_core};
+use crate::vncconn::{vnc_close_core, vnc_connect_core, vnc_key_core, vnc_pointer_core, VncManager};
 use crate::db::db_admin_sql::{
     self, DatabaseObjectType, DropObjectSqlOptions, DropTableChildObjectSqlOptions,
     DuplicateTableStructureSqlOptions, RenameObjectSqlOptions, TableAdminSqlOptions,
@@ -47,14 +50,6 @@ use crate::db::history::{self, HistoryEntry, SnippetEntry};
 use crate::db::ids::IdGen;
 use crate::db::manager::ConnManager;
 use crate::db::object_source_sql::{self, EditableObjectSourceSqlInput, ObjectSourceKind};
-use crate::events::EventSink;
-use crate::server_ws::WsHub;
-use crate::ssh::conn::{connect_checked, test_connection, ConnectArgs as SshConnectArgs};
-use crate::ssh::manager::{Session as SshSession, SessionManager};
-use crate::ssh::term::{term_close_core, term_open_core, term_resize_core, term_write_core};
-use crate::vncconn::{
-    vnc_close_core, vnc_connect_core, vnc_key_core, vnc_pointer_core, VncManager,
-};
 
 static WEB_CONN_IDS: IdGen = IdGen::new("conn");
 static WEB_HISTORY_IDS: IdGen = IdGen::new("hist");
@@ -114,11 +109,10 @@ pub struct AppState {
     /// add the friendly name + engine/host so `list_connections`/`list_hosts` render them. Keyed by
     /// the same live id, written on connect / removed on disconnect alongside the owner maps.
     pub conn_meta: Arc<std::sync::Mutex<HashMap<String, (String, String)>>>, // connId    -> (name, dbType)
-    pub ssh_meta: Arc<std::sync::Mutex<HashMap<String, (String, String)>>>, // sessionId -> (name, host)
+    pub ssh_meta: Arc<std::sync::Mutex<HashMap<String, (String, String)>>>,  // sessionId -> (name, host)
     /// SSE response routing for the server-mode MCP: sessionId → sender. `/mcp/sse` registers a
     /// channel here; `/mcp/messages` pushes the JSON-RPC reply onto the matching one.
-    pub mcp_sessions:
-        Arc<std::sync::Mutex<HashMap<String, tokio::sync::mpsc::UnboundedSender<String>>>>,
+    pub mcp_sessions: Arc<std::sync::Mutex<HashMap<String, tokio::sync::mpsc::UnboundedSender<String>>>>,
     /// Network-layer IP allowlist for the `/mcp` routes, parsed ONCE from `CATIO_MCP_IP_ALLOWLIST`
     /// (comma-separated IPv4/CIDR). EMPTY ⇒ gate disabled (the token stays the sole gate), so every
     /// existing `build_router`-based test — which never sets the env — is unaffected. Loopback is
@@ -137,10 +131,7 @@ fn owns_resource(map: &std::sync::Mutex<HashMap<String, i64>>, id: &str, actor: 
     if actor.is_admin {
         return true;
     }
-    map.lock()
-        .unwrap()
-        .get(id)
-        .is_some_and(|&owner| owner == actor.id)
+    map.lock().unwrap().get(id).is_some_and(|&owner| owner == actor.id)
 }
 
 /// A live session: which user, and when it stops being valid (server-side enforced TTL).
@@ -169,12 +160,10 @@ impl AppState {
             agent: Arc::new(crate::agent::AgentRuntime::production()),
             vnc: Arc::new(VncManager::default()),
             scan: crate::scan::ScanState::default(),
-            secret_key: std::env::var("CATIO_MASTER_KEY")
-                .ok()
+            secret_key: std::env::var("CATIO_MASTER_KEY").ok()
                 .filter(|k| !k.is_empty())
                 .map(|k| crate::secrets::derive_key(&k)),
-            max_upload_bytes: std::env::var("CATIO_MAX_UPLOAD_BYTES")
-                .ok()
+            max_upload_bytes: std::env::var("CATIO_MAX_UPLOAD_BYTES").ok()
                 .and_then(|s| s.parse::<u64>().ok())
                 .filter(|&n| n > 0),
             conn_owners: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -185,9 +174,7 @@ impl AppState {
             ssh_meta: Arc::new(std::sync::Mutex::new(HashMap::new())),
             mcp_sessions: Arc::new(std::sync::Mutex::new(HashMap::new())),
             mcp_ip_allowlist: Arc::new(
-                std::env::var("CATIO_MCP_IP_ALLOWLIST")
-                    .ok()
-                    .unwrap_or_default()
+                std::env::var("CATIO_MCP_IP_ALLOWLIST").ok().unwrap_or_default()
                     .split(',')
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
@@ -225,18 +212,13 @@ pub fn build_router(state: AppState) -> Router {
         // so these are NOT part of /api/invoke. The per-user token scopes them to the user's own
         // live connections/sessions (see server_mcp::ServerTargets).
         .route("/mcp/sse", get(crate::server_mcp::mcp_sse_handler))
-        .route(
-            "/mcp/messages",
-            post(crate::server_mcp::mcp_messages_handler),
-        )
+        .route("/mcp/messages", post(crate::server_mcp::mcp_messages_handler))
         .fallback(spa)
         .with_state(state)
 }
 
 pub async fn run_server(addr: SocketAddr, static_dir: PathBuf) -> std::io::Result<()> {
-    let data_dir = std::env::var("CATIO_DATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("data"));
+    let data_dir = std::env::var("CATIO_DATA").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("data"));
     let state = AppState::new(static_dir, data_dir)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     bootstrap_admin_from_env(&state);
@@ -246,11 +228,7 @@ pub async fn run_server(addr: SocketAddr, static_dir: PathBuf) -> std::io::Resul
     // `ConnectInfo<SocketAddr>`) for the IP allowlist gate. Integration tests call
     // `axum::serve(listener, build_router(state))` directly (no connect-info), so their handlers
     // see `Option<ConnectInfo<_>> == None` — fine, since they never set the allowlist env.
-    axum::serve(
-        listener,
-        build_router(state).into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await
+    axum::serve(listener, build_router(state).into_make_service_with_connect_info::<SocketAddr>()).await
 }
 
 /// First-run admin: if there are no users yet and CATIO_ADMIN_USER / CATIO_ADMIN_PASSWORD are
@@ -259,10 +237,7 @@ fn bootstrap_admin_from_env(state: &AppState) {
     if state.auth.user_count().unwrap_or(1) != 0 {
         return;
     }
-    if let (Ok(user), Ok(pass)) = (
-        std::env::var("CATIO_ADMIN_USER"),
-        std::env::var("CATIO_ADMIN_PASSWORD"),
-    ) {
+    if let (Ok(user), Ok(pass)) = (std::env::var("CATIO_ADMIN_USER"), std::env::var("CATIO_ADMIN_PASSWORD")) {
         match state.auth.create_user(&user, &pass, true) {
             Ok(_) => println!("catio-server: created initial admin '{user}' from env"),
             Err(e) => eprintln!("catio-server: failed to create initial admin: {e}"),
@@ -279,11 +254,7 @@ struct InvokeReq {
     args: Value,
 }
 
-async fn invoke(
-    State(st): State<AppState>,
-    headers: HeaderMap,
-    Json(req): Json<InvokeReq>,
-) -> Response {
+async fn invoke(State(st): State<AppState>, headers: HeaderMap, Json(req): Json<InvokeReq>) -> Response {
     let token = session_token(&headers);
     let user = token.as_ref().and_then(|t| resolve_session(&st, t));
 
@@ -296,8 +267,7 @@ async fn invoke(
             // `needsBootstrap` lets the UI show the first-run "create admin" form (no users yet)
             // instead of the normal login form.
             let needs_bootstrap = st.auth.user_count().map(|n| n == 0).unwrap_or(false);
-            return Json(json!({ "user": user, "needsBootstrap": needs_bootstrap }))
-                .into_response();
+            return Json(json!({ "user": user, "needsBootstrap": needs_bootstrap })).into_response();
         }
         "auth_bootstrap" => return auth_bootstrap(&st, &req.args).await,
         _ => {}
@@ -316,16 +286,8 @@ async fn invoke(
         "user_create" => return user_create(&st, &req.args, &user),
         "user_delete" => return user_delete(&st, &req.args, &user),
         "auth_change_password" => {
-            let old = req
-                .args
-                .get("oldPassword")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let new = req
-                .args
-                .get("newPassword")
-                .and_then(Value::as_str)
-                .unwrap_or("");
+            let old = req.args.get("oldPassword").and_then(Value::as_str).unwrap_or("");
+            let new = req.args.get("newPassword").and_then(Value::as_str).unwrap_or("");
             return match st.auth.change_password(user.id, old, new) {
                 Ok(()) => Json(json!({ "ok": true })).into_response(),
                 Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
@@ -361,10 +323,7 @@ async fn invoke(
 fn session_token(headers: &HeaderMap) -> Option<String> {
     let cookie = headers.get(header::COOKIE)?.to_str().ok()?;
     cookie.split(';').find_map(|p| {
-        p.trim()
-            .strip_prefix("catio_session=")
-            .filter(|v| !v.is_empty())
-            .map(str::to_string)
+        p.trim().strip_prefix("catio_session=").filter(|v| !v.is_empty()).map(str::to_string)
     })
 }
 
@@ -374,10 +333,7 @@ fn resolve_session(st: &AppState, token: &str) -> Option<User> {
     let mut map = st.sessions.lock().unwrap();
     match map.get(token) {
         Some(s) if s.expires_at > Instant::now() => Some(s.user.clone()),
-        Some(_) => {
-            map.remove(token);
-            None
-        }
+        Some(_) => { map.remove(token); None }
         None => None,
     }
 }
@@ -389,23 +345,14 @@ fn create_session(st: &AppState, user: User) -> String {
     let now = Instant::now();
     let mut map = st.sessions.lock().unwrap();
     map.retain(|_, s| s.expires_at > now);
-    map.insert(
-        token.clone(),
-        Session {
-            user,
-            expires_at: now + SESSION_TTL,
-        },
-    );
+    map.insert(token.clone(), Session { user, expires_at: now + SESSION_TTL });
     token
 }
 
 /// Invalidate every session belonging to `user_id` — used when a user is deleted so their live
 /// cookie stops working immediately (the session cached a clone of the user, incl. is_admin).
 fn purge_user_sessions(st: &AppState, user_id: i64) {
-    st.sessions
-        .lock()
-        .unwrap()
-        .retain(|_, s| s.user.id != user_id);
+    st.sessions.lock().unwrap().retain(|_, s| s.user.id != user_id);
 }
 
 /// Build the session cookie. `Secure` is added when CATIO_COOKIE_SECURE is truthy — set it when a
@@ -415,11 +362,8 @@ fn session_cookie(token: &str, max_age: u32) -> String {
     let secure = std::env::var("CATIO_COOKIE_SECURE")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
-    let mut c =
-        format!("catio_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={max_age}");
-    if secure {
-        c.push_str("; Secure");
-    }
+    let mut c = format!("catio_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={max_age}");
+    if secure { c.push_str("; Secure"); }
     c
 }
 
@@ -497,10 +441,7 @@ fn user_create(st: &AppState, args: &Value, actor: &User) -> Response {
     }
     let username = args.get("username").and_then(Value::as_str).unwrap_or("");
     let password = args.get("password").and_then(Value::as_str).unwrap_or("");
-    let is_admin = args
-        .get("isAdmin")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let is_admin = args.get("isAdmin").and_then(Value::as_bool).unwrap_or(false);
     json_or_err(st.auth.create_user(username, password, is_admin))
 }
 
@@ -509,11 +450,7 @@ fn user_delete(st: &AppState, args: &Value, actor: &User) -> Response {
         return forbidden();
     }
     let Some(id) = args.get("id").and_then(Value::as_i64) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "`id` required" })),
-        )
-            .into_response();
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "`id` required" }))).into_response();
     };
     match st.auth.delete_user(id) {
         Ok(()) => {
@@ -529,33 +466,17 @@ fn user_delete(st: &AppState, args: &Value, actor: &User) -> Response {
 /// Encrypt + store a connection secret for the CURRENT user (keyed by their session id).
 fn secret_remember(st: &AppState, args: &Value, actor: &User) -> Response {
     let Some(key) = st.secret_key.as_ref() else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "error": "服务器未配置 CATIO_MASTER_KEY,无法保存连接密码" })),
-        )
-            .into_response();
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "服务器未配置 CATIO_MASTER_KEY,无法保存连接密码" }))).into_response();
     };
     let profile_id = args.get("profileId").and_then(Value::as_str).unwrap_or("");
     let secret = args.get("secret").and_then(Value::as_str).unwrap_or("");
     if profile_id.is_empty() || secret.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "profileId 与 secret 必填" })),
-        )
-            .into_response();
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "profileId 与 secret 必填" }))).into_response();
     }
     let aad = crate::secrets::secret_aad(actor.id, profile_id);
     match crate::secrets::encrypt(key, &aad, secret.as_bytes()) {
-        Ok((nonce, ct)) => json_or_err(
-            st.auth
-                .store_secret(actor.id, profile_id, &nonce, &ct)
-                .map(|_| true),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e })),
-        )
-            .into_response(),
+        Ok((nonce, ct)) => json_or_err(st.auth.store_secret(actor.id, profile_id, &nonce, &ct).map(|_| true)),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
     }
 }
 
@@ -572,11 +493,7 @@ fn secret_recall(st: &AppState, args: &Value, actor: &User) -> Response {
             Json(json!({ "secret": secret })).into_response()
         }
         Ok(None) => Json(json!({ "secret": Value::Null })).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e })),
-        )
-            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
     }
 }
 
@@ -592,9 +509,7 @@ fn secret_forget(st: &AppState, args: &Value, actor: &User) -> Response {
 /// any user's row by passing `ownerId` (so admins can manage everyone's connections).
 fn store_owner(args: &Value, actor: &User) -> i64 {
     if actor.is_admin {
-        args.get("ownerId")
-            .and_then(Value::as_i64)
-            .unwrap_or(actor.id)
+        args.get("ownerId").and_then(Value::as_i64).unwrap_or(actor.id)
     } else {
         actor.id
     }
@@ -603,11 +518,7 @@ fn store_owner(args: &Value, actor: &User) -> i64 {
 fn store_list(st: &AppState, args: &Value, actor: &User) -> Response {
     let store = args.get("store").and_then(Value::as_str).unwrap_or("");
     if store.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "store 必填" })),
-        )
-            .into_response();
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "store 必填" }))).into_response();
     }
     json_or_err(st.auth.store_list(store, actor.id, actor.is_admin))
 }
@@ -616,11 +527,7 @@ fn store_set(st: &AppState, args: &Value, actor: &User) -> Response {
     let store = args.get("store").and_then(Value::as_str).unwrap_or("");
     let item_id = args.get("itemId").and_then(Value::as_str).unwrap_or("");
     if store.is_empty() || item_id.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "store/itemId 必填" })),
-        )
-            .into_response();
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "store/itemId 必填" }))).into_response();
     }
     // Strip the server-injected owner tags before persisting; they're re-added on list.
     let mut payload = args.get("payload").cloned().unwrap_or(Value::Null);
@@ -629,30 +536,18 @@ fn store_set(st: &AppState, args: &Value, actor: &User) -> Response {
         m.remove("__ownerName");
     }
     let payload_str = serde_json::to_string(&payload).unwrap_or_else(|_| "null".into());
-    json_or_err(
-        st.auth
-            .store_set(store_owner(args, actor), store, item_id, &payload_str)
-            .map(|_| true),
-    )
+    json_or_err(st.auth.store_set(store_owner(args, actor), store, item_id, &payload_str).map(|_| true))
 }
 
 fn store_delete(st: &AppState, args: &Value, actor: &User) -> Response {
     let store = args.get("store").and_then(Value::as_str).unwrap_or("");
     let item_id = args.get("itemId").and_then(Value::as_str).unwrap_or("");
-    json_or_err(
-        st.auth
-            .store_delete(store_owner(args, actor), store, item_id)
-            .map(|_| true),
-    )
+    json_or_err(st.auth.store_delete(store_owner(args, actor), store, item_id).map(|_| true))
 }
 
 fn store_clear(st: &AppState, args: &Value, actor: &User) -> Response {
     let store = args.get("store").and_then(Value::as_str).unwrap_or("");
-    json_or_err(
-        st.auth
-            .store_clear(store_owner(args, actor), store)
-            .map(|_| true),
-    )
+    json_or_err(st.auth.store_clear(store_owner(args, actor), store).map(|_| true))
 }
 
 // ── Per-user MCP access token (server-mode MCP) ──
@@ -662,25 +557,15 @@ fn store_clear(st: &AppState, args: &Value, actor: &User) -> Response {
 /// settings page always has a token to display. The endpoint URL is built client-side.
 fn mcp_token_get(st: &AppState, actor: &User) -> Response {
     match st.auth.mcp_token_get(actor.id) {
-        Ok(Some((token, enabled))) => {
-            Json(json!({ "token": token, "enabled": enabled })).into_response()
-        }
+        Ok(Some((token, enabled))) => Json(json!({ "token": token, "enabled": enabled })).into_response(),
         Ok(None) => {
             let token = new_session_token();
             match st.auth.mcp_token_upsert(actor.id, &token) {
                 Ok(()) => Json(json!({ "token": token, "enabled": true })).into_response(),
-                Err(e) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "error": e })),
-                )
-                    .into_response(),
+                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
             }
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e })),
-        )
-            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
     }
 }
 
@@ -690,30 +575,17 @@ fn mcp_token_regenerate(st: &AppState, actor: &User) -> Response {
     let token = new_session_token();
     match st.auth.mcp_token_upsert(actor.id, &token) {
         Ok(()) => {
-            let enabled = st
-                .auth
-                .mcp_token_get(actor.id)
-                .ok()
-                .flatten()
-                .map(|(_, e)| e)
-                .unwrap_or(true);
+            let enabled = st.auth.mcp_token_get(actor.id).ok().flatten().map(|(_, e)| e).unwrap_or(true);
             Json(json!({ "token": token, "enabled": enabled })).into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e })),
-        )
-            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
     }
 }
 
 /// Enable/disable the token WITHOUT rotating it. Disabled → `mcp_token_resolve` reports
 /// `enabled=false` → the /mcp routes 401, while the token value is preserved.
 fn mcp_token_set_enabled(st: &AppState, args: &Value, actor: &User) -> Response {
-    let enabled = args
-        .get("enabled")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let enabled = args.get("enabled").and_then(Value::as_bool).unwrap_or(false);
     match st.auth.mcp_token_set_enabled(actor.id, enabled) {
         Ok(()) => Json(json!({ "enabled": enabled })).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))).into_response(),
@@ -721,11 +593,7 @@ fn mcp_token_set_enabled(st: &AppState, args: &Value, actor: &User) -> Response 
 }
 
 fn forbidden() -> Response {
-    (
-        StatusCode::FORBIDDEN,
-        Json(json!({ "error": "需要管理员权限" })),
-    )
-        .into_response()
+    (StatusCode::FORBIDDEN, Json(json!({ "error": "需要管理员权限" }))).into_response()
 }
 
 /// Serialize `Ok` as JSON (200) or map `Err(String)` to a 400 `{error}`.
@@ -736,13 +604,9 @@ fn json_or_err<T: serde::Serialize>(r: Result<T, String>) -> Response {
     }
 }
 
-fn estr<E: std::fmt::Display>(e: E) -> String {
-    e.to_string()
-}
+fn estr<E: std::fmt::Display>(e: E) -> String { e.to_string() }
 fn require<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
-    args.get(key)
-        .and_then(Value::as_str)
-        .ok_or_else(|| format!("`{key}` required"))
+    args.get(key).and_then(Value::as_str).ok_or_else(|| format!("`{key}` required"))
 }
 /// Optional string arg → `None` for missing OR JSON `null` (the frontend sends `null` for an
 /// unset schema). Empty strings pass through (the SQL builders trim/treat them as default).
@@ -752,20 +616,14 @@ fn opt_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
 fn u32_or(args: &Value, key: &str, default: u32) -> u32 {
     // Saturate, don't truncate: `as u32` would wrap 4_294_967_296 → 0, and some drivers read
     // 0 as "unbounded", an accidental resource blowup. Clamp to u32::MAX instead.
-    args.get(key)
-        .and_then(Value::as_u64)
-        .map(|n| n.min(u32::MAX as u64) as u32)
-        .unwrap_or(default)
+    args.get(key).and_then(Value::as_u64).map(|n| n.min(u32::MAX as u64) as u32).unwrap_or(default)
 }
 fn from_arg<T: serde::de::DeserializeOwned>(args: &Value, key: &str) -> Result<T, String> {
     serde_json::from_value(args.get(key).cloned().unwrap_or(Value::Null)).map_err(estr)
 }
 
 fn now_stamp() -> String {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs().to_string())
-        .unwrap_or_default()
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs().to_string()).unwrap_or_default()
 }
 
 /// Best-effort: record a DB query in the persisted history (never fails the query). The
@@ -777,19 +635,10 @@ fn user_data_dir(st: &AppState, actor: &User) -> PathBuf {
     st.data_dir.join("users").join(actor.id.to_string())
 }
 
-fn record_history(
-    st: &AppState,
-    actor: &User,
-    conn_id: &str,
-    sql: &str,
-    dur: String,
-    args: &Value,
-) {
+fn record_history(st: &AppState, actor: &User, conn_id: &str, sql: &str, dur: String, args: &Value) {
     let dir = user_data_dir(st, actor);
     let dir: &Path = dir.as_ref();
-    if std::fs::create_dir_all(dir).is_err() {
-        return;
-    }
+    if std::fs::create_dir_all(dir).is_err() { return; }
     let _guard = st.history_lock.lock().unwrap_or_else(|e| e.into_inner());
     let entry = HistoryEntry {
         id: WEB_HISTORY_IDS.next(),
@@ -833,24 +682,12 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
             let id = WEB_CONN_IDS.next();
             conns.insert(id.clone(), drv).await;
             st.conn_owners.lock().unwrap().insert(id.clone(), actor.id); // record owner for the gate
-                                                                         // MCP meta: the display name is a top-level sibling of `args` (sent only by the server
-                                                                         // frontend; desktop ignores it); the engine string comes from the inner ConnectArgs.
+            // MCP meta: the display name is a top-level sibling of `args` (sent only by the server
+            // frontend; desktop ignores it); the engine string comes from the inner ConnectArgs.
             let name = args.get("name").and_then(Value::as_str).unwrap_or("");
-            let db_type = args
-                .get("args")
-                .and_then(|a| a.get("dbType"))
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            st.conn_meta
-                .lock()
-                .unwrap()
-                .insert(id.clone(), (name.to_string(), db_type.to_string()));
-            serde_json::to_value(ConnectResult {
-                conn_id: id,
-                version,
-                capabilities: caps,
-            })
-            .map_err(estr)
+            let db_type = args.get("args").and_then(|a| a.get("dbType")).and_then(Value::as_str).unwrap_or("");
+            st.conn_meta.lock().unwrap().insert(id.clone(), (name.to_string(), db_type.to_string()));
+            serde_json::to_value(ConnectResult { conn_id: id, version, capabilities: caps }).map_err(estr)
         }
         "db_test_connection" => {
             let a: ConnectArgs = from_arg(&args, "args")?;
@@ -863,11 +700,8 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
             let conn_id = require(&args, "connId")?;
             st.conn_owners.lock().unwrap().remove(conn_id);
             st.conn_meta.lock().unwrap().remove(conn_id);
-            if conns.remove(conn_id).await {
-                Ok(Value::Null)
-            } else {
-                Err("connection not found".into())
-            }
+            if conns.remove(conn_id).await { Ok(Value::Null) }
+            else { Err("connection not found".into()) }
         }
 
         // ── Query / pagination / explain ────────────────────────────────────────
@@ -878,51 +712,27 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
             let max_rows = u32_or(&args, "maxRows", 1000);
             let ns = opt_str(&args, "defaultNamespace");
             let started = Instant::now();
-            let result = drv
-                .query_with_default_namespace(sql, max_rows, ns)
-                .await
-                .map_err(estr)?;
-            record_history(
-                st,
-                actor,
-                conn_id,
-                sql,
-                format!("{}ms", started.elapsed().as_millis()),
-                &args,
-            );
+            let result = drv.query_with_default_namespace(sql, max_rows, ns).await.map_err(estr)?;
+            record_history(st, actor, conn_id, sql, format!("{}ms", started.elapsed().as_millis()), &args);
             serde_json::to_value(result).map_err(estr)
         }
         "db_query_page" => {
-            let drv = conns
-                .get(require(&args, "connId")?)
-                .await
-                .ok_or("connection not found")?;
+            let drv = conns.get(require(&args, "connId")?).await.ok_or("connection not found")?;
             let sql = require(&args, "sql")?;
             let limit = u32_or(&args, "limit", 1000);
             let offset = u32_or(&args, "offset", 0);
             let ns = opt_str(&args, "defaultNamespace");
-            serde_json::to_value(
-                drv.paginated_query_with_default_namespace(sql, limit, offset, ns)
-                    .await
-                    .map_err(estr)?,
-            )
-            .map_err(estr)
+            serde_json::to_value(drv.paginated_query_with_default_namespace(sql, limit, offset, ns).await.map_err(estr)?).map_err(estr)
         }
         "db_explain" => {
-            let drv = conns
-                .get(require(&args, "connId")?)
-                .await
-                .ok_or("connection not found")?;
+            let drv = conns.get(require(&args, "connId")?).await.ok_or("connection not found")?;
             let sql = require(&args, "sql")?;
             let ns = opt_str(&args, "defaultNamespace");
             let built = crate::db::query_explain_sql::build_explain_sql(drv.db_type(), sql);
             match built.sql {
                 Some(explain_sql) => serde_json::to_value(
-                    drv.query_with_default_namespace(&explain_sql, 1000, ns)
-                        .await
-                        .map_err(estr)?,
-                )
-                .map_err(estr),
+                    drv.query_with_default_namespace(&explain_sql, 1000, ns).await.map_err(estr)?,
+                ).map_err(estr),
                 None => Err(match built.reason.as_deref() {
                     Some("unsupported") => "此引擎不支持执行计划".into(),
                     Some("empty") => "没有可解释的 SQL".into(),
@@ -933,10 +743,7 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
 
         // ── Schema / structure introspection ────────────────────────────────────
         "db_schema" => {
-            let drv = conns
-                .get(require(&args, "connId")?)
-                .await
-                .ok_or("connection not found")?;
+            let drv = conns.get(require(&args, "connId")?).await.ok_or("connection not found")?;
             let mut out = Vec::new();
             for s in drv.list_schemas().await.map_err(estr)? {
                 let tables = drv.list_tables(&s).await.unwrap_or_default();
@@ -945,111 +752,45 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
             serde_json::to_value(out).map_err(estr)
         }
         "db_table_structure" => {
-            let drv = conns
-                .get(require(&args, "connId")?)
-                .await
-                .ok_or("connection not found")?;
+            let drv = conns.get(require(&args, "connId")?).await.ok_or("connection not found")?;
             let schema = opt_str(&args, "schema").unwrap_or("");
-            serde_json::to_value(
-                drv.table_structure(schema, require(&args, "table")?)
-                    .await
-                    .map_err(estr)?,
-            )
-            .map_err(estr)
+            serde_json::to_value(drv.table_structure(schema, require(&args, "table")?).await.map_err(estr)?).map_err(estr)
         }
         "db_schema_columns" => {
-            let drv = conns
-                .get(require(&args, "connId")?)
-                .await
-                .ok_or("connection not found")?;
-            serde_json::to_value(
-                drv.schema_columns(require(&args, "schema")?)
-                    .await
-                    .map_err(estr)?,
-            )
-            .map_err(estr)
+            let drv = conns.get(require(&args, "connId")?).await.ok_or("connection not found")?;
+            serde_json::to_value(drv.schema_columns(require(&args, "schema")?).await.map_err(estr)?).map_err(estr)
         }
         "db_schema_functions" => {
-            let drv = conns
-                .get(require(&args, "connId")?)
-                .await
-                .ok_or("connection not found")?;
-            serde_json::to_value(
-                drv.list_functions(require(&args, "schema")?)
-                    .await
-                    .map_err(estr)?,
-            )
-            .map_err(estr)
+            let drv = conns.get(require(&args, "connId")?).await.ok_or("connection not found")?;
+            serde_json::to_value(drv.list_functions(require(&args, "schema")?).await.map_err(estr)?).map_err(estr)
         }
         "db_object_source" => {
-            let drv = conns
-                .get(require(&args, "connId")?)
-                .await
-                .ok_or("connection not found")?;
-            let src = drv
-                .object_source(
-                    require(&args, "schema")?,
-                    require(&args, "name")?,
-                    require(&args, "kind")?,
-                )
-                .await
-                .map_err(estr)?;
+            let drv = conns.get(require(&args, "connId")?).await.ok_or("connection not found")?;
+            let src = drv.object_source(require(&args, "schema")?, require(&args, "name")?, require(&args, "kind")?).await.map_err(estr)?;
             Ok(Value::String(src))
         }
         "db_er_model" => {
-            let drv = conns
-                .get(require(&args, "connId")?)
-                .await
-                .ok_or("connection not found")?;
-            serde_json::to_value(
-                drv.er_relations(require(&args, "schema")?)
-                    .await
-                    .map_err(estr)?,
-            )
-            .map_err(estr)
+            let drv = conns.get(require(&args, "connId")?).await.ok_or("connection not found")?;
+            serde_json::to_value(drv.er_relations(require(&args, "schema")?).await.map_err(estr)?).map_err(estr)
         }
         "db_keyspace_info" => {
-            let drv = conns
-                .get(require(&args, "connId")?)
-                .await
-                .ok_or("connection not found")?;
-            serde_json::to_value(
-                drv.keyspace_info(require(&args, "schema")?)
-                    .await
-                    .map_err(estr)?,
-            )
-            .map_err(estr)
+            let drv = conns.get(require(&args, "connId")?).await.ok_or("connection not found")?;
+            serde_json::to_value(drv.keyspace_info(require(&args, "schema")?).await.map_err(estr)?).map_err(estr)
         }
 
         // ── Table data preview / filtered query ─────────────────────────────────
         "db_table_preview" => {
-            let drv = conns
-                .get(require(&args, "connId")?)
-                .await
-                .ok_or("connection not found")?;
+            let drv = conns.get(require(&args, "connId")?).await.ok_or("connection not found")?;
             let schema = opt_str(&args, "schema");
             let table = require(&args, "table")?;
             let limit = u32_or(&args, "limit", 200);
             let offset = u32_or(&args, "offset", 0);
-            serde_json::to_value(
-                drv.table_data(schema, table, limit, offset)
-                    .await
-                    .map_err(estr)?,
-            )
-            .map_err(estr)
+            serde_json::to_value(drv.table_data(schema, table, limit, offset).await.map_err(estr)?).map_err(estr)
         }
         "db_table_query" => {
-            let drv = conns
-                .get(require(&args, "connId")?)
-                .await
-                .ok_or("connection not found")?;
+            let drv = conns.get(require(&args, "connId")?).await.ok_or("connection not found")?;
             let db = drv.db_type();
-            if matches!(
-                db,
-                crate::db::DatabaseType::Mongodb
-                    | crate::db::DatabaseType::Redis
-                    | crate::db::DatabaseType::Elasticsearch
-            ) {
+            if matches!(db, crate::db::DatabaseType::Mongodb | crate::db::DatabaseType::Redis | crate::db::DatabaseType::Elasticsearch) {
                 return Err("服务端 WHERE/ORDER BY 仅支持 SQL 引擎".into());
             }
             let schema = opt_str(&args, "schema");
@@ -1061,52 +802,26 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
             let has_schemas = commands::table_query_should_qualify(schema);
             let with_ctid = db == crate::db::DatabaseType::Postgres;
             let sql = crate::db::dialect::build_table_query_sql(
-                db,
-                has_schemas,
-                schema,
-                table,
-                where_clause,
-                order_by,
-                limit,
-                offset,
-                with_ctid,
+                db, has_schemas, schema, table, where_clause, order_by, limit, offset, with_ctid,
             );
             serde_json::to_value(drv.query(&sql, limit).await.map_err(estr)?).map_err(estr)
         }
 
         // ── Grid edits (preview / apply) + Data-Compare sync batch ───────────────
         "db_preview_dml" => {
-            let drv = conns
-                .get(require(&args, "connId")?)
-                .await
-                .ok_or("connection not found")?;
+            let drv = conns.get(require(&args, "connId")?).await.ok_or("connection not found")?;
             let req: EditRequest = from_arg(&args, "req")?;
-            if !drv.capabilities().writable {
-                return Err("read-only engine".into());
-            }
-            if matches!(
-                drv.db_type(),
-                crate::db::DatabaseType::Mongodb | crate::db::DatabaseType::Elasticsearch
-            ) {
+            if !drv.capabilities().writable { return Err("read-only engine".into()); }
+            if matches!(drv.db_type(), crate::db::DatabaseType::Mongodb | crate::db::DatabaseType::Elasticsearch) {
                 return Err("editing via SQL DML is not supported for this engine".into());
             }
-            Ok(Value::String(
-                commands::build_sql(drv.db_type(), &req).map_err(estr)?,
-            ))
+            Ok(Value::String(commands::build_sql(drv.db_type(), &req).map_err(estr)?))
         }
         "db_apply_edits" => {
-            let drv = conns
-                .get(require(&args, "connId")?)
-                .await
-                .ok_or("connection not found")?;
+            let drv = conns.get(require(&args, "connId")?).await.ok_or("connection not found")?;
             let reqs: Vec<EditRequest> = from_arg(&args, "reqs")?;
-            if !drv.capabilities().writable {
-                return Err("read-only engine".into());
-            }
-            if matches!(
-                drv.db_type(),
-                crate::db::DatabaseType::Mongodb | crate::db::DatabaseType::Elasticsearch
-            ) {
+            if !drv.capabilities().writable { return Err("read-only engine".into()); }
+            if matches!(drv.db_type(), crate::db::DatabaseType::Mongodb | crate::db::DatabaseType::Elasticsearch) {
                 return Err("editing via SQL DML is not supported for this engine".into());
             }
             let mut affected = 0u64;
@@ -1118,52 +833,26 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
             Ok(json!(affected))
         }
         "db_exec_batch" => {
-            let drv = conns
-                .get(require(&args, "connId")?)
-                .await
-                .ok_or("connection not found")?;
-            if !drv.capabilities().writable {
-                return Err("read-only engine".into());
-            }
-            if matches!(
-                drv.db_type(),
-                crate::db::DatabaseType::Mongodb | crate::db::DatabaseType::Elasticsearch
-            ) {
-                return Err(
-                    "transactional batch execution is not supported for this engine".into(),
-                );
+            let drv = conns.get(require(&args, "connId")?).await.ok_or("connection not found")?;
+            if !drv.capabilities().writable { return Err("read-only engine".into()); }
+            if matches!(drv.db_type(), crate::db::DatabaseType::Mongodb | crate::db::DatabaseType::Elasticsearch) {
+                return Err("transactional batch execution is not supported for this engine".into());
             }
             let stmts: Vec<String> = from_arg::<Vec<String>>(&args, "statements")?
-                .into_iter()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            if stmts.is_empty() {
-                return Ok(json!(0u64));
-            }
+                .into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            if stmts.is_empty() { return Ok(json!(0u64)); }
             Ok(json!(drv.exec_batch(&stmts).await.map_err(estr)?))
         }
         "db_redis_edit" => {
-            use crate::db::drivers::redis_command::{
-                argv_to_command_string, build_confirmed_edit_argv, rows_affected_from_result,
-            };
-            let drv = conns
-                .get(require(&args, "connId")?)
-                .await
-                .ok_or("connection not found")?;
+            use crate::db::drivers::redis_command::{argv_to_command_string, build_confirmed_edit_argv, rows_affected_from_result};
+            let drv = conns.get(require(&args, "connId")?).await.ok_or("connection not found")?;
             if drv.db_type() != crate::db::DatabaseType::Redis {
                 return Err("db_redis_edit 仅支持 Redis 引擎".into());
             }
             let edit = from_arg(&args, "edit")?;
-            let confirm = args
-                .get("confirm")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
+            let confirm = args.get("confirm").and_then(Value::as_bool).unwrap_or(false);
             let argv = build_confirmed_edit_argv(&edit, confirm).map_err(estr)?;
-            let r = drv
-                .query(&argv_to_command_string(&argv), 0)
-                .await
-                .map_err(estr)?;
+            let r = drv.query(&argv_to_command_string(&argv), 0).await.map_err(estr)?;
             Ok(json!(rows_affected_from_result(&r).unwrap_or(0)))
         }
 
@@ -1174,159 +863,107 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
                 require(&args, "connId")?.to_string(),
                 require(&args, "database")?.to_string(),
                 require(&args, "schema")?.to_string(),
-                serde_json::from_value(args.get("selectedTables").cloned().unwrap_or(json!([])))
-                    .map_err(estr)?,
-                serde_json::from_value(args.get("tableDdls").cloned().unwrap_or(json!({})))
-                    .map_err(estr)?,
-                args.get("includeStructure")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-                args.get("includeData")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-                args.get("batchSize")
-                    .and_then(Value::as_u64)
-                    .map(|n| n as usize),
-                args.get("rowLimit")
-                    .and_then(Value::as_u64)
-                    .map(|n| n.min(u32::MAX as u64) as u32),
-            )
-            .await
-            .map_err(estr)?;
+                serde_json::from_value(args.get("selectedTables").cloned().unwrap_or(json!([]))).map_err(estr)?,
+                serde_json::from_value(args.get("tableDdls").cloned().unwrap_or(json!({}))).map_err(estr)?,
+                args.get("includeStructure").and_then(Value::as_bool).unwrap_or(false),
+                args.get("includeData").and_then(Value::as_bool).unwrap_or(false),
+                args.get("batchSize").and_then(Value::as_u64).map(|n| n as usize),
+                args.get("rowLimit").and_then(Value::as_u64).map(|n| n.min(u32::MAX as u64) as u32),
+            ).await.map_err(estr)?;
             Ok(Value::String(sql))
         }
 
         // ── Whole-grid .xlsx export → bytes (server mode downloads in the browser) ───
         "db_export_xlsx_bytes" => {
             use base64::{engine::general_purpose::STANDARD as B64, Engine};
-            let columns: Vec<String> =
-                serde_json::from_value(args.get("columns").cloned().unwrap_or(json!([])))
-                    .map_err(estr)?;
-            let rows: Vec<Vec<Value>> =
-                serde_json::from_value(args.get("rows").cloned().unwrap_or(json!([])))
-                    .map_err(estr)?;
+            let columns: Vec<String> = serde_json::from_value(args.get("columns").cloned().unwrap_or(json!([]))).map_err(estr)?;
+            let rows: Vec<Vec<Value>> = serde_json::from_value(args.get("rows").cloned().unwrap_or(json!([]))).map_err(estr)?;
             // Bound the in-memory workbook build (whole sheet held in RAM + base64'd into JSON).
             const MAX_XLSX_CELLS: usize = 5_000_000;
             if rows.len().saturating_mul(columns.len().max(1)) > MAX_XLSX_CELLS {
                 return Err("导出数据过大,请缩小范围后重试".into());
             }
-            let sheet_name = args
-                .get("sheetName")
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            let bytes = crate::db::xlsx_export::build_xlsx_workbook(
-                &crate::db::xlsx_export::XlsxWorksheetData {
-                    sheet_name,
-                    columns,
-                    rows,
-                },
-            )
-            .map_err(estr)?;
+            let sheet_name = args.get("sheetName").and_then(Value::as_str).map(str::to_string);
+            let bytes = crate::db::xlsx_export::build_xlsx_workbook(&crate::db::xlsx_export::XlsxWorksheetData {
+                sheet_name, columns, rows,
+            }).map_err(estr)?;
             Ok(Value::String(B64.encode(&bytes)))
         }
 
         // ── Object administration (drop / rename / truncate / duplicate / source) ─
         "db_drop_object" => {
-            let drv = commands::writable_drv(require(&args, "connId")?, conns)
-                .await
-                .map_err(estr)?;
+            let drv = commands::writable_drv(require(&args, "connId")?, conns).await.map_err(estr)?;
             let sql = db_admin_sql::build_drop_object_sql(DropObjectSqlOptions {
                 database_type: drv.db_type(),
                 object_type: from_arg::<DatabaseObjectType>(&args, "objectType")?,
                 schema: opt_str(&args, "schema").map(str::to_string),
                 name: require(&args, "name")?.to_string(),
-            })
-            .map_err(estr)?;
-            Ok(json!(
-                commands::drop_or_absent(drv.query(&sql, 0).await).map_err(estr)?
-            ))
+            }).map_err(estr)?;
+            Ok(json!(commands::drop_or_absent(drv.query(&sql, 0).await).map_err(estr)?))
         }
         "db_drop_table_child_object" => {
-            let drv = commands::writable_drv(require(&args, "connId")?, conns)
-                .await
-                .map_err(estr)?;
-            let sql =
-                db_admin_sql::build_drop_table_child_object_sql(DropTableChildObjectSqlOptions {
-                    database_type: drv.db_type(),
-                    object_type: from_arg::<TableChildObjectType>(&args, "objectType")?,
-                    schema: opt_str(&args, "schema").map(str::to_string),
-                    table_name: require(&args, "table")?.to_string(),
-                    name: require(&args, "name")?.to_string(),
-                })
-                .map_err(estr)?;
-            Ok(json!(
-                commands::drop_or_absent(drv.query(&sql, 0).await).map_err(estr)?
-            ))
+            let drv = commands::writable_drv(require(&args, "connId")?, conns).await.map_err(estr)?;
+            let sql = db_admin_sql::build_drop_table_child_object_sql(DropTableChildObjectSqlOptions {
+                database_type: drv.db_type(),
+                object_type: from_arg::<TableChildObjectType>(&args, "objectType")?,
+                schema: opt_str(&args, "schema").map(str::to_string),
+                table_name: require(&args, "table")?.to_string(),
+                name: require(&args, "name")?.to_string(),
+            }).map_err(estr)?;
+            Ok(json!(commands::drop_or_absent(drv.query(&sql, 0).await).map_err(estr)?))
         }
         "db_rename_object" => {
-            let drv = commands::writable_drv(require(&args, "connId")?, conns)
-                .await
-                .map_err(estr)?;
+            let drv = commands::writable_drv(require(&args, "connId")?, conns).await.map_err(estr)?;
             let sql = db_admin_sql::build_rename_object_sql(RenameObjectSqlOptions {
                 database_type: drv.db_type(),
                 object_type: from_arg::<DatabaseObjectType>(&args, "objectType")?,
                 schema: opt_str(&args, "schema").map(str::to_string),
                 old_name: require(&args, "oldName")?.to_string(),
                 new_name: require(&args, "newName")?.to_string(),
-            })
-            .map_err(estr)?;
+            }).map_err(estr)?;
             let r = drv.query(&sql, 0).await.map_err(estr)?;
             Ok(json!(r.rows_affected.unwrap_or(0)))
         }
         "db_truncate_table" => {
-            let drv = commands::writable_drv(require(&args, "connId")?, conns)
-                .await
-                .map_err(estr)?;
+            let drv = commands::writable_drv(require(&args, "connId")?, conns).await.map_err(estr)?;
             let sql = db_admin_sql::build_truncate_table_sql(TableAdminSqlOptions {
                 database_type: drv.db_type(),
                 schema: opt_str(&args, "schema").map(str::to_string),
                 table_name: require(&args, "table")?.to_string(),
-            })
-            .map_err(estr)?;
+            }).map_err(estr)?;
             let r = drv.query(&sql, 0).await.map_err(estr)?;
             Ok(json!(r.rows_affected.unwrap_or(0)))
         }
         "db_duplicate_table_structure" => {
-            let drv = commands::writable_drv(require(&args, "connId")?, conns)
-                .await
-                .map_err(estr)?;
-            let sql = db_admin_sql::build_duplicate_table_structure_sql(
-                DuplicateTableStructureSqlOptions {
-                    database_type: drv.db_type(),
-                    schema: opt_str(&args, "schema").map(str::to_string),
-                    source_name: require(&args, "source")?.to_string(),
-                    target_name: require(&args, "target")?.to_string(),
-                },
-            )
-            .map_err(estr)?;
+            let drv = commands::writable_drv(require(&args, "connId")?, conns).await.map_err(estr)?;
+            let sql = db_admin_sql::build_duplicate_table_structure_sql(DuplicateTableStructureSqlOptions {
+                database_type: drv.db_type(),
+                schema: opt_str(&args, "schema").map(str::to_string),
+                source_name: require(&args, "source")?.to_string(),
+                target_name: require(&args, "target")?.to_string(),
+            }).map_err(estr)?;
             let r = drv.query(&sql, 0).await.map_err(estr)?;
             Ok(json!(r.rows_affected.unwrap_or(0)))
         }
         "db_save_object_source" => {
-            let drv = commands::writable_drv(require(&args, "connId")?, conns)
-                .await
-                .map_err(estr)?;
+            let drv = commands::writable_drv(require(&args, "connId")?, conns).await.map_err(estr)?;
             let kind = require(&args, "kind")?;
-            let object_type = ObjectSourceKind::parse(kind)
-                .ok_or_else(|| format!("unknown object kind: {kind}"))?;
-            let sql = object_source_sql::build_executable_object_source_sql(
-                EditableObjectSourceSqlInput {
-                    database_type: drv.db_type(),
-                    object_type,
-                    schema: opt_str(&args, "schema").map(str::to_string),
-                    name: require(&args, "name")?.to_string(),
-                    source: require(&args, "source")?.to_string(),
-                },
-            )
-            .map_err(estr)?;
+            let object_type = ObjectSourceKind::parse(kind).ok_or_else(|| format!("unknown object kind: {kind}"))?;
+            let sql = object_source_sql::build_executable_object_source_sql(EditableObjectSourceSqlInput {
+                database_type: drv.db_type(),
+                object_type,
+                schema: opt_str(&args, "schema").map(str::to_string),
+                name: require(&args, "name")?.to_string(),
+                source: require(&args, "source")?.to_string(),
+            }).map_err(estr)?;
             let r = drv.query(&sql, 0).await.map_err(estr)?;
             Ok(json!(r.rows_affected.unwrap_or(0)))
         }
 
         // ── History / snippets (per-user under the data volume: users/{id}/) ──────
-        "db_history" => Ok(
-            serde_json::to_value(history::load_history(&user_data_dir(st, actor))).map_err(estr)?,
-        ),
+        "db_history" => {
+            Ok(serde_json::to_value(history::load_history(&user_data_dir(st, actor))).map_err(estr)?)
+        }
         "db_clear_history" => {
             let dir = user_data_dir(st, actor);
             let _guard = st.history_lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -1338,9 +975,7 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
             let dir = user_data_dir(st, actor);
             let _guard = st.history_lock.lock().unwrap_or_else(|e| e.into_inner());
             let list: Vec<HistoryEntry> = history::load_history(&dir)
-                .into_iter()
-                .filter(|h| h.id != id)
-                .collect();
+                .into_iter().filter(|h| h.id != id).collect();
             history::save_history(&dir, &list).map_err(estr)?;
             Ok(Value::Null)
         }
@@ -1349,21 +984,16 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
             let dir = user_data_dir(st, actor);
             let _guard = st.history_lock.lock().unwrap_or_else(|e| e.into_inner());
             let list: Vec<HistoryEntry> = history::load_history(&dir)
-                .into_iter()
-                .filter(|h| h.profile_id.as_deref() != Some(pid))
-                .collect();
+                .into_iter().filter(|h| h.profile_id.as_deref() != Some(pid)).collect();
             history::save_history(&dir, &list).map_err(estr)?;
             Ok(Value::Null)
         }
-        "db_snippets" => Ok(serde_json::to_value(history::load_snippets(&user_data_dir(
-            st, actor,
-        )))
-        .map_err(estr)?),
+        "db_snippets" => {
+            Ok(serde_json::to_value(history::load_snippets(&user_data_dir(st, actor))).map_err(estr)?)
+        }
         "db_save_snippet" => {
             let mut snippet: SnippetEntry = from_arg(&args, "snippet")?;
-            if snippet.id.is_empty() {
-                snippet.id = WEB_SNIPPET_IDS.next();
-            }
+            if snippet.id.is_empty() { snippet.id = WEB_SNIPPET_IDS.next(); }
             let dir = user_data_dir(st, actor);
             let _guard = st.history_lock.lock().unwrap_or_else(|e| e.into_inner());
             let mut list = history::load_snippets(&dir);
@@ -1385,33 +1015,20 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
             let dir = user_data_dir(st, actor); // per-user known_hosts
             let _ = std::fs::create_dir_all(&dir);
             let (handle, fingerprint, forwarded, jump, host_key_trusted) =
-                connect_checked(&a, Some(dir.as_path()))
-                    .await
-                    .map_err(estr)?;
+                connect_checked(&a, Some(dir.as_path())).await.map_err(estr)?;
             let session_id = WEB_SSH_IDS.next();
-            st.ssh
-                .insert(
-                    session_id.clone(),
-                    SshSession {
-                        handle,
-                        host: a.host.clone(),
-                        user: a.user.clone(),
-                        terms: std::collections::HashMap::new(),
-                        forwarded,
-                        _jump: jump,
-                    },
-                )
-                .await;
-            st.ssh_owners
-                .lock()
-                .unwrap()
-                .insert(session_id.clone(), actor.id); // record owner
-                                                       // MCP meta: display name is the top-level sibling of `args`; host from the ConnectArgs.
+            st.ssh.insert(session_id.clone(), SshSession {
+                handle,
+                host: a.host.clone(),
+                user: a.user.clone(),
+                terms: std::collections::HashMap::new(),
+                forwarded,
+                _jump: jump,
+            }).await;
+            st.ssh_owners.lock().unwrap().insert(session_id.clone(), actor.id); // record owner
+            // MCP meta: display name is the top-level sibling of `args`; host from the ConnectArgs.
             let name = args.get("name").and_then(Value::as_str).unwrap_or("");
-            st.ssh_meta
-                .lock()
-                .unwrap()
-                .insert(session_id.clone(), (name.to_string(), a.host.clone()));
+            st.ssh_meta.lock().unwrap().insert(session_id.clone(), (name.to_string(), a.host.clone()));
             Ok(json!({
                 "sessionId": session_id,
                 "hostKeyFingerprint": fingerprint,
@@ -1424,12 +1041,8 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
             st.ssh_meta.lock().unwrap().remove(session_id);
             st.ssh.remove_monitor(session_id).await;
             let sess = st.ssh.remove(session_id).await.ok_or("session not found")?;
-            sess.lock()
-                .await
-                .handle
-                .disconnect(russh::Disconnect::ByApplication, "", "en")
-                .await
-                .ok();
+            sess.lock().await.handle
+                .disconnect(russh::Disconnect::ByApplication, "", "en").await.ok();
             Ok(Value::Null)
         }
         "ssh_trust_host" => {
@@ -1439,8 +1052,7 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
             let _ = std::fs::create_dir_all(&dir);
             let path = dir.join("known_hosts");
             let mut map = std::fs::read_to_string(&path)
-                .map(|s| crate::ssh::knownhosts::parse(&s))
-                .unwrap_or_default();
+                .map(|s| crate::ssh::knownhosts::parse(&s)).unwrap_or_default();
             map.insert(host_port, fingerprint);
             std::fs::write(&path, crate::ssh::knownhosts::serialize(&map)).map_err(estr)?;
             Ok(Value::Null)
@@ -1449,81 +1061,33 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
         // ── Host info (request/response): live monitor frames ride the WS, but these one-shot
         //    queries (host summary + OS glyph) go over /api/invoke. ──
         "ssh_sysinfo" => Ok(Value::String(
-            crate::ssh::monitor::ssh_sysinfo_core(
-                require(&args, "sessionId")?.to_string(),
-                &st.ssh,
-            )
-            .await
-            .map_err(estr)?,
+            crate::ssh::monitor::ssh_sysinfo_core(require(&args, "sessionId")?.to_string(), &st.ssh).await.map_err(estr)?,
         )),
         "ssh_detect_os" => Ok(Value::String(
-            crate::ssh::monitor::ssh_detect_os_core(
-                require(&args, "sessionId")?.to_string(),
-                &st.ssh,
-            )
-            .await
-            .map_err(estr)?,
+            crate::ssh::monitor::ssh_detect_os_core(require(&args, "sessionId")?.to_string(), &st.ssh).await.map_err(estr)?,
         )),
 
         // ── SFTP browse + file ops (request/response; download/upload are separate routes) ──
         "sftp_list" => serde_json::to_value(
-            crate::ssh::sftp::list_directory(
-                &st.ssh,
-                require(&args, "sessionId")?,
-                require(&args, "path")?,
-            )
-            .await
-            .map_err(estr)?,
-        )
-        .map_err(estr),
+            crate::ssh::sftp::list_directory(&st.ssh, require(&args, "sessionId")?, require(&args, "path")?).await.map_err(estr)?,
+        ).map_err(estr),
         "sftp_realpath" => Ok(Value::String(
-            crate::ssh::sftp::realpath(
-                &st.ssh,
-                require(&args, "sessionId")?,
-                require(&args, "path")?,
-            )
-            .await
-            .map_err(estr)?,
+            crate::ssh::sftp::realpath(&st.ssh, require(&args, "sessionId")?, require(&args, "path")?).await.map_err(estr)?,
         )),
         "sftp_mkdir" => {
-            crate::ssh::sftp::sftp_mkdir_core(
-                &st.ssh,
-                require(&args, "sessionId")?,
-                require(&args, "path")?,
-            )
-            .await
-            .map_err(estr)?;
+            crate::ssh::sftp::sftp_mkdir_core(&st.ssh, require(&args, "sessionId")?, require(&args, "path")?).await.map_err(estr)?;
             Ok(Value::Null)
         }
         "sftp_rename" => {
-            crate::ssh::sftp::sftp_rename_core(
-                &st.ssh,
-                require(&args, "sessionId")?,
-                require(&args, "from")?,
-                require(&args, "to")?,
-            )
-            .await
-            .map_err(estr)?;
+            crate::ssh::sftp::sftp_rename_core(&st.ssh, require(&args, "sessionId")?, require(&args, "from")?, require(&args, "to")?).await.map_err(estr)?;
             Ok(Value::Null)
         }
         "sftp_delete" => {
-            crate::ssh::sftp::sftp_delete_core(
-                &st.ssh,
-                require(&args, "sessionId")?,
-                require(&args, "path")?,
-            )
-            .await
-            .map_err(estr)?;
+            crate::ssh::sftp::sftp_delete_core(&st.ssh, require(&args, "sessionId")?, require(&args, "path")?).await.map_err(estr)?;
             Ok(Value::Null)
         }
         "sftp_touch" => {
-            crate::ssh::sftp::sftp_touch_core(
-                &st.ssh,
-                require(&args, "sessionId")?,
-                require(&args, "path")?,
-            )
-            .await
-            .map_err(estr)?;
+            crate::ssh::sftp::sftp_touch_core(&st.ssh, require(&args, "sessionId")?, require(&args, "path")?).await.map_err(estr)?;
             Ok(Value::Null)
         }
         "sftp_read_file" => serde_json::to_value(
@@ -1532,11 +1096,8 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
                 require(&args, "sessionId")?.to_string(),
                 require(&args, "path")?.to_string(),
                 args.get("maxBytes").and_then(Value::as_u64),
-            )
-            .await
-            .map_err(estr)?,
-        )
-        .map_err(estr),
+            ).await.map_err(estr)?,
+        ).map_err(estr),
         "sftp_write_file" => {
             let mt = crate::ssh::sftp::sftp_write_file_core(
                 &st.ssh,
@@ -1545,9 +1106,7 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
                 require(&args, "content")?.to_string(),
                 args.get("baseModified").and_then(Value::as_i64),
                 args.get("mode").and_then(Value::as_u64).map(|m| m as u32),
-            )
-            .await
-            .map_err(estr)?;
+            ).await.map_err(estr)?;
             Ok(json!(mt))
         }
 
@@ -1562,10 +1121,7 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
             let id = crate::ssh::tunnel::tunnel_open_core(session_id, spec, sink, &st.ssh)
                 .await
                 .map_err(estr)?;
-            st.tunnel_owners
-                .lock()
-                .unwrap()
-                .insert(id.clone(), actor.id); // record owner for the gate
+            st.tunnel_owners.lock().unwrap().insert(id.clone(), actor.id); // record owner for the gate
             Ok(Value::String(id))
         }
         "tunnel_close" => {
@@ -1663,11 +1219,7 @@ const MAX_SCAN_CONCURRENCY: u32 = 256;
 /// plus a same-origin Origin check (browsers always send Origin on a WS handshake, so this blocks
 /// cross-site WebSocket hijacking; the SameSite=Strict cookie already prevents the cookie itself
 /// from riding a cross-site handshake). Rejected before the upgrade when unauthenticated.
-async fn ws_handler(
-    State(st): State<AppState>,
-    headers: HeaderMap,
-    ws: WebSocketUpgrade,
-) -> Response {
+async fn ws_handler(State(st): State<AppState>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
     if !origin_ok(&headers) {
         return (StatusCode::FORBIDDEN, "bad origin").into_response();
     }
@@ -1689,13 +1241,7 @@ async fn ws_handler(
 /// these inside the relevant cmd handler; clients must not be able to `sub` to them directly.
 fn is_protected_topic(topic: &str) -> bool {
     const PREFIXES: [&str; 7] = [
-        "term://",
-        "history://",
-        "vnc-init://",
-        "vnc-rect://",
-        "vnc-closed://",
-        "monitor://",
-        "scan://",
+        "term://", "history://", "vnc-init://", "vnc-rect://", "vnc-closed://", "monitor://", "scan://",
     ];
     PREFIXES.iter().any(|p| topic.starts_with(p))
 }
@@ -1703,9 +1249,7 @@ fn is_protected_topic(topic: &str) -> bool {
 /// Allow same-origin requests and Origin-absent ones (non-browser tools, e.g. the test client);
 /// reject a present-but-mismatched Origin.
 fn origin_ok(headers: &HeaderMap) -> bool {
-    let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) else {
-        return true;
-    };
+    let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) else { return true };
     let origin_authority = origin.split("://").nth(1).unwrap_or("");
     matches!(headers.get(header::HOST).and_then(|v| v.to_str().ok()), Some(host) if host == origin_authority)
 }
@@ -1720,16 +1264,12 @@ async fn handle_ws(socket: WebSocket, st: AppState, token: String, owner_id: Str
     let conn_id = st.ws.register(tx.clone(), Some(owner_id));
     // Terminals (session_id, chan_id) and VNC sessions opened on THIS connection — closed on
     // disconnect so a dropped browser tab doesn't leak remote shells / VNC streams.
-    let opened: Arc<std::sync::Mutex<Vec<(String, String)>>> =
-        Arc::new(std::sync::Mutex::new(Vec::new()));
-    let opened_vnc: Arc<std::sync::Mutex<Vec<String>>> =
-        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let opened: Arc<std::sync::Mutex<Vec<(String, String)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let opened_vnc: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
     // Scan ids + monitor session_ids started on THIS connection — cancelled/stopped on disconnect
     // so a dropped tab doesn't leave the server scanning the LAN or polling a host forever.
-    let opened_scans: Arc<std::sync::Mutex<Vec<String>>> =
-        Arc::new(std::sync::Mutex::new(Vec::new()));
-    let opened_monitors: Arc<std::sync::Mutex<Vec<String>>> =
-        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let opened_scans: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let opened_monitors: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
 
     let writer = tokio::spawn(async move {
         while let Some(env) = rx.recv().await {
@@ -1742,40 +1282,32 @@ async fn handle_ws(socket: WebSocket, st: AppState, token: String, owner_id: Str
     while let Some(Ok(msg)) = ws_rx.next().await {
         match msg {
             Message::Text(t) => {
-                let Ok(env) = serde_json::from_str::<Value>(&t) else {
-                    continue;
-                };
+                let Ok(env) = serde_json::from_str::<Value>(&t) else { continue };
                 match env.get("type").and_then(Value::as_str) {
-                    Some("sub") => {
-                        if let Some(topic) = env.get("topic").and_then(Value::as_str) {
-                            // `mcp-log://<scope>` realtime-log streams are client-subscribable but
-                            // AUTHORIZED here (not by client trust): resolve the session and allow only
-                            // the owner to sub their OWN id, or an admin to sub `all` / any user's id.
-                            // A non-admin thus can't eavesdrop on `mcp-log://all` or another user's id.
-                            if let Some(scope) = topic.strip_prefix("mcp-log://") {
-                                if let Some(actor) = resolve_session(&st, &token) {
-                                    if actor.is_admin || scope == actor.id.to_string() {
-                                        st.ws.subscribe(conn_id, topic);
-                                    }
+                    Some("sub") => if let Some(topic) = env.get("topic").and_then(Value::as_str) {
+                        // `mcp-log://<scope>` realtime-log streams are client-subscribable but
+                        // AUTHORIZED here (not by client trust): resolve the session and allow only
+                        // the owner to sub their OWN id, or an admin to sub `all` / any user's id.
+                        // A non-admin thus can't eavesdrop on `mcp-log://all` or another user's id.
+                        if let Some(scope) = topic.strip_prefix("mcp-log://") {
+                            if let Some(actor) = resolve_session(&st, &token) {
+                                if actor.is_admin || scope == actor.id.to_string() {
+                                    st.ws.subscribe(conn_id, topic);
                                 }
-                            } else if !is_protected_topic(topic) {
-                                // Sensitive streams (terminal output, VNC framebuffer, host monitor, scan
-                                // results incl. hit credentials, command history) are subscribed SERVER-side
-                                // by their cmd handlers for the originating connection only. Refusing
-                                // client-driven `sub` to these prefixes stops one logged-in user from
-                                // eavesdropping on another's session by guessing/replaying a topic id.
-                                st.ws.subscribe(conn_id, topic);
                             }
+                        } else if !is_protected_topic(topic) {
+                            // Sensitive streams (terminal output, VNC framebuffer, host monitor, scan
+                            // results incl. hit credentials, command history) are subscribed SERVER-side
+                            // by their cmd handlers for the originating connection only. Refusing
+                            // client-driven `sub` to these prefixes stops one logged-in user from
+                            // eavesdropping on another's session by guessing/replaying a topic id.
+                            st.ws.subscribe(conn_id, topic);
                         }
-                    }
-                    Some("unsub") => {
-                        if let Some(topic) = env.get("topic").and_then(Value::as_str) {
-                            st.ws.unsubscribe(conn_id, topic);
-                        }
-                    }
-                    Some("ping") => {
-                        let _ = tx.try_send(json!({ "type": "pong" }));
-                    }
+                    },
+                    Some("unsub") => if let Some(topic) = env.get("topic").and_then(Value::as_str) {
+                        st.ws.unsubscribe(conn_id, topic);
+                    },
+                    Some("ping") => { let _ = tx.try_send(json!({ "type": "pong" })); }
                     Some("cmd") => {
                         // Re-validate on every command — an upgrade-time check alone would leave an
                         // established socket as a long-lived SSH control channel after logout.
@@ -1783,48 +1315,19 @@ async fn handle_ws(socket: WebSocket, st: AppState, token: String, owner_id: Str
                             let _ = tx.try_send(json!({ "type": "reply", "id": env.get("id").cloned().unwrap_or(Value::Null), "ok": false, "error": "会话已失效,请重新登录" }));
                             break;
                         };
-                        let cmd = env
-                            .get("cmd")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_string();
+                        let cmd = env.get("cmd").and_then(Value::as_str).unwrap_or("").to_string();
                         let id = env.get("id").cloned().unwrap_or(Value::Null);
                         let cmd_args = env.get("args").cloned().unwrap_or_else(|| json!({}));
                         // Slow connect commands do blocking network I/O (TCP + handshake, up to
                         // ~25s) — run them OFF the reader loop so other cmds / ping / close on this
                         // same (singleton) socket aren't frozen while a host connects.
                         if matches!(cmd.as_str(), "vnc_connect" | "term_open") {
-                            let (st2, tx2, op2, opv2, ops2, opm2, actor2) = (
-                                st.clone(),
-                                tx.clone(),
-                                opened.clone(),
-                                opened_vnc.clone(),
-                                opened_scans.clone(),
-                                opened_monitors.clone(),
-                                actor.clone(),
-                            );
+                            let (st2, tx2, op2, opv2, ops2, opm2, actor2) = (st.clone(), tx.clone(), opened.clone(), opened_vnc.clone(), opened_scans.clone(), opened_monitors.clone(), actor.clone());
                             tokio::spawn(async move {
-                                handle_ws_cmd(
-                                    &st2, conn_id, &actor2, &tx2, &cmd, id, &cmd_args, &op2, &opv2,
-                                    &ops2, &opm2,
-                                )
-                                .await;
+                                handle_ws_cmd(&st2, conn_id, &actor2, &tx2, &cmd, id, &cmd_args, &op2, &opv2, &ops2, &opm2).await;
                             });
                         } else {
-                            handle_ws_cmd(
-                                &st,
-                                conn_id,
-                                &actor,
-                                &tx,
-                                &cmd,
-                                id,
-                                &cmd_args,
-                                &opened,
-                                &opened_vnc,
-                                &opened_scans,
-                                &opened_monitors,
-                            )
-                            .await;
+                            handle_ws_cmd(&st, conn_id, &actor, &tx, &cmd, id, &cmd_args, &opened, &opened_vnc, &opened_scans, &opened_monitors).await;
                         }
                     }
                     _ => {}
@@ -1876,217 +1379,146 @@ async fn handle_ws_cmd(
     opened_monitors: &std::sync::Mutex<Vec<String>>,
 ) {
     let actor_admin = actor.is_admin;
-    let sid = || {
-        args.get("sessionId")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string()
-    };
-    let cid = || {
-        args.get("chanId")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string()
-    };
+    let sid = || args.get("sessionId").and_then(Value::as_str).unwrap_or("").to_string();
+    let cid = || args.get("chanId").and_then(Value::as_str).unwrap_or("").to_string();
     // Ownership gate (WS): terminal/monitor commands act on an SSH `sessionId`; vnc pointer/key/close
     // act on a VNC `sessionId`. The owner (or an admin) only — same rule as the HTTP dispatch gate.
     let ws_owned = match cmd {
-        "term_open" | "term_write" | "term_resize" | "term_close" | "monitor_start"
-        | "monitor_stop" => owns_resource(&st.ssh_owners, &sid(), actor),
+        "term_open" | "term_write" | "term_resize" | "term_close" | "monitor_start" | "monitor_stop" =>
+            owns_resource(&st.ssh_owners, &sid(), actor),
         "vnc_pointer" | "vnc_key" | "vnc_close" => owns_resource(&st.vnc_owners, &sid(), actor),
         _ => true,
     };
     let result: Result<Value, String> = if !ws_owned {
         Err("资源不存在或无权访问".to_string())
-    } else {
-        match cmd {
-            "term_open" => {
-                let session_id = sid();
-                let cols = u32_or(args, "cols", 80);
-                let rows = u32_or(args, "rows", 24);
-                st.ws.subscribe(conn_id, &format!("history://{session_id}"));
-                let sink: Arc<dyn EventSink> = st.ws.clone();
-                let hub = st.ws.clone();
-                match term_open_core(session_id.clone(), cols, rows, sink, &st.ssh, |chan_id| {
-                    hub.subscribe(conn_id, &format!("term://{chan_id}"));
-                })
-                .await
-                {
-                    Ok(chan_id) => {
-                        opened.lock().unwrap().push((session_id, chan_id.clone()));
-                        Ok(json!({ "chanId": chan_id }))
-                    }
-                    Err(e) => Err(e.to_string()),
+    } else { match cmd {
+        "term_open" => {
+            let session_id = sid();
+            let cols = u32_or(args, "cols", 80);
+            let rows = u32_or(args, "rows", 24);
+            st.ws.subscribe(conn_id, &format!("history://{session_id}"));
+            let sink: Arc<dyn EventSink> = st.ws.clone();
+            let hub = st.ws.clone();
+            match term_open_core(session_id.clone(), cols, rows, sink, &st.ssh, |chan_id| {
+                hub.subscribe(conn_id, &format!("term://{chan_id}"));
+            }).await {
+                Ok(chan_id) => {
+                    opened.lock().unwrap().push((session_id, chan_id.clone()));
+                    Ok(json!({ "chanId": chan_id }))
                 }
+                Err(e) => Err(e.to_string()),
             }
-            "term_write" => term_write_core(
-                &st.ssh,
-                &sid(),
-                &cid(),
-                args.get("dataBase64").and_then(Value::as_str).unwrap_or(""),
-            )
-            .await
-            .map(|_| Value::Null)
-            .map_err(|e| e.to_string()),
-            "term_resize" => term_resize_core(
-                &st.ssh,
-                &sid(),
-                &cid(),
-                u32_or(args, "cols", 80),
-                u32_or(args, "rows", 24),
-            )
-            .await
-            .map(|_| Value::Null)
-            .map_err(|e| e.to_string()),
-            "term_close" => {
-                let (s, c) = (sid(), cid());
-                opened
-                    .lock()
-                    .unwrap()
-                    .retain(|(os, oc)| !(os == &s && oc == &c));
-                st.ws.unsubscribe(conn_id, &format!("term://{c}"));
-                term_close_core(&st.ssh, &s, &c)
-                    .await
-                    .map(|_| Value::Null)
-                    .map_err(|e| e.to_string())
-            }
-
-            // ── VNC over WS (M5): connect streams vnc-init/rect/closed; pointer/key drive input ──
-            "vnc_connect" if opened_vnc.lock().unwrap().len() >= MAX_VNC_PER_CONN => {
-                Err("VNC 会话数已达上限".to_string())
-            }
-            "vnc_connect" => {
-                let host = args
-                    .get("host")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                let port = args.get("port").and_then(Value::as_u64).unwrap_or(5900) as u16;
-                let password = args
-                    .get("password")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                let sink: Arc<dyn EventSink> = st.ws.clone();
-                let hub = st.ws.clone();
-                match vnc_connect_core(host, port, password, sink, st.vnc.clone(), |vid| {
-                    hub.subscribe(conn_id, &format!("vnc-init://{vid}"));
-                    hub.subscribe(conn_id, &format!("vnc-rect://{vid}"));
-                    hub.subscribe(conn_id, &format!("vnc-closed://{vid}"));
-                })
-                .await
-                {
-                    Ok(vid) => {
-                        opened_vnc.lock().unwrap().push(vid.clone());
-                        st.vnc_owners.lock().unwrap().insert(vid.clone(), actor.id); // record owner
-                        Ok(json!({ "sessionId": vid }))
-                    }
-                    Err(e) => Err(e.to_string()),
-                }
-            }
-            "vnc_pointer" => vnc_pointer_core(
-                &st.vnc,
-                &sid(),
-                args.get("mask").and_then(Value::as_u64).unwrap_or(0) as u8,
-                args.get("x").and_then(Value::as_u64).unwrap_or(0) as u16,
-                args.get("y").and_then(Value::as_u64).unwrap_or(0) as u16,
-            )
-            .map(|_| Value::Null)
-            .map_err(|e| e.to_string()),
-            "vnc_key" => vnc_key_core(
-                &st.vnc,
-                &sid(),
-                args.get("down").and_then(Value::as_bool).unwrap_or(false),
-                args.get("keysym").and_then(Value::as_u64).unwrap_or(0) as u32,
-            )
-            .map(|_| Value::Null)
-            .map_err(|e| e.to_string()),
-            "vnc_close" => {
-                let s = sid();
-                opened_vnc.lock().unwrap().retain(|x| x != &s);
-                st.vnc_owners.lock().unwrap().remove(&s);
-                st.ws.unsubscribe(conn_id, &format!("vnc-init://{s}"));
-                st.ws.unsubscribe(conn_id, &format!("vnc-rect://{s}"));
-                st.ws.unsubscribe(conn_id, &format!("vnc-closed://{s}"));
-                vnc_close_core(&st.vnc, &s)
-                    .map(|_| Value::Null)
-                    .map_err(|e| e.to_string())
-            }
-
-            // ── System monitor over WS (M3+): subscribe the live frames topic, then start the loop ──
-            "monitor_start" => {
-                let session_id = sid();
-                let interval_ms = args
-                    .get("intervalMs")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(2000);
-                st.ws.subscribe(conn_id, &format!("monitor://{session_id}"));
-                // Track so a dropped tab's monitor loop is stopped on disconnect (no orphan polling).
-                {
-                    let mut m = opened_monitors.lock().unwrap();
-                    if !m.contains(&session_id) {
-                        m.push(session_id.clone());
-                    }
-                }
-                let sink: Arc<dyn EventSink> = st.ws.clone();
-                crate::ssh::monitor::monitor_start_core(session_id, interval_ms, sink, &st.ssh)
-                    .await
-                    .map(|_| Value::Null)
-                    .map_err(|e| e.to_string())
-            }
-            "monitor_stop" => {
-                let session_id = sid();
-                st.ws
-                    .unsubscribe(conn_id, &format!("monitor://{session_id}"));
-                opened_monitors.lock().unwrap().retain(|s| s != &session_id);
-                st.ssh.remove_monitor(&session_id).await;
-                Ok(Value::Null)
-            }
-
-            // ── Network scan over WS (admin-only): scanning the server's LAN + brute-forcing creds is
-            //    a privileged server-side network operation, so a non-admin must not start it. ──
-            "scan_start" if !actor_admin => Err("仅管理员可发起网络扫描".to_string()),
-            "scan_start" if opened_scans.lock().unwrap().len() >= MAX_SCANS_PER_CONN => {
-                Err("并发扫描数已达上限".to_string())
-            }
-            "scan_start" => {
-                for topic in [
-                    "scan://progress",
-                    "scan://found",
-                    "scan://log",
-                    "scan://done",
-                ] {
-                    st.ws.subscribe(conn_id, topic);
-                }
-                let sink: Arc<dyn EventSink> = st.ws.clone();
-                match serde_json::from_value::<crate::scan::commands::ScanArgs>(
-                    args.get("args").cloned().unwrap_or(Value::Null),
-                ) {
-                    Ok(mut a) => {
-                        a.concurrency = a.concurrency.min(MAX_SCAN_CONCURRENCY); // 0 = default; clamp the upper bound
-                        match crate::scan::commands::scan_start_core(a, sink, st.scan.clone()).await
-                        {
-                            Ok(scan_id) => {
-                                opened_scans.lock().unwrap().push(scan_id.clone());
-                                Ok(Value::String(scan_id))
-                            }
-                            Err(e) => Err(e.to_string()),
-                        }
-                    }
-                    Err(e) => Err(e.to_string()),
-                }
-            }
-            "scan_cancel" if !actor_admin => Err("仅管理员可操作网络扫描".to_string()),
-            "scan_cancel" => {
-                let scan_id = args.get("scanId").and_then(Value::as_str).unwrap_or("");
-                st.scan.cancel(scan_id).await;
-                opened_scans.lock().unwrap().retain(|s| s != scan_id);
-                Ok(Value::Null)
-            }
-
-            other => Err(format!("ws command not supported: {other}")),
         }
-    };
+        "term_write" => term_write_core(&st.ssh, &sid(), &cid(),
+            args.get("dataBase64").and_then(Value::as_str).unwrap_or(""))
+            .await.map(|_| Value::Null).map_err(|e| e.to_string()),
+        "term_resize" => term_resize_core(&st.ssh, &sid(), &cid(),
+            u32_or(args, "cols", 80), u32_or(args, "rows", 24))
+            .await.map(|_| Value::Null).map_err(|e| e.to_string()),
+        "term_close" => {
+            let (s, c) = (sid(), cid());
+            opened.lock().unwrap().retain(|(os, oc)| !(os == &s && oc == &c));
+            st.ws.unsubscribe(conn_id, &format!("term://{c}"));
+            term_close_core(&st.ssh, &s, &c).await.map(|_| Value::Null).map_err(|e| e.to_string())
+        }
+
+        // ── VNC over WS (M5): connect streams vnc-init/rect/closed; pointer/key drive input ──
+        "vnc_connect" if opened_vnc.lock().unwrap().len() >= MAX_VNC_PER_CONN => {
+            Err("VNC 会话数已达上限".to_string())
+        }
+        "vnc_connect" => {
+            let host = args.get("host").and_then(Value::as_str).unwrap_or("").to_string();
+            let port = args.get("port").and_then(Value::as_u64).unwrap_or(5900) as u16;
+            let password = args.get("password").and_then(Value::as_str).unwrap_or("").to_string();
+            let sink: Arc<dyn EventSink> = st.ws.clone();
+            let hub = st.ws.clone();
+            match vnc_connect_core(host, port, password, sink, st.vnc.clone(), |vid| {
+                hub.subscribe(conn_id, &format!("vnc-init://{vid}"));
+                hub.subscribe(conn_id, &format!("vnc-rect://{vid}"));
+                hub.subscribe(conn_id, &format!("vnc-closed://{vid}"));
+            }).await {
+                Ok(vid) => {
+                    opened_vnc.lock().unwrap().push(vid.clone());
+                    st.vnc_owners.lock().unwrap().insert(vid.clone(), actor.id); // record owner
+                    Ok(json!({ "sessionId": vid }))
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        }
+        "vnc_pointer" => vnc_pointer_core(
+            &st.vnc, &sid(),
+            args.get("mask").and_then(Value::as_u64).unwrap_or(0) as u8,
+            args.get("x").and_then(Value::as_u64).unwrap_or(0) as u16,
+            args.get("y").and_then(Value::as_u64).unwrap_or(0) as u16,
+        ).map(|_| Value::Null).map_err(|e| e.to_string()),
+        "vnc_key" => vnc_key_core(
+            &st.vnc, &sid(),
+            args.get("down").and_then(Value::as_bool).unwrap_or(false),
+            args.get("keysym").and_then(Value::as_u64).unwrap_or(0) as u32,
+        ).map(|_| Value::Null).map_err(|e| e.to_string()),
+        "vnc_close" => {
+            let s = sid();
+            opened_vnc.lock().unwrap().retain(|x| x != &s);
+            st.vnc_owners.lock().unwrap().remove(&s);
+            st.ws.unsubscribe(conn_id, &format!("vnc-init://{s}"));
+            st.ws.unsubscribe(conn_id, &format!("vnc-rect://{s}"));
+            st.ws.unsubscribe(conn_id, &format!("vnc-closed://{s}"));
+            vnc_close_core(&st.vnc, &s).map(|_| Value::Null).map_err(|e| e.to_string())
+        }
+
+        // ── System monitor over WS (M3+): subscribe the live frames topic, then start the loop ──
+        "monitor_start" => {
+            let session_id = sid();
+            let interval_ms = args.get("intervalMs").and_then(Value::as_u64).unwrap_or(2000);
+            st.ws.subscribe(conn_id, &format!("monitor://{session_id}"));
+            // Track so a dropped tab's monitor loop is stopped on disconnect (no orphan polling).
+            { let mut m = opened_monitors.lock().unwrap(); if !m.contains(&session_id) { m.push(session_id.clone()); } }
+            let sink: Arc<dyn EventSink> = st.ws.clone();
+            crate::ssh::monitor::monitor_start_core(session_id, interval_ms, sink, &st.ssh)
+                .await.map(|_| Value::Null).map_err(|e| e.to_string())
+        }
+        "monitor_stop" => {
+            let session_id = sid();
+            st.ws.unsubscribe(conn_id, &format!("monitor://{session_id}"));
+            opened_monitors.lock().unwrap().retain(|s| s != &session_id);
+            st.ssh.remove_monitor(&session_id).await;
+            Ok(Value::Null)
+        }
+
+        // ── Network scan over WS (admin-only): scanning the server's LAN + brute-forcing creds is
+        //    a privileged server-side network operation, so a non-admin must not start it. ──
+        "scan_start" if !actor_admin => Err("仅管理员可发起网络扫描".to_string()),
+        "scan_start" if opened_scans.lock().unwrap().len() >= MAX_SCANS_PER_CONN =>
+            Err("并发扫描数已达上限".to_string()),
+        "scan_start" => {
+            for topic in ["scan://progress", "scan://found", "scan://log", "scan://done"] {
+                st.ws.subscribe(conn_id, topic);
+            }
+            let sink: Arc<dyn EventSink> = st.ws.clone();
+            match serde_json::from_value::<crate::scan::commands::ScanArgs>(args.get("args").cloned().unwrap_or(Value::Null)) {
+                Ok(mut a) => {
+                    a.concurrency = a.concurrency.min(MAX_SCAN_CONCURRENCY); // 0 = default; clamp the upper bound
+                    match crate::scan::commands::scan_start_core(a, sink, st.scan.clone()).await {
+                        Ok(scan_id) => {
+                            opened_scans.lock().unwrap().push(scan_id.clone());
+                            Ok(Value::String(scan_id))
+                        }
+                        Err(e) => Err(e.to_string()),
+                    }
+                }
+                Err(e) => Err(e.to_string()),
+            }
+        }
+        "scan_cancel" if !actor_admin => Err("仅管理员可操作网络扫描".to_string()),
+        "scan_cancel" => {
+            let scan_id = args.get("scanId").and_then(Value::as_str).unwrap_or("");
+            st.scan.cancel(scan_id).await;
+            opened_scans.lock().unwrap().retain(|s| s != scan_id);
+            Ok(Value::Null)
+        }
+
+        other => Err(format!("ws command not supported: {other}")),
+    } };
     // Fire-and-forget commands carry no `id` (vnc_pointer/key) — don't generate reply traffic for
     // every mouse event. Commands with an id always get a reply.
     if !id.is_null() {
@@ -2103,9 +1535,7 @@ async fn handle_ws_cmd(
 /// Resolve the caller's user from the session cookie, or None. Shared by the SFTP binary routes
 /// (which, like /api/invoke, must be gated AND ownership-checked against the SSH session).
 fn authed_user(st: &AppState, headers: &HeaderMap) -> Option<User> {
-    session_token(headers)
-        .as_deref()
-        .and_then(|t| resolve_session(st, t))
+    session_token(headers).as_deref().and_then(|t| resolve_session(st, t))
 }
 
 /// Build an RFC 6266 `Content-Disposition: attachment` value with both an ASCII `filename=`
@@ -2114,25 +1544,13 @@ fn authed_user(st: &AppState, headers: &HeaderMap) -> Option<User> {
 fn content_disposition_attachment(name: &str) -> String {
     let ascii: String = name
         .chars()
-        .map(|c| {
-            if c.is_ascii() && !c.is_control() && c != '"' && c != '\\' {
-                c
-            } else {
-                '_'
-            }
-        })
+        .map(|c| if c.is_ascii() && !c.is_control() && c != '"' && c != '\\' { c } else { '_' })
         .collect();
-    let ascii = if ascii.trim().is_empty() {
-        "download".to_string()
-    } else {
-        ascii
-    };
+    let ascii = if ascii.trim().is_empty() { "download".to_string() } else { ascii };
     let mut enc = String::new();
     for &b in name.as_bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                enc.push(b as char)
-            }
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => enc.push(b as char),
             _ => enc.push_str(&format!("%{b:02X}")),
         }
     }
@@ -2148,11 +1566,7 @@ struct DownloadQuery {
 
 /// `GET /api/sftp/download?sessionId=&path=` — read the remote file and stream it to the browser
 /// as an attachment (the browser's own download UI shows progress). Buffers fully (Phase-1 LAN).
-async fn sftp_download_handler(
-    State(st): State<AppState>,
-    headers: HeaderMap,
-    Query(q): Query<DownloadQuery>,
-) -> Response {
+async fn sftp_download_handler(State(st): State<AppState>, headers: HeaderMap, Query(q): Query<DownloadQuery>) -> Response {
     let Some(user) = authed_user(&st, &headers) else {
         return (StatusCode::UNAUTHORIZED, "未登录").into_response();
     };
@@ -2161,37 +1575,27 @@ async fn sftp_download_handler(
     }
     match crate::ssh::sftp::read_remote_bytes(&st.ssh, &q.session_id, &q.path).await {
         Ok(bytes) => {
-            let cd =
-                content_disposition_attachment(q.path.rsplit('/').next().unwrap_or("download"));
+            let cd = content_disposition_attachment(q.path.rsplit('/').next().unwrap_or("download"));
             (
                 [
                     (header::CONTENT_TYPE, "application/octet-stream".to_string()),
                     (header::CONTENT_DISPOSITION, cd),
                 ],
                 bytes,
-            )
-                .into_response()
+            ).into_response()
         }
         Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     }
 }
 
 fn upload_field_err(e: axum::extract::multipart::MultipartError) -> Response {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(json!({ "error": format!("读取上传字段失败: {e}") })),
-    )
-        .into_response()
+    (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("读取上传字段失败: {e}") }))).into_response()
 }
 
 /// `POST /api/sftp/upload` (multipart: sessionId, remotePath, file) — receive the browser-picked
 /// file and write it to the remote path over SFTP (the HTML5 upload that replaces Tauri's native
 /// drag-drop / local-path upload).
-async fn sftp_upload_handler(
-    State(st): State<AppState>,
-    headers: HeaderMap,
-    mut multipart: Multipart,
-) -> Response {
+async fn sftp_upload_handler(State(st): State<AppState>, headers: HeaderMap, mut multipart: Multipart) -> Response {
     let Some(user) = authed_user(&st, &headers) else {
         return (StatusCode::UNAUTHORIZED, "未登录").into_response();
     };
@@ -2202,70 +1606,32 @@ async fn sftp_upload_handler(
         let field = match multipart.next_field().await {
             Ok(Some(f)) => f,
             Ok(None) => break,
-            Err(e) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({ "error": format!("multipart 解析失败: {e}") })),
-                )
-                    .into_response()
-            }
+            Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": format!("multipart 解析失败: {e}") }))).into_response(),
         };
         match field.name() {
-            Some("sessionId") => match field.text().await {
-                Ok(v) => session_id = v,
-                Err(e) => return upload_field_err(e),
-            },
-            Some("remotePath") => match field.text().await {
-                Ok(v) => remote_path = v,
-                Err(e) => return upload_field_err(e),
-            },
+            Some("sessionId") => match field.text().await { Ok(v) => session_id = v, Err(e) => return upload_field_err(e) },
+            Some("remotePath") => match field.text().await { Ok(v) => remote_path = v, Err(e) => return upload_field_err(e) },
             // STREAM the file straight to SFTP chunk-by-chunk — never buffer the whole file in
             // memory, so multi-GB uploads work without OOM or a size cap. The frontend appends the
             // fields in order (sessionId, remotePath, file), so the path is known by now.
             Some("file") => {
                 if session_id.is_empty() || remote_path.is_empty() {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({ "error": "file 字段需在 sessionId/remotePath 之后" })),
-                    )
-                        .into_response();
+                    return (StatusCode::BAD_REQUEST, Json(json!({ "error": "file 字段需在 sessionId/remotePath 之后" }))).into_response();
                 }
                 if !owns_resource(&st.ssh_owners, &session_id, &user) {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({ "error": "session not found" })),
-                    )
-                        .into_response();
+                    return (StatusCode::BAD_REQUEST, Json(json!({ "error": "session not found" }))).into_response();
                 }
                 use futures_util::StreamExt;
-                let stream = field.map(|r| {
-                    r.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
-                });
-                return match crate::ssh::sftp::write_remote_stream(
-                    &st.ssh,
-                    &session_id,
-                    &remote_path,
-                    stream,
-                    st.max_upload_bytes,
-                )
-                .await
-                {
+                let stream = field.map(|r| r.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string())));
+                return match crate::ssh::sftp::write_remote_stream(&st.ssh, &session_id, &remote_path, stream, st.max_upload_bytes).await {
                     Ok(n) => Json(json!({ "ok": true, "bytes": n })).into_response(),
-                    Err(e) => (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({ "error": e.to_string() })),
-                    )
-                        .into_response(),
+                    Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))).into_response(),
                 };
             }
             _ => {}
         }
     }
-    (
-        StatusCode::BAD_REQUEST,
-        Json(json!({ "error": "缺少文件" })),
-    )
-        .into_response()
+    (StatusCode::BAD_REQUEST, Json(json!({ "error": "缺少文件" }))).into_response()
 }
 
 // SPA fallback: serve a dist asset if it exists, else index.html with the server flag injected
@@ -2278,11 +1644,7 @@ async fn spa(State(st): State<AppState>, uri: Uri) -> Response {
     }
     match tokio::fs::read_to_string(st.static_dir.join("index.html")).await {
         Ok(html) => Html(inject_flag(&html)).into_response(),
-        Err(_) => (
-            StatusCode::NOT_FOUND,
-            "UI not built — run `npm run build` first",
-        )
-            .into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, "UI not built — run `npm run build` first").into_response(),
     }
 }
 
@@ -2295,16 +1657,10 @@ async fn spa(State(st): State<AppState>, uri: Uri) -> Response {
 /// an error and fall through to index.html, which is the correct SPA behavior.
 fn safe_asset_path(static_dir: &Path, req_path: &str) -> Option<PathBuf> {
     let rel = req_path.trim_start_matches('/');
-    if rel.is_empty() || rel.contains("..") || rel.contains('\\') {
-        return None;
-    }
+    if rel.is_empty() || rel.contains("..") || rel.contains('\\') { return None; }
     let base = std::fs::canonicalize(static_dir).ok()?;
     let full = std::fs::canonicalize(base.join(rel)).ok()?;
-    if full.starts_with(&base) && full.is_file() {
-        Some(full)
-    } else {
-        None
-    }
+    if full.starts_with(&base) && full.is_file() { Some(full) } else { None }
 }
 
 fn inject_flag(html: &str) -> String {
@@ -2344,10 +1700,7 @@ mod tests {
         // Non-ASCII → underscore fallback + percent-encoded UTF-8 filename*.
         let cd = content_disposition_attachment("报告.csv");
         assert!(cd.contains("filename=\"__.csv\""), "ascii fallback: {cd}");
-        assert!(
-            cd.contains("filename*=UTF-8''%E6%8A%A5%E5%91%8A.csv"),
-            "utf8: {cd}"
-        );
+        assert!(cd.contains("filename*=UTF-8''%E6%8A%A5%E5%91%8A.csv"), "utf8: {cd}");
 
         // Control chars / quotes can't inject a header.
         let cd = content_disposition_attachment("a\"b\r\n.txt");
@@ -2379,9 +1732,6 @@ mod tests {
         // escape that `contains("..")` misses) must be rejected by the containment check.
         let abs = tmp.path().join("secret.txt");
         let abs_req = format!("/{}", abs.to_string_lossy().replace('\\', "/"));
-        assert!(
-            safe_asset_path(&dist, &abs_req).is_none(),
-            "leaked via absolute path: {abs_req}"
-        );
+        assert!(safe_asset_path(&dist, &abs_req).is_none(), "leaked via absolute path: {abs_req}");
     }
 }
