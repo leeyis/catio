@@ -76,12 +76,18 @@ pub fn synthetic_tool_id(round: u32, index: usize) -> String {
 }
 
 /// Pure request encoder preserving the full assistant message fields and
-/// emitting tool results with `role: tool` + `tool_name`.
+/// emitting tool results with `role: tool` + `tool_name`. `/api/chat` takes
+/// the system prompt as the FIRST `system` message — the generate-style
+/// top-level `system` field may be ignored by chat endpoints.
 pub fn encode_chat_request(request: &ProviderRequest, model: &str) -> Value {
+    let mut messages = vec![json!({
+        "role": "system",
+        "content": request.system_prompt,
+    })];
+    messages.extend(encode_messages(&request.messages));
     let mut body = json!({
         "model": model,
-        "system": request.system_prompt,
-        "messages": encode_messages(&request.messages),
+        "messages": messages,
         "stream": true,
     });
     if !request.tools.is_empty() {

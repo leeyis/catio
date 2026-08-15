@@ -198,8 +198,18 @@ fn encode_request_preserves_full_assistant_message_and_tool_results() {
     let body = encode_chat_request(&provider_request, "llama3");
     assert_eq!(body["model"], "llama3");
     assert_eq!(body["stream"], true);
-    assert_eq!(body["system"], "sys");
-    let assistant = &body["messages"][1];
+    // `/api/chat` carries the system prompt as the first `system` message;
+    // the generate-style top-level `system` field must not be relied on.
+    assert!(
+        body.get("system").is_none(),
+        "top-level system must not be used for /api/chat: {body}"
+    );
+    let system = &body["messages"][0];
+    assert_eq!(system["role"], "system");
+    assert_eq!(system["content"], "sys");
+    let user = &body["messages"][1];
+    assert_eq!(user["role"], "user");
+    let assistant = &body["messages"][2];
     assert_eq!(assistant["role"], "assistant");
     assert_eq!(assistant["content"], "ok");
     assert_eq!(assistant["thinking"], "t");
@@ -211,7 +221,7 @@ fn encode_request_preserves_full_assistant_message_and_tool_results() {
         assistant["tool_calls"][0]["function"]["arguments"],
         json!({ "command": "pwd" })
     );
-    let tool_result = &body["messages"][2];
+    let tool_result = &body["messages"][3];
     assert_eq!(tool_result["role"], "tool");
     assert_eq!(tool_result["tool_name"], "terminal_exec");
     assert_eq!(tool_result["content"], "/tmp");
