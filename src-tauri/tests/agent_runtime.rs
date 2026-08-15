@@ -1087,6 +1087,123 @@ async fn provider_requests_carry_increasing_round_numbers() {
     assert_eq!(rounds, [0, 1, 2, 3]);
 }
 
+/// A `RuntimeBridge` whose responses never arrive: approval times out and
+/// fails CLOSED (Blocked, never executed); tool results time out AFTER dispatch
+/// and report OutcomeUnknown.
+fn timeout_bridge(timeout: Duration) -> Arc<dyn ClientBridge> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    // Keep the sender alive for the bridge's lifetime so `recv` waits (and
+    // the timeout branch fires) instead of returning TurnNotFound.
+    std::mem::forget(tx);
+    Arc::new(catio_lib::agent::bridge::RuntimeBridge::with_timeout(
+        rx,
+        CancellationToken::new(),
+        timeout,
+    ))
+}
+
+#[tokio::test]
+async fn approval_timeout_fails_closed_as_blocked() {
+    let provider = ScriptedProvider::tool_then_text("rm -rf /tmp/demo", "done");
+    let sink = RecordingSink::default();
+    let ctx = TurnContext {
+        owner_id: "owner-a".into(),
+        turn_id: "turn-1".into(),
+        request: valid_request(ExecutionMode::Ask),
+        provider: Arc::new(provider),
+        sink: Arc::new(sink.clone()),
+        bridge: timeout_bridge(Duration::from_millis(50)),
+        cancel_token: CancellationToken::new(),
+        expected: Arc::new(parking_lot::Mutex::new(
+            catio_lib::agent::ExpectedResponse::None,
+        )),
+    };
+    TurnEngine.run(ctx).await.unwrap();
+    // Fail-closed: the tool never executes, the paired result is Blocked.
+    assert_eq!(sink.tool_finished_statuses(), [ToolResultStatus::Blocked]);
+    assert!(!sink.event_types().contains(&"toolExecutionRequested"));
+    assert!(!sink.event_types().contains(&"toolStarted"));
+}
+
+#[tokio::test]
+async fn tool_result_timeout_after_dispatch_is_outcome_unknown() {
+    let provider = ScriptedProvider::tool_then_text("echo hi", "done");
+    let sink = RecordingSink::default();
+    let ctx = TurnContext {
+        owner_id: "owner-a".into(),
+        turn_id: "turn-1".into(),
+        request: valid_request(ExecutionMode::Ask),
+        provider: Arc::new(provider),
+        sink: Arc::new(sink.clone()),
+        bridge: timeout_bridge(Duration::from_millis(50)),
+        cancel_token: CancellationToken::new(),
+        expected: Arc::new(parking_lot::Mutex::new(
+            catio_lib::agent::ExpectedResponse::None,
+        )),
+    };
+    TurnEngine.run(ctx).await.unwrap();
+    assert_eq!(
+        sink.tool_finished_statuses(),
+        [ToolResultStatus::OutcomeUnknown]
+    );
+    // The dispatch DID happen before the timeout.
+    assert!(sink.event_types().contains(&"toolStarted"));
+}
+
+/// Provider whose first round reports ToolsUnsupported and whose fallback
+/// retry blocks forever — proves the fallback retry honours cancellation.
+#[derive(Clone)]
+struct FallbackBlockingProvider {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+    retry_entered: Arc<Notify>,
+}
+
+#[async_trait]
+impl Provider for FallbackBlockingProvider {
+    async fn complete(
+        &self,
+        _request: ProviderRequest,
+        _observer: &dyn ProviderObserver,
+    ) -> Result<ProviderRound, ProviderError> {
+        let call = self
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if call == 0 {
+            Err(ProviderError::ToolsUnsupported)
+        } else {
+            self.retry_entered.notify_waiters();
+            std::future::pending().await
+        }
+    }
+}
+
+#[tokio::test]
+async fn fallback_retry_cancels_promptly() {
+    let provider = Arc::new(FallbackBlockingProvider {
+        calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        retry_entered: Arc::new(Notify::new()),
+    });
+    let factory = Arc::new(ScriptedFactory {
+        provider: provider.clone(),
+    });
+    let runtime = Arc::new(AgentRuntime::new(factory));
+    let sink = RecordingSink::default();
+    let turn = runtime
+        .start_turn(
+            actor("owner-a"),
+            valid_request(ExecutionMode::Ask),
+            Arc::new(sink.clone()),
+        )
+        .await
+        .unwrap();
+    // First round fails with ToolsUnsupported; the retry is now blocked.
+    provider.retry_entered.notified().await;
+    tokio::task::yield_now().await;
+    runtime.cancel(actor("owner-a"), turn).await.unwrap();
+    sink.wait_for_terminal().await;
+    assert_eq!(sink.terminal_types(), ["turnCancelled"]);
+}
+
 // ---------------------------------------------------------------------------
 // Explicit legacy fallback (ToolsUnsupported only)
 // ---------------------------------------------------------------------------

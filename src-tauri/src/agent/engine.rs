@@ -18,8 +18,8 @@ use crate::agent::policy::{PolicyDecision, ToolPolicy};
 use crate::agent::provider::{Provider, ProviderError, ProviderRequest, ProviderRound};
 use crate::agent::types::{
     AgentError, AgentEvent, AgentEventEnvelope, AgentMessage, ApprovalDecision, ContentBlock,
-    ExecutionMode, ExpectedResponse, StartTurnRequest, ToolExecutionStatus, ToolResult,
-    ToolResultStatus, ToolSpec, ToolUse,
+    ExecutionMode, ExpectedResponse, StartTurnRequest, ToolExecutionOutcome,
+    ToolExecutionStatus, ToolResult, ToolResultStatus, ToolSpec, ToolUse,
 };
 
 /// The only structured tool supported by P0.
@@ -593,6 +593,22 @@ impl TurnEngine {
                             .await?;
                         return Err(AgentError::TurnCancelled);
                     }
+                    Err(AgentError::ApprovalTimeout) => {
+                        // Fail-closed BEFORE dispatch: no decision → never
+                        // execute; the paired result is Blocked.
+                        let result = ToolResult {
+                            tool_use_id: tool_use_id.clone(),
+                            content: "approval timed out; fail-closed, not executed".into(),
+                            status: ToolResultStatus::Blocked,
+                        };
+                        emitter
+                            .emit(AgentEvent::ToolFinished {
+                                tool_use_id: tool_use_id.clone(),
+                                result: result.clone(),
+                            })
+                            .await?;
+                        return Ok(result);
+                    }
                     Err(err) => return Err(err),
                 };
                 match decision {
@@ -632,10 +648,22 @@ impl TurnEngine {
                 tool_use_id: tool_use_id.clone(),
             })
             .await?;
-        let outcome = ctx
+        let outcome = match ctx
             .bridge
             .execute_tool(&tool_use_id, target, tool_use.input.clone())
-            .await?;
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(AgentError::ToolBridgeTimeout) => {
+                // The dispatch already happened; without a trusted result the
+                // outcome stays unknown.
+                ToolExecutionOutcome {
+                    content: "tool bridge timed out after dispatch; outcome unknown".into(),
+                    status: ToolExecutionStatus::OutcomeUnknown,
+                }
+            }
+            Err(err) => return Err(err),
+        };
         let result = ToolResult {
             tool_use_id: tool_use_id.clone(),
             content: outcome.content,

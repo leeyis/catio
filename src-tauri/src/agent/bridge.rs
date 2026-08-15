@@ -55,11 +55,21 @@ impl ClientBridge for NoopBridge {
     }
 }
 
+/// Default bridge timeout: no human approval can reasonably wait forever.
+const DEFAULT_BRIDGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// Production bridge for an active Turn: waits on the `AgentRuntime` response
 /// channel and honours the cancel token.
+///
+/// Timeout policy (per the design):
+/// - before dispatch (approval): timeout fails CLOSED as `ApprovalTimeout`
+///   (the engine marks the tool Blocked and never executes it);
+/// - after dispatch (tool result): timeout is `ToolBridgeTimeout` — the
+///   dispatch already happened, so the engine reports `OutcomeUnknown`.
 pub struct RuntimeBridge {
     receiver: Arc<Mutex<mpsc::UnboundedReceiver<ClientTurnResponse>>>,
     cancel_token: CancellationToken,
+    timeout: std::time::Duration,
 }
 
 impl RuntimeBridge {
@@ -67,9 +77,20 @@ impl RuntimeBridge {
         receiver: mpsc::UnboundedReceiver<ClientTurnResponse>,
         cancel_token: CancellationToken,
     ) -> Self {
+        Self::with_timeout(receiver, cancel_token, DEFAULT_BRIDGE_TIMEOUT)
+    }
+
+    /// Test seam: injects a short timeout so timeout behaviour is deterministic
+    /// without real sleeps.
+    pub fn with_timeout(
+        receiver: mpsc::UnboundedReceiver<ClientTurnResponse>,
+        cancel_token: CancellationToken,
+        timeout: std::time::Duration,
+    ) -> Self {
         Self {
             receiver: Arc::new(Mutex::new(receiver)),
             cancel_token,
+            timeout,
         }
     }
 
@@ -104,12 +125,18 @@ impl ClientBridge for RuntimeBridge {
         let expected = ExpectedResponse::Approval {
             tool_use_id: tool_use_id.to_string(),
         };
+        let wait = self.recv_matching(&expected);
+        tokio::pin!(wait);
         tokio::select! {
-            response = self.recv_matching(&expected) => match response? {
+            response = &mut wait => match response? {
                 ClientTurnResponse::ApprovalDecision { decision, .. } => Ok(decision),
                 _ => Err(AgentError::TurnStateConflict("wrong response kind".into())),
             },
             _ = self.cancel_token.cancelled() => Err(AgentError::TurnCancelled),
+            _ = tokio::time::sleep(self.timeout) => {
+                // Fail-closed BEFORE dispatch: never execute without a decision.
+                Err(AgentError::ApprovalTimeout)
+            }
         }
     }
 
@@ -122,8 +149,10 @@ impl ClientBridge for RuntimeBridge {
         let expected = ExpectedResponse::ToolResult {
             tool_use_id: tool_use_id.to_string(),
         };
+        let wait = self.recv_matching(&expected);
+        tokio::pin!(wait);
         tokio::select! {
-            response = self.recv_matching(&expected) => match response? {
+            response = &mut wait => match response? {
                 ClientTurnResponse::ToolExecutionResult { outcome, .. } => Ok(outcome),
                 _ => Err(AgentError::TurnStateConflict("wrong response kind".into())),
             },
@@ -133,6 +162,10 @@ impl ClientBridge for RuntimeBridge {
                 content: "cancelled; outcome unknown".into(),
                 status: ToolExecutionStatus::OutcomeUnknown,
             }),
+            _ = tokio::time::sleep(self.timeout) => {
+                // Dispatch already happened; the engine reports OutcomeUnknown.
+                Err(AgentError::ToolBridgeTimeout)
+            }
         }
     }
 }
