@@ -15,11 +15,13 @@ use tokio_util::sync::CancellationToken;
 use crate::agent::bridge::ClientBridge;
 use crate::agent::legacy::first_shell_tool;
 use crate::agent::policy::{PolicyDecision, ToolPolicy};
-use crate::agent::provider::{Provider, ProviderError, ProviderRequest, ProviderRound};
+use crate::agent::provider::{
+    redact_diagnostics, Provider, ProviderError, ProviderRequest, ProviderRound,
+};
 use crate::agent::types::{
-    AgentError, AgentEvent, AgentEventEnvelope, ApprovalDecision, ContentBlock, ExecutionMode,
-    ExpectedResponse, StartTurnRequest, ToolExecutionOutcome, ToolExecutionStatus, ToolResult,
-    ToolResultStatus, ToolSpec, ToolUse,
+    AgentError, AgentEvent, AgentEventEnvelope, ApiCredential, ApprovalDecision, ContentBlock,
+    ExecutionMode, ExpectedResponse, StartTurnRequest, ToolExecutionOutcome,
+    ToolExecutionStatus, ToolResult, ToolResultStatus, ToolSpec, ToolUse,
 };
 
 /// The only structured tool supported by P0.
@@ -359,11 +361,11 @@ impl TurnEngine {
                         .await
                     {
                         Ok(round) => round,
-                        Err(RoundOutcome::ProviderErr(err)) => return Err(map_provider_error(err)),
+                        Err(RoundOutcome::ProviderErr(err)) => return Err(map_provider_error(err, &ctx.request.provider.credential)),
                         Err(RoundOutcome::Engine(err)) => return Err(err),
                     }
                 }
-                Err(RoundOutcome::ProviderErr(err)) => return Err(map_provider_error(err)),
+                Err(RoundOutcome::ProviderErr(err)) => return Err(map_provider_error(err, &ctx.request.provider.credential)),
                 Err(RoundOutcome::Engine(err)) => return Err(err),
             };
 
@@ -745,13 +747,18 @@ fn map_execution_status(status: ToolExecutionStatus) -> ToolResultStatus {
     }
 }
 
-fn map_provider_error(err: ProviderError) -> AgentError {
+fn map_provider_error(err: ProviderError, credential: &ApiCredential) -> AgentError {
     match err {
         ProviderError::Auth => AgentError::ProviderAuth,
         ProviderError::RateLimit => AgentError::ProviderRateLimit,
-        ProviderError::Http(m) => AgentError::ProviderHttp(m),
-        ProviderError::Network(m) => AgentError::ProviderHttp(m),
-        ProviderError::Protocol(m) => AgentError::ProviderProtocol(m),
+        // Defense in depth: every message-bearing provider error is redacted
+        // against the turn's exact credential before it can reach events,
+        // UI or logs.
+        ProviderError::Http(m) => AgentError::ProviderHttp(redact_diagnostics(&m, credential)),
+        ProviderError::Network(m) => AgentError::ProviderHttp(redact_diagnostics(&m, credential)),
+        ProviderError::Protocol(m) => {
+            AgentError::ProviderProtocol(redact_diagnostics(&m, credential))
+        }
         ProviderError::UnexpectedEof => AgentError::ProviderUnexpectedEof,
         ProviderError::ToolsUnsupported => AgentError::ToolsUnsupported,
     }

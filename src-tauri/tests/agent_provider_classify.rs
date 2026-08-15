@@ -5,6 +5,7 @@
 //! and never contain credentials.
 
 use catio_lib::agent::provider::{classify_error_response, ProviderError};
+use catio_lib::agent::ApiCredential;
 use reqwest::StatusCode;
 
 fn body_with_tool_error() -> Vec<u8> {
@@ -14,15 +15,15 @@ fn body_with_tool_error() -> Vec<u8> {
 #[test]
 fn auth_and_rate_limit_never_become_tools_unsupported() {
     assert_eq!(
-        classify_error_response(StatusCode::UNAUTHORIZED, &body_with_tool_error()),
+        classify_error_response(StatusCode::UNAUTHORIZED, &body_with_tool_error(), &ApiCredential::from("sk-test".to_string())),
         ProviderError::Auth
     );
     assert_eq!(
-        classify_error_response(StatusCode::FORBIDDEN, &body_with_tool_error()),
+        classify_error_response(StatusCode::FORBIDDEN, &body_with_tool_error(), &ApiCredential::from("sk-test".to_string())),
         ProviderError::Auth
     );
     assert_eq!(
-        classify_error_response(StatusCode::TOO_MANY_REQUESTS, &body_with_tool_error()),
+        classify_error_response(StatusCode::TOO_MANY_REQUESTS, &body_with_tool_error(), &ApiCredential::from("sk-test".to_string())),
         ProviderError::RateLimit
     );
 }
@@ -38,7 +39,7 @@ fn explicit_tools_capability_error_classifies_as_tools_unsupported() {
     ];
     for body in variants {
         assert_eq!(
-            classify_error_response(StatusCode::BAD_REQUEST, body),
+            classify_error_response(StatusCode::BAD_REQUEST, body, &ApiCredential::from("sk-test".to_string())),
             ProviderError::ToolsUnsupported,
             "body: {}",
             String::from_utf8_lossy(body)
@@ -56,7 +57,7 @@ fn server_errors_never_become_tools_unsupported_even_with_capability_body() {
         StatusCode::SERVICE_UNAVAILABLE,
         StatusCode::GATEWAY_TIMEOUT,
     ] {
-        let err = classify_error_response(status, &body_with_tool_error());
+        let err = classify_error_response(status, &body_with_tool_error(), &ApiCredential::from("sk-test".to_string()));
         assert!(
             !matches!(err, ProviderError::ToolsUnsupported),
             "status {status} with a tools-unsupported body must stay Http, got {err:?}"
@@ -86,7 +87,7 @@ fn generic_client_errors_never_become_tools_unsupported() {
         if status == StatusCode::BAD_REQUEST {
             continue;
         }
-        let err = classify_error_response(status, body);
+        let err = classify_error_response(status, body, &ApiCredential::from("sk-test".to_string()));
         assert!(
             matches!(err, ProviderError::Http(_)),
             "status {status} must stay ProviderError::Http, got {err:?}"
@@ -97,7 +98,8 @@ fn generic_client_errors_never_become_tools_unsupported() {
     assert!(matches!(
         classify_error_response(
             StatusCode::BAD_REQUEST,
-            br#"{"error":"tool arguments must be valid JSON"}"#
+            br#"{"error":"tool arguments must be valid JSON"}"#,
+            &ApiCredential::from("sk-test".to_string())
         ),
         ProviderError::Http(_)
     ));
@@ -114,7 +116,7 @@ fn generic_errors_never_fall_back() {
         br#"{"error":"tool arguments must be valid JSON"}"#,
     ];
     for body in bodies {
-        let err = classify_error_response(StatusCode::INTERNAL_SERVER_ERROR, body);
+        let err = classify_error_response(StatusCode::INTERNAL_SERVER_ERROR, body, &ApiCredential::from("sk-test".to_string()));
         assert!(
             !matches!(err, ProviderError::ToolsUnsupported),
             "body: {}",
@@ -122,9 +124,31 @@ fn generic_errors_never_fall_back() {
         );
     }
     assert!(matches!(
-        classify_error_response(StatusCode::BAD_GATEWAY, b"upstream"),
+        classify_error_response(StatusCode::BAD_GATEWAY, b"upstream", &ApiCredential::from("sk-test".to_string())),
         ProviderError::Http(_)
     ));
+}
+
+#[test]
+fn exact_credential_value_is_redacted_even_without_sk_or_bearer_shape() {
+    let secret = "catio-secret-plain-42";
+    let credential = ApiCredential::from(secret.to_string());
+    let body = format!(r#"{{"error":"upstream echoed {secret} back"}}"#);
+    let err = classify_error_response(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        body.as_bytes(),
+        &credential,
+    );
+    match err {
+        ProviderError::Http(message) => {
+            assert!(
+                !message.contains(secret),
+                "exact credential leaked into diagnostics: {message}"
+            );
+            assert!(message.contains("[REDACTED]"), "missing redaction: {message}");
+        }
+        other => panic!("expected Http error, got {other:?}"),
+    }
 }
 
 #[test]
@@ -137,7 +161,7 @@ fn error_body_is_length_limited_and_credentials_are_not_leaked() {
             .repeat(10_000)
             .as_slice(),
     );
-    match classify_error_response(StatusCode::BAD_REQUEST, &huge) {
+    match classify_error_response(StatusCode::BAD_REQUEST, &huge, &ApiCredential::from("sk-test".to_string())) {
         ProviderError::ToolsUnsupported => {}
         other => panic!("expected ToolsUnsupported, got {other:?}"),
     }
@@ -145,7 +169,7 @@ fn error_body_is_length_limited_and_credentials_are_not_leaked() {
     // Generic errors embed a TRUNCATED body only.
     let mut body = b"sk-super-secret-value-1234567890;".repeat(10_000);
     body.extend_from_slice(b"server exploded");
-    let err = classify_error_response(StatusCode::INTERNAL_SERVER_ERROR, &body);
+    let err = classify_error_response(StatusCode::INTERNAL_SERVER_ERROR, &body, &ApiCredential::from("sk-test".to_string()));
     match err {
         ProviderError::Http(message) => {
             assert!(

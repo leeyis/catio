@@ -1400,6 +1400,66 @@ impl Provider for FenceThenUnsupportedProvider {
     }
 }
 
+/// Provider whose error message echoes the turn's credential verbatim —
+/// proves no ProviderError/AgentError/event serialization may contain it.
+#[derive(Clone)]
+struct LeakyProvider;
+
+#[async_trait]
+impl Provider for LeakyProvider {
+    async fn complete(
+        &self,
+        _request: ProviderRequest,
+        _observer: &dyn ProviderObserver,
+    ) -> Result<ProviderRound, ProviderError> {
+        Err(ProviderError::Http(
+            "upstream echoed: catio-secret-plain-42 back".into(),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn arbitrary_credential_never_leaks_into_terminal_event() {
+    let secret = "catio-secret-plain-42";
+    let mut request = valid_request(ExecutionMode::Ask);
+    request.provider.credential = ApiCredential::from(secret.to_string());
+    let sink = RecordingSink::default();
+    let ctx = TurnContext {
+        owner_id: "owner-a".into(),
+        turn_id: "turn-1".into(),
+        request,
+        provider: Arc::new(LeakyProvider),
+        sink: Arc::new(sink.clone()),
+        bridge: Arc::new(NoopBridge),
+        cancel_token: CancellationToken::new(),
+        expected: Arc::new(parking_lot::Mutex::new(
+            catio_lib::agent::ExpectedResponse::None,
+        )),
+    };
+    let err = TurnEngine.run(ctx).await.unwrap_err();
+    let message = err.to_string();
+    assert!(
+        !message.contains(secret),
+        "AgentError leaked the credential: {message}"
+    );
+    assert!(message.contains("[REDACTED]"));
+    // The terminal event serialization must be clean as well.
+    let failed = sink
+        .envelopes
+        .lock()
+        .iter()
+        .find_map(|e| match &e.event {
+            AgentEvent::TurnFailed { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .expect("turn must emit TurnFailed");
+    assert!(
+        !failed.contains(secret),
+        "TurnFailed event leaked the credential: {failed}"
+    );
+    assert_eq!(sink.terminal_types(), ["turnFailed"]);
+}
+
 #[tokio::test]
 async fn capability_error_after_fallback_does_not_reactivate() {
     let bridge = ScriptedBridge::succeed("ok");

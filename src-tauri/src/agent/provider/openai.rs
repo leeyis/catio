@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use crate::agent::provider::{
-    classify_error_response, Provider, ProviderError, ProviderObserver, ProviderRequest,
-    ProviderRound, ProviderStop,
+    classify_error_response, read_limited_body, Provider, ProviderError, ProviderObserver,
+    ProviderRequest, ProviderRound, ProviderStop, ERROR_BODY_LIMIT,
 };
 use crate::agent::types::{
     AgentMessage, AgentRole, ContentBlock, ProviderConfig, TokenUsage, ToolUse,
@@ -49,11 +49,10 @@ impl Provider for OpenAiProvider {
             .map_err(|e| ProviderError::Network(e.to_string()))?;
         let status = response.status();
         if status.is_client_error() || status.is_server_error() {
-            let body = response
-                .bytes()
+            let body = read_limited_body(response, ERROR_BODY_LIMIT)
                 .await
                 .map_err(|e| ProviderError::Network(e.to_string()))?;
-            return Err(classify_error_response(status, &body));
+            return Err(classify_error_response(status, &body, &self.config.credential));
         }
 
         let mut stream = response.bytes_stream();
