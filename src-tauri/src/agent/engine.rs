@@ -276,22 +276,28 @@ impl TurnEngine {
         let single_line = ctx.request.single_line_commands;
         let target = ctx.request.target_ref.clone();
 
-        // manual mode never advertises tools; deny and round cap disable them
-        // for exactly one tools-disabled synthesis.
-        let mut tools_disabled = matches!(mode, ExecutionMode::Manual);
-        let mut legacy_fallback = false;
+        // manual mode never advertises tools. A deny or the round cap forces
+        // exactly ONE tools-disabled final synthesis: that round may never
+        // request or execute a tool — native `ToolUse` and legacy fenced
+        // commands are both `toolsDisabledSynthesisViolated`.
+        let mut final_synthesis = false;
+        // Capability fallback: exactly one tools-disabled retry after
+        // `ToolsUnsupported`; the provider is then known to lack tools and
+        // the fallback never re-activates.
+        let mut legacy_mode = false;
         let mut used_rounds: u32 = 0;
 
         loop {
             if ctx.cancel_token.is_cancelled() {
                 return Err(AgentError::TurnCancelled);
             }
-            if used_rounds >= round_cap {
-                tools_disabled = true;
+            if !final_synthesis && used_rounds >= round_cap {
+                final_synthesis = true;
             }
             used_rounds += 1;
             let round_index = used_rounds - 1;
 
+            let tools_disabled = final_synthesis || legacy_mode || matches!(mode, ExecutionMode::Manual);
             let tools = if tools_disabled {
                 Vec::new()
             } else {
@@ -326,17 +332,20 @@ impl TurnEngine {
             .await
             {
                 Ok(round) => round,
-                Err(RoundOutcome::ProviderErr(ProviderError::ToolsUnsupported)) => {
+                Err(RoundOutcome::ProviderErr(ProviderError::ToolsUnsupported))
+                    if !final_synthesis && !legacy_mode =>
+                {
                     // Explicit legacy fallback: exactly one tools-disabled
-                    // retry of the current round; other errors never fall back.
+                    // retry of the current round. Capability errors on the
+                    // fallback retry, the final synthesis or any later round
+                    // never re-activate the fallback.
                     emitter
                         .emit(AgentEvent::CompatibilityFallbackActivated {
                             provider: "compatibility".into(),
                             reason: "toolsUnsupported".into(),
                         })
                         .await?;
-                    tools_disabled = true;
-                    legacy_fallback = true;
+                    legacy_mode = true;
                     let retry = ProviderRequest {
                         system_prompt: ctx.request.system_prompt.clone(),
                         messages: messages.clone(),
@@ -389,9 +398,11 @@ impl TurnEngine {
 
             // Legacy fallback: the retried round is plain markdown; the first
             // valid shell fence becomes a synthetic `terminal_exec` tool that
-            // flows through the exact same policy/bridge/result path.
+            // flows through the exact same policy/bridge/result path — except
+            // during the final synthesis, where any fenced command is a
+            // violation and must never be approved or executed.
             let mut synthetic_tool: Option<ToolUse> = None;
-            if legacy_fallback && tool_uses.is_empty() {
+            if legacy_mode && tool_uses.is_empty() {
                 let text: String = round
                     .message
                     .content
@@ -403,16 +414,32 @@ impl TurnEngine {
                     .collect();
                 let synthetic_id = format!("{}-{}-0", ctx.turn_id, round_index);
                 if let Ok(Some(tool)) = first_shell_tool(&text, single_line, &synthetic_id) {
+                    if final_synthesis {
+                        return Err(AgentError::ToolsDisabledSynthesisViolated(
+                            "fenced command during final synthesis".into(),
+                        ));
+                    }
                     synthetic_tool = Some(tool);
                 }
+            }
+
+            // The final synthesis is exactly one tools-disabled round whose
+            // answer is plain text; it ends the Turn either way.
+            if final_synthesis {
+                if !tool_uses.is_empty() || synthetic_tool.is_some() {
+                    return Err(AgentError::ToolsDisabledSynthesisViolated(
+                        "provider requested tools during the final synthesis".into(),
+                    ));
+                }
+                return Ok(());
             }
 
             if tool_uses.is_empty() && synthetic_tool.is_none() {
                 return Ok(());
             }
 
-            // A tools-disabled synthesis may carry the fallback's synthetic
-            // tool; anything else requesting tools is a violation.
+            // A tools-disabled (legacy-mode) round may carry the fallback's
+            // synthetic tool; anything else requesting tools is a violation.
             if tools_disabled && synthetic_tool.is_none() {
                 return Err(AgentError::ToolsDisabledSynthesisViolated(
                     "provider requested tools during tools-disabled synthesis".into(),
@@ -446,9 +473,10 @@ impl TurnEngine {
                 }
             }
 
-            // A denial allows exactly one tools-disabled final synthesis.
+            // A denial forces exactly one tools-disabled final synthesis;
+            // that round must not request or execute anything.
             if any_denied {
-                tools_disabled = true;
+                final_synthesis = true;
             }
         }
     }

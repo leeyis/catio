@@ -257,6 +257,46 @@ impl ScriptedProvider {
         }
     }
 
+    /// ToolsUnsupported once, then two fenced-markdown rounds: the retried
+    /// round may execute its fence; the NEXT round is the final synthesis
+    /// after a deny / round cap and must never execute another fence.
+    fn tools_unsupported_then_fences(first: &str, second: &str) -> Self {
+        Self {
+            rounds: Arc::new(Mutex::new(VecDeque::from([
+                ScriptedRound {
+                    round: text_round(first),
+                    deltas: vec![first.to_string()],
+                },
+                ScriptedRound {
+                    round: text_round(second),
+                    deltas: vec![second.to_string()],
+                },
+            ]))),
+            failures: Arc::new(Mutex::new(VecDeque::from([
+                ProviderError::ToolsUnsupported,
+            ]))),
+            requests: Arc::new(Mutex::new(Vec::new())),
+            pending_when_empty: false,
+        }
+    }
+
+    /// ToolsUnsupported on the first call, one fenced round, then
+    /// ToolsUnsupported AGAIN — proves the fallback never re-activates.
+    fn tools_unsupported_fence_then_unsupported(fenced: &str) -> Self {
+        Self {
+            rounds: Arc::new(Mutex::new(VecDeque::from([ScriptedRound {
+                round: text_round(fenced),
+                deltas: vec![fenced.to_string()],
+            }]))),
+            failures: Arc::new(Mutex::new(VecDeque::from([
+                ProviderError::ToolsUnsupported,
+                ProviderError::ToolsUnsupported,
+            ]))),
+            requests: Arc::new(Mutex::new(Vec::new())),
+            pending_when_empty: false,
+        }
+    }
+
     /// One tool round followed by an indefinitely blocked provider (used to
     /// keep a Turn alive after dispatch).
     fn tool_then_blocked(command: &str) -> Self {
@@ -533,6 +573,13 @@ impl RecordingSink {
         self.envelopes.lock().iter().map(|e| e.sequence).collect()
     }
 
+    fn count_type(&self, name: &str) -> usize {
+        self.event_types()
+            .iter()
+            .filter(|t| **t == name)
+            .count()
+    }
+
     fn terminal_count(&self) -> usize {
         self.event_types()
             .iter()
@@ -634,9 +681,9 @@ async fn run_test_turn(provider: ScriptedProvider, sink: RecordingSink) -> Resul
     run_turn_with(provider, sink, ExecutionMode::Ask).await
 }
 
-async fn run_tool_turn_with_provider(
+async fn run_tool_turn_with_provider<P: Provider + Send + Sync + 'static>(
     mode: ExecutionMode,
-    provider: ScriptedProvider,
+    provider: Arc<P>,
     bridge: ScriptedBridge,
     sink: RecordingSink,
 ) -> Result<(), AgentError> {
@@ -644,7 +691,7 @@ async fn run_tool_turn_with_provider(
         owner_id: "owner-a".into(),
         turn_id: "turn-1".into(),
         request: valid_request(mode),
-        provider: Arc::new(provider),
+        provider,
         sink: Arc::new(sink),
         bridge: Arc::new(bridge),
         cancel_token: CancellationToken::new(),
@@ -662,7 +709,7 @@ async fn run_tool_turn(
     sink: RecordingSink,
 ) -> Result<(), AgentError> {
     let provider = ScriptedProvider::tool_then_text(command, "done");
-    run_tool_turn_with_provider(mode, provider, bridge, sink).await
+    run_tool_turn_with_provider(mode, Arc::new(provider), bridge, sink).await
 }
 
 async fn run_text_turn_with_mode(
@@ -678,7 +725,7 @@ async fn run_invalid_tools_turn(
 ) -> Result<(), AgentError> {
     run_tool_turn_with_provider(
         ExecutionMode::Ask,
-        ScriptedProvider::invalid_tools(),
+        Arc::new(ScriptedProvider::invalid_tools()),
         bridge,
         sink,
     )
@@ -1002,7 +1049,7 @@ async fn denied_tool_gets_one_result_and_one_tools_disabled_synthesis() {
     let bridge = ScriptedBridge::deny();
     let provider = ScriptedProvider::tool_then_text("rm -rf /tmp/demo", "已取消执行。");
     let sink = RecordingSink::default();
-    run_tool_turn_with_provider(ExecutionMode::Ask, provider.clone(), bridge, sink.clone())
+    run_tool_turn_with_provider(ExecutionMode::Ask, Arc::new(provider.clone()), bridge, sink.clone())
         .await
         .unwrap();
     assert_eq!(provider.request_count(), 2);
@@ -1053,7 +1100,7 @@ async fn round_cap_reached_forces_tools_disabled_synthesis() {
     let bridge = ScriptedBridge::succeed("ok");
     let provider = ScriptedProvider::tool_rounds_then_text(5, "echo round", "final");
     let sink = RecordingSink::default();
-    run_tool_turn_with_provider(ExecutionMode::Ask, provider.clone(), bridge, sink.clone())
+    run_tool_turn_with_provider(ExecutionMode::Ask, Arc::new(provider.clone()), bridge, sink.clone())
         .await
         .unwrap();
     // 5 tool rounds + 1 tools-disabled synthesis = 6 provider requests.
@@ -1068,7 +1115,7 @@ async fn synthesis_requesting_tools_fails_turn() {
     let bridge = ScriptedBridge::deny();
     let provider = ScriptedProvider::tool_then_tool("rm -rf /tmp/demo", "echo again");
     let sink = RecordingSink::default();
-    let err = run_tool_turn_with_provider(ExecutionMode::Ask, provider, bridge, sink.clone())
+    let err = run_tool_turn_with_provider(ExecutionMode::Ask, Arc::new(provider), bridge, sink.clone())
         .await
         .unwrap_err();
     assert_eq!(err.code(), "toolsDisabledSynthesisViolated");
@@ -1080,7 +1127,7 @@ async fn provider_requests_carry_increasing_round_numbers() {
     let bridge = ScriptedBridge::succeed("ok");
     let provider = ScriptedProvider::tool_rounds_then_text(3, "echo round", "final");
     let sink = RecordingSink::default();
-    run_tool_turn_with_provider(ExecutionMode::Ask, provider.clone(), bridge, sink.clone())
+    run_tool_turn_with_provider(ExecutionMode::Ask, Arc::new(provider.clone()), bridge, sink.clone())
         .await
         .unwrap();
     assert_eq!(provider.request_count(), 4);
@@ -1212,7 +1259,7 @@ async fn compatibility_fallback_activates_for_tools_unsupported() {
     let bridge = ScriptedBridge::succeed("exit 0");
     let provider = ScriptedProvider::tools_unsupported_then_text("```sh\necho hi\n```", "done");
     let sink = RecordingSink::default();
-    run_tool_turn_with_provider(ExecutionMode::Ask, provider.clone(), bridge, sink.clone())
+    run_tool_turn_with_provider(ExecutionMode::Ask, Arc::new(provider.clone()), bridge, sink.clone())
         .await
         .unwrap();
     // 第一次请求带 tools 触发 ToolsUnsupported；重试不带 tools。
@@ -1255,4 +1302,121 @@ async fn generic_http_error_does_not_trigger_fallback() {
     assert!(!sink
         .event_types()
         .contains(&"compatibilityFallbackActivated"));
+}
+
+#[tokio::test]
+async fn legacy_deny_prevents_final_synthesis_fence_execution() {
+    let bridge = ScriptedBridge::deny();
+    let provider = ScriptedProvider::tools_unsupported_then_fences(
+        "```sh\nrm -rf /tmp/demo\n```",
+        "```sh\necho must-not-run\n```",
+    );
+    let sink = RecordingSink::default();
+    let err = run_tool_turn_with_provider(ExecutionMode::Ask, Arc::new(provider.clone()), bridge.clone(), sink.clone())
+        .await
+        .unwrap_err();
+    // The final synthesis after a deny must fail the turn: the fenced command
+    // is never approved, executed or re-synthesized.
+    assert_eq!(err.code(), "toolsDisabledSynthesisViolated");
+    assert_eq!(sink.terminal_types(), ["turnFailed"]);
+    // 1 tools round (ToolsUnsupported) + 1 legacy retry + 1 final synthesis.
+    assert_eq!(provider.request_count(), 3);
+    assert!(!provider.request(0).tools.is_empty());
+    assert!(provider.request(1).tools.is_empty());
+    assert!(provider.request(2).tools.is_empty());
+    // The pre-deny fence was proposed and denied exactly once; nothing after
+    // the deny may execute.
+    assert_eq!(bridge.approval_requests(), ["turn-1-0-0"]);
+    assert!(bridge.executions().is_empty());
+    assert_eq!(sink.count_type("toolStarted"), 0);
+    assert_eq!(sink.tool_finished_statuses(), [ToolResultStatus::Denied]);
+    assert_eq!(sink.count_type("compatibilityFallbackActivated"), 1);
+    assert_eq!(sink.terminal_count(), 1);
+}
+
+#[tokio::test]
+async fn legacy_round_cap_prevents_final_synthesis_fence_execution() {
+    let bridge = ScriptedBridge::succeed("ok");
+    let provider = ScriptedProvider::tools_unsupported_then_fences(
+        "```sh\necho first\n```",
+        "```sh\necho must-not-run\n```",
+    );
+    let sink = RecordingSink::default();
+    let mut request = valid_request(ExecutionMode::Ask);
+    request.round_cap = 1;
+    let ctx = TurnContext {
+        owner_id: "owner-a".into(),
+        turn_id: "turn-1".into(),
+        request,
+        provider: Arc::new(provider.clone()),
+        sink: Arc::new(sink.clone()),
+        bridge: Arc::new(bridge.clone()),
+        cancel_token: CancellationToken::new(),
+        expected: Arc::new(parking_lot::Mutex::new(
+            catio_lib::agent::ExpectedResponse::None,
+        )),
+    };
+    let err = TurnEngine.run(ctx).await.unwrap_err();
+    // Round cap reached: the ONE tools-disabled final synthesis must fail the
+    // turn instead of executing the fenced command.
+    assert_eq!(err.code(), "toolsDisabledSynthesisViolated");
+    assert_eq!(sink.terminal_types(), ["turnFailed"]);
+    assert_eq!(provider.request_count(), 3);
+    assert!(provider.request(2).tools.is_empty());
+    // Exactly one execution: the pre-cap legacy fence, never the post-cap one.
+    assert_eq!(bridge.executions(), ["turn-1-0-0"]);
+    assert_eq!(sink.count_type("toolStarted"), 1);
+    assert_eq!(sink.count_type("compatibilityFallbackActivated"), 1);
+    assert_eq!(sink.terminal_count(), 1);
+}
+
+/// Call 1: `ToolsUnsupported`; call 2: a fenced markdown round; later calls:
+/// `ToolsUnsupported` again — proves the fallback never re-activates on a
+/// capability error AFTER it already ran.
+#[derive(Clone)]
+struct FenceThenUnsupportedProvider {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+    requests: Arc<Mutex<Vec<ProviderRequest>>>,
+}
+
+#[async_trait]
+impl Provider for FenceThenUnsupportedProvider {
+    async fn complete(
+        &self,
+        request: ProviderRequest,
+        observer: &dyn ProviderObserver,
+    ) -> Result<ProviderRound, ProviderError> {
+        self.requests.lock().push(request.clone());
+        let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        match call {
+            0 => Err(ProviderError::ToolsUnsupported),
+            1 => {
+                let fenced = "```sh\necho hi\n```";
+                observer.text_delta(fenced);
+                Ok(text_round(fenced))
+            }
+            _ => Err(ProviderError::ToolsUnsupported),
+        }
+    }
+}
+
+#[tokio::test]
+async fn capability_error_after_fallback_does_not_reactivate() {
+    let bridge = ScriptedBridge::succeed("ok");
+    let provider = Arc::new(FenceThenUnsupportedProvider {
+        calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        requests: Arc::new(Mutex::new(Vec::new())),
+    });
+    let sink = RecordingSink::default();
+    let err = run_tool_turn_with_provider(ExecutionMode::Ask, provider.clone(), bridge.clone(), sink.clone())
+        .await
+        .unwrap_err();
+    // The retried round executed its fence; a LATER ToolsUnsupported must not
+    // re-trigger the fallback — it is a plain provider failure.
+    assert_eq!(err.code(), "toolsUnsupported");
+    assert_eq!(sink.terminal_types(), ["turnFailed"]);
+    assert_eq!(provider.requests.lock().len(), 3);
+    assert_eq!(sink.count_type("compatibilityFallbackActivated"), 1);
+    assert_eq!(bridge.executions(), ["turn-1-0-0"]);
+    assert_eq!(sink.terminal_count(), 1);
 }
