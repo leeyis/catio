@@ -403,3 +403,57 @@ it('abort cancels the backend turn and outcome-unknown shows a localized warning
   })
   await waitFor(() => expect(screen.getByText(/命令可能仍在目标终端运行/)).toBeInTheDocument())
 })
+
+interface RequestMessage { role: string; content: Array<{ type: string; text: string }> }
+
+it('sends the current user message as the last request message (new + existing conversations)', async () => {
+  localStorage.setItem('catio-agent-config', JSON.stringify({
+    provider: 'ollama', baseUrl: 'http://localhost:11434', apiKey: '',
+    anthropicAuthMode: 'api-key', model: 'llama3', executionMode: 'manual',
+  }))
+  wrap()
+  fireEvent.click(screen.getAllByText('新建连接')[0])
+  fireEvent.click(screen.getByText('主机 / 终端'))
+  const hostLabel = screen.getAllByText('主机').map(el => el.parentElement)
+    .find(parent => parent?.querySelector('input')) as HTMLElement
+  fireEvent.input(hostLabel.querySelector('input') as HTMLInputElement, { target: { value: 'edge-01' } })
+  fireEvent.click(screen.getByText('保存并连接'))
+  fireEvent.click(screen.getByTitle('Catio Agent · 跨终端与数据库'))
+
+  const composer = screen.getByPlaceholderText(/生成 shell 命令/) as HTMLTextAreaElement
+  fireEvent.change(composer, { target: { value: 'first message' } })
+  fireEvent.click(screen.getByTitle('发送'))
+  await waitFor(() => expect(agentOrder).toEqual(['subscribe', 'start']))
+
+  // New conversation: the outgoing request must carry the CURRENT user message
+  // as its last message — never the empty assistant placeholder.
+  const firstRequest = agentRuntimeMock.startAgentTurn.mock.calls[0][0] as { messages: RequestMessage[] }
+  const firstMessages = firstRequest.messages
+  expect(firstMessages[firstMessages.length - 1]).toEqual({
+    role: 'user',
+    content: [{ type: 'text', text: 'first message' }],
+  })
+  expect(firstMessages.some(m => m.role === 'assistant' && m.content.length === 0)).toBe(false)
+
+  // Settle turn 1 so a second send is accepted.
+  emitAgent(1, { type: 'turnStarted' })
+  emitAgent(2, { type: 'assistantMessageStarted', messageId: 'm0', round: 0 })
+  emitAgent(3, { type: 'textDelta', messageId: 'm0', delta: 'ok' })
+  emitAgent(4, { type: 'assistantMessageFinished', messageId: 'm0' })
+  emitAgent(5, { type: 'turnFinished' })
+  await waitFor(() => expect(screen.queryByTitle('停止')).toBeNull())
+
+  // Existing conversation: prior history + current user message, still no placeholder.
+  fireEvent.change(composer, { target: { value: 'second message' } })
+  fireEvent.click(screen.getByTitle('发送'))
+  await waitFor(() => expect(agentRuntimeMock.startAgentTurn).toHaveBeenCalledTimes(2))
+
+  const secondRequest = agentRuntimeMock.startAgentTurn.mock.calls[1][0] as { messages: RequestMessage[] }
+  const secondMessages = secondRequest.messages
+  expect(secondMessages[secondMessages.length - 1]).toEqual({
+    role: 'user',
+    content: [{ type: 'text', text: 'second message' }],
+  })
+  expect(secondMessages.some(m => m.role === 'user' && m.content[0]?.text === 'first message')).toBe(true)
+  expect(secondMessages.some(m => m.role === 'assistant' && m.content.length === 0)).toBe(false)
+})

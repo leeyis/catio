@@ -2031,7 +2031,12 @@ export default function App() {
 
       const request: AgentTurnRequest = {
         conversationId: convId,
-        messages: priorMessages,
+        // Prior history enters as text snapshots; the CURRENT user message is
+        // always the last request message (never the empty assistant placeholder).
+        messages: [
+          ...priorMessages,
+          { role: 'user', content: [{ type: 'text', text }] },
+        ],
         systemPrompt,
         terminalContext: termTail,
         targetRef: tab.kind === 'terminal' ? (terminalTarget?.chanId ?? '') : '',
