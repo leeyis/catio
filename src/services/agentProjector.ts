@@ -3,7 +3,7 @@
 //! next state and at most one effect (approval request, tool dispatch, warning,
 //! or turn settled).
 
-import { isAgentEventEnvelope, type AgentEventEnvelope } from './agentRuntime'
+import { isAgentEventEnvelope } from './agentRuntime'
 
 export interface AgentProjectorState {
   /** Last accepted sequence per turn (strictly increasing). */

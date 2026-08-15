@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { projectAgentEvent, type AgentEventEnvelope, type AgentProjectorState } from './agentProjector'
+import { projectAgentEvent, type AgentProjectorState } from './agentProjector'
+import type { AgentEventEnvelope } from './agentRuntime'
 
 function env(turnId: string, sequence: number, event: AgentEventEnvelope['event']): AgentEventEnvelope {
   return { ownerId: 'local', conversationId: 'conv-1', turnId, sequence, event }
