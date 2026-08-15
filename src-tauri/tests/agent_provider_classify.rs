@@ -47,6 +47,63 @@ fn explicit_tools_capability_error_classifies_as_tools_unsupported() {
 }
 
 #[test]
+fn server_errors_never_become_tools_unsupported_even_with_capability_body() {
+    // 5xx means the service is broken or the gateway failed: the body must
+    // never turn it into a capability error (and never trigger fallback).
+    for status in [
+        StatusCode::INTERNAL_SERVER_ERROR,
+        StatusCode::BAD_GATEWAY,
+        StatusCode::SERVICE_UNAVAILABLE,
+        StatusCode::GATEWAY_TIMEOUT,
+    ] {
+        let err = classify_error_response(status, &body_with_tool_error());
+        assert!(
+            !matches!(err, ProviderError::ToolsUnsupported),
+            "status {status} with a tools-unsupported body must stay Http, got {err:?}"
+        );
+        assert!(
+            matches!(err, ProviderError::Http(_)),
+            "status {status} must be ProviderError::Http, got {err:?}"
+        );
+    }
+}
+
+#[test]
+fn generic_client_errors_never_become_tools_unsupported() {
+    // Only a small, explicit capability status set may signal
+    // ToolsUnsupported; every other client status is a transport failure even
+    // when the body says "tools not supported".
+    let body = body_with_tool_error();
+    let capability_bodies: Vec<(StatusCode, &[u8])> = vec![
+        (StatusCode::CONFLICT, &body),
+        (StatusCode::NOT_ACCEPTABLE, &body),
+        (StatusCode::UNPROCESSABLE_ENTITY, &body),
+        (StatusCode::BAD_REQUEST, &body),
+    ];
+    // 400 with an explicit capability body IS the capability case (below);
+    // the others must stay Http.
+    for (status, body) in capability_bodies {
+        if status == StatusCode::BAD_REQUEST {
+            continue;
+        }
+        let err = classify_error_response(status, body);
+        assert!(
+            matches!(err, ProviderError::Http(_)),
+            "status {status} must stay ProviderError::Http, got {err:?}"
+        );
+    }
+    // A 400 body that mentions tools but is NOT an explicit capability signal
+    // stays Http as well (no speculative fallback).
+    assert!(matches!(
+        classify_error_response(
+            StatusCode::BAD_REQUEST,
+            br#"{"error":"tool arguments must be valid JSON"}"#
+        ),
+        ProviderError::Http(_)
+    ));
+}
+
+#[test]
 fn generic_errors_never_fall_back() {
     let bodies: Vec<&[u8]> = vec![
         b"internal server error",

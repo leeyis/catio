@@ -96,16 +96,21 @@ const ERROR_BODY_LIMIT: usize = 4096;
 
 /// Shared HTTP error classification across the three production adapters.
 ///
-/// Only an explicit, testable "tools not supported" capability response
-/// becomes `ToolsUnsupported` (the sole trigger for the legacy fallback).
-/// Auth, rate-limit, generic 4xx/5xx and malformed bodies never fall back.
-/// Error bodies are length-limited and only ever read from the response —
-/// never constructed from the request credential.
+/// Only an explicit capability status (a small, closed set of client
+/// statuses) COMBINED with an explicit "tools not supported" body becomes
+/// `ToolsUnsupported` (the sole trigger for the legacy fallback). 5xx and all
+/// other 4xx are transport failures even when the body mentions tools; auth,
+/// rate-limit and malformed bodies never fall back. Error bodies are
+/// length-limited and only ever read from the response — never constructed
+/// from the request credential.
 pub fn classify_error_response(status: reqwest::StatusCode, body: &[u8]) -> ProviderError {
     match status.as_u16() {
         401 | 403 => ProviderError::Auth,
         429 => ProviderError::RateLimit,
-        code => {
+        // Explicit capability statuses: providers signal "tool use not
+        // enabled for this model/deployment" with exactly these client
+        // statuses. Everything else stays a transport failure.
+        code @ (400 | 404) => {
             let limited: String =
                 String::from_utf8_lossy(&body[..body.len().min(ERROR_BODY_LIMIT)]).into();
             if looks_like_tools_unsupported(limited.as_bytes()) {
@@ -113,6 +118,11 @@ pub fn classify_error_response(status: reqwest::StatusCode, body: &[u8]) -> Prov
             } else {
                 ProviderError::Http(format!("status {code}: {}", redact_credentials(&limited)))
             }
+        }
+        code => {
+            let limited: String =
+                String::from_utf8_lossy(&body[..body.len().min(ERROR_BODY_LIMIT)]).into();
+            ProviderError::Http(format!("status {code}: {}", redact_credentials(&limited)))
         }
     }
 }
