@@ -27,6 +27,10 @@ pub struct ProviderRequest {
     pub target_ref: String,
     pub execution_mode: crate::agent::types::ExecutionMode,
     pub single_line_commands: bool,
+    /// Zero-based provider round within the Turn. Adapters use it for stable
+    /// synthetic identifiers (e.g. Ollama tool ids `ollama-{round}-{index}`);
+    /// it always comes from the engine, never hard-coded.
+    pub round: u32,
 }
 
 /// Streaming observer receiving deltas as the provider produces them.

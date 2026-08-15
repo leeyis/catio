@@ -26,6 +26,7 @@ fn request() -> ProviderRequest {
         target_ref: "target-1".into(),
         execution_mode: ExecutionMode::Ask,
         single_line_commands: true,
+        round: 0,
     }
 }
 
@@ -85,6 +86,16 @@ fn synthetic_ids_include_round_number() {
             },
         ]
     );
+}
+
+#[test]
+fn synthetic_tool_id_format_is_round_and_index() {
+    // Production seam: the decoder and the wire path share this ID generator,
+    // so a synthetic id is always `ollama-{round}-{index}` — never round 0.
+    use catio_lib::agent::provider::ollama::synthetic_tool_id;
+    assert_eq!(synthetic_tool_id(0, 0), "ollama-0-0");
+    assert_eq!(synthetic_tool_id(2, 0), "ollama-2-0");
+    assert_eq!(synthetic_tool_id(5, 3), "ollama-5-3");
 }
 
 #[test]
@@ -182,6 +193,7 @@ fn encode_request_preserves_full_assistant_message_and_tool_results() {
         target_ref: "target-1".into(),
         execution_mode: ExecutionMode::Ask,
         single_line_commands: true,
+        round: 0,
     };
     let body = encode_chat_request(&provider_request, "llama3");
     assert_eq!(body["model"], "llama3");

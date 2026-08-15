@@ -26,6 +26,7 @@ fn text_request() -> ProviderRequest {
         target_ref: "target-1".into(),
         execution_mode: ExecutionMode::Ask,
         single_line_commands: true,
+        round: 0,
     }
 }
 
@@ -171,6 +172,7 @@ fn encode_request_body_matches_openai_wire_shape() {
         target_ref: "target-1".into(),
         execution_mode: ExecutionMode::Ask,
         single_line_commands: true,
+        round: 0,
     };
     let body = encode_chat_request(&request, "model-x");
     assert_eq!(body["model"], "model-x");

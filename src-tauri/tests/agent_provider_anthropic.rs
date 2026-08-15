@@ -27,6 +27,7 @@ fn request() -> ProviderRequest {
         target_ref: "target-1".into(),
         execution_mode: ExecutionMode::Ask,
         single_line_commands: true,
+        round: 0,
     }
 }
 
@@ -302,6 +303,7 @@ fn encode_request_separates_system_and_pairs_tool_results() {
         target_ref: "target-1".into(),
         execution_mode: ExecutionMode::Ask,
         single_line_commands: true,
+        round: 0,
     };
     let body = encode_messages_request(&provider_request, "claude-x");
     assert_eq!(body["model"], "claude-x");

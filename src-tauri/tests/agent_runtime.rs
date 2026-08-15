@@ -1011,6 +1011,19 @@ async fn synthesis_requesting_tools_fails_turn() {
     assert_eq!(sink.terminal_types(), ["turnFailed"]);
 }
 
+#[tokio::test]
+async fn provider_requests_carry_increasing_round_numbers() {
+    let bridge = ScriptedBridge::succeed("ok");
+    let provider = ScriptedProvider::tool_rounds_then_text(3, "echo round", "final");
+    let sink = RecordingSink::default();
+    run_tool_turn_with_provider(ExecutionMode::Ask, provider.clone(), bridge, sink.clone())
+        .await
+        .unwrap();
+    assert_eq!(provider.request_count(), 4);
+    let rounds: Vec<u32> = (0..4).map(|i| provider.request(i).round).collect();
+    assert_eq!(rounds, [0, 1, 2, 3]);
+}
+
 // ---------------------------------------------------------------------------
 // Explicit legacy fallback (ToolsUnsupported only)
 // ---------------------------------------------------------------------------

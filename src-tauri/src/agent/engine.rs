@@ -199,6 +199,7 @@ impl TurnEngine {
                 tools_disabled = true;
             }
             used_rounds += 1;
+            let round_index = used_rounds - 1;
 
             let tools = if tools_disabled {
                 Vec::new()
@@ -212,9 +213,9 @@ impl TurnEngine {
                 target_ref: target.clone(),
                 execution_mode: mode,
                 single_line_commands: single_line,
+                round: round_index,
             };
 
-            let round_index = used_rounds - 1;
             let message_id = format!("{}-m{}", ctx.turn_id, round_index);
             emitter
                 .emit(AgentEvent::AssistantMessageStarted {
@@ -248,6 +249,7 @@ impl TurnEngine {
                         target_ref: target.clone(),
                         execution_mode: mode,
                         single_line_commands: single_line,
+                        round: round_index,
                     };
                     match ctx.provider.complete(retry, &observer).await {
                         Ok(round) => round,

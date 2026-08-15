@@ -61,9 +61,16 @@ impl Provider for OllamaProvider {
                 }
             }
         }
-        let decoded = decoder.finish(request_round(&request))?;
+        let decoded = decoder.finish(request.round)?;
         Ok(decoded.into_round())
     }
+}
+
+/// Stable synthetic tool-use id for Ollama (which never emits ids). The round
+/// comes from the engine's `ProviderRequest`, so ids are unique across rounds:
+/// `ollama-{round}-{index}`.
+pub fn synthetic_tool_id(round: u32, index: usize) -> String {
+    format!("ollama-{round}-{index}")
 }
 
 /// HTTP error classification: auth/rate-limit/generic http.
@@ -73,12 +80,6 @@ fn classify_http_error(status: reqwest::StatusCode) -> ProviderError {
         429 => ProviderError::RateLimit,
         code => ProviderError::Http(format!("status {code}")),
     }
-}
-
-/// The engine has no round counter on the wire; default to round 0 for
-/// synthetic IDs. (The pure decoder is the tested seam for explicit rounds.)
-fn request_round(_request: &ProviderRequest) -> u32 {
-    0
 }
 
 /// Pure request encoder preserving the full assistant message fields and
@@ -252,7 +253,7 @@ impl OllamaDecoder {
                 ));
             }
             content.push(ContentBlock::ToolUse {
-                id: format!("ollama-{round}-{index}"),
+                id: synthetic_tool_id(round, index),
                 name,
                 input,
             });
