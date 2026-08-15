@@ -977,6 +977,7 @@ dependencies = [
  "ipnet",
  "mongodb",
  "mysql_async",
+ "parking_lot",
  "portable-pty",
  "rand 0.10.1",
  "redis",
