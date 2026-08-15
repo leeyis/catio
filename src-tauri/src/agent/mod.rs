@@ -3,8 +3,12 @@
 //!
 //! This module is the only public surface for the Rust agent engine.
 
+pub mod legacy;
+pub mod policy;
 pub mod types;
 
+pub use legacy::{first_shell_tool, LegacyParseError};
+pub use policy::{PolicyDecision, ToolPolicy, ToolRisk};
 pub use types::{
     ActorContext, AgentError, AgentEvent, AgentEventEnvelope, AgentMessage, AgentRole,
     ApiCredential, ApprovalDecision, ClientTurnResponse, ContentBlock, ExecutionMode,

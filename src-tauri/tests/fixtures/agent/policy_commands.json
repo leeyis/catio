@@ -1,0 +1,16 @@
+[
+  {"command": "ls -la", "sensitive": false, "reasons": []},
+  {"command": "rm -rf /tmp/demo", "sensitive": true, "reasons": ["fileDelete"]},
+  {"command": "mv ./build /opt/app", "sensitive": true, "reasons": ["fileMove"]},
+  {"command": "dd if=/dev/zero of=/dev/sda", "sensitive": true, "reasons": ["diskWrite"]},
+  {"command": "shutdown -h now", "sensitive": true, "reasons": ["power"]},
+  {"command": "kill 1234", "sensitive": true, "reasons": ["kill"]},
+  {"command": "docker compose down", "sensitive": true, "reasons": ["service"]},
+  {"command": "chmod -R 777 /opt/app", "sensitive": true, "reasons": ["chmodR"]},
+  {"command": ":(){ :|:& };:", "sensitive": true, "reasons": ["forkbomb"]},
+  {"command": "echo broken > /etc/hosts", "sensitive": true, "reasons": ["overwrite"]},
+  {"command": "DROP TABLE users", "sensitive": true, "reasons": ["dbDrop"]},
+  {"command": "terraform destroy", "sensitive": true, "reasons": ["infra"]},
+  {"command": "git reset --hard HEAD~1", "sensitive": true, "reasons": ["gitDestructive"]},
+  {"command": "cat ~/.ssh/id_rsa", "sensitive": true, "reasons": ["secretAccess"]}
+]
