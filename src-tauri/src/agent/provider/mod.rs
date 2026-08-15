@@ -3,6 +3,8 @@
 
 use async_trait::async_trait;
 
+pub mod openai;
+
 use crate::agent::types::{AgentMessage, TokenUsage, ToolSpec};
 
 /// Provider-neutral request for one completion round.
