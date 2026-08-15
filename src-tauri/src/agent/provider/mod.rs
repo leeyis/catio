@@ -111,10 +111,7 @@ pub fn classify_error_response(status: reqwest::StatusCode, body: &[u8]) -> Prov
             if looks_like_tools_unsupported(limited.as_bytes()) {
                 ProviderError::ToolsUnsupported
             } else {
-                ProviderError::Http(format!(
-                    "status {code}: {}",
-                    redact_credentials(&limited)
-                ))
+                ProviderError::Http(format!("status {code}: {}", redact_credentials(&limited)))
             }
         }
     }

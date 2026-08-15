@@ -943,7 +943,8 @@ async fn text_delta_is_emitted_before_completion_releases() {
     // The provider has produced a delta and is still blocked inside `complete`:
     // the delta must already be on the sink (real-time streaming).
     emitted.await;
-    sink.wait_for(|s| s.event_types().contains(&"textDelta")).await;
+    sink.wait_for(|s| s.event_types().contains(&"textDelta"))
+        .await;
     assert_eq!(
         sink.event_types(),
         ["turnStarted", "assistantMessageStarted", "textDelta"]
@@ -1165,9 +1166,7 @@ impl Provider for FallbackBlockingProvider {
         _request: ProviderRequest,
         _observer: &dyn ProviderObserver,
     ) -> Result<ProviderRound, ProviderError> {
-        let call = self
-            .calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if call == 0 {
             Err(ProviderError::ToolsUnsupported)
         } else {

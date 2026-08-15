@@ -75,7 +75,11 @@ fn error_body_is_length_limited_and_credentials_are_not_leaked() {
     // A huge body: the capability signal is inside the first 4096 bytes so
     // classification works; the trailing credential spam must never leak.
     let mut huge = br#"{"error":"tools not supported"}"#.to_vec();
-    huge.extend_from_slice(b"CREDENTIAL=sk-super-secret-value-1234567890;".repeat(10_000).as_slice());
+    huge.extend_from_slice(
+        b"CREDENTIAL=sk-super-secret-value-1234567890;"
+            .repeat(10_000)
+            .as_slice(),
+    );
     match classify_error_response(StatusCode::BAD_REQUEST, &huge) {
         ProviderError::ToolsUnsupported => {}
         other => panic!("expected ToolsUnsupported, got {other:?}"),
@@ -92,7 +96,10 @@ fn error_body_is_length_limited_and_credentials_are_not_leaked() {
                 "error body must be length-limited, got {} chars",
                 message.len()
             );
-            assert!(!message.contains("sk-super-secret"), "credential leaked: {message}");
+            assert!(
+                !message.contains("sk-super-secret"),
+                "credential leaked: {message}"
+            );
         }
         other => panic!("expected Http error, got {other:?}"),
     }

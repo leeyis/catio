@@ -18,8 +18,8 @@ use crate::agent::policy::{PolicyDecision, ToolPolicy};
 use crate::agent::provider::{Provider, ProviderError, ProviderRequest, ProviderRound};
 use crate::agent::types::{
     AgentError, AgentEvent, AgentEventEnvelope, AgentMessage, ApprovalDecision, ContentBlock,
-    ExecutionMode, ExpectedResponse, StartTurnRequest, ToolExecutionOutcome,
-    ToolExecutionStatus, ToolResult, ToolResultStatus, ToolSpec, ToolUse,
+    ExecutionMode, ExpectedResponse, StartTurnRequest, ToolExecutionOutcome, ToolExecutionStatus,
+    ToolResult, ToolResultStatus, ToolSpec, ToolUse,
 };
 
 /// The only structured tool supported by P0.
@@ -346,19 +346,11 @@ impl TurnEngine {
                         single_line_commands: single_line,
                         round: round_index,
                     };
-                    match Self::complete_round_live(
-                        ctx,
-                        emitter,
-                        &message_id,
-                        &observer,
-                        retry,
-                    )
-                    .await
+                    match Self::complete_round_live(ctx, emitter, &message_id, &observer, retry)
+                        .await
                     {
                         Ok(round) => round,
-                        Err(RoundOutcome::ProviderErr(err)) => {
-                            return Err(map_provider_error(err))
-                        }
+                        Err(RoundOutcome::ProviderErr(err)) => return Err(map_provider_error(err)),
                         Err(RoundOutcome::Engine(err)) => return Err(err),
                     }
                 }

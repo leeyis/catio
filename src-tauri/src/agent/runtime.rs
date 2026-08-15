@@ -237,8 +237,8 @@ mod tests {
         ProviderError, ProviderObserver, ProviderRequest, ProviderRound, ProviderStop,
     };
     use crate::agent::types::{
-        AgentEvent, AgentEventEnvelope, AgentMessage, AgentRole, AnthropicAuthMode,
-        ApiCredential, ContentBlock, ExecutionMode, ProviderProtocol,
+        AgentEvent, AgentEventEnvelope, AgentMessage, AgentRole, AnthropicAuthMode, ApiCredential,
+        ContentBlock, ExecutionMode, ProviderProtocol,
     };
     use std::sync::Weak;
 
@@ -295,7 +295,9 @@ mod tests {
             Ok(ProviderRound {
                 message: AgentMessage {
                     role: AgentRole::Assistant,
-                    content: vec![ContentBlock::Text { text: "done".into() }],
+                    content: vec![ContentBlock::Text {
+                        text: "done".into(),
+                    }],
                 },
                 stop: ProviderStop::Stop,
                 usage: None,
