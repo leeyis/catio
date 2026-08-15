@@ -3,7 +3,7 @@
 > 研究日期：2026-08-15  
 > Hermes 基线：[`bdd400deb8ba56e30c87b6916348db73f828aded`](https://github.com/leeyis/small-rust-hermes-v3/tree/bdd400deb8ba56e30c87b6916348db73f828aded)（仓库 `main` 在研究时的 HEAD）  
 > Catio 基线：[`3adf8d984f54f6bfc01f3c7716a8e70bfa605f28`](https://github.com/leeyis/catio/tree/3adf8d984f54f6bfc01f3c7716a8e70bfa605f28)  
-> 资料范围：Hermes README、Cargo manifests、Rust 源码、许可证、提交历史；该仓库关闭了 GitHub Issues，研究时没有可用 issue。本文以 Agent 后端执行逻辑为主，同时评估 Catio 后续技能/记忆入口所需的架构预留；反思和自我进化不在当前范围。
+> 资料范围：Hermes README、Cargo manifests、Rust 源码、许可证、提交历史；该仓库关闭了 GitHub Issues，研究时没有可用 issue。本文以 Agent 后端执行逻辑为主，同时评估 Catio 后续技能、记忆、反思与受控技能演进所需的架构预留。
 
 ## 结论
 
@@ -164,7 +164,7 @@ Rust engine 通过现有 Tauri command/event 与 server WS 暴露，再由兼容
 - 权限键至少包含 `owner_id + target_id + tool + normalized_scope`；deny 永远优先。
 - shell 仍默认 confirmation；只给真正结构化的只读工具 auto-allow。
 - SQLite event/audit log 分开保存 transcript、执行意图、审批人、结果摘要；terminal output 做限长、secret redaction 和 retention。
-- 技能和记忆的 owner scope、数据来源和命中理由必须进入审计信息；反思、自我进化和 subagent 仍暂缓，它们不是当前 shell loop 的必要优化。
+- 技能和记忆的 owner scope、数据来源和命中理由必须进入审计信息；反思与技能演进安排在 turn engine 和知识模块之后，subagent 仍暂缓。
 
 成功标准：两个 server 用户无法读取、取消、确认或复用对方的 turn/session/tool approval；crash 重启后能区分 completed、failed、cancelled 和 outcome-unknown。
 
@@ -178,6 +178,16 @@ Hermes 已经把两类能力分别建模为 `SkillStore` 与 `MemoryStore`。前
 
 成功标准：技能/记忆面板可以独立使用；关闭自动注入后 Agent 行为与 P0 完全一致；每个 turn 能重放当时实际使用的知识快照，而不会被后续编辑悄然改变。
 
+### P4：异步反思与用户审核的技能演进
+
+Catio 后续应从已验证的问题解决过程提炼经验，例如数据库巡检、服务器巡检和产品安装。采用混合触发：系统在成功且具有复用价值的 turn 后异步建议沉淀，用户也可从 Agent、历史或技能界面手动触发。两种入口都只生成候选技能；候选必须由用户审核后发布，不能静默进入 Agent 的可用技能集合。
+
+技能同时支持通用和目标专属作用域。系统优先将主机、路径、数据库和版本等转换为参数；不能安全泛化的内容绑定原目标。发布技能只表示用户认可流程内容，不代表授予其中工具的执行权限，每次使用仍经过现有权限、敏感命令确认和目标范围校验。
+
+反思管线使用不可变 turn event snapshot，依次完成结果验证、脱敏、参数化和已有技能匹配。没有相似项时生成 `CandidateSkill`；命中现有技能时生成带 diff 的 `CandidateRevision`。失败、取消或结果未知的经历可以进入记忆，但不能自动形成技能。完整设计见 [`2026-08-15-reflection-skill-evolution-design.md`](../superpowers/specs/2026-08-15-reflection-skill-evolution-design.md)。
+
+成功标准：只有具备验证证据的自动候选可以进入审核队列；只有已发布版本参与 Agent 检索；所有来源、审核、版本与实际使用可追溯；关闭反思后基础 turn engine 行为不变。
+
 ## 8. 不建议采用的内容
 
 | Hermes 设计 | 判断 | 原因 |
@@ -190,7 +200,7 @@ Hermes 已经把两类能力分别建模为 `SkillStore` 与 `MemoryStore`。前
 | 单 bearer token + global `AppState` | 不采用 | 无 owner 隔离，token query/log 泄露面，不满足 Catio server mode。 |
 | 全局按 tool name `AlwaysAllow` | 不采用 | scope 过宽，应绑定用户、目标和规范化参数范围。 |
 | skills / memory | 后续阶段选择性采用 | 两者已有明确的平级 UI 入口规划；可吸收独立 store/relevance 思想，但需补 owner scope、SQLite repository、命中解释与快照审计，且不能耦合进 turn loop。 |
-| reflection / self-evolution | 暂不采用 | 与执行可靠性无直接关系，带来额外隐私、注入和长期状态风险。 |
+| reflection / skill evolution | 后续阶段受控采用 | 使用异步反思、secret redaction、不可变快照和用户审核形成候选技能或候选修订；禁止静默发布和隐式权限升级。 |
 
 ## 9. 验证与成熟度备注
 
@@ -201,4 +211,4 @@ Hermes 已经把两类能力分别建模为 `SkillStore` 与 `MemoryStore`。前
 
 ## 最终建议
 
-把 Hermes 当作**可选择性吸收的后端实现来源**，而不是整体运行时。Catio 下一轮 Agent 优化的最小正确切片应是：保持现有 UI 不变，在 `src-tauri` 新建一个 provider-neutral turn engine，先支持单个 structured `terminal_exec` tool，把 current `AbortController`、PTY capture、busy/split、敏感命令确认能力接入 Rust event loop，再用兼容 adapter 把 typed events 投影到当前 conversation UI。技能与记忆作为后续独立模块，在现有片段库/历史区域增加平级入口，并经 `Context Assembler` 向 turn 提供可审计的不可变快照；第一阶段只预留这条 seam，不提前把 memory、reflection 或 Hermes GUI 耦合进执行内核。
+把 Hermes 当作**可选择性吸收的后端实现来源**，而不是整体运行时。Catio 下一轮 Agent 优化的最小正确切片应是：保持现有 UI 不变，在 `src-tauri` 新建一个 provider-neutral turn engine，先支持单个 structured `terminal_exec` tool，把 current `AbortController`、PTY capture、busy/split、敏感命令确认能力接入 Rust event loop，再用兼容 adapter 把 typed events 投影到当前 conversation UI。技能与记忆作为后续独立模块，在现有片段库/历史区域增加平级入口，并经 `Context Assembler` 向 turn 提供可审计的不可变快照；反思与技能演进再以异步、可关闭的外围管线接入，所有候选必须由用户审核发布。第一阶段只预留这些 seam，不提前把 memory、reflection 或 Hermes GUI 耦合进执行内核。
