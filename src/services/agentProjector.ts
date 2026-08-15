@@ -38,6 +38,13 @@ export type AgentProjectionEffect =
 export interface AgentProjection {
   state: AgentProjectorState
   effects: AgentProjectionEffect[]
+  /**
+   * True when the envelope was accepted into the projection (its event
+   * mutated state). Malformed, duplicate and gapped envelopes are NOT
+   * accepted; callers must not apply their event payload to conversations or
+   * tool routing, but MUST still run `effects` (e.g. the order warning).
+   */
+  accepted: boolean
 }
 
 type Diagnostic = (message: string) => void
@@ -67,19 +74,23 @@ export function projectAgentEvent(
 ): AgentProjection {
   if (!isAgentEventEnvelope(envelope)) {
     onDiagnostic('agent: malformed envelope dropped')
-    return { state, effects: [] }
+    return { state, effects: [], accepted: false }
   }
   const { turnId, sequence, event } = envelope
   const last = state.lastSequenceByTurn[turnId] ?? 0
   if (sequence <= last) {
     // Duplicate/out-of-order: never re-run effects.
-    return { state, effects: [] }
+    return { state, effects: [], accepted: false }
   }
   if (sequence > last + 1) {
     onDiagnostic(`agent: sequence gap for turn ${turnId}: ${last} -> ${sequence}`)
     const next = nextState(state)
     next.lastSequenceByTurn[turnId] = sequence
-    return { state: next, effects: [{ type: 'showWarning', code: 'agentEventOrder' }] }
+    return {
+      state: next,
+      effects: [{ type: 'showWarning', code: 'agentEventOrder' }],
+      accepted: false,
+    }
   }
 
   const next = nextState(state)
@@ -126,7 +137,7 @@ export function projectAgentEvent(
       break
   }
 
-  return { state: next, effects }
+  return { state: next, effects, accepted: true }
 }
 
 /** True when the event terminates its turn. */

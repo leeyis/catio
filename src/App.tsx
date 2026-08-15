@@ -1882,9 +1882,21 @@ export default function App() {
     if (!entry) return
 
     const prev = agentProjection.current[turnId] ?? initialProjectorState
-    const { state, effects } = projectAgentEvent(prev, envelope, () =>
+    const { state, effects, accepted } = projectAgentEvent(prev, envelope, () =>
       diagnosticLog({ level: 'warn', area: 'agent', event: 'projection-error', source: 'agent-capture' }))
     agentProjection.current[turnId] = state
+
+    if (!accepted) {
+      // Rejected envelope (malformed/duplicate/gap): only its warning effects
+      // run; the raw event payload must never touch the conversation or tool
+      // routing.
+      for (const effect of effects) {
+        if (effect.type === 'showWarning') {
+          appendAgentRunWarning(conversationId, t(`panels.${effect.code}`))
+        }
+      }
+      return
+    }
 
     // Streaming text lands in the conversation's trailing assistant message.
     if (event.type === 'assistantMessageStarted') {
@@ -1910,7 +1922,7 @@ export default function App() {
       return
     }
     if (event.type === 'toolProposed') {
-      agentToolInputs.current[event.toolUseId] = event.input
+      agentToolInputs.current[`${turnId}:${event.toolUseId}`] = event.input
       return
     }
 
@@ -1920,7 +1932,7 @@ export default function App() {
           void cancelAgentTurn(turnId).catch(() => {})
           continue
         }
-        const input = agentToolInputs.current[effect.toolUseId]
+        const input = agentToolInputs.current[`${turnId}:${effect.toolUseId}`]
         const command = (input as { command?: string } | undefined)?.command ?? ''
         const allowed = await requestAgentRunPermission(entry.hostName, command, entry.controller.signal)
         if (entry.controller.signal.aborted) continue
@@ -1975,6 +1987,10 @@ export default function App() {
         }
         delete activeAgentTurn.current[turnId]
         delete agentProjection.current[turnId]
+        // Memory hygiene: drop this turn's tool-input snapshots once settled.
+        for (const key of Object.keys(agentToolInputs.current)) {
+          if (key.startsWith(`${turnId}:`)) delete agentToolInputs.current[key]
+        }
       }
     }
   }

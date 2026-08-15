@@ -38,6 +38,7 @@ vi.mock('../src/services/terminalCapture', () => ({
 // Records whether subscribe completed before start (the required ordering).
 const agentOrder: string[] = []
 let agentEventHandler: ((payload: unknown) => void) | null = null
+let turnCounter = 0
 
 beforeEach(() => {
   localStorage.clear()
@@ -47,6 +48,7 @@ beforeEach(() => {
   agentRuntimeMock.cancelAgentTurn.mockReset()
   agentOrder.length = 0
   agentEventHandler = null
+  turnCounter = 0
   agentRuntimeMock.subscribeAgentEvents.mockImplementation(async handler => {
     agentOrder.push('subscribe')
     agentEventHandler = handler
@@ -54,7 +56,8 @@ beforeEach(() => {
   })
   agentRuntimeMock.startAgentTurn.mockImplementation(async () => {
     agentOrder.push('start')
-    return { turnId: 'turn-1' }
+    turnCounter += 1
+    return { turnId: `turn-${turnCounter}` }
   })
   agentRuntimeMock.respondToAgentTurn.mockResolvedValue(undefined)
   agentRuntimeMock.cancelAgentTurn.mockResolvedValue(undefined)
@@ -68,11 +71,17 @@ function currentConversationId(): string {
   return convs[0].id
 }
 
-function emitAgent(sequence: number, event: unknown): void {
+function conversationIdAt(index: number): string {
+  const raw = localStorage.getItem('catio-conversations') ?? '[]'
+  const convs = JSON.parse(raw) as Array<{ id: string }>
+  return convs[index].id
+}
+
+function emitAgent(sequence: number, event: unknown, turnId = 'turn-1', conversationId?: string): void {
   agentEventHandler?.({
     ownerId: 'local',
-    conversationId: currentConversationId(),
-    turnId: 'turn-1',
+    conversationId: conversationId ?? currentConversationId(),
+    turnId,
     sequence,
     event,
   })
@@ -487,4 +496,122 @@ it('drops malformed envelopes before they touch the conversation', async () => {
   // Exactly one assistant message, fed only by the valid deltas.
   expect(assistant).toHaveLength(1)
   expect(assistant[0].content).toBe('ok')
+})
+
+it('ignores duplicate text deltas without double-appending', async () => {
+  localStorage.setItem('catio-agent-config', JSON.stringify({
+    provider: 'ollama', baseUrl: 'http://localhost:11434', apiKey: '',
+    anthropicAuthMode: 'api-key', model: 'llama3', executionMode: 'manual',
+  }))
+  wrap()
+  fireEvent.click(screen.getAllByText('新建连接')[0])
+  fireEvent.click(screen.getByText('主机 / 终端'))
+  const hostLabel = screen.getAllByText('主机').map(el => el.parentElement)
+    .find(parent => parent?.querySelector('input')) as HTMLElement
+  fireEvent.input(hostLabel.querySelector('input') as HTMLInputElement, { target: { value: 'edge-01' } })
+  fireEvent.click(screen.getByText('保存并连接'))
+  fireEvent.click(screen.getByTitle('Catio Agent · 跨终端与数据库'))
+  fireEvent.change(screen.getByPlaceholderText(/生成 shell 命令/), { target: { value: 'list' } })
+  fireEvent.click(screen.getByTitle('发送'))
+  await waitFor(() => expect(agentOrder).toEqual(['subscribe', 'start']))
+
+  emitAgent(1, { type: 'turnStarted' })
+  emitAgent(2, { type: 'assistantMessageStarted', messageId: 'm0', round: 0 })
+  emitAgent(3, { type: 'textDelta', messageId: 'm0', delta: 'Hello' })
+  // Duplicate sequence: the projector rejects it, so the text must NOT append again.
+  emitAgent(3, { type: 'textDelta', messageId: 'm0', delta: 'Hello' })
+  emitAgent(4, { type: 'assistantMessageFinished', messageId: 'm0' })
+  emitAgent(5, { type: 'turnFinished' })
+  await waitFor(() => expect(screen.queryByTitle('停止')).toBeNull())
+
+  const raw = localStorage.getItem('catio-conversations') ?? '[]'
+  const convs = JSON.parse(raw) as Array<{ messages: Array<{ role: string; content: string }> }>
+  const assistant = convs.flatMap(c => c.messages).filter(m => m.role === 'assistant')
+  expect(assistant).toHaveLength(1)
+  expect(assistant[0].content).toBe('Hello')
+  expect(assistant[0].content).not.toBe('HelloHello')
+})
+
+it('shows the order warning on sequence gaps without applying the gapped event', async () => {
+  localStorage.setItem('catio-agent-config', JSON.stringify({
+    provider: 'ollama', baseUrl: 'http://localhost:11434', apiKey: '',
+    anthropicAuthMode: 'api-key', model: 'llama3', executionMode: 'manual',
+  }))
+  wrap()
+  fireEvent.click(screen.getAllByText('新建连接')[0])
+  fireEvent.click(screen.getByText('主机 / 终端'))
+  const hostLabel = screen.getAllByText('主机').map(el => el.parentElement)
+    .find(parent => parent?.querySelector('input')) as HTMLElement
+  fireEvent.input(hostLabel.querySelector('input') as HTMLInputElement, { target: { value: 'edge-01' } })
+  fireEvent.click(screen.getByText('保存并连接'))
+  fireEvent.click(screen.getByTitle('Catio Agent · 跨终端与数据库'))
+  fireEvent.change(screen.getByPlaceholderText(/生成 shell 命令/), { target: { value: 'list' } })
+  fireEvent.click(screen.getByTitle('发送'))
+  await waitFor(() => expect(agentOrder).toEqual(['subscribe', 'start']))
+
+  emitAgent(1, { type: 'turnStarted' })
+  emitAgent(2, { type: 'assistantMessageStarted', messageId: 'm0', round: 0 })
+  // Gap: sequence jumps to 7. The warning MUST surface and the gapped delta
+  // must NOT be appended to the conversation.
+  emitAgent(7, { type: 'textDelta', messageId: 'm0', delta: 'should-not-apply' })
+  await waitFor(() => expect(screen.getByText(/乱序或缺失/)).toBeInTheDocument())
+
+  emitAgent(8, { type: 'textDelta', messageId: 'm0', delta: 'ok' })
+  emitAgent(9, { type: 'assistantMessageFinished', messageId: 'm0' })
+  emitAgent(10, { type: 'turnFinished' })
+  await waitFor(() => expect(screen.queryByTitle('停止')).toBeNull())
+
+  const raw = localStorage.getItem('catio-conversations') ?? '[]'
+  const convs = JSON.parse(raw) as Array<{ messages: Array<{ role: string; content: string }> }>
+  const assistant = convs.flatMap(c => c.messages).filter(m => m.role === 'assistant')
+  // The gapped delta was dropped; the warning + later deltas are present.
+  expect(assistant[0].content).not.toContain('should-not-apply')
+  expect(assistant[0].content).toContain('ok')
+  expect(assistant[0].content).toContain('乱序或缺失')
+})
+
+it('scopes tool inputs by turn: a later turn with the same toolUseId cannot corrupt an earlier approval', async () => {
+  localStorage.setItem('catio-agent-config', JSON.stringify({
+    provider: 'ollama', baseUrl: 'http://localhost:11434', apiKey: '',
+    anthropicAuthMode: 'api-key', model: 'llama3', executionMode: 'ask',
+  }))
+  saveProfile({ id: 'live-1.2.3.4:22-edge01', name: 'edge-01', host: '1.2.3.4', port: 22, user: 'deploy', auth: { method: 'password' } })
+  saveProfile({ id: 'live-1.2.3.4:22-edge02', name: 'edge-02', host: '1.2.3.5', port: 22, user: 'deploy', auth: { method: 'password' } })
+  wrap()
+
+  // tab 1 (edge-01) → turn-1
+  fireEvent.click(screen.getByRole('button', { name: '主机' }))
+  fireEvent.click(screen.getAllByText('edge-01')[0])
+  fireEvent.click(screen.getByText('连接'))
+  fireEvent.click(screen.getByTitle('Catio Agent · 跨终端与数据库'))
+  const composer = screen.getByPlaceholderText(/生成 shell 命令/) as HTMLTextAreaElement
+  fireEvent.change(composer, { target: { value: 'one' } })
+  fireEvent.click(screen.getByTitle('发送'))
+  await waitFor(() => expect(agentRuntimeMock.startAgentTurn).toHaveBeenCalledTimes(1))
+  const conv1 = currentConversationId()
+
+  // tab 2 (edge-02) → turn-2
+  fireEvent.click(screen.getByRole('button', { name: '主机' }))
+  fireEvent.click(screen.getAllByText('edge-02')[0])
+  fireEvent.click(screen.getByText('连接'))
+  fireEvent.click(screen.getByTitle('Catio Agent · 跨终端与数据库'))
+  const composer2 = screen.getByPlaceholderText(/生成 shell 命令/) as HTMLTextAreaElement
+  fireEvent.change(composer2, { target: { value: 'two' } })
+  fireEvent.click(screen.getByTitle('发送'))
+  await waitFor(() => expect(agentRuntimeMock.startAgentTurn).toHaveBeenCalledTimes(2))
+  const conv2 = conversationIdAt(1)
+
+  // Interleaved arrivals: turn-1 proposes tool-1 ('pwd'), turn-2 proposes the
+  // SAME toolUseId with a different command, then turn-1's approval arrives.
+  emitAgent(1, { type: 'turnStarted' }, 'turn-1', conv1)
+  emitAgent(2, { type: 'assistantMessageStarted', messageId: 'm0', round: 0 }, 'turn-1', conv1)
+  emitAgent(3, { type: 'toolProposed', toolUseId: 'tool-1', name: 'terminal_exec', input: { command: 'pwd' }, risk: [] }, 'turn-1', conv1)
+  emitAgent(1, { type: 'turnStarted' }, 'turn-2', conv2)
+  emitAgent(2, { type: 'assistantMessageStarted', messageId: 'm0', round: 0 }, 'turn-2', conv2)
+  emitAgent(3, { type: 'toolProposed', toolUseId: 'tool-1', name: 'terminal_exec', input: { command: 'rm -rf /tmp/x' }, risk: ['fileDelete'] }, 'turn-2', conv2)
+  emitAgent(4, { type: 'approvalRequested', toolUseId: 'tool-1', reason: 'sensitiveCommand' }, 'turn-1', conv1)
+
+  // The approval modal for turn-1 must show turn-1's own command.
+  await waitFor(() => expect(screen.getByText('允许 Agent 执行命令？')).toBeInTheDocument())
+  expect(within(screen.getByRole('group', { name: /执行命令/ })).getByText('pwd')).toBeInTheDocument()
 })
