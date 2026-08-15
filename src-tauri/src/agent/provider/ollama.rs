@@ -58,8 +58,8 @@ impl Provider for OllamaProvider {
             let chunk = chunk.map_err(|e| ProviderError::Network(e.to_string()))?;
             for delta in decoder.feed(&chunk)? {
                 match delta {
-                    Delta::Text(text) => observer.text_delta(&text),
-                    Delta::Thinking(thinking) => observer.thinking_delta(&thinking),
+                    Delta::Text(text) => observer.text_delta(&text).await,
+                    Delta::Thinking(thinking) => observer.thinking_delta(&thinking).await,
                 }
             }
         }

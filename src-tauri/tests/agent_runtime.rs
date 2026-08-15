@@ -350,9 +350,61 @@ impl Provider for ScriptedProvider {
             None => return Err(ProviderError::Protocol("no scripted round".into())),
         };
         for delta in &scripted.deltas {
-            observer.text_delta(delta);
+            observer.text_delta(delta).await;
         }
         Ok(scripted.round)
+    }
+}
+
+/// Provider that emits `count` text deltas in a tight loop, then signals
+/// completion. Used to prove the delta handoff is bounded: with a slow sink,
+/// the provider must stall on backpressure instead of buffering without bound.
+#[derive(Clone)]
+struct BurstProvider {
+    count: usize,
+    finished: Arc<Notify>,
+}
+
+#[async_trait]
+impl Provider for BurstProvider {
+    async fn complete(
+        &self,
+        _request: ProviderRequest,
+        observer: &dyn ProviderObserver,
+    ) -> Result<ProviderRound, ProviderError> {
+        for index in 0..self.count {
+            observer.text_delta(&format!("d{index} ")).await;
+        }
+        self.finished.notify_one();
+        Ok(text_round("final"))
+    }
+}
+
+/// Sink that records every envelope but blocks on the FIRST TextDelta until
+/// released — the engine is then stalled mid-emit while the provider keeps
+/// producing deltas.
+#[derive(Clone, Default)]
+struct BlockingDeltaSink {
+    envelopes: Arc<Mutex<Vec<AgentEventEnvelope>>>,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+    blocked: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait]
+impl AgentEventSink for BlockingDeltaSink {
+    async fn emit(&self, envelope: AgentEventEnvelope) -> Result<(), AgentError> {
+        let is_delta = matches!(envelope.event, AgentEvent::TextDelta { .. });
+        self.envelopes.lock().push(envelope);
+        if is_delta
+            && !self
+                .blocked
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.entered.notify_waiters();
+            self.release.notified().await;
+        }
+        Ok(())
     }
 }
 
@@ -389,7 +441,7 @@ impl Provider for GatedDeltaProvider {
         _request: ProviderRequest,
         observer: &dyn ProviderObserver,
     ) -> Result<ProviderRound, ProviderError> {
-        observer.text_delta("early ");
+        observer.text_delta("early ").await;
         self.delta_emitted.notify_waiters();
         self.release.notified().await;
         Ok(text_round("early world"))
@@ -1012,6 +1064,93 @@ async fn text_delta_is_emitted_before_completion_releases() {
 }
 
 #[tokio::test]
+async fn provider_deltas_are_backpressured_when_the_sink_is_slow() {
+    let provider = Arc::new(BurstProvider {
+        count: 5_000,
+        finished: Arc::new(Notify::new()),
+    });
+    let sink = BlockingDeltaSink::default();
+    let ctx = TurnContext {
+        owner_id: "owner-a".into(),
+        turn_id: "turn-1".into(),
+        request: valid_request(ExecutionMode::Ask),
+        provider: provider.clone(),
+        sink: Arc::new(sink.clone()),
+        bridge: Arc::new(NoopBridge),
+        cancel_token: CancellationToken::new(),
+        expected: Arc::new(parking_lot::Mutex::new(
+            catio_lib::agent::ExpectedResponse::None,
+        )),
+    };
+    // Register the waiter BEFORE the engine can emit, so no notification is
+    // lost.
+    let entered = sink.entered.notified();
+    let task = tokio::spawn(TurnEngine.run(ctx));
+    entered.await;
+    // The sink is stalled inside the first TextDelta emit. With a BOUNDED
+    // channel the provider is structurally blocked after the capacity is
+    // full — it cannot reach `finished` no matter the scheduler. An unbounded
+    // queue lets it complete immediately.
+    let finished = provider.finished.notified();
+    tokio::pin!(finished);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), &mut finished)
+            .await
+            .is_err(),
+        "provider pushed past the bounded delta channel (unbounded queue?)"
+    );
+    // Release the sink: the turn drains and completes normally.
+    sink.release.notify_waiters();
+    task.await.unwrap().unwrap();
+    // Every delta was delivered exactly once, in arrival order.
+    let deltas: Vec<String> = sink
+        .envelopes
+        .lock()
+        .iter()
+        .filter_map(|e| match &e.event {
+            AgentEvent::TextDelta { delta, .. } => Some(delta.clone()),
+            _ => None,
+        })
+        .collect();
+    let expected: Vec<String> = (0..5_000).map(|i| format!("d{i} ")).collect();
+    assert_eq!(deltas, expected);
+}
+
+#[tokio::test]
+async fn burst_deltas_arrive_in_order_without_loss() {
+    let provider = Arc::new(BurstProvider {
+        count: 3_000,
+        finished: Arc::new(Notify::new()),
+    });
+    let sink = RecordingSink::default();
+    let ctx = TurnContext {
+        owner_id: "owner-a".into(),
+        turn_id: "turn-1".into(),
+        request: valid_request(ExecutionMode::Ask),
+        provider: provider.clone(),
+        sink: Arc::new(sink.clone()),
+        bridge: Arc::new(NoopBridge),
+        cancel_token: CancellationToken::new(),
+        expected: Arc::new(parking_lot::Mutex::new(
+            catio_lib::agent::ExpectedResponse::None,
+        )),
+    };
+    TurnEngine.run(ctx).await.unwrap();
+    let deltas: Vec<String> = sink
+        .envelopes
+        .lock()
+        .iter()
+        .filter_map(|e| match &e.event {
+            AgentEvent::TextDelta { delta, .. } => Some(delta.clone()),
+            _ => None,
+        })
+        .collect();
+    let expected: Vec<String> = (0..3_000).map(|i| format!("d{i} ")).collect();
+    assert_eq!(deltas, expected);
+    assert_eq!(sink.terminal_count(), 1);
+}
+
+#[tokio::test]
 async fn provider_unexpected_eof_fails_turn() {
     let provider = ScriptedProvider::fail_with(ProviderError::UnexpectedEof);
     let sink = RecordingSink::default();
@@ -1138,29 +1277,39 @@ async fn provider_requests_carry_increasing_round_numbers() {
 /// A `RuntimeBridge` whose responses never arrive: approval times out and
 /// fails CLOSED (Blocked, never executed); tool results time out AFTER dispatch
 /// and report OutcomeUnknown.
-fn timeout_bridge(timeout: Duration) -> Arc<dyn ClientBridge> {
+///
+/// Returns the sender as an explicit lifetime holder: the caller keeps it
+/// alive for the whole turn so `recv` waits (and the timeout branch fires)
+/// instead of returning TurnNotFound, then drops it — no leak, no
+/// `mem::forget`.
+fn timeout_bridge(
+    timeout: Duration,
+) -> (
+    Arc<dyn ClientBridge>,
+    tokio::sync::mpsc::UnboundedSender<ClientTurnResponse>,
+) {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    // Keep the sender alive for the bridge's lifetime so `recv` waits (and
-    // the timeout branch fires) instead of returning TurnNotFound.
-    std::mem::forget(tx);
-    Arc::new(catio_lib::agent::bridge::RuntimeBridge::with_timeout(
-        rx,
-        CancellationToken::new(),
-        timeout,
-    ))
+    let bridge: Arc<dyn ClientBridge> =
+        Arc::new(catio_lib::agent::bridge::RuntimeBridge::with_timeout(
+            rx,
+            CancellationToken::new(),
+            timeout,
+        ));
+    (bridge, tx)
 }
 
 #[tokio::test]
 async fn approval_timeout_fails_closed_as_blocked() {
     let provider = ScriptedProvider::tool_then_text("rm -rf /tmp/demo", "done");
     let sink = RecordingSink::default();
+    let (bridge, _sender_lifetime) = timeout_bridge(Duration::from_millis(50));
     let ctx = TurnContext {
         owner_id: "owner-a".into(),
         turn_id: "turn-1".into(),
         request: valid_request(ExecutionMode::Ask),
         provider: Arc::new(provider),
         sink: Arc::new(sink.clone()),
-        bridge: timeout_bridge(Duration::from_millis(50)),
+        bridge,
         cancel_token: CancellationToken::new(),
         expected: Arc::new(parking_lot::Mutex::new(
             catio_lib::agent::ExpectedResponse::None,
@@ -1177,13 +1326,14 @@ async fn approval_timeout_fails_closed_as_blocked() {
 async fn tool_result_timeout_after_dispatch_is_outcome_unknown() {
     let provider = ScriptedProvider::tool_then_text("echo hi", "done");
     let sink = RecordingSink::default();
+    let (bridge, _sender_lifetime) = timeout_bridge(Duration::from_millis(50));
     let ctx = TurnContext {
         owner_id: "owner-a".into(),
         turn_id: "turn-1".into(),
         request: valid_request(ExecutionMode::Ask),
         provider: Arc::new(provider),
         sink: Arc::new(sink.clone()),
-        bridge: timeout_bridge(Duration::from_millis(50)),
+        bridge,
         cancel_token: CancellationToken::new(),
         expected: Arc::new(parking_lot::Mutex::new(
             catio_lib::agent::ExpectedResponse::None,
@@ -1217,7 +1367,9 @@ impl Provider for FallbackBlockingProvider {
         if call == 0 {
             Err(ProviderError::ToolsUnsupported)
         } else {
-            self.retry_entered.notify_waiters();
+            // notify_one stores a permit when nobody is waiting yet, so the
+            // test's later `notified()` can never miss this wakeup.
+            self.retry_entered.notify_one();
             std::future::pending().await
         }
     }
@@ -1392,7 +1544,7 @@ impl Provider for FenceThenUnsupportedProvider {
             0 => Err(ProviderError::ToolsUnsupported),
             1 => {
                 let fenced = "```sh\necho hi\n```";
-                observer.text_delta(fenced);
+                observer.text_delta(fenced).await;
                 Ok(text_round(fenced))
             }
             _ => Err(ProviderError::ToolsUnsupported),

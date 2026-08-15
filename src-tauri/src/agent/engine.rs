@@ -3,13 +3,12 @@
 //! provider, event sink, client bridge and cancel token; the engine reads no
 //! global state.
 
-use std::collections::VecDeque;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use serde_json::{json, Value};
-use tokio::sync::Notify;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::bridge::ClientBridge;
@@ -113,16 +112,21 @@ impl Drop for SequenceEmitter {
     }
 }
 
-/// Provider observer with a live delta queue: the provider's synchronous
-/// `text_delta`/`thinking_delta` calls push into a `VecDeque` and wake the
-/// engine via `Notify`. The engine drains and emits deltas WHILE the provider
-/// is still inside `complete`, preserving real-time streaming, arrival order
-/// and the strict per-turn sequence. The queue is explicitly bounded by the
-/// engine draining it continuously; the sink's async `emit` provides back
-/// pressure.
+/// Bounded capacity of the delta handoff channel. The engine drains it
+/// continuously; when the sink is slower than the provider, the provider
+/// awaits on a full channel instead of buffering without bound.
+const DELTA_CHANNEL_CAPACITY: usize = 1024;
+
+/// Provider observer with a live delta handoff: the provider's
+/// `text_delta`/`thinking_delta` calls send into a bounded mpsc channel and
+/// await when it is full (backpressure). The engine receives while `complete`
+/// is still running, preserving real-time streaming, arrival order and the
+/// strict per-turn sequence. The channel is race-free (no check-then-wait) and
+/// never silently drops a delta: a full channel stalls the provider; a closed
+/// receiver only occurs during round teardown, when no new delta could be
+/// delivered anyway.
 struct EngineObserver {
-    deltas: Arc<Mutex<VecDeque<Delta>>>,
-    notify: Arc<Notify>,
+    tx: mpsc::Sender<Delta>,
 }
 
 enum Delta {
@@ -131,41 +135,20 @@ enum Delta {
 }
 
 impl EngineObserver {
-    fn new() -> Self {
-        Self {
-            deltas: Arc::new(Mutex::new(VecDeque::new())),
-            notify: Arc::new(Notify::new()),
-        }
-    }
-
-    fn push(&self, delta: Delta) {
-        self.deltas.lock().push_back(delta);
-        self.notify.notify_waiters();
-    }
-
-    /// Returns the next delta, waiting for the provider to produce one.
-    async fn next_delta(&self) -> Option<Delta> {
-        loop {
-            if let Some(delta) = self.deltas.lock().pop_front() {
-                return Some(delta);
-            }
-            self.notify.notified().await;
-        }
-    }
-
-    /// Returns a delta if one is already queued (used after completion).
-    fn try_next(&self) -> Option<Delta> {
-        self.deltas.lock().pop_front()
+    fn new() -> (Self, mpsc::Receiver<Delta>) {
+        let (tx, rx) = mpsc::channel(DELTA_CHANNEL_CAPACITY);
+        (Self { tx }, rx)
     }
 }
 
+#[async_trait]
 impl crate::agent::provider::ProviderObserver for EngineObserver {
-    fn text_delta(&self, delta: &str) {
-        self.push(Delta::Text(delta.to_string()));
+    async fn text_delta(&self, delta: &str) {
+        let _ = self.tx.send(Delta::Text(delta.to_string())).await;
     }
 
-    fn thinking_delta(&self, delta: &str) {
-        self.push(Delta::Thinking(delta.to_string()));
+    async fn thinking_delta(&self, delta: &str) {
+        let _ = self.tx.send(Delta::Thinking(delta.to_string())).await;
     }
 }
 
@@ -194,25 +177,31 @@ impl TurnEngine {
         ctx: &TurnContext,
         emitter: &mut SequenceEmitter,
         message_id: &str,
-        observer: &EngineObserver,
         request: ProviderRequest,
     ) -> Result<ProviderRound, RoundOutcome> {
-        let complete = ctx.provider.complete(request, observer);
+        let (observer, mut rx) = EngineObserver::new();
+        let complete = ctx.provider.complete(request, &observer);
         tokio::pin!(complete);
         loop {
             tokio::select! {
                 result = &mut complete => {
                     // Deltas produced just before completion must still be
                     // delivered, in arrival order.
-                    while let Some(delta) = observer.try_next() {
+                    while let Ok(delta) = rx.try_recv() {
                         Self::emit_delta(emitter, message_id, delta).await?;
                     }
                     return result.map_err(RoundOutcome::ProviderErr);
                 }
-                delta = observer.next_delta() => {
-                    if let Some(delta) = delta {
-                        Self::emit_delta(emitter, message_id, delta).await?;
-                    }
+                delta = rx.recv() => {
+                    let Some(delta) = delta else {
+                        // The provider's sender vanished while the turn is
+                        // alive: an internal failure, never a silent delta
+                        // loss.
+                        return Err(RoundOutcome::Engine(AgentError::Internal(
+                            "delta channel closed unexpectedly".into(),
+                        )));
+                    };
+                    Self::emit_delta(emitter, message_id, delta).await?;
                 }
                 _ = ctx.cancel_token.cancelled() => {
                     return Err(RoundOutcome::Engine(AgentError::TurnCancelled));
@@ -323,15 +312,8 @@ impl TurnEngine {
                 })
                 .await?;
 
-            let observer = EngineObserver::new();
-            let round = match Self::complete_round_live(
-                ctx,
-                emitter,
-                &message_id,
-                &observer,
-                provider_request,
-            )
-            .await
+            let round = match Self::complete_round_live(ctx, emitter, &message_id, provider_request)
+                .await
             {
                 Ok(round) => round,
                 Err(RoundOutcome::ProviderErr(ProviderError::ToolsUnsupported))
@@ -357,8 +339,7 @@ impl TurnEngine {
                         single_line_commands: single_line,
                         round: round_index,
                     };
-                    match Self::complete_round_live(ctx, emitter, &message_id, &observer, retry)
-                        .await
+                    match Self::complete_round_live(ctx, emitter, &message_id, retry).await
                     {
                         Ok(round) => round,
                         Err(RoundOutcome::ProviderErr(err)) => return Err(map_provider_error(err, &ctx.request.provider.credential)),

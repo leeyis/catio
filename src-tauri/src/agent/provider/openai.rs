@@ -61,7 +61,7 @@ impl Provider for OpenAiProvider {
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| ProviderError::Network(e.to_string()))?;
             for delta in decoder.feed(&chunk)? {
-                observer.text_delta(&delta);
+                observer.text_delta(&delta).await;
             }
         }
         let decoded = decoder.finish()?;

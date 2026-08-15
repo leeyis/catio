@@ -101,7 +101,7 @@ impl Provider for ScriptedProvider {
             None => return Err(ProviderError::Protocol("no scripted round".into())),
         };
         for delta in &scripted.deltas {
-            observer.text_delta(delta);
+            observer.text_delta(delta).await;
         }
         Ok(scripted.round)
     }

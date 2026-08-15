@@ -35,9 +35,15 @@ pub struct ProviderRequest {
 }
 
 /// Streaming observer receiving deltas as the provider produces them.
+///
+/// The methods are async so a bounded handoff can apply BACKPRESSURE: when
+/// the consumer (engine → sink) is slower than the provider, the provider
+/// awaits here instead of buffering without bound. No delta is ever silently
+/// dropped by the channel itself.
+#[async_trait]
 pub trait ProviderObserver: Send + Sync {
-    fn text_delta(&self, delta: &str);
-    fn thinking_delta(&self, delta: &str);
+    async fn text_delta(&self, delta: &str);
+    async fn thinking_delta(&self, delta: &str);
 }
 
 /// Normalized stop reason for a provider round.

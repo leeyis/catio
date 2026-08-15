@@ -22,9 +22,10 @@ use tokio::net::TcpListener;
 /// Observer that ignores deltas (error path only).
 struct NoopObserver;
 
+#[async_trait]
 impl ProviderObserver for NoopObserver {
-    fn text_delta(&self, _delta: &str) {}
-    fn thinking_delta(&self, _delta: &str) {}
+    async fn text_delta(&self, _delta: &str) {}
+    async fn thinking_delta(&self, _delta: &str) {}
 }
 
 fn request() -> ProviderRequest {
