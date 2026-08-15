@@ -102,8 +102,10 @@ impl SequenceEmitter {
 
 impl Drop for SequenceEmitter {
     fn drop(&mut self) {
+        // During unwinding (e.g. a provider panic) the terminal event cannot
+        // be emitted; a debug_assert panic here would abort the process.
         debug_assert!(
-            self.terminal_emitted,
+            self.terminal_emitted || std::thread::panicking(),
             "TurnEngine must emit exactly one terminal event"
         );
     }
