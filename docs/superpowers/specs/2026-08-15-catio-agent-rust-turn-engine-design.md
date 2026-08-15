@@ -1,7 +1,7 @@
 # Catio Agent Rust Turn Engine 设计
 
 > 日期：2026-08-15  
-> 状态：P0 实施完成，待主架构师验收  
+> 状态：P0 实施完成，待主架构师验收
 > 关联研究：[`small-rust-hermes-v3-analysis.md`](../../research/small-rust-hermes-v3-analysis.md)  
 > 领域语言：[`CONTEXT.md`](../../../CONTEXT.md)
 
