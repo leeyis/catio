@@ -1,12 +1,21 @@
 //! Provider port: the true external dependency, injectable for tests via
 //! scripted adapters. Wire formats are encoded/decoded behind this seam.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 
 pub mod anthropic;
+pub mod ollama;
 pub mod openai;
 
-use crate::agent::types::{AgentMessage, TokenUsage, ToolSpec};
+use anthropic::AnthropicProvider;
+use ollama::OllamaProvider;
+use openai::OpenAiProvider;
+
+use crate::agent::types::{
+    AgentError, AgentMessage, ProviderConfig, ProviderProtocol, TokenUsage, ToolSpec,
+};
 
 /// Provider-neutral request for one completion round.
 #[derive(Clone, Debug)]
@@ -86,4 +95,40 @@ pub trait Provider: Send + Sync {
         request: ProviderRequest,
         observer: &dyn ProviderObserver,
     ) -> Result<ProviderRound, ProviderError>;
+}
+
+/// Production factory: constructs the three adapters over one shared
+/// `reqwest::Client`.
+pub struct ReqwestProviderFactory {
+    client: reqwest::Client,
+}
+
+impl ReqwestProviderFactory {
+    pub fn new(client: reqwest::Client) -> Self {
+        Self { client }
+    }
+}
+
+impl Default for ReqwestProviderFactory {
+    fn default() -> Self {
+        Self::new(reqwest::Client::new())
+    }
+}
+
+#[async_trait]
+impl crate::agent::runtime::ProviderFactory for ReqwestProviderFactory {
+    async fn create(&self, config: &ProviderConfig) -> Result<Arc<dyn Provider>, AgentError> {
+        let provider: Arc<dyn Provider> = match config.protocol {
+            ProviderProtocol::Openai => {
+                Arc::new(OpenAiProvider::new(self.client.clone(), config.clone()))
+            }
+            ProviderProtocol::Anthropic => {
+                Arc::new(AnthropicProvider::new(self.client.clone(), config.clone()))
+            }
+            ProviderProtocol::Ollama => {
+                Arc::new(OllamaProvider::new(self.client.clone(), config.clone()))
+            }
+        };
+        Ok(provider)
+    }
 }

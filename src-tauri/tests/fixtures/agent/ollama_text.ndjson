@@ -1,0 +1,3 @@
+{"model":"llama3","message":{"role":"assistant","content":"hello ","thinking":"reasoning here"},"done":false}
+{"model":"llama3","message":{"role":"assistant","content":"world","thinking":""},"done":false}
+{"model":"llama3","message":{"role":"assistant","content":""},"done":true}

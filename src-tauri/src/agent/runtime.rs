@@ -51,6 +51,13 @@ impl AgentRuntime {
         }
     }
 
+    /// Production runtime with the shared reqwest-backed provider factory.
+    pub fn production() -> Self {
+        Self::new(Arc::new(
+            crate::agent::provider::ReqwestProviderFactory::default(),
+        ))
+    }
+
     /// Starts a Turn and returns an opaque handle. The frontend must subscribe
     /// to `agent://events` before calling this.
     pub async fn start_turn(

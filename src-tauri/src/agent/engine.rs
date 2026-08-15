@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::bridge::ClientBridge;
+use crate::agent::legacy::first_shell_tool;
 use crate::agent::policy::{PolicyDecision, ToolPolicy};
 use crate::agent::provider::{Provider, ProviderError, ProviderRequest, ProviderRound};
 use crate::agent::types::{
@@ -187,6 +188,7 @@ impl TurnEngine {
         // manual mode never advertises tools; deny and round cap disable them
         // for exactly one tools-disabled synthesis.
         let mut tools_disabled = matches!(mode, ExecutionMode::Manual);
+        let mut legacy_fallback = false;
         let mut used_rounds: u32 = 0;
 
         loop {
@@ -222,12 +224,36 @@ impl TurnEngine {
                 .await?;
 
             let observer = EngineObserver::new(message_id.clone());
-            let round = tokio::select! {
+            let mut round = tokio::select! {
                 result = ctx.provider.complete(provider_request, &observer) => result,
                 _ = ctx.cancel_token.cancelled() => return Err(AgentError::TurnCancelled),
             };
             let round = match round {
                 Ok(round) => round,
+                Err(ProviderError::ToolsUnsupported) => {
+                    // Explicit legacy fallback: exactly one tools-disabled
+                    // retry of the current round; other errors never fall back.
+                    emitter
+                        .emit(AgentEvent::CompatibilityFallbackActivated {
+                            provider: "compatibility".into(),
+                            reason: "toolsUnsupported".into(),
+                        })
+                        .await?;
+                    tools_disabled = true;
+                    legacy_fallback = true;
+                    let retry = ProviderRequest {
+                        system_prompt: ctx.request.system_prompt.clone(),
+                        messages: messages.clone(),
+                        tools: Vec::new(),
+                        target_ref: target.clone(),
+                        execution_mode: mode,
+                        single_line_commands: single_line,
+                    };
+                    match ctx.provider.complete(retry, &observer).await {
+                        Ok(round) => round,
+                        Err(err) => return Err(map_provider_error(err)),
+                    }
+                }
                 Err(err) => return Err(map_provider_error(err)),
             };
 
@@ -260,7 +286,7 @@ impl TurnEngine {
                     .await?;
             }
 
-            let tool_uses: Vec<ToolUse> = round
+            let mut tool_uses: Vec<ToolUse> = round
                 .message
                 .content
                 .iter()
@@ -274,14 +300,39 @@ impl TurnEngine {
                 })
                 .collect();
 
-            if tool_uses.is_empty() {
+            // Legacy fallback: the retried round is plain markdown; the first
+            // valid shell fence becomes a synthetic `terminal_exec` tool that
+            // flows through the exact same policy/bridge/result path.
+            let mut synthetic_tool: Option<ToolUse> = None;
+            if legacy_fallback && tool_uses.is_empty() {
+                let text: String = round
+                    .message
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                let synthetic_id = format!("{}-{}-0", ctx.turn_id, round_index);
+                if let Ok(Some(tool)) = first_shell_tool(&text, single_line, &synthetic_id) {
+                    synthetic_tool = Some(tool);
+                }
+            }
+
+            if tool_uses.is_empty() && synthetic_tool.is_none() {
                 return Ok(());
             }
 
-            if tools_disabled {
+            // A tools-disabled synthesis may carry the fallback's synthetic
+            // tool; anything else requesting tools is a violation.
+            if tools_disabled && synthetic_tool.is_none() {
                 return Err(AgentError::ToolsDisabledSynthesisViolated(
                     "provider requested tools during tools-disabled synthesis".into(),
                 ));
+            }
+            if let Some(tool) = synthetic_tool {
+                tool_uses.push(tool);
             }
 
             let mut any_denied = false;

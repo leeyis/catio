@@ -55,7 +55,7 @@ struct ScriptedRound {
 #[derive(Clone)]
 struct ScriptedProvider {
     rounds: Arc<Mutex<VecDeque<ScriptedRound>>>,
-    fail: Option<ProviderError>,
+    failures: Arc<Mutex<VecDeque<ProviderError>>>,
     requests: Arc<Mutex<Vec<ProviderRequest>>>,
     pending_when_empty: bool,
 }
@@ -80,7 +80,7 @@ impl ScriptedProvider {
                 round: text_round(&parts.concat()),
                 deltas: parts.iter().map(|s| s.to_string()).collect(),
             }]))),
-            fail: None,
+            failures: Arc::new(Mutex::new(VecDeque::new())),
             requests: Arc::new(Mutex::new(Vec::new())),
             pending_when_empty: false,
         }
@@ -108,7 +108,29 @@ impl ScriptedProvider {
         };
         Self {
             rounds: Arc::new(Mutex::new(VecDeque::from([tool_round, synthesis_round]))),
-            fail: None,
+            failures: Arc::new(Mutex::new(VecDeque::new())),
+            requests: Arc::new(Mutex::new(Vec::new())),
+            pending_when_empty: false,
+        }
+    }
+
+    /// One round that first fails with `ToolsUnsupported`, then returns a
+    /// fenced markdown text round followed by a final synthesis round.
+    fn tools_unsupported_then_text(fenced: &str, synthesis: &str) -> Self {
+        Self {
+            rounds: Arc::new(Mutex::new(VecDeque::from([
+                ScriptedRound {
+                    round: text_round(fenced),
+                    deltas: vec![fenced.to_string()],
+                },
+                ScriptedRound {
+                    round: text_round(synthesis),
+                    deltas: vec![synthesis.to_string()],
+                },
+            ]))),
+            failures: Arc::new(Mutex::new(VecDeque::from([
+                ProviderError::ToolsUnsupported,
+            ]))),
             requests: Arc::new(Mutex::new(Vec::new())),
             pending_when_empty: false,
         }
@@ -145,7 +167,7 @@ impl ScriptedProvider {
         };
         Self {
             rounds: Arc::new(Mutex::new(VecDeque::from([invalid_round, synthesis_round]))),
-            fail: None,
+            failures: Arc::new(Mutex::new(VecDeque::new())),
             requests: Arc::new(Mutex::new(Vec::new())),
             pending_when_empty: false,
         }
@@ -177,7 +199,7 @@ impl ScriptedProvider {
         });
         Self {
             rounds: Arc::new(Mutex::new(rounds)),
-            fail: None,
+            failures: Arc::new(Mutex::new(VecDeque::new())),
             requests: Arc::new(Mutex::new(Vec::new())),
             pending_when_empty: false,
         }
@@ -220,7 +242,7 @@ impl ScriptedProvider {
         ]);
         Self {
             rounds: Arc::new(Mutex::new(rounds)),
-            fail: None,
+            failures: Arc::new(Mutex::new(VecDeque::new())),
             requests: Arc::new(Mutex::new(Vec::new())),
             pending_when_empty: false,
         }
@@ -229,7 +251,7 @@ impl ScriptedProvider {
     fn fail_with(err: ProviderError) -> Self {
         Self {
             rounds: Arc::new(Mutex::new(VecDeque::new())),
-            fail: Some(err),
+            failures: Arc::new(Mutex::new(VecDeque::from([err]))),
             requests: Arc::new(Mutex::new(Vec::new())),
             pending_when_empty: false,
         }
@@ -255,7 +277,7 @@ impl ScriptedProvider {
         };
         Self {
             rounds: Arc::new(Mutex::new(VecDeque::from([tool_round]))),
-            fail: None,
+            failures: Arc::new(Mutex::new(VecDeque::new())),
             requests: Arc::new(Mutex::new(Vec::new())),
             pending_when_empty: true,
         }
@@ -278,8 +300,8 @@ impl Provider for ScriptedProvider {
         observer: &dyn ProviderObserver,
     ) -> Result<ProviderRound, ProviderError> {
         self.requests.lock().push(request.clone());
-        if let Some(err) = &self.fail {
-            return Err(err.clone());
+        if let Some(err) = self.failures.lock().pop_front() {
+            return Err(err);
         }
         let scripted = self.rounds.lock().pop_front();
         let scripted = match scripted {
@@ -987,4 +1009,58 @@ async fn synthesis_requesting_tools_fails_turn() {
         .unwrap_err();
     assert_eq!(err.code(), "toolsDisabledSynthesisViolated");
     assert_eq!(sink.terminal_types(), ["turnFailed"]);
+}
+
+// ---------------------------------------------------------------------------
+// Explicit legacy fallback (ToolsUnsupported only)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn compatibility_fallback_activates_for_tools_unsupported() {
+    let bridge = ScriptedBridge::succeed("exit 0");
+    let provider = ScriptedProvider::tools_unsupported_then_text("```sh\necho hi\n```", "done");
+    let sink = RecordingSink::default();
+    run_tool_turn_with_provider(ExecutionMode::Ask, provider.clone(), bridge, sink.clone())
+        .await
+        .unwrap();
+    // 第一次请求带 tools 触发 ToolsUnsupported；重试不带 tools。
+    assert!(!provider.request(0).tools.is_empty());
+    assert!(provider.request(1).tools.is_empty());
+    assert!(sink
+        .event_types()
+        .contains(&"compatibilityFallbackActivated"));
+    // fenced command 变为 synthetic tool 并执行一次。
+    assert_eq!(
+        sink.event_types()
+            .iter()
+            .filter(|t| **t == "toolStarted")
+            .count(),
+        1
+    );
+    assert_eq!(sink.tool_finished_statuses(), [ToolResultStatus::Succeeded]);
+    // synthetic id 稳定为 turn_id + round + 0。
+    assert_eq!(sink.tool_use_ids(), ["turn-1-0-0"]);
+    assert_eq!(sink.terminal_types(), ["turnFinished"]);
+}
+
+#[tokio::test]
+async fn provider_auth_error_does_not_trigger_fallback() {
+    let provider = ScriptedProvider::fail_with(ProviderError::Auth);
+    let sink = RecordingSink::default();
+    let err = run_test_turn(provider, sink.clone()).await.unwrap_err();
+    assert_eq!(err.code(), "providerAuth");
+    assert!(!sink
+        .event_types()
+        .contains(&"compatibilityFallbackActivated"));
+}
+
+#[tokio::test]
+async fn generic_http_error_does_not_trigger_fallback() {
+    let provider = ScriptedProvider::fail_with(ProviderError::Http("status 500".into()));
+    let sink = RecordingSink::default();
+    let err = run_test_turn(provider, sink.clone()).await.unwrap_err();
+    assert_eq!(err.code(), "providerHttp");
+    assert!(!sink
+        .event_types()
+        .contains(&"compatibilityFallbackActivated"));
 }

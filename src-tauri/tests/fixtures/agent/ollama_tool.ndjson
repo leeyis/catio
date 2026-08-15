@@ -1,0 +1,2 @@
+{"model":"llama3","message":{"role":"assistant","content":"","thinking":"","tool_calls":[{"function":{"name":"terminal_exec","arguments":{"command":"pwd"}}},{"function":{"name":"terminal_exec","arguments":{"command":"ls"}}}]},"done":false}
+{"model":"llama3","message":{"role":"assistant","content":""},"done":true}
