@@ -396,11 +396,7 @@ impl AgentEventSink for BlockingDeltaSink {
     async fn emit(&self, envelope: AgentEventEnvelope) -> Result<(), AgentError> {
         let is_delta = matches!(envelope.event, AgentEvent::TextDelta { .. });
         self.envelopes.lock().push(envelope);
-        if is_delta
-            && !self
-                .blocked
-                .swap(true, std::sync::atomic::Ordering::SeqCst)
-        {
+        if is_delta && !self.blocked.swap(true, std::sync::atomic::Ordering::SeqCst) {
             self.entered.notify_waiters();
             self.release.notified().await;
         }
@@ -626,10 +622,7 @@ impl RecordingSink {
     }
 
     fn count_type(&self, name: &str) -> usize {
-        self.event_types()
-            .iter()
-            .filter(|t| **t == name)
-            .count()
+        self.event_types().iter().filter(|t| **t == name).count()
     }
 
     fn terminal_count(&self) -> usize {
@@ -1188,9 +1181,14 @@ async fn denied_tool_gets_one_result_and_one_tools_disabled_synthesis() {
     let bridge = ScriptedBridge::deny();
     let provider = ScriptedProvider::tool_then_text("rm -rf /tmp/demo", "已取消执行。");
     let sink = RecordingSink::default();
-    run_tool_turn_with_provider(ExecutionMode::Ask, Arc::new(provider.clone()), bridge, sink.clone())
-        .await
-        .unwrap();
+    run_tool_turn_with_provider(
+        ExecutionMode::Ask,
+        Arc::new(provider.clone()),
+        bridge,
+        sink.clone(),
+    )
+    .await
+    .unwrap();
     assert_eq!(provider.request_count(), 2);
     assert!(provider.request(1).tools.is_empty());
     assert_eq!(sink.tool_finished_statuses(), [ToolResultStatus::Denied]);
@@ -1239,9 +1237,14 @@ async fn round_cap_reached_forces_tools_disabled_synthesis() {
     let bridge = ScriptedBridge::succeed("ok");
     let provider = ScriptedProvider::tool_rounds_then_text(5, "echo round", "final");
     let sink = RecordingSink::default();
-    run_tool_turn_with_provider(ExecutionMode::Ask, Arc::new(provider.clone()), bridge, sink.clone())
-        .await
-        .unwrap();
+    run_tool_turn_with_provider(
+        ExecutionMode::Ask,
+        Arc::new(provider.clone()),
+        bridge,
+        sink.clone(),
+    )
+    .await
+    .unwrap();
     // 5 tool rounds + 1 tools-disabled synthesis = 6 provider requests.
     assert_eq!(provider.request_count(), 6);
     assert!(provider.request(5).tools.is_empty());
@@ -1254,9 +1257,10 @@ async fn synthesis_requesting_tools_fails_turn() {
     let bridge = ScriptedBridge::deny();
     let provider = ScriptedProvider::tool_then_tool("rm -rf /tmp/demo", "echo again");
     let sink = RecordingSink::default();
-    let err = run_tool_turn_with_provider(ExecutionMode::Ask, Arc::new(provider), bridge, sink.clone())
-        .await
-        .unwrap_err();
+    let err =
+        run_tool_turn_with_provider(ExecutionMode::Ask, Arc::new(provider), bridge, sink.clone())
+            .await
+            .unwrap_err();
     assert_eq!(err.code(), "toolsDisabledSynthesisViolated");
     assert_eq!(sink.terminal_types(), ["turnFailed"]);
 }
@@ -1266,9 +1270,14 @@ async fn provider_requests_carry_increasing_round_numbers() {
     let bridge = ScriptedBridge::succeed("ok");
     let provider = ScriptedProvider::tool_rounds_then_text(3, "echo round", "final");
     let sink = RecordingSink::default();
-    run_tool_turn_with_provider(ExecutionMode::Ask, Arc::new(provider.clone()), bridge, sink.clone())
-        .await
-        .unwrap();
+    run_tool_turn_with_provider(
+        ExecutionMode::Ask,
+        Arc::new(provider.clone()),
+        bridge,
+        sink.clone(),
+    )
+    .await
+    .unwrap();
     assert_eq!(provider.request_count(), 4);
     let rounds: Vec<u32> = (0..4).map(|i| provider.request(i).round).collect();
     assert_eq!(rounds, [0, 1, 2, 3]);
@@ -1411,9 +1420,14 @@ async fn compatibility_fallback_activates_for_tools_unsupported() {
     let bridge = ScriptedBridge::succeed("exit 0");
     let provider = ScriptedProvider::tools_unsupported_then_text("```sh\necho hi\n```", "done");
     let sink = RecordingSink::default();
-    run_tool_turn_with_provider(ExecutionMode::Ask, Arc::new(provider.clone()), bridge, sink.clone())
-        .await
-        .unwrap();
+    run_tool_turn_with_provider(
+        ExecutionMode::Ask,
+        Arc::new(provider.clone()),
+        bridge,
+        sink.clone(),
+    )
+    .await
+    .unwrap();
     // 第一次请求带 tools 触发 ToolsUnsupported；重试不带 tools。
     assert!(!provider.request(0).tools.is_empty());
     assert!(provider.request(1).tools.is_empty());
@@ -1464,9 +1478,14 @@ async fn legacy_deny_prevents_final_synthesis_fence_execution() {
         "```sh\necho must-not-run\n```",
     );
     let sink = RecordingSink::default();
-    let err = run_tool_turn_with_provider(ExecutionMode::Ask, Arc::new(provider.clone()), bridge.clone(), sink.clone())
-        .await
-        .unwrap_err();
+    let err = run_tool_turn_with_provider(
+        ExecutionMode::Ask,
+        Arc::new(provider.clone()),
+        bridge.clone(),
+        sink.clone(),
+    )
+    .await
+    .unwrap_err();
     // The final synthesis after a deny must fail the turn: the fenced command
     // is never approved, executed or re-synthesized.
     assert_eq!(err.code(), "toolsDisabledSynthesisViolated");
@@ -1620,9 +1639,14 @@ async fn capability_error_after_fallback_does_not_reactivate() {
         requests: Arc::new(Mutex::new(Vec::new())),
     });
     let sink = RecordingSink::default();
-    let err = run_tool_turn_with_provider(ExecutionMode::Ask, provider.clone(), bridge.clone(), sink.clone())
-        .await
-        .unwrap_err();
+    let err = run_tool_turn_with_provider(
+        ExecutionMode::Ask,
+        provider.clone(),
+        bridge.clone(),
+        sink.clone(),
+    )
+    .await
+    .unwrap_err();
     // The retried round executed its fence; a LATER ToolsUnsupported must not
     // re-trigger the fallback — it is a plain provider failure.
     assert_eq!(err.code(), "toolsUnsupported");

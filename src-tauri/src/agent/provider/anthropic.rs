@@ -65,7 +65,11 @@ impl Provider for AnthropicProvider {
             let body = read_limited_body(response, ERROR_BODY_LIMIT)
                 .await
                 .map_err(|e| ProviderError::Network(e.to_string()))?;
-            return Err(classify_error_response(status, &body, &self.config.credential));
+            return Err(classify_error_response(
+                status,
+                &body,
+                &self.config.credential,
+            ));
         }
 
         let mut stream = response.bytes_stream();

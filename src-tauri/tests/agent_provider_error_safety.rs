@@ -8,10 +8,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use catio_lib::agent::provider::openai::OpenAiProvider;
 use catio_lib::agent::provider::{
     Provider, ProviderError, ProviderObserver, ProviderRequest, ProviderRound,
 };
-use catio_lib::agent::provider::openai::OpenAiProvider;
 use catio_lib::agent::types::{
     AgentMessage, AgentRole, AnthropicAuthMode, ApiCredential, ContentBlock, ExecutionMode,
     ProviderConfig, ProviderProtocol,
@@ -102,7 +102,11 @@ async fn adapter_error_read_is_bounded_and_credential_is_exactly_redacted() {
 
     // A bounded read must return well before the server's 30 s stall; an
     // unbounded `bytes()` read would wait for the declared 100 KB and time out.
-    let outcome = tokio::time::timeout(Duration::from_secs(5), provider.complete(request(), &NoopObserver)).await;
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        provider.complete(request(), &NoopObserver),
+    )
+    .await;
 
     server.abort();
 
@@ -123,8 +127,8 @@ async fn adapter_error_read_is_bounded_and_credential_is_exactly_redacted() {
             );
         }
         Ok(other) => panic!("expected ProviderError::Http, got {other:?}"),
-        Err(_) => panic!(
-            "adapter waited for the full declared error body: the read is not bounded"
-        ),
+        Err(_) => {
+            panic!("adapter waited for the full declared error body: the read is not bounded")
+        }
     }
 }

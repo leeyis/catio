@@ -14,8 +14,7 @@ use ollama::OllamaProvider;
 use openai::OpenAiProvider;
 
 use crate::agent::types::{
-    AgentError, AgentMessage, ApiCredential, ProviderConfig, ProviderProtocol, TokenUsage,
-    ToolSpec,
+    AgentError, AgentMessage, ApiCredential, ProviderConfig, ProviderProtocol, TokenUsage, ToolSpec,
 };
 
 /// Provider-neutral request for one completion round.

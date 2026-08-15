@@ -19,8 +19,8 @@ use crate::agent::provider::{
 };
 use crate::agent::types::{
     AgentError, AgentEvent, AgentEventEnvelope, ApiCredential, ApprovalDecision, ContentBlock,
-    ExecutionMode, ExpectedResponse, StartTurnRequest, ToolExecutionOutcome,
-    ToolExecutionStatus, ToolResult, ToolResultStatus, ToolSpec, ToolUse,
+    ExecutionMode, ExpectedResponse, StartTurnRequest, ToolExecutionOutcome, ToolExecutionStatus,
+    ToolResult, ToolResultStatus, ToolSpec, ToolUse,
 };
 
 /// The only structured tool supported by P0.
@@ -288,7 +288,8 @@ impl TurnEngine {
             used_rounds += 1;
             let round_index = used_rounds - 1;
 
-            let tools_disabled = final_synthesis || legacy_mode || matches!(mode, ExecutionMode::Manual);
+            let tools_disabled =
+                final_synthesis || legacy_mode || matches!(mode, ExecutionMode::Manual);
             let tools = if tools_disabled {
                 Vec::new()
             } else {
@@ -339,14 +340,17 @@ impl TurnEngine {
                         single_line_commands: single_line,
                         round: round_index,
                     };
-                    match Self::complete_round_live(ctx, emitter, &message_id, retry).await
-                    {
+                    match Self::complete_round_live(ctx, emitter, &message_id, retry).await {
                         Ok(round) => round,
-                        Err(RoundOutcome::ProviderErr(err)) => return Err(map_provider_error(err, &ctx.request.provider.credential)),
+                        Err(RoundOutcome::ProviderErr(err)) => {
+                            return Err(map_provider_error(err, &ctx.request.provider.credential))
+                        }
                         Err(RoundOutcome::Engine(err)) => return Err(err),
                     }
                 }
-                Err(RoundOutcome::ProviderErr(err)) => return Err(map_provider_error(err, &ctx.request.provider.credential)),
+                Err(RoundOutcome::ProviderErr(err)) => {
+                    return Err(map_provider_error(err, &ctx.request.provider.credential))
+                }
                 Err(RoundOutcome::Engine(err)) => return Err(err),
             };
 
