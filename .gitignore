@@ -30,9 +30,8 @@ docs/*
 AGENTS.md
 CLAUDE.md
 
-# local agent and repository automation configuration
+# local agent configuration
 .happycode/
-.github/
 .claude/
 
 # local integration-test scaffolding (docker compose / env notes)
