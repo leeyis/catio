@@ -24,9 +24,16 @@ diff.png
 *.log
 
 # internal design specs & agent instructions (not for the public repo)
-docs/superpowers/
+docs/*
+!docs/screenshots/
+!docs/screenshots/**
 AGENTS.md
 CLAUDE.md
+
+# local agent and repository automation configuration
+.happycode/
+.github/
+.claude/
 
 # local integration-test scaffolding (docker compose / env notes)
 deploy/
