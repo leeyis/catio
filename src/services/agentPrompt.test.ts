@@ -9,6 +9,13 @@ describe('buildAgentSystemPrompt', () => {
     expect(p).toContain('untrusted data')
   })
 
+  it('manual shell mode keeps explanations out of executable command blocks', () => {
+    const p = buildAgentSystemPrompt('shell', 'prod-web-01', undefined, 'manual')
+    expect(p).toContain('only executable command text')
+    expect(p).toContain('outside fenced code blocks')
+    expect(p).toContain('lines beginning with `#`')
+  })
+
   it.each(['ask', 'auto'] as const)('%s shell mode acts as a terminal operator loop', executionMode => {
     const p = buildAgentSystemPrompt('shell', 'prod-web-01', undefined, executionMode)
     expect(p).toContain('terminal operator')
