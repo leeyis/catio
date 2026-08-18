@@ -90,7 +90,7 @@ Catio 是一个基于 **Rust + Tauri 2 + React** 的开源运维与数据库客�
 
 - Agent 提供商：本地 **Ollama** 或 **OpenAI 兼容**端点，支持拉取模型和连接测试。
 - Agent 可使用当前终端输出、选中文本、当前数据库 Schema/表上下文和 SQL 片段作为 prompt 上下文。
-- 桌面端 MCP server 通过 SSE 暴露已连接主机和数据库，支持 token 鉴权、IP 白名单和实时日志。
+- 桌面端 MCP server 通过 Streamable HTTP（`POST /mcp`）暴露已连接主机和数据库，支持 token 鉴权、IP 白名单和实时日志；旧的 HTTP+SSE 端点保留给尚不支持 Streamable HTTP 的客户端。
 - Server 模式提供每用户 MCP endpoint 与 token，外部代理只能访问该用户自己的连接。
 
 ### 发现与保险库

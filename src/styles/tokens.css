@@ -521,6 +521,25 @@
   --term-fg: #E2E8F0;
   --term-dim: #64748B;
 
+  /* ANSI 前景色（MCP 实时日志的控制台高亮）。三套主题的 --term-bg 都是深色，
+     故这一组只需定义一次，不随主题切换——对比度在深底上已校准。 */
+  --ansi-black: #4B5563;
+  --ansi-red: #F87171;
+  --ansi-green: #4ADE80;
+  --ansi-yellow: #FBBF24;
+  --ansi-blue: #60A5FA;
+  --ansi-magenta: #E879F9;
+  --ansi-cyan: #22D3EE;
+  --ansi-white: #E5E7EB;
+  --ansi-bright-black: #6B7280;
+  --ansi-bright-red: #FCA5A5;
+  --ansi-bright-green: #86EFAC;
+  --ansi-bright-yellow: #FDE68A;
+  --ansi-bright-blue: #93C5FD;
+  --ansi-bright-magenta: #F0ABFC;
+  --ansi-bright-cyan: #67E8F9;
+  --ansi-bright-white: #F9FAFB;
+
   /* shadows */
   --shadow-card: 0 2px 8px rgba(15,23,42,0.05);
   --shadow-input: 0 4px 14px -4px rgba(15,23,42,0.05);
@@ -951,3 +970,21 @@ select option { background: var(--surface-elevated); color: var(--text-primary);
 }
 @keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
 @media (prefers-reduced-motion: reduce) { .skel { animation: none; } }
+
+/* ANSI 前景色工具类（MCP 实时日志的控制台高亮，由 ansiSpans.ts 产出类名） */
+.ansi-black { color: var(--ansi-black); }
+.ansi-red { color: var(--ansi-red); }
+.ansi-green { color: var(--ansi-green); }
+.ansi-yellow { color: var(--ansi-yellow); }
+.ansi-blue { color: var(--ansi-blue); }
+.ansi-magenta { color: var(--ansi-magenta); }
+.ansi-cyan { color: var(--ansi-cyan); }
+.ansi-white { color: var(--ansi-white); }
+.ansi-bright-black { color: var(--ansi-bright-black); }
+.ansi-bright-red { color: var(--ansi-bright-red); }
+.ansi-bright-green { color: var(--ansi-bright-green); }
+.ansi-bright-yellow { color: var(--ansi-bright-yellow); }
+.ansi-bright-blue { color: var(--ansi-bright-blue); }
+.ansi-bright-magenta { color: var(--ansi-bright-magenta); }
+.ansi-bright-cyan { color: var(--ansi-bright-cyan); }
+.ansi-bright-white { color: var(--ansi-bright-white); }

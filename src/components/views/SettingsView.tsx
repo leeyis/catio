@@ -31,6 +31,7 @@ import { useServerAuth } from '../auth/ServerAuthGate'
 import { isServer } from '../../services/transport'
 import { copyTextToClipboard } from '../../services/clipboard'
 import { diagnosticLogDir } from '../../services/diagnostics'
+import { parseAnsi } from './ansiSpans'
 
 // ---- Prop types ----
 
@@ -902,6 +903,8 @@ type LogRow = McpLogEntry & { _id: number }
 
 const LOG_RING = 200
 const FIELD_TRUNC = 160
+/** 全屏时的截断上限——有空间就多显示，仍保留上限以防单条巨型输出拖垮渲染。 */
+const FIELD_TRUNC_FULL = 4000
 
 function logKindStyle(kind: string, isError?: boolean): { fg: string; bg: string } {
   if (kind === 'denied' || isError) return { fg: 'var(--danger-fg)', bg: 'color-mix(in srgb, var(--danger-fg) 13%, transparent)' }
@@ -927,13 +930,23 @@ function fmtBytes(n: number): string {
 //     userId/username/transfer, so the rendered output is identical to the pre-extraction panel.
 //   - server passes (cb) => onMcpServerLog(scope, cb); an admin viewing `all` sets showUser to
 //     render the username column, and SFTP `transfer` rows render a progress bar.
-function McpLogPanel({ subscribe, showUser }: { subscribe: (cb: (e: McpLogEntry) => void) => Promise<() => void>; showUser?: boolean }) {
+// `export` 仅为可测：全屏切换与 ANSI 渲染是这个面板自己的行为，需要独立断言。
+export function McpLogPanel({ subscribe, showUser }: { subscribe: (cb: (e: McpLogEntry) => void) => Promise<() => void>; showUser?: boolean }) {
   const { t } = useTranslation()
   const [log, setLog] = useState<LogRow[]>([])
   const [paused, setPaused] = useState(false)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const [full, setFull] = useState(false)
   const idRef = useRef(0)
   const scrollRef = useRef<HTMLDivElement>(null)
+
+  // Esc 退出全屏（浮层遮住了设置页，键盘出口是必要的）。
+  useEffect(() => {
+    if (!full) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setFull(false) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [full])
 
   // Subscribe while mounted; unsubscribe on unmount (or when `subscribe` identity changes, e.g. the
   // server head switching scope). The `active` guard drops a unsub that resolves after teardown.
@@ -985,34 +998,107 @@ function McpLogPanel({ subscribe, showUser }: { subscribe: (cb: (e: McpLogEntry)
 
   const linkBtnStyle: React.CSSProperties = { background: 'none', border: 'none', padding: 0, color: 'var(--accent-primary)', fontSize: 10.5, fontWeight: 600, cursor: 'pointer' }
 
-  // One truncatable args/output block with click-to-expand.
+  // One truncatable args/output block with click-to-expand. Output is rendered through the ANSI
+  // parser so tool colors survive (and unrenderable control sequences get stripped rather than
+  // showing up as garbage). Fullscreen raises the truncation cap — there's room for it.
   function logField(rowId: number, name: 'args' | 'output', label: string, value: string, isError?: boolean) {
     const key = `${rowId}:${name}`
     const open = expanded.has(key)
-    const long = value.length > FIELD_TRUNC
-    const shown = open || !long ? value : value.slice(0, FIELD_TRUNC) + '…'
+    const cap = full ? FIELD_TRUNC_FULL : FIELD_TRUNC
+    const long = value.length > cap
+    const shown = open || !long ? value : value.slice(0, cap) + '…'
     return (
       <div className="col gap4" style={{ marginTop: 6 }}>
         <div className="row gap6" style={{ alignItems: 'center' }}>
           <span style={{ fontSize: 10.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{label}</span>
           {long && <button onClick={() => toggleExpand(key)} style={linkBtnStyle}>{open ? t('settings.mcpLogCollapse') : t('settings.mcpLogExpand')}</button>}
         </div>
-        <code className="mono" style={{ padding: '6px 8px', background: 'var(--term-bg)', color: isError ? 'var(--danger-fg)' : 'var(--term-fg)', borderRadius: 6, fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-all', lineHeight: 1.45 }}>{shown}</code>
+        <code
+          className="mono"
+          style={{
+            padding: '6px 8px',
+            background: 'var(--term-bg)',
+            // 错误整体染红；正常输出交给 ANSI 片段自己上色，容器只给默认前景。
+            color: isError ? 'var(--danger-fg)' : 'var(--term-fg)',
+            borderRadius: 6,
+            fontSize: 11,
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-all',
+            lineHeight: 1.45,
+            // 全屏时单块输出也可能很长，给它自己的滚动区，避免把行挤出视口。
+            maxHeight: full ? '46vh' : undefined,
+            overflowY: full ? 'auto' : undefined,
+          }}
+        >
+          {parseAnsi(shown).map((s, i) => (
+            <span
+              key={i}
+              className={s.className}
+              style={{
+                fontWeight: s.bold ? 700 : undefined,
+                opacity: s.dim ? 0.65 : undefined,
+                fontStyle: s.italic ? 'italic' : undefined,
+                textDecoration: s.underline ? 'underline' : undefined,
+              }}
+            >
+              {s.text}
+            </span>
+          ))}
+        </code>
       </div>
     )
   }
 
+  // 全屏：铺满窗口的浮层。用 fixed 而非改父容器尺寸，故不受设置页滚动/内边距影响。
+  const shellStyle: React.CSSProperties = full
+    ? {
+        position: 'fixed',
+        inset: 0,
+        zIndex: 60,
+        margin: 0,
+        padding: 16,
+        gap: 10,
+        background: 'var(--surface-base)',
+      }
+    : { gap: 8, marginTop: 4 }
+
   return (
-    <div className="col" style={{ gap: 8, marginTop: 4 }}>
+    <div className="col" style={shellStyle}>
       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-        <span style={{ fontSize: 12, fontWeight: 600 }}>{t('settings.mcpLogPanelTitle')}</span>
+        <span className="row gap6" style={{ alignItems: 'center', fontSize: 12, fontWeight: 600 }}>
+          {t('settings.mcpLogPanelTitle')}
+          <span className="mono" style={{ fontSize: 10.5, fontWeight: 500, color: 'var(--text-faint)' }}>
+            {log.length}/{LOG_RING}
+          </span>
+        </span>
         <div className="row gap6">
           <Btn variant="ghost" size="sm" icon={paused ? 'play' : 'square'} onClick={() => setPaused(p => !p)}>{paused ? t('settings.mcpLogResume') : t('settings.mcpLogPause')}</Btn>
           <Btn variant="ghost" size="sm" icon="broom" disabled={log.length === 0} onClick={clearLog}>{t('settings.mcpLogClear')}</Btn>
+          <Btn
+            variant="ghost"
+            size="sm"
+            icon={full ? 'minimize-2' : 'maximize-2'}
+            onClick={() => setFull(f => !f)}
+          >
+            {full ? t('settings.mcpLogRestore') : t('settings.mcpLogFullscreen')}
+          </Btn>
         </div>
       </div>
 
-      <div ref={scrollRef} className="col" style={{ gap: 6, maxHeight: 320, overflowY: 'auto', padding: 8, border: '1px solid var(--border-hairline)', borderRadius: 10, background: 'var(--surface-sunken)' }}>
+      <div
+        ref={scrollRef}
+        className="col"
+        style={{
+          gap: 6,
+          // 全屏时吃掉剩余高度（grow），否则维持原来的 320px 上限。
+          ...(full ? { flex: 1, minHeight: 0 } : { maxHeight: 320 }),
+          overflowY: 'auto',
+          padding: 8,
+          border: '1px solid var(--border-hairline)',
+          borderRadius: 10,
+          background: 'var(--surface-sunken)',
+        }}
+      >
         {log.length === 0 ? (
           <div className="row gap6" style={{ fontSize: 11.5, color: 'var(--text-faint)', padding: '8px 4px' }}>
             <Icon name="info" size={12} /> {t('settings.mcpLogEmpty')}
@@ -1102,9 +1188,12 @@ function ServerMcpSettings() {
     void mcpTokenGet().then(tk => { setToken(tk.token); setEnabled(tk.enabled) }).catch(() => {})
   }, [])
 
-  // The token-bearing SSE endpoint, composed client-side from the page origin.
-  const endpoint = token ? `${location.origin}/mcp/sse?token=${token}` : ''
-  const claudeCmd = `claude mcp add --transport sse catio ${endpoint}`
+  // The token-bearing endpoints, composed client-side from the page origin. Streamable HTTP
+  // (POST /mcp) is the one to hand out; /mcp/sse stays for clients that don't speak it yet.
+  const endpoint = token ? `${location.origin}/mcp?token=${token}` : ''
+  const sseEndpoint = token ? `${location.origin}/mcp/sse?token=${token}` : ''
+  const claudeCmd = `claude mcp add --transport http catio ${endpoint}`
+  const claudeSseCmd = `claude mcp add --transport sse catio ${sseEndpoint}`
   const clientJson = `{
   "mcpServers": {
     "catio": { "url": "${endpoint}" }
@@ -1183,7 +1272,7 @@ function ServerMcpSettings() {
             </div>
             <div className="col gap4">
               <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('settings.mcpConfigHint')}</span>
-              <pre className="mono" style={{ margin: 0, padding: '10px 12px', background: 'var(--term-bg)', color: 'var(--term-fg)', borderRadius: 8, fontSize: 11.5, overflow: 'auto' }}>{`# Claude Code\n${claudeCmd}\n\n# Cursor / Windsurf (mcp.json)\n${clientJson}`}</pre>
+              <pre className="mono" style={{ margin: 0, padding: '10px 12px', background: 'var(--term-bg)', color: 'var(--term-fg)', borderRadius: 8, fontSize: 11.5, overflow: 'auto' }}>{`# Claude Code\n${claudeCmd}\n\n# Cursor / Windsurf (mcp.json)\n${clientJson}\n\n# ${t('settings.mcpLegacySse')}\n${claudeSseCmd}`}</pre>
             </div>
           </div>
         ) : (
@@ -1247,7 +1336,7 @@ function DesktopMcpSettings() {
   const { t } = useTranslation()
   const tauri = isTauri()
   const { prefs, update } = usePrefs()
-  const [info, setInfo] = useState<McpInfo>({ running: false, url: null, port: null, exposed: false })
+  const [info, setInfo] = useState<McpInfo>({ running: false, url: null, sseUrl: null, port: null, exposed: false })
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [copied, setCopied] = useState(false)
@@ -1318,9 +1407,13 @@ function DesktopMcpSettings() {
     update({ mcpLiveLog: on })
   }
 
-  // The token-bearing SSE endpoint (only present while running).
+  // The token-bearing endpoints (only present while running). `url` is Streamable HTTP
+  // (POST /mcp — one request, one JSON response); `sseUrl` is the retained HTTP+SSE
+  // endpoint kept for clients that don't speak Streamable HTTP yet.
   const url = info.url ?? ''
-  const claudeCmd = `claude mcp add --transport sse catio ${url}`
+  const sseUrl = info.sseUrl ?? ''
+  const claudeCmd = `claude mcp add --transport http catio ${url}`
+  const claudeSseCmd = `claude mcp add --transport sse catio ${sseUrl}`
   const clientJson = `{
   "mcpServers": {
     "catio": { "url": "${url}" }
@@ -1374,7 +1467,7 @@ function DesktopMcpSettings() {
                 </div>
                 <div className="col gap4">
                   <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('settings.mcpConfigHint')}</span>
-                  <pre className="mono" style={{ margin: 0, padding: '10px 12px', background: 'var(--term-bg)', color: 'var(--term-fg)', borderRadius: 8, fontSize: 11.5, overflow: 'auto' }}>{`# Claude Code\n${claudeCmd}\n\n# Cursor / Windsurf (mcp.json)\n${clientJson}`}</pre>
+                  <pre className="mono" style={{ margin: 0, padding: '10px 12px', background: 'var(--term-bg)', color: 'var(--term-fg)', borderRadius: 8, fontSize: 11.5, overflow: 'auto' }}>{`# Claude Code\n${claudeCmd}\n\n# Cursor / Windsurf (mcp.json)\n${clientJson}\n\n# ${t('settings.mcpLegacySse')}\n${claudeSseCmd}`}</pre>
                 </div>
               </div>
             )}

@@ -22,6 +22,7 @@
 //! emit, IP whitelist, and Tauri commands, and injects a [`DesktopTargets`] visible set.
 
 pub mod core;
+pub mod http;
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -39,7 +40,6 @@ use tokio::sync::watch;
 
 use tauri::{AppHandle, Emitter, Manager, State};
 
-const PROTOCOL_VERSION: &str = "2024-11-05";
 const PREFERRED_PORT: u16 = 8765;
 const MAX_LOG_BYTES: usize = 2 * 1024 * 1024;
 const LOG_RETENTION_DAYS: i64 = 7;
@@ -98,7 +98,10 @@ impl Default for McpState {
 #[serde(rename_all = "camelCase")]
 pub struct McpInfo {
     pub running: bool,
+    /// Streamable HTTP endpoint（`POST /mcp?token=`）——推荐给新客户端。
     pub url: Option<String>,
+    /// 保留的 HTTP+SSE endpoint（`GET /sse?token=`），供旧客户端。
+    pub sse_url: Option<String>,
     pub port: Option<u16>,
     /// True iff the running server is bound to 0.0.0.0 (LAN-exposed). UI shows a warning.
     pub exposed: bool,
@@ -108,13 +111,16 @@ impl McpInfo {
     fn running(addr: SocketAddr, token: &str) -> Self {
         Self {
             running: true,
-            url: Some(format!("http://{addr}/sse?token={token}")),
+            // Streamable HTTP endpoint（推荐）。旧的 `/sse?token=` 仍在监听，供尚未
+            // 支持 Streamable HTTP 的客户端使用，但不再作为默认展示值。
+            url: Some(format!("http://{addr}/mcp?token={token}")),
+            sse_url: Some(format!("http://{addr}/sse?token={token}")),
             port: Some(addr.port()),
             exposed: addr.ip().is_unspecified(), // true iff bound to 0.0.0.0
         }
     }
     fn stopped() -> Self {
-        Self { running: false, url: None, port: None, exposed: false }
+        Self { running: false, url: None, sse_url: None, port: None, exposed: false }
     }
 }
 
@@ -145,6 +151,44 @@ fn gen_token() -> String {
 
 fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// chunked body 的上限，防不回终止分块的客户端把内存吃满。
+const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+/// chunked body 是否已收到终止分块（`0\r\n\r\n`，容忍带 trailer 的 `0\r\n`）。
+fn ends_chunked_body(buf: &[u8]) -> bool {
+    find_subsequence(buf, b"\r\n0\r\n").is_some() || buf.starts_with(b"0\r\n")
+}
+
+/// 解 `Transfer-Encoding: chunked`。容错优先：任何畸形处即停并返回已解出的部分，
+/// 让上层的 JSON 解析给出 400，而不是在这里 panic。
+fn decode_chunked(buf: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(buf.len());
+    let mut i = 0usize;
+    // 分块头：十六进制长度，可带 `;ext`，以 CRLF 结束。
+    while let Some(nl) = find_subsequence(&buf[i..], b"\r\n") {
+        let line = &buf[i..i + nl];
+        let hex = line.split(|&b| b == b';').next().unwrap_or(line);
+        let hex = String::from_utf8_lossy(hex).trim().to_string();
+        let Ok(len) = usize::from_str_radix(&hex, 16) else { break };
+        i += nl + 2;
+        if len == 0 {
+            break; // 终止分块（后面可能有 trailer，不关心）。
+        }
+        let end = i.saturating_add(len);
+        if end > buf.len() {
+            out.extend_from_slice(&buf[i..]); // 被截断：带回已有部分。
+            break;
+        }
+        out.extend_from_slice(&buf[i..end]);
+        i = end;
+        // 分块数据后跟 CRLF。
+        if buf[i..].starts_with(b"\r\n") {
+            i += 2;
+        }
+    }
+    out
 }
 
 fn query_param(query: &str, key: &str) -> Option<String> {
@@ -203,20 +247,50 @@ async fn handle_conn(mut stream: TcpStream, ctx: ServerCtx, client_ip: String) {
     };
 
     let mut content_length = 0usize;
+    // Origin/Accept 供 Streamable HTTP 的 `POST /mcp` 用：Origin 做 DNS rebinding
+    // 防护（spec MUST），Accept 决定能否用单个 JSON 对象回应。
+    let mut origin: Option<String> = None;
+    let mut accept: Option<String> = None;
+    // chunked：Node/undici 等在流式发送 body 时不带 Content-Length，此时必须按分块解码，
+    // 否则拿到的是带长度前缀的原始分块、JSON 解析必失败。
+    let mut chunked = false;
     for line in lines {
         if let Some((k, v)) = line.split_once(':') {
-            if k.trim().eq_ignore_ascii_case("content-length") {
+            let k = k.trim();
+            if k.eq_ignore_ascii_case("content-length") {
                 content_length = v.trim().parse().unwrap_or(0);
+            } else if k.eq_ignore_ascii_case("origin") {
+                origin = Some(v.trim().to_string());
+            } else if k.eq_ignore_ascii_case("accept") {
+                accept = Some(v.trim().to_string());
+            } else if k.eq_ignore_ascii_case("transfer-encoding") {
+                chunked = v.to_ascii_lowercase().contains("chunked");
             }
         }
     }
 
     let mut body = buf[header_end + 4..].to_vec();
-    while body.len() < content_length {
-        match stream.read(&mut tmp).await {
-            Ok(0) => break,
-            Ok(n) => body.extend_from_slice(&tmp[..n]),
-            Err(_) => break,
+    if chunked {
+        // 读到终止分块（`0\r\n\r\n`）为止，再解码。
+        while !ends_chunked_body(&body) {
+            match stream.read(&mut tmp).await {
+                Ok(0) => break,
+                Ok(n) => body.extend_from_slice(&tmp[..n]),
+                Err(_) => break,
+            }
+            if body.len() > MAX_BODY_BYTES {
+                let _ = write_simple(&mut stream, 413, "Payload Too Large", "text/plain", "body too large").await;
+                return;
+            }
+        }
+        body = decode_chunked(&body);
+    } else {
+        while body.len() < content_length {
+            match stream.read(&mut tmp).await {
+                Ok(0) => break,
+                Ok(n) => body.extend_from_slice(&tmp[..n]),
+                Err(_) => break,
+            }
         }
     }
 
@@ -228,7 +302,7 @@ async fn handle_conn(mut stream: TcpStream, ctx: ServerCtx, client_ip: String) {
     // OPTIONS/health stay open (CORS preflight + liveness); everything else is gated.
     let authed_route = matches!(
         (method.as_str(), path.as_str()),
-        ("GET", "/sse") | ("GET", "/") | ("POST", "/messages") | ("POST", "/message")
+        ("GET", "/sse") | ("GET", "/") | ("POST", "/messages") | ("POST", "/message") | ("POST", "/mcp")
     );
     if authed_route {
         let allowed = {
@@ -267,6 +341,21 @@ async fn handle_conn(mut stream: TcpStream, ctx: ServerCtx, client_ip: String) {
                 return;
             }
             handle_message(&mut stream, &ctx, &query, &body, &client_ip).await
+        }
+        // Streamable HTTP（2025-03-26+）：单 endpoint，响应直接是 JSON，不开 SSE 流。
+        ("POST", "/mcp") => {
+            if !token_ok {
+                log_event("denied", &client_ip, &json!({ "path": path }));
+                emit_log(&ctx, "denied", &client_ip, json!({ "path": path }));
+                let _ = write_simple(&mut stream, 401, "Unauthorized", "text/plain", "invalid token").await;
+                return;
+            }
+            handle_streamable(&mut stream, &ctx, origin.as_deref(), accept.as_deref(), &body, &client_ip).await
+        }
+        // GET/DELETE /mcp：本实现只支持 POST（无 server→client 主动请求，也无协议级
+        // session）。spec 对这两者明确要求 405，客户端据此不再尝试开流。
+        ("GET", "/mcp") | ("DELETE", "/mcp") => {
+            let _ = write_simple(&mut stream, 405, "Method Not Allowed", "text/plain", "method not allowed").await;
         }
         _ => {
             let _ = write_simple(&mut stream, 404, "Not Found", "text/plain", "not found").await;
@@ -345,6 +434,70 @@ async fn handle_sse(mut stream: TcpStream, ctx: ServerCtx, client_ip: String) {
     ctx.sessions.lock().unwrap().remove(&session_id);
 }
 
+/// Streamable HTTP 的 `POST /mcp`：一次 POST → 一个 JSON 响应，不经 SSE。
+///
+/// 与保留的 `/messages` 路径的区别：`/messages` 只回 `202` 再把结果推到那条
+/// SSE 流（需要先 `GET /sse` 建流并维持 per-session 任务 + 25s 心跳）；这里响应
+/// 直接落在同一个 HTTP 响应体里，省掉整条长连接。
+///
+/// 顺序：Origin（DNS rebinding，spec MUST）→ Accept → 解析 → dispatch。
+/// 通知（无 `id`）按 spec 回 `202 Accepted` 且无 body。
+async fn handle_streamable(
+    stream: &mut TcpStream,
+    ctx: &ServerCtx,
+    origin: Option<&str>,
+    accept: Option<&str>,
+    body: &[u8],
+    client_ip: &str,
+) {
+    // Origin 校验先于一切：桌面端绑 127.0.0.1，若放行任意 Origin，用户浏览器里的
+    // 恶意页面即可用 DNS rebinding 驱动本机的真实数据库/SSH 会话。
+    if !http::origin_allowed(origin) {
+        let detail = json!({ "path": "/mcp", "origin": origin.unwrap_or("") });
+        log_event("denied", client_ip, &detail);
+        emit_log(ctx, "denied", client_ip, detail);
+        let body = http::error_body(http::CODE_PARSE_ERROR, "origin not allowed").to_string();
+        let _ = write_json(stream, 403, "Forbidden", &body).await;
+        return;
+    }
+    if !http::accepts_json(accept) {
+        // 我们只会用 JSON 回应；对方声明只收 SSE 就没有可用的交集。
+        let body = http::error_body(http::CODE_PARSE_ERROR, "client must accept application/json").to_string();
+        let _ = write_json(stream, 406, "Not Acceptable", &body).await;
+        return;
+    }
+
+    let req: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => {
+            let body = http::error_body(http::CODE_PARSE_ERROR, &format!("invalid json: {e}")).to_string();
+            let _ = write_json(stream, 400, "Bad Request", &body).await;
+            return;
+        }
+    };
+
+    match dispatch(ctx, &req, client_ip).await {
+        Some(resp) => {
+            let body = serde_json::to_string(&resp).unwrap_or_default();
+            let _ = write_json(stream, 200, "OK", &body).await;
+        }
+        // 通知：spec 要求 202 且无 body。
+        None => {
+            let _ = write_simple(stream, 202, "Accepted", "", "").await;
+        }
+    }
+}
+
+/// 写一个 `application/json` 响应体。
+async fn write_json(
+    stream: &mut TcpStream,
+    code: u16,
+    reason: &str,
+    body: &str,
+) -> std::io::Result<()> {
+    write_simple(stream, code, reason, "application/json", body).await
+}
+
 async fn handle_message(stream: &mut TcpStream, ctx: &ServerCtx, query: &str, body: &[u8], client_ip: &str) {
     let session_id = query_param(query, "sessionId");
 
@@ -376,10 +529,15 @@ async fn dispatch(ctx: &ServerCtx, req: &Value, client_ip: &str) -> Option<Value
 
     match method {
         "initialize" => id.map(|id| {
+            // 回客户端声明的版本（若受支持），而非硬编码常量——Streamable HTTP 客户端
+            // 声明 2025-03-26+，旧 SSE 客户端声明 2024-11-05，两者都要能对上握手。
+            let requested = params
+                .get("protocolVersion")
+                .and_then(Value::as_str);
             json!({
                 "jsonrpc": "2.0", "id": id,
                 "result": {
-                    "protocolVersion": PROTOCOL_VERSION,
+                    "protocolVersion": http::negotiate_version(requested),
                     "capabilities": { "tools": {} },
                     "serverInfo": { "name": "catio", "version": env!("CARGO_PKG_VERSION") }
                 }
@@ -744,4 +902,62 @@ pub fn mcp_set_whitelist(state: State<'_, McpState>, entries: Vec<String>) {
 #[tauri::command]
 pub fn mcp_set_live_log(state: State<'_, McpState>, enabled: bool) {
     state.live_log_enabled.store(enabled, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Transfer-Encoding: chunked —— Node/undici 等流式发送 body 时不带 Content-Length。
+    // 不解码就会把带长度前缀的原始分块喂给 serde，JSON 解析必失败（表现为无故 400）。
+    //
+    // 覆盖边界：以下测的是解码逻辑本身。桌面 `handle_conn` 的装配（解 header → 循环
+    // 读到终止分块 → 调 decode_chunked）无法在此单测——`ServerCtx` 持有 `AppHandle`，
+    // 需要真实 Tauri runtime。server head 的同一行为有端到端覆盖，见
+    // `tests/server_mcp.rs::streamable_accepts_a_chunked_request_body`。
+
+    #[test]
+    fn decodes_a_single_chunk() {
+        // 分块长度是十六进制：{"jsonrpc":"2.0","id":1} 共 24 字节 = 0x18。
+        let payload = br#"{"jsonrpc":"2.0","id":1}"#;
+        assert_eq!(payload.len(), 0x18);
+        let body = b"18\r\n{\"jsonrpc\":\"2.0\",\"id\":1}\r\n0\r\n\r\n";
+        assert_eq!(decode_chunked(body), payload.to_vec());
+    }
+
+    #[test]
+    fn decodes_multiple_chunks_into_one_body() {
+        // 分块边界可以落在 JSON 中间——解码后必须重新拼成完整文档。
+        // `{"a":` = 5 字节，`1}` = 2 字节。
+        let body = b"5\r\n{\"a\":\r\n2\r\n1}\r\n0\r\n\r\n";
+        assert_eq!(decode_chunked(body), br#"{"a":1}"#.to_vec());
+    }
+
+    #[test]
+    fn tolerates_chunk_extensions() {
+        let body = b"7;foo=bar\r\n{\"a\":1}\r\n0\r\n\r\n";
+        assert_eq!(decode_chunked(body), br#"{"a":1}"#.to_vec());
+    }
+
+    #[test]
+    fn truncated_chunk_returns_what_it_has_without_panicking() {
+        // 声明 100 字节却只给了 4 个：必须返回已有部分，交给上层报 400。
+        let body = b"64\r\nabcd";
+        assert_eq!(decode_chunked(body), b"abcd".to_vec());
+    }
+
+    #[test]
+    fn malformed_length_stops_cleanly() {
+        assert!(decode_chunked(b"zz\r\nabcd\r\n0\r\n\r\n").is_empty());
+        assert!(decode_chunked(b"").is_empty());
+    }
+
+    #[test]
+    fn detects_the_terminating_chunk() {
+        assert!(ends_chunked_body(b"5\r\nhello\r\n0\r\n\r\n"));
+        assert!(ends_chunked_body(b"0\r\n\r\n"), "空 body 的终止分块在首位");
+        // 还没收完就不能当作结束，否则会把半个 body 交给解析器。
+        assert!(!ends_chunked_body(b"5\r\nhel"));
+        assert!(!ends_chunked_body(b"5\r\nhello\r\n"));
+    }
 }

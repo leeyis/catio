@@ -42,8 +42,6 @@ use crate::netmatch::ip_allowed;
 use crate::server::AppState;
 use crate::server_ws::WsHub;
 
-const PROTOCOL_VERSION: &str = "2024-11-05";
-
 // ---- server visible set: STRICTLY the calling user's OWNED resources ----
 
 /// Server identity / visible-set. Borrows the four `AppState` maps and filters them to
@@ -413,6 +411,82 @@ pub async fn mcp_messages_handler(
     (StatusCode::ACCEPTED, "").into_response()
 }
 
+/// `POST /mcp?token=` — Streamable HTTP（2025-03-26+）。一次 POST → 一个 JSON 响应。
+///
+/// 与保留的 `/mcp/messages` 的区别：那条只回 `202` 再把结果推到客户端先前用
+/// `GET /mcp/sse` 建起的流上（服务端要为每条流维持一个 task + 25s keep-alive）；
+/// 这里响应直接落在同一 HTTP 响应体里，不需要长连接。
+///
+/// 闸门顺序与 `/mcp/messages` 一致（token → IP allowlist），另加 spec 要求的
+/// Origin 校验（DNS rebinding）与 Accept 判定。
+pub async fn mcp_streamable_handler(
+    State(st): State<AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
+    headers: HeaderMap,
+    Query(q): Query<SseQuery>,
+    body: Bytes,
+) -> Response {
+    let (user_id, username) = match st.auth.mcp_token_resolve(&q.token) {
+        Ok(Some((uid, true, name))) => (uid, name),
+        _ => return (StatusCode::UNAUTHORIZED, "invalid token").into_response(),
+    };
+
+    let cip = client_ip(&st, connect_info.as_ref(), &headers);
+    if !ip_gate_ok(&st, cip.as_deref()) {
+        emit_mcp_log(&st, user_id, &username, "denied", cip.as_deref().unwrap_or(""), json!({ "path": "/mcp" }));
+        return (StatusCode::FORBIDDEN, "forbidden").into_response();
+    }
+    let ip = cip.unwrap_or_default();
+
+    let hdr = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    // Origin 校验（spec MUST）。server 模式虽多绑在 LAN/反代后，同一条规则仍要执行：
+    // 浏览器里的第三方页面不得借用户的 cookie-less token 端点驱动其资源。
+    if !crate::mcp::http::origin_allowed(hdr("origin")) {
+        emit_mcp_log(&st, user_id, &username, "denied", &ip, json!({ "path": "/mcp", "origin": hdr("origin").unwrap_or("") }));
+        return (
+            StatusCode::FORBIDDEN,
+            axum::Json(crate::mcp::http::error_body(crate::mcp::http::CODE_PARSE_ERROR, "origin not allowed")),
+        )
+            .into_response();
+    }
+    if !crate::mcp::http::accepts_json(hdr("accept")) {
+        return (
+            StatusCode::NOT_ACCEPTABLE,
+            axum::Json(crate::mcp::http::error_body(
+                crate::mcp::http::CODE_PARSE_ERROR,
+                "client must accept application/json",
+            )),
+        )
+            .into_response();
+    }
+
+    let req: Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(crate::mcp::http::error_body(
+                    crate::mcp::http::CODE_PARSE_ERROR,
+                    &format!("invalid json: {e}"),
+                )),
+            )
+                .into_response()
+        }
+    };
+
+    match dispatch(&st, user_id, &username, &ip, &req).await {
+        Some(resp) => (StatusCode::OK, axum::Json(resp)).into_response(),
+        // 通知（无 id）：spec 要求 202 且无 body。
+        None => (StatusCode::ACCEPTED, "").into_response(),
+    }
+}
+
+/// `GET`/`DELETE /mcp` → 405。本实现只支持 POST（无 server→client 主动请求，也无
+/// 协议级 session），spec 对这两者明确要求 405，客户端据此不再尝试开流/销毁会话。
+pub async fn mcp_streamable_not_allowed() -> Response {
+    (StatusCode::METHOD_NOT_ALLOWED, "method not allowed").into_response()
+}
+
 // ---- JSON-RPC dispatch (server-specific: realtime WS log, no file logging — spec §7 YAGNI) ----
 
 /// The JSON-RPC envelope. `tools/list`/`tools/call` delegate to the shared core; `tools/call`
@@ -426,10 +500,12 @@ async fn dispatch(st: &AppState, user_id: i64, username: &str, ip: &str, req: &V
 
     match method {
         "initialize" => id.map(|id| {
+            // 回客户端声明的版本（若受支持）——见 mcp::http::negotiate_version。
+            let requested = params.get("protocolVersion").and_then(Value::as_str);
             json!({
                 "jsonrpc": "2.0", "id": id,
                 "result": {
-                    "protocolVersion": PROTOCOL_VERSION,
+                    "protocolVersion": crate::mcp::http::negotiate_version(requested),
                     "capabilities": { "tools": {} },
                     "serverInfo": { "name": "catio", "version": env!("CARGO_PKG_VERSION") }
                 }

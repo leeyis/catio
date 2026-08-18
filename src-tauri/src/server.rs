@@ -211,6 +211,14 @@ pub fn build_router(state: AppState) -> Router {
         // Server-mode MCP (P3a): external agents self-authenticate on `?token=` (NO cookie gate),
         // so these are NOT part of /api/invoke. The per-user token scopes them to the user's own
         // live connections/sessions (see server_mcp::ServerTargets).
+        // Streamable HTTP（2025-03-26+）：单 endpoint，POST 直接回 JSON。推荐路径。
+        .route(
+            "/mcp",
+            post(crate::server_mcp::mcp_streamable_handler)
+                .get(crate::server_mcp::mcp_streamable_not_allowed)
+                .delete(crate::server_mcp::mcp_streamable_not_allowed),
+        )
+        // 保留的 HTTP+SSE（2024-11-05）：供尚未支持 Streamable HTTP 的客户端。
         .route("/mcp/sse", get(crate::server_mcp::mcp_sse_handler))
         .route("/mcp/messages", post(crate::server_mcp::mcp_messages_handler))
         .fallback(spa)
