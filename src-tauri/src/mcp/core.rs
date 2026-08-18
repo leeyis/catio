@@ -577,7 +577,7 @@ fn tool_list_hosts(targets: &dyn McpTargets) -> String {
     serde_json::to_string_pretty(&json!({ "hosts": arr })).unwrap_or_default()
 }
 
-// → ssh::multiexec::run_on; optional `directory` runs as `cd <dir> && <cmd>`;
+// → ssh::exec::run_on_session; optional `directory` runs as `cd <dir> && <cmd>`;
 //   `timeout` default 30000ms; host picked via `connectionName` (defaults to sole active host).
 async fn tool_execute_command(targets: &dyn McpTargets, sessions: &SessionManager, args: &Value) -> Result<String, String> {
     let cmd = args.get("cmdString").and_then(Value::as_str).ok_or("missing 'cmdString'")?;
@@ -590,11 +590,18 @@ async fn tool_execute_command(targets: &dyn McpTargets, sessions: &SessionManage
         Some(d) if !d.is_empty() => format!("cd {} && {}", shell_quote(d), cmd),
         _ => cmd.to_string(),
     };
-    let out = tokio::time::timeout(Duration::from_millis(timeout_ms), crate::ssh::multiexec::run_on(sess, &full))
-        .await
-        .map_err(|_| "command timed out".to_string())?
-        .map_err(|e| e.to_string())?;
-    Ok(out)
+    // run_on_session：会话锁只覆盖 channel_open_session，命令执行/收流在锁外——
+    // 长命令（sleep 420）不再把同会话的 term/sftp/tunnel/其它 exec 堵在锁上。
+    match crate::ssh::exec::run_on_session(&sess, &full, Some(Duration::from_millis(timeout_ms))).await {
+        Ok(out) => Ok(out),
+        // 超时：把超时前的 stdout 一并回给 agent（附一行说明），比只给 "timed out" 有用。
+        Err(crate::ssh::SshError::TimedOut { partial }) => Err(if partial.is_empty() {
+            format!("command timed out after {timeout_ms}ms (no output before timeout)")
+        } else {
+            format!("command timed out after {timeout_ms}ms; partial output before timeout:\n{partial}")
+        }),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 // → ssh::sftp::upload_blocking. Host picked via `connectionName` (defaults to sole active host).

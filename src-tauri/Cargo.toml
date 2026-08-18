@@ -92,6 +92,8 @@ strip = true
 base64 = "0.22.1"
 parking_lot = "0.12"
 tempfile = "3"
+# ssh::exec 单测里构造 ChannelMsg::Data 需要（russh 的 Data.data 是 bytes::Bytes，未被 re-export）。
+bytes = "1"
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "socks", "cookies", "multipart"] }
 # WebSocket client for the /ws integration tests (M3).

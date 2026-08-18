@@ -22,7 +22,6 @@ use tauri::{Emitter, Manager};
 
 use crate::events::EventSink;
 use crate::ssh::manager::SessionManager;
-use crate::ssh::monitor::run_cmd;
 use crate::ssh::SshError;
 
 // ─── 数据类型 ────────────────────────────────────────────────────────────────
@@ -222,14 +221,14 @@ pub async fn realpath(
     })
 }
 
-/// 在会话上跑一条命令，短暂持锁取 handle。
+/// 在会话上跑一条命令。锁只覆盖开 channel，exec/收流在锁外（run_on_session）——
+/// 大目录 `ls -lA`、大树 `rm -rf` 这类耗时命令不会堵住同会话的 term/tunnel。
 async fn exec(mgr: &SessionManager, session_id: &str, cmd: &str) -> Result<String, SshError> {
     let sess = mgr
         .get(session_id)
         .await
         .ok_or_else(|| SshError::NotFound(session_id.to_string()))?;
-    let guard = sess.lock().await;
-    run_cmd(&guard.handle, cmd).await
+    crate::ssh::exec::run_on_session(&sess, cmd, None).await
 }
 
 /// 短暂持锁打开一个 exec channel（流式传输用，随后释放锁，channel 独立运行）。

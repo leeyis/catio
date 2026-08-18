@@ -18,7 +18,6 @@ use tokio::sync::Mutex;
 
 use crate::ssh::ids::IdGen;
 use crate::ssh::manager::{Session, SessionManager};
-use crate::ssh::monitor::run_cmd;
 use crate::ssh::SshError;
 
 /// 进程级唯一 run-id 生成器。"run-1", "run-2", ...
@@ -41,12 +40,10 @@ struct MultiExecEvent {
 
 /// 在单条会话上执行一次命令，返回 stdout。
 ///
-/// 持有会话锁仅贯穿 `run_cmd` 的 exec 调用（单条 SSH exec channel），
-/// 与 `monitor::run_cmd_locked` 保持相同的细粒度锁策略。
-/// 复用 `monitor::run_cmd` 以保持 exec channel 行为完全一致（不因非零退出码报错）。
+/// 委托给 `ssh::exec::run_on_session`：会话锁只覆盖 `channel_open_session`，命令执行
+/// 与收流在锁外——广播一条长命令不会把同会话的 term/sftp/tunnel 堵在锁上。
 pub async fn run_on(session: Arc<Mutex<Session>>, cmd: &str) -> Result<String, SshError> {
-    let s = session.lock().await;
-    run_cmd(&s.handle, cmd).await
+    crate::ssh::exec::run_on_session(&session, cmd, None).await
 }
 
 // ─── Tauri 命令 ───────────────────────────────────────────────────────────────

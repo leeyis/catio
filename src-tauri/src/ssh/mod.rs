@@ -1,5 +1,6 @@
 //! Catio SSH backend (sub-project 2). russh-based.
 pub mod conn;
+pub mod exec;
 pub mod import;
 pub mod ids;
 pub mod knownhosts;
@@ -37,6 +38,10 @@ pub enum SshError {
     Io(String),
     #[error("file changed on server")]
     Conflict,
+    /// 命令超时。`partial` 是超时前已收到的 stdout（可能为空）——长命令跑了一段
+    /// 才超时的场景里，这段输出往往正是要看的，故随错误一起带出而非丢弃。
+    #[error("operation timed out")]
+    TimedOut { partial: String },
 }
 
 impl Serialize for SshError {
@@ -52,6 +57,7 @@ impl Serialize for SshError {
             SshError::Tunnel(_) => ("Tunnel", self.to_string()),
             SshError::Io(_) => ("Io", self.to_string()),
             SshError::Conflict => ("Conflict", self.to_string()),
+            SshError::TimedOut { .. } => ("TimedOut", self.to_string()),
         };
         let mut st = s.serialize_struct("SshError", 2)?;
         st.serialize_field("kind", kind)?;

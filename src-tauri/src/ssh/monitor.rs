@@ -1,22 +1,17 @@
 //! 无代理（agentless）系统监控：通过 SSH exec channel 跑标准命令
 //! （`cat /proc/stat` 等），用 D1 的纯函数解析，组装 `Monitor`，并周期性地
 //! 经 `monitor://{sessionId}` 事件发往前端；cpu/mem/net 维护滚动 sparkline 窗口。
-//!
-//! russh 0.61.2（ring 后端）已确认的 exec channel 流程：
-//!   `let mut ch = handle.channel_open_session().await?; ch.exec(true, cmd).await?;`
-//!   随后循环 `ch.wait()` 收集 `ChannelMsg::Data { data: Bytes }`，直到
-//!   `ChannelMsg::Eof | Close`（`ExitStatus` 可能早于末批 stdout 到达，不作结束信号）。
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
 use russh::client::Handle;
-use russh::ChannelMsg;
 use serde::Serialize;
 
 use crate::events::EventSink;
 use crate::ssh::conn::ClientHandler;
+use crate::ssh::exec::run_cmd;
 use crate::ssh::manager::SessionManager;
 use crate::ssh::parse::{
     parse_cpu_cores, parse_cpu_pct, parse_disk, parse_gpus, parse_mem, parse_net_mbps,
@@ -54,49 +49,7 @@ pub struct Monitor {
 }
 
 // ────────────────────────────────────────────────
-// 1. run_cmd —— 在一个 exec channel 上跑命令，收集 stdout
-// ────────────────────────────────────────────────
-
-/// 打开一个会话 channel，`exec(true, cmd)`，收集所有 stdout `Data` 字节为
-/// String（lossy utf8），在 Eof/Close 时返回（ExitStatus 不终止收集）。
-///
-/// 契约（exit-code 处理）：**不**因非零退出码而报错。仅收集 stdout 并原样返回
-/// `Ok(stdout)`。这对监控很关键——`nvidia-smi` 在无 GPU 机器上会以非零码退出
-/// 且无 stdout，此时返回 `Ok("")`，交给 `parse_gpus("")` → 空列表。只有
-/// channel 打开/exec 本身的 I/O 错误才映射为 `SshError::Io`。
-///
-/// `pub`：D3（multiexec）复用本函数。
-pub async fn run_cmd(handle: &Handle<ClientHandler>, cmd: &str) -> Result<String, SshError> {
-    let mut ch = handle
-        .channel_open_session()
-        .await
-        .map_err(|e| SshError::Io(e.to_string()))?;
-    ch.exec(true, cmd)
-        .await
-        .map_err(|e| SshError::Io(e.to_string()))?;
-
-    let mut out: Vec<u8> = Vec::new();
-    while let Some(msg) = ch.wait().await {
-        match msg {
-            ChannelMsg::Data { ref data } => {
-                out.extend_from_slice(&data[..]);
-            }
-            // 关键：**不**在 ExitStatus 处 break。多数 SSH 服务器会在最后一批 stdout
-            // `Data`（乃至 `Eof`）之前就发来 `ExitStatus`，若在此结束循环会截断仍在途的
-            // stdout——这正是 OS 探测偶发拿到空输出、回退到 SSH banner 的根因。
-            // 退出码不影响返回值，仅记录后继续收集；真正的结束以 `Eof`/`Close` 为准
-            // （通道流结束时 `wait()` 返回 None 也会自然退出循环）。
-            ChannelMsg::Eof | ChannelMsg::Close => {
-                break;
-            }
-            _ => {}
-        }
-    }
-    Ok(String::from_utf8_lossy(&out).into_owned())
-}
-
-// ────────────────────────────────────────────────
-// 2. assemble_monitor —— 纯函数单次采样组装器（单元可测）
+// assemble_monitor —— 纯函数单次采样组装器（单元可测）
 // ────────────────────────────────────────────────
 
 /// 纯函数：用两次 /proc/stat、/proc/net/dev 快照与各 cat 输出组装一个单次采样
@@ -199,15 +152,14 @@ fn push_window<T: Clone>(win: &mut VecDeque<T>, v: T, cap: usize) -> Vec<T> {
 // 5. Tauri 命令：monitor_start / monitor_stop
 // ────────────────────────────────────────────────
 
-/// 在会话锁内仅做一次 `run_cmd`，立即释放锁。
-/// 这样监控任务可以在 sleep 和各 exec 之间自由释放锁，
-/// 不会阻塞同会话的 term/sftp/tunnel 操作。
+/// 采一条监控命令。锁只覆盖 `channel_open_session`，命令执行/收流在锁外
+/// （见 `ssh::exec::run_on_session`），`sleep(interval)` 本就在锁外——
+/// 故监控任务不会阻塞同会话的 term/sftp/tunnel 操作。
 async fn run_cmd_locked(
     sess: &tokio::sync::Mutex<crate::ssh::manager::Session>,
     cmd: &str,
 ) -> Result<String, SshError> {
-    let s = sess.lock().await;
-    run_cmd(&s.handle, cmd).await
+    crate::ssh::exec::run_on_session(sess, cmd, None).await
 }
 
 /// 通过会话锁（每条命令单独加锁）采集一次监控快照。
@@ -384,11 +336,8 @@ pub async fn ssh_sysinfo_core(session_id: String, mgr: &SessionManager) -> Resul
         "}",
     );
 
-    // 仅在 exec 期间持有锁，run_cmd 完成即释放。
-    let out = {
-        let s = sess.lock().await;
-        run_cmd(&s.handle, SYSINFO_CMD).await?
-    };
+    // 锁只覆盖开 channel；exec/收流在锁外（run_on_session）。
+    let out = crate::ssh::exec::run_on_session(&sess, SYSINFO_CMD, None).await?;
     Ok(out.trim().to_string())
 }
 
@@ -428,10 +377,7 @@ pub async fn ssh_detect_os_core(session_id: String, mgr: &SessionManager) -> Res
         "fi",
     );
 
-    let out = {
-        let s = sess.lock().await;
-        run_cmd(&s.handle, DETECT_CMD).await?
-    };
+    let out = crate::ssh::exec::run_on_session(&sess, DETECT_CMD, None).await?;
     Ok(out.trim().to_string())
 }
 

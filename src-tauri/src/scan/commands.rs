@@ -28,7 +28,6 @@ use crate::scan::probe::{self, ProbeResult};
 use crate::scan::range::{self};
 use crate::scan::{ScanError, ScanState};
 use crate::ssh::conn::{self, AuthMethod, ConnectArgs as SshConnectArgs};
-use crate::ssh::monitor;
 
 static SCAN_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -77,7 +76,7 @@ async fn detect_os_then_close(
     handle: &Handle<conn::ClientHandler>,
     probe: &ProbeResult,
 ) -> (Option<String>, Option<String>, Option<String>) {
-    let out = match timeout(OS_DETECT_TIMEOUT, monitor::run_cmd(handle, OS_DETECT_CMD)).await {
+    let out = match timeout(OS_DETECT_TIMEOUT, crate::ssh::exec::run_cmd(handle, OS_DETECT_CMD)).await {
         Ok(Ok(s)) => s,
         _ => String::new(),
     };
