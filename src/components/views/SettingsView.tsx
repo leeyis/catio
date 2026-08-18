@@ -23,7 +23,7 @@ import type { UiFontKey, MonoFontKey, Density } from '../../state/preferences'
 import { fetchModels, testModel } from '../../services'
 import type { ModelTestResult } from '../../services'
 import { isTauri } from '../../services/ssh'
-import { mcpStart, mcpStop, mcpStatus, mcpSetWhitelist, mcpSetLiveLog, onMcpLog, onMcpServerLog, mcpTokenGet, mcpTokenRegenerate, mcpTokenSetEnabled } from '../../services/mcp'
+import { mcpStart, mcpStop, mcpStatus, mcpSetWhitelist, mcpSetLiveLog, mcpRefreshToken, onMcpLog, onMcpServerLog, mcpTokenGet, mcpTokenRegenerate, mcpTokenSetEnabled } from '../../services/mcp'
 import type { McpInfo, McpLogEntry } from '../../services/mcp'
 import { exportConfig, importConfig } from '../../services/configSync'
 import { ServerAccountBlock } from '../auth/ServerAccountBlock'
@@ -1380,6 +1380,31 @@ function DesktopMcpSettings() {
     }
   }
 
+  // Rotate the token. The running server keeps its current token until restarted, so tell the
+  // user when a restart is needed for the new one to take effect.
+  const [tokenNotice, setTokenNotice] = useState('')
+  async function refreshToken() {
+    if (busy) return
+    setBusy(true)
+    setError('')
+    setTokenNotice('')
+    try {
+      const [, running] = await mcpRefreshToken()
+      if (running) {
+        // Restart so the new token is the one actually served (and shown in the URL).
+        await mcpStop()
+        await mcpSetWhitelist(prefs.mcpWhitelist)
+        setInfo(await mcpStart())
+      }
+      setTokenNotice(t('settings.mcpTokenRefreshed'))
+      setTimeout(() => setTokenNotice(''), 4000)
+    } catch (err) {
+      setError(t('settings.mcpStartError', { message: (err as { message?: string } | null)?.message ?? String(err) }))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   function addWhitelist() {
     const v = wlInput.trim()
     if (!v || !isValidWhitelistEntry(v)) { setWlError(t('settings.mcpWhitelistInvalid')); return }
@@ -1441,11 +1466,16 @@ function DesktopMcpSettings() {
           </div>
         ) : (
           <>
-            <div className="row gap8" style={{ marginBottom: info.running ? 12 : 0 }}>
+            <div className="row gap8" style={{ marginBottom: info.running ? 12 : 0, alignItems: 'center', flexWrap: 'wrap' }}>
               <Btn variant={info.running ? 'secondary' : 'cta'} size="sm" icon={busy ? 'loader' : info.running ? 'square' : 'play'} disabled={busy} onClick={() => { void toggleServer() }}>
                 {info.running ? t('settings.mcpStopBtn') : t('settings.mcpStartBtn')}
               </Btn>
-              {error && <span style={{ fontSize: 11.5, color: 'var(--danger-fg)', alignSelf: 'center' }}>{error}</span>}
+              {/* Token 固定不变，仅在此主动轮换 */}
+              <Btn variant="ghost" size="sm" icon="refresh-cw" disabled={busy} onClick={() => { void refreshToken() }}>
+                {t('settings.mcpTokenRefresh')}
+              </Btn>
+              {tokenNotice && <span style={{ fontSize: 11.5, color: 'var(--signal-green)' }}>{tokenNotice}</span>}
+              {error && <span style={{ fontSize: 11.5, color: 'var(--danger-fg)' }}>{error}</span>}
             </div>
 
             {info.running && (

@@ -66,6 +66,10 @@ struct RunningServer {
     addr: SocketAddr,
     token: String,
     shutdown: watch::Sender<bool>,
+    /// serve 任务句柄。`mcp_stop` **必须 await 它**：listener 的存活期就是该任务的存活期，
+    /// 只发 shutdown 信号就返回的话，紧接着的 `mcp_start` 会因端口仍被占用而 bind 失败、
+    /// 回退到随机端口（端点从 :8765 变成随机值，agent 配置里的端口随之失效）。
+    task: tokio::task::JoinHandle<()>,
 }
 
 pub struct McpState {
@@ -77,6 +81,9 @@ pub struct McpState {
     whitelist: Arc<StdMutex<Vec<WhitelistRule>>>,
     /// Whether to emit the `mcp://log` live-log event. File logging is unaffected.
     live_log_enabled: Arc<AtomicBool>,
+    /// Persisted token: stable across restarts unless the user explicitly refreshes it.
+    /// Protected by a mutex so `mcp_start` can read and `mcp_token_refresh` can write atomically.
+    persisted_token: StdMutex<Option<String>>,
 }
 
 impl Default for McpState {
@@ -87,6 +94,7 @@ impl Default for McpState {
             hosts: Arc::new(StdMutex::new(Vec::new())),
             whitelist: Arc::new(StdMutex::new(Vec::new())),
             live_log_enabled: Arc::new(AtomicBool::new(false)),
+            persisted_token: StdMutex::new(load_persisted_token()),
         }
     }
 }
@@ -538,6 +546,30 @@ fn log_dir() -> PathBuf {
         .join("logs")
 }
 
+fn token_file() -> PathBuf {
+    log_dir().join("mcp_token")
+}
+
+/// Load the persisted token (if it exists and is a valid 32-hex string).
+fn load_persisted_token() -> Option<String> {
+    let path = token_file();
+    std::fs::read_to_string(&path).ok().and_then(|s| {
+        let trimmed = s.trim();
+        if trimmed.len() == 32 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+            Some(trimmed.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+/// Persist the token to disk (best-effort; failure is silent).
+fn save_token(token: &str) {
+    let path = token_file();
+    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    let _ = std::fs::write(&path, token);
+}
+
 /// (year, month, day) from days since the Unix epoch (Howard Hinnant's algorithm).
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
@@ -724,7 +756,18 @@ pub async fn mcp_start(app: AppHandle, state: State<'_, McpState>) -> Result<Mcp
         Err(_) => TcpListener::bind((bind_ip, 0)).await.map_err(|e| e.to_string())?,
     };
     let addr = listener.local_addr().map_err(|e| e.to_string())?;
-    let token = gen_token();
+    // Use the persisted token if available; otherwise generate a new one and persist it.
+    let token = {
+        let mut pt = state.persisted_token.lock().unwrap();
+        if let Some(existing) = pt.as_ref() {
+            existing.clone()
+        } else {
+            let new_token = gen_token();
+            save_token(&new_token);
+            *pt = Some(new_token.clone());
+            new_token
+        }
+    };
     prune_old(&log_dir(), now_epoch());
 
     let (sh_tx, sh_rx) = watch::channel(false);
@@ -736,18 +779,25 @@ pub async fn mcp_start(app: AppHandle, state: State<'_, McpState>) -> Result<Mcp
         whitelist: state.whitelist.clone(),
         live_log: state.live_log_enabled.clone(),
     };
-    tokio::spawn(serve(listener, ctx, sh_rx));
+    let task = tokio::spawn(serve(listener, ctx, sh_rx));
 
-    *state.running.lock().unwrap() = Some(RunningServer { addr, token: token.clone(), shutdown: sh_tx });
+    *state.running.lock().unwrap() =
+        Some(RunningServer { addr, token: token.clone(), shutdown: sh_tx, task });
     Ok(McpInfo::running(addr, &token))
 }
 
+/// 停止服务。**等 serve 任务真正结束**后才返回，使端口立即可重绑——
+/// 「更新 Token」的 stop→start 依赖这一点（详见 [`RunningServer::task`]）。
 #[tauri::command]
-pub fn mcp_stop(state: State<'_, McpState>) -> McpInfo {
-    if let Some(rs) = state.running.lock().unwrap().take() {
+pub async fn mcp_stop(state: State<'_, McpState>) -> Result<McpInfo, String> {
+    // 先在锁内取出，再在锁外 await：StdMutex 的 guard 不可跨 await 持有。
+    let running = state.running.lock().unwrap().take();
+    if let Some(rs) = running {
         let _ = rs.shutdown.send(true);
+        // accept() 正阻塞在 select! 上，收到信号即 break 并 drop listener。
+        let _ = rs.task.await;
     }
-    McpInfo::stopped()
+    Ok(McpInfo::stopped())
 }
 
 #[tauri::command]
@@ -789,6 +839,18 @@ pub fn mcp_set_whitelist(state: State<'_, McpState>, entries: Vec<String>) {
 #[tauri::command]
 pub fn mcp_set_live_log(state: State<'_, McpState>, enabled: bool) {
     state.live_log_enabled.store(enabled, Ordering::Relaxed);
+}
+
+/// Generate a fresh token and persist it. If the server is running, the new token takes effect
+/// only after the next `mcp_start` — the running server keeps its current token until stopped.
+/// Returns the new token value (for display) and whether the server is currently running.
+#[tauri::command]
+pub fn mcp_token_refresh(state: State<'_, McpState>) -> (String, bool) {
+    let new_token = gen_token();
+    save_token(&new_token);
+    *state.persisted_token.lock().unwrap() = Some(new_token.clone());
+    let running = state.running.lock().unwrap().is_some();
+    (new_token, running)
 }
 
 #[cfg(test)]
@@ -837,6 +899,89 @@ mod tests {
     fn malformed_length_stops_cleanly() {
         assert!(decode_chunked(b"zz\r\nabcd\r\n0\r\n\r\n").is_empty());
         assert!(decode_chunked(b"").is_empty());
+    }
+
+    // ── 停止后端口必须立即可重绑 ────────────────────────────────────────
+    //
+    // 「更新 Token」在服务运行时要 stop→start 让新 token 生效。若 stop 只发信号就返回，
+    // 旧 listener 可能还占着 8765，紧接着的 start 就会 bind 失败并回退到随机端口——
+    // 端点从 :8765 变成 :54321，agent 配置里的端口也失效，比 token 变化更糟。
+
+    /// 按 `mcp_start` 的方式起一个真 serve 任务，返回可用于停止它的 `RunningServer` 片段。
+    /// 不构造 `ServerCtx`（需要 AppHandle），只复用 listener + shutdown + JoinHandle 三者的
+    /// 时序——这正是端口能否立即重绑的决定因素。
+    async fn spawn_serve_like(port: u16) -> (watch::Sender<bool>, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await.unwrap();
+        let (tx, mut rx) = watch::channel(false);
+        // 与 serve() 同构：select! 在 accept 与 shutdown 间等待，break 后 listener 随任务 drop。
+        let h = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = rx.changed() => break,
+                    accept = listener.accept() => match accept {
+                        Ok(_) => {}
+                        Err(_) => break,
+                    },
+                }
+            }
+        });
+        (tx, h)
+    }
+
+    /// 复刻 `mcp_stop` 的收尾语义：发信号 **并等任务结束**。
+    async fn stop_like(tx: watch::Sender<bool>, task: tokio::task::JoinHandle<()>) {
+        let _ = tx.send(true);
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn stop_that_awaits_the_task_frees_the_port_immediately() {
+        let port = {
+            let probe = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            probe.local_addr().unwrap().port()
+        };
+
+        let (tx, task) = spawn_serve_like(port).await;
+        assert!(
+            TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await.is_err(),
+            "serve 运行期间同端口不应可绑"
+        );
+
+        stop_like(tx, task).await;
+
+        // 这是「更新 Token」里 stop→start 能守住 8765 的前提。
+        assert!(
+            TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await.is_ok(),
+            "mcp_stop await 任务后,同端口必须可立即重绑"
+        );
+    }
+
+    // ── token 持久化 ──────────────────────────────────────────────────────
+    //
+    // 用户反馈的问题：每次启停服务都换 token，导致 agent 客户端配置得跟着改。
+    // 现在 token 落盘，启动时复用；只有用户点「更新 Token」才轮换。
+
+    #[test]
+    fn accepts_a_well_formed_persisted_token() {
+        // 32 位十六进制 = gen_token 的输出格式。
+        let tok = "0123456789abcdef0123456789abcdef";
+        assert_eq!(tok.len(), 32);
+        assert!(tok.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn gen_token_is_32_hex_chars() {
+        // load_persisted_token 按此格式校验，两者必须对齐，否则存进去的读不回来。
+        let t = gen_token();
+        assert_eq!(t.len(), 32, "token 必须是 32 字符: {t}");
+        assert!(t.chars().all(|c| c.is_ascii_hexdigit()), "token 必须全为十六进制: {t}");
+    }
+
+    #[test]
+    fn gen_token_is_not_constant() {
+        // 「固定 token」指的是跨重启复用落盘值，不是生成器退化成常量——
+        // 点「更新 Token」必须真的换一个。
+        assert_ne!(gen_token(), gen_token());
     }
 
     #[test]

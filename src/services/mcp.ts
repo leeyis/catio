@@ -86,6 +86,12 @@ export async function mcpSetLiveLog(enabled: boolean): Promise<void> {
   return tauriInvoke('mcp_set_live_log', { enabled })
 }
 
+/** Desktop-only: generate a fresh token and persist it. Returns (newToken, isRunning). */
+export async function mcpRefreshToken(): Promise<[string, boolean]> {
+  if (!isTauri()) throw new Error('mcpRefreshToken is desktop-only')
+  return tauriInvoke('mcp_token_refresh')
+}
+
 // ---- Server-mode per-user MCP token (P3a) ----
 // Desktop never calls these (the desktop server self-auths via its per-run URL token); they are
 // the server head's per-user SSE endpoint controls. The token + enabled state live in the backend

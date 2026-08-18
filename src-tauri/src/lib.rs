@@ -190,6 +190,7 @@ pub fn run() {
             mcp::mcp_sync_targets,
             mcp::mcp_set_whitelist,
             mcp::mcp_set_live_log,
+            mcp::mcp_token_refresh,
             scan::commands::scan_start,
             scan::commands::scan_cancel,
             scan::commands::scan_read_text_file,
