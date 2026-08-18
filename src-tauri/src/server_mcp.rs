@@ -1,9 +1,9 @@
 //! Server-head MCP (P3a) — per-user, token-authenticated MCP over axum.
 //!
-//! Unlike the desktop head (hand-rolled HTTP+SSE on 127.0.0.1, single user), the server head is
-//! multi-user: every user owns a personal token (`auth.rs` `mcp_tokens`). The two routes
-//! (`GET /mcp/sse`, `POST /mcp/messages`) self-authenticate on `?token=` (NO session cookie —
-//! external agents send none) and bypass the `/api/invoke` cookie gate entirely.
+//! Unlike the desktop head (hand-rolled tokio HTTP on 127.0.0.1, single user), the server head is
+//! multi-user: every user owns a personal token (`auth.rs` `mcp_tokens`). The MCP endpoint
+//! (`POST /mcp`, Streamable HTTP) self-authenticates on `?token=` (NO session cookie —
+//! external agents send none) and bypasses the `/api/invoke` cookie gate entirely.
 //!
 //! OWNER ISOLATION: the token identifies exactly ONE user, so [`ServerTargets`] resolves STRICTLY
 //! that user's OWNED connections/sessions — NOT admin-sees-all. Even an admin's MCP token only
@@ -11,30 +11,23 @@
 //! does NOT apply here). A crafted/guessed id outside the owned set resolves to None/Err.
 //!
 //! The tools are the shared [`crate::mcp::core`] implementation; this module only adds the
-//! transport: an SSE session table (sessionId → sender) + a small JSON-RPC envelope. P3b adds a
+//! transport: a small JSON-RPC envelope over one POST endpoint. P3b adds a
 //! realtime log streamed over the WS hub (`mcp-log://<user_id>` + `mcp-log://all`, gated on
 //! `has_subscriber`), a [`WsSink`] that remaps SFTP progress onto it, and an optional network-layer
-//! IP allowlist (`CATIO_MCP_IP_ALLOWLIST`) on the two routes. Still no file logging (spec §7 YAGNI).
+//! IP allowlist (`CATIO_MCP_IP_ALLOWLIST`) on the route. Still no file logging (spec §7 YAGNI).
 
 use std::collections::HashMap;
-use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use axum::{
     body::Bytes,
     extract::{ConnectInfo, Query, State},
     http::{HeaderMap, StatusCode},
-    response::{
-        sse::{Event, KeepAlive, Sse},
-        IntoResponse, Response,
-    },
+    response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::sync::mpsc::UnboundedSender;
 
 use crate::events::EventSink;
 use crate::mcp::core::{self, ConnEntry, HostEntry, McpTargets};
@@ -142,7 +135,6 @@ impl EventSink for WsSink {
             ts: fmt_datetime(now_epoch()),
             kind: "transfer".to_string(),
             ip: String::new(),
-            session_id: None,
             tool: payload.get("filename").and_then(Value::as_str).map(String::from),
             args: None,
             output: None,
@@ -171,8 +163,6 @@ struct McpLogEntry {
     ts: String,
     kind: String,
     ip: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -231,7 +221,6 @@ fn emit_mcp_log(st: &AppState, user_id: i64, username: &str, kind: &str, ip: &st
         ts: fmt_datetime(now_epoch()),
         kind: kind.to_string(),
         ip: ip.to_string(),
-        session_id: detail.get("sessionId").and_then(Value::as_str).map(String::from),
         tool: detail.get("tool").and_then(Value::as_str).map(String::from),
         args: detail.get("args").cloned(),
         output: detail.get("output").and_then(Value::as_str).map(String::from),
@@ -280,150 +269,21 @@ fn ip_gate_ok(st: &AppState, client_ip: Option<&str>) -> bool {
     }
 }
 
-// ---- SSE session table ----
-
-/// Removes the SSE session from the table when the stream is dropped (client disconnect / end),
-/// so the sessionId → sender map can't leak entries across reconnects.
-struct SessionGuard {
-    sessions: Arc<Mutex<HashMap<String, UnboundedSender<String>>>>,
-    id: String,
-}
-impl Drop for SessionGuard {
-    fn drop(&mut self) {
-        self.sessions.lock().unwrap().remove(&self.id);
-    }
-}
-
-fn gen_session_id() -> String {
-    static CTR: AtomicU64 = AtomicU64::new(0);
-    let n = CTR.fetch_add(1, Ordering::Relaxed);
-    format!("{:016x}-{n:x}", rand::random::<u64>())
-}
-
+/// `POST /mcp` 的查询串：只有 token（外部 agent 不带 cookie，token 即身份）。
 #[derive(Deserialize)]
-pub struct SseQuery {
+pub struct McpQuery {
     #[serde(default)]
     token: String,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MsgQuery {
-    #[serde(default)]
-    token: String,
-    #[serde(default)]
-    session_id: String,
-}
-
-/// `GET /mcp/sse?token=` — SSE event stream. Self-authenticates on the token (must resolve AND be
-/// enabled; else 401). Mints a sessionId, registers its sender, advertises the `endpoint` event
-/// (token echoed through so the client carries it on POSTs), then streams `message` events pushed
-/// by `/mcp/messages`. A 25s keep-alive ping holds the connection open; the [`SessionGuard`]
-/// unregisters on disconnect.
-pub async fn mcp_sse_handler(
-    State(st): State<AppState>,
-    connect_info: Option<ConnectInfo<SocketAddr>>,
-    headers: HeaderMap,
-    Query(q): Query<SseQuery>,
-) -> Response {
-    // Resolve the token to (user_id, username) up front: the realtime-log connect/denied entries
-    // need both, and re-resolving would just double the query.
-    let (user_id, username) = match st.auth.mcp_token_resolve(&q.token) {
-        Ok(Some((uid, true, name))) => (uid, name),
-        _ => return (StatusCode::UNAUTHORIZED, "invalid token").into_response(),
-    };
-
-    // IP allowlist gate (network-layer, additive to the token). Disabled when the allowlist is
-    // empty; loopback always passes; an undeterminable IP under an engaged gate fails closed.
-    let cip = client_ip(&st, connect_info.as_ref(), &headers);
-    if !ip_gate_ok(&st, cip.as_deref()) {
-        emit_mcp_log(&st, user_id, &username, "denied", cip.as_deref().unwrap_or(""), json!({ "path": "/mcp/sse" }));
-        return (StatusCode::FORBIDDEN, "forbidden").into_response();
-    }
-    let ip = cip.unwrap_or_default();
-
-    let session_id = gen_session_id();
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    st.mcp_sessions.lock().unwrap().insert(session_id.clone(), tx);
-    let guard = SessionGuard { sessions: st.mcp_sessions.clone(), id: session_id.clone() };
-
-    emit_mcp_log(&st, user_id, &username, "connect", &ip, json!({ "sessionId": session_id }));
-
-    // Echo the token through so the client carries it on its POSTs to /mcp/messages.
-    let endpoint = format!("/mcp/messages?sessionId={session_id}&token={}", q.token);
-    let stream = futures_util::stream::unfold(
-        (Some(endpoint), rx, guard),
-        |(mut first, mut rx, guard)| async move {
-            if let Some(ep) = first.take() {
-                let ev = Event::default().event("endpoint").data(ep);
-                return Some((Ok::<Event, Infallible>(ev), (None, rx, guard)));
-            }
-            match rx.recv().await {
-                Some(line) => Some((Ok(Event::default().event("message").data(line)), (None, rx, guard))),
-                None => None,
-            }
-        },
-    );
-
-    Sse::new(stream)
-        .keep_alive(KeepAlive::new().interval(Duration::from_secs(25)))
-        .into_response()
-}
-
-/// `POST /mcp/messages?sessionId=&token=` — JSON-RPC endpoint. Self-authenticates on the token and
-/// re-resolves the user on EVERY POST (stateless; the sessionId only routes the response). Builds
-/// a [`ServerTargets`] owner-scoped to that user, runs the shared core, replies 202, then pushes
-/// the JSON-RPC response onto the matching SSE stream. Token = primary gate; owner-scope = data gate.
-pub async fn mcp_messages_handler(
-    State(st): State<AppState>,
-    connect_info: Option<ConnectInfo<SocketAddr>>,
-    headers: HeaderMap,
-    Query(q): Query<MsgQuery>,
-    body: Bytes,
-) -> Response {
-    let (user_id, username) = match st.auth.mcp_token_resolve(&q.token) {
-        Ok(Some((uid, true, name))) => (uid, name),
-        _ => return (StatusCode::UNAUTHORIZED, "invalid token").into_response(),
-    };
-
-    // IP allowlist gate — same point as the token check, additive (token stays the primary gate).
-    let cip = client_ip(&st, connect_info.as_ref(), &headers);
-    if !ip_gate_ok(&st, cip.as_deref()) {
-        emit_mcp_log(&st, user_id, &username, "denied", cip.as_deref().unwrap_or(""), json!({ "path": "/mcp/messages" }));
-        return (StatusCode::FORBIDDEN, "forbidden").into_response();
-    }
-    let ip = cip.unwrap_or_default();
-
-    let req: Value = match serde_json::from_slice(&body) {
-        Ok(v) => v,
-        Err(e) => return (StatusCode::BAD_REQUEST, format!("invalid json: {e}")).into_response(),
-    };
-
-    let resp = dispatch(&st, user_id, &username, &ip, &req).await;
-    if let Some(resp) = resp {
-        if !q.session_id.is_empty() {
-            let line = serde_json::to_string(&resp).unwrap_or_default();
-            if let Some(tx) = st.mcp_sessions.lock().unwrap().get(&q.session_id) {
-                let _ = tx.send(line);
-            }
-        }
-    }
-    (StatusCode::ACCEPTED, "").into_response()
-}
-
-/// `POST /mcp?token=` — Streamable HTTP（2025-03-26+）。一次 POST → 一个 JSON 响应。
+/// `POST /mcp?token=` — Streamable HTTP。一次 POST → 一个 JSON 响应，无长连接。
 ///
-/// 与保留的 `/mcp/messages` 的区别：那条只回 `202` 再把结果推到客户端先前用
-/// `GET /mcp/sse` 建起的流上（服务端要为每条流维持一个 task + 25s keep-alive）；
-/// 这里响应直接落在同一 HTTP 响应体里，不需要长连接。
-///
-/// 闸门顺序与 `/mcp/messages` 一致（token → IP allowlist），另加 spec 要求的
-/// Origin 校验（DNS rebinding）与 Accept 判定。
+/// 闸门顺序：token → IP allowlist → Origin（DNS rebinding，spec MUST）→ Accept。
 pub async fn mcp_streamable_handler(
     State(st): State<AppState>,
     connect_info: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
-    Query(q): Query<SseQuery>,
+    Query(q): Query<McpQuery>,
     body: Bytes,
 ) -> Response {
     let (user_id, username) = match st.auth.mcp_token_resolve(&q.token) {

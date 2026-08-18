@@ -1,9 +1,9 @@
 //! Local MCP (Model Context Protocol) server, embedded in the app.
 //!
 //! Exposes the user's *already-connected* databases and SSH hosts to external AI
-//! coding agents (Claude Code, Cursor, …) over MCP's HTTP+SSE transport. The agent
-//! opens `GET /sse?token=…` for the server→client event stream, then POSTs JSON-RPC
-//! requests to the `/messages?sessionId=…&token=…` endpoint advertised on it.
+//! coding agents (Claude Code, Cursor, …) over MCP's **Streamable HTTP** transport:
+//! a single endpoint, `POST /mcp?token=…`, whose response body IS the JSON-RPC reply.
+//! No SSE stream, so no per-session task and no keep-alive heartbeat to maintain.
 //!
 //! Security:
 //! * Bound to 127.0.0.1 only — never exposed off the machine.
@@ -18,24 +18,21 @@
 //!
 //! The tools themselves live in the transport/identity-agnostic [`core`] module so
 //! the desktop (here) and server (`crate::server_mcp`) heads share ONE implementation;
-//! this module keeps the desktop-specific HTTP/SSE transport, file logging, `mcp://log`
+//! this module keeps the desktop-specific HTTP transport, file logging, `mcp://log`
 //! emit, IP whitelist, and Tauri commands, and injects a [`DesktopTargets`] visible set.
 
 pub mod core;
 pub mod http;
 
-use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::watch;
 
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -98,10 +95,8 @@ impl Default for McpState {
 #[serde(rename_all = "camelCase")]
 pub struct McpInfo {
     pub running: bool,
-    /// Streamable HTTP endpoint（`POST /mcp?token=`）——推荐给新客户端。
+    /// MCP endpoint（`POST /mcp?token=`）。
     pub url: Option<String>,
-    /// 保留的 HTTP+SSE endpoint（`GET /sse?token=`），供旧客户端。
-    pub sse_url: Option<String>,
     pub port: Option<u16>,
     /// True iff the running server is bound to 0.0.0.0 (LAN-exposed). UI shows a warning.
     pub exposed: bool,
@@ -111,16 +106,13 @@ impl McpInfo {
     fn running(addr: SocketAddr, token: &str) -> Self {
         Self {
             running: true,
-            // Streamable HTTP endpoint（推荐）。旧的 `/sse?token=` 仍在监听，供尚未
-            // 支持 Streamable HTTP 的客户端使用，但不再作为默认展示值。
             url: Some(format!("http://{addr}/mcp?token={token}")),
-            sse_url: Some(format!("http://{addr}/sse?token={token}")),
             port: Some(addr.port()),
             exposed: addr.ip().is_unspecified(), // true iff bound to 0.0.0.0
         }
     }
     fn stopped() -> Self {
-        Self { running: false, url: None, sse_url: None, port: None, exposed: false }
+        Self { running: false, url: None, port: None, exposed: false }
     }
 }
 
@@ -131,18 +123,11 @@ struct ServerCtx {
     app: AppHandle,
     conns: Arc<StdMutex<Vec<ConnMeta>>>,
     hosts: Arc<StdMutex<Vec<HostMeta>>>,
-    sessions: Arc<StdMutex<HashMap<String, UnboundedSender<String>>>>,
     token: String,
     /// Shared with McpState; gates each new connection's source IP in real time.
     whitelist: Arc<StdMutex<Vec<WhitelistRule>>>,
     /// Shared with McpState; gates whether live-log events are emitted.
     live_log: Arc<AtomicBool>,
-}
-
-fn gen_session_id() -> String {
-    static CTR: AtomicU64 = AtomicU64::new(0);
-    let n = CTR.fetch_add(1, Ordering::Relaxed);
-    format!("{:016x}-{n:x}", rand::random::<u64>())
 }
 
 fn gen_token() -> String {
@@ -300,10 +285,7 @@ async fn handle_conn(mut stream: TcpStream, ctx: ServerCtx, client_ip: String) {
     // IP whitelist gate (network-layer, additive to the token). Loopback (127.0.0.1/::1)
     // is always allowed; non-loopback must match a rule, else 403 + denied log/emit.
     // OPTIONS/health stay open (CORS preflight + liveness); everything else is gated.
-    let authed_route = matches!(
-        (method.as_str(), path.as_str()),
-        ("GET", "/sse") | ("GET", "/") | ("POST", "/messages") | ("POST", "/message") | ("POST", "/mcp")
-    );
+    let authed_route = matches!((method.as_str(), path.as_str()), ("POST", "/mcp"));
     if authed_route {
         let allowed = {
             let rules = ctx.whitelist.lock().unwrap();
@@ -324,25 +306,7 @@ async fn handle_conn(mut stream: TcpStream, ctx: ServerCtx, client_ip: String) {
         ("GET", "/health") => {
             let _ = write_simple(&mut stream, 200, "OK", "application/json", "{\"ok\":true}").await;
         }
-        ("GET", "/sse") | ("GET", "/") => {
-            if !token_ok {
-                log_event("denied", &client_ip, &json!({ "path": path }));
-                emit_log(&ctx, "denied", &client_ip, json!({ "path": path }));
-                let _ = write_simple(&mut stream, 401, "Unauthorized", "text/plain", "invalid token").await;
-                return;
-            }
-            handle_sse(stream, ctx, client_ip).await
-        }
-        ("POST", "/messages") | ("POST", "/message") => {
-            if !token_ok {
-                log_event("denied", &client_ip, &json!({ "path": path }));
-                emit_log(&ctx, "denied", &client_ip, json!({ "path": path }));
-                let _ = write_simple(&mut stream, 401, "Unauthorized", "text/plain", "invalid token").await;
-                return;
-            }
-            handle_message(&mut stream, &ctx, &query, &body, &client_ip).await
-        }
-        // Streamable HTTP（2025-03-26+）：单 endpoint，响应直接是 JSON，不开 SSE 流。
+        // Streamable HTTP：唯一的 MCP endpoint，响应直接是 JSON。
         ("POST", "/mcp") => {
             if !token_ok {
                 log_event("denied", &client_ip, &json!({ "path": path }));
@@ -387,58 +351,7 @@ async fn write_simple(
     stream.flush().await
 }
 
-async fn handle_sse(mut stream: TcpStream, ctx: ServerCtx, client_ip: String) {
-    let session_id = gen_session_id();
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    ctx.sessions.lock().unwrap().insert(session_id.clone(), tx);
-    log_event("connect", &client_ip, &json!({ "sessionId": session_id }));
-    emit_log(&ctx, "connect", &client_ip, json!({ "sessionId": session_id }));
-
-    let headers = "HTTP/1.1 200 OK\r\n\
-        Content-Type: text/event-stream\r\n\
-        Cache-Control: no-cache\r\n\
-        Connection: keep-alive\r\n\
-        Access-Control-Allow-Origin: *\r\n\r\n";
-    if stream.write_all(headers.as_bytes()).await.is_err() {
-        ctx.sessions.lock().unwrap().remove(&session_id);
-        return;
-    }
-
-    // Advertise the POST endpoint (token carried through so the client echoes it).
-    let endpoint = format!(
-        "event: endpoint\r\ndata: /messages?sessionId={session_id}&token={}\r\n\r\n",
-        ctx.token
-    );
-    let _ = stream.write_all(endpoint.as_bytes()).await;
-    let _ = stream.flush().await;
-
-    let mut ping = tokio::time::interval(Duration::from_secs(25));
-    ping.tick().await;
-
-    loop {
-        tokio::select! {
-            msg = rx.recv() => match msg {
-                Some(m) => {
-                    let frame = format!("event: message\r\ndata: {m}\r\n\r\n");
-                    if stream.write_all(frame.as_bytes()).await.is_err() { break; }
-                    let _ = stream.flush().await;
-                }
-                None => break,
-            },
-            _ = ping.tick() => {
-                if stream.write_all(b": ping\r\n\r\n").await.is_err() { break; }
-                let _ = stream.flush().await;
-            }
-        }
-    }
-    ctx.sessions.lock().unwrap().remove(&session_id);
-}
-
-/// Streamable HTTP 的 `POST /mcp`：一次 POST → 一个 JSON 响应，不经 SSE。
-///
-/// 与保留的 `/messages` 路径的区别：`/messages` 只回 `202` 再把结果推到那条
-/// SSE 流（需要先 `GET /sse` 建流并维持 per-session 任务 + 25s 心跳）；这里响应
-/// 直接落在同一个 HTTP 响应体里，省掉整条长连接。
+/// `POST /mcp`：一次 POST → 一个 JSON 响应。
 ///
 /// 顺序：Origin（DNS rebinding，spec MUST）→ Accept → 解析 → dispatch。
 /// 通知（无 `id`）按 spec 回 `202 Accepted` 且无 body。
@@ -496,28 +409,6 @@ async fn write_json(
     body: &str,
 ) -> std::io::Result<()> {
     write_simple(stream, code, reason, "application/json", body).await
-}
-
-async fn handle_message(stream: &mut TcpStream, ctx: &ServerCtx, query: &str, body: &[u8], client_ip: &str) {
-    let session_id = query_param(query, "sessionId");
-
-    let req: Value = match serde_json::from_slice(body) {
-        Ok(v) => v,
-        Err(e) => {
-            let _ = write_simple(stream, 400, "Bad Request", "text/plain", &format!("invalid json: {e}")).await;
-            return;
-        }
-    };
-
-    let resp = dispatch(ctx, &req, client_ip).await;
-    let _ = write_simple(stream, 202, "Accepted", "text/plain", "").await;
-
-    if let (Some(sid), Some(resp)) = (session_id, resp) {
-        let line = serde_json::to_string(&resp).unwrap_or_default();
-        if let Some(tx) = ctx.sessions.lock().unwrap().get(&sid) {
-            let _ = tx.send(line);
-        }
-    }
 }
 
 // ---- JSON-RPC dispatch (desktop-specific: file log + mcp://log emit gate) ----
@@ -694,8 +585,6 @@ struct McpLogEntry {
     kind: String,
     ip: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    session_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     tool: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     args: Option<Value>,
@@ -717,7 +606,6 @@ fn emit_log(ctx: &ServerCtx, kind: &str, ip: &str, detail: Value) {
         ts: fmt_datetime(now_epoch()),
         kind: kind.to_string(),
         ip: ip.to_string(),
-        session_id: detail.get("sessionId").and_then(Value::as_str).map(String::from),
         tool: detail.get("tool").and_then(Value::as_str).map(String::from),
         args: detail.get("args").cloned(),
         output: detail.get("output").and_then(Value::as_str).map(String::from),
@@ -844,7 +732,6 @@ pub async fn mcp_start(app: AppHandle, state: State<'_, McpState>) -> Result<Mcp
         app: app.clone(),
         conns: state.conns.clone(),
         hosts: state.hosts.clone(),
-        sessions: Arc::new(StdMutex::new(HashMap::new())),
         token: token.clone(),
         whitelist: state.whitelist.clone(),
         live_log: state.live_log_enabled.clone(),

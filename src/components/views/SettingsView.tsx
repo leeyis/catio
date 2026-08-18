@@ -909,7 +909,7 @@ const FIELD_TRUNC_FULL = 4000
 function logKindStyle(kind: string, isError?: boolean): { fg: string; bg: string } {
   if (kind === 'denied' || isError) return { fg: 'var(--danger-fg)', bg: 'color-mix(in srgb, var(--danger-fg) 13%, transparent)' }
   if (kind === 'tools/result') return { fg: 'var(--signal-green)', bg: 'color-mix(in srgb, var(--signal-green) 13%, transparent)' }
-  if (kind === 'tools/call' || kind === 'connect') return { fg: 'var(--accent-primary)', bg: 'var(--accent-soft)' }
+  if (kind === 'tools/call') return { fg: 'var(--accent-primary)', bg: 'var(--accent-soft)' }
   if (kind === 'transfer') return { fg: 'var(--text-secondary)', bg: 'color-mix(in srgb, var(--accent-primary) 10%, transparent)' }
   return { fg: 'var(--text-tertiary)', bg: 'var(--surface-sunken)' }
 }
@@ -1121,7 +1121,6 @@ export function McpLogPanel({ subscribe, showUser }: { subscribe: (cb: (e: McpLo
                   )}
                   <span className="row gap4" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
                     {row.ip && <span className="mono">{row.ip}</span>}
-                    {row.sessionId && <span className="mono" style={{ color: 'var(--text-faint)' }}>· {row.sessionId}</span>}
                   </span>
                   {row.tool && (
                     <span className="row gap4" style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text-secondary)' }}>
@@ -1188,12 +1187,9 @@ function ServerMcpSettings() {
     void mcpTokenGet().then(tk => { setToken(tk.token); setEnabled(tk.enabled) }).catch(() => {})
   }, [])
 
-  // The token-bearing endpoints, composed client-side from the page origin. Streamable HTTP
-  // (POST /mcp) is the one to hand out; /mcp/sse stays for clients that don't speak it yet.
+  // The token-bearing MCP endpoint, composed client-side from the page origin.
   const endpoint = token ? `${location.origin}/mcp?token=${token}` : ''
-  const sseEndpoint = token ? `${location.origin}/mcp/sse?token=${token}` : ''
   const claudeCmd = `claude mcp add --transport http catio ${endpoint}`
-  const claudeSseCmd = `claude mcp add --transport sse catio ${sseEndpoint}`
   const clientJson = `{
   "mcpServers": {
     "catio": { "url": "${endpoint}" }
@@ -1272,7 +1268,7 @@ function ServerMcpSettings() {
             </div>
             <div className="col gap4">
               <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('settings.mcpConfigHint')}</span>
-              <pre className="mono" style={{ margin: 0, padding: '10px 12px', background: 'var(--term-bg)', color: 'var(--term-fg)', borderRadius: 8, fontSize: 11.5, overflow: 'auto' }}>{`# Claude Code\n${claudeCmd}\n\n# Cursor / Windsurf (mcp.json)\n${clientJson}\n\n# ${t('settings.mcpLegacySse')}\n${claudeSseCmd}`}</pre>
+              <pre className="mono" style={{ margin: 0, padding: '10px 12px', background: 'var(--term-bg)', color: 'var(--term-fg)', borderRadius: 8, fontSize: 11.5, overflow: 'auto' }}>{`# Claude Code\n${claudeCmd}\n\n# Cursor / Windsurf (mcp.json)\n${clientJson}`}</pre>
             </div>
           </div>
         ) : (
@@ -1336,7 +1332,7 @@ function DesktopMcpSettings() {
   const { t } = useTranslation()
   const tauri = isTauri()
   const { prefs, update } = usePrefs()
-  const [info, setInfo] = useState<McpInfo>({ running: false, url: null, sseUrl: null, port: null, exposed: false })
+  const [info, setInfo] = useState<McpInfo>({ running: false, url: null, port: null, exposed: false })
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [copied, setCopied] = useState(false)
@@ -1407,13 +1403,9 @@ function DesktopMcpSettings() {
     update({ mcpLiveLog: on })
   }
 
-  // The token-bearing endpoints (only present while running). `url` is Streamable HTTP
-  // (POST /mcp — one request, one JSON response); `sseUrl` is the retained HTTP+SSE
-  // endpoint kept for clients that don't speak Streamable HTTP yet.
+  // The token-bearing MCP endpoint (only present while running).
   const url = info.url ?? ''
-  const sseUrl = info.sseUrl ?? ''
   const claudeCmd = `claude mcp add --transport http catio ${url}`
-  const claudeSseCmd = `claude mcp add --transport sse catio ${sseUrl}`
   const clientJson = `{
   "mcpServers": {
     "catio": { "url": "${url}" }
@@ -1467,7 +1459,7 @@ function DesktopMcpSettings() {
                 </div>
                 <div className="col gap4">
                   <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('settings.mcpConfigHint')}</span>
-                  <pre className="mono" style={{ margin: 0, padding: '10px 12px', background: 'var(--term-bg)', color: 'var(--term-fg)', borderRadius: 8, fontSize: 11.5, overflow: 'auto' }}>{`# Claude Code\n${claudeCmd}\n\n# Cursor / Windsurf (mcp.json)\n${clientJson}\n\n# ${t('settings.mcpLegacySse')}\n${claudeSseCmd}`}</pre>
+                  <pre className="mono" style={{ margin: 0, padding: '10px 12px', background: 'var(--term-bg)', color: 'var(--term-fg)', borderRadius: 8, fontSize: 11.5, overflow: 'auto' }}>{`# Claude Code\n${claudeCmd}\n\n# Cursor / Windsurf (mcp.json)\n${clientJson}`}</pre>
                 </div>
               </div>
             )}

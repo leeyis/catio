@@ -1127,7 +1127,6 @@
     "mcpLogClear": "清空",
     "mcpLogFullscreen": "全屏",
     "mcpLogRestore": "还原",
-    "mcpLegacySse": "旧客户端（不支持 Streamable HTTP 时）",
     "mcpLogPause": "暂停滚动",
     "mcpLogResume": "继续滚动",
     "mcpLogExpand": "展开",

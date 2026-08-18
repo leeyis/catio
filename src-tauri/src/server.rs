@@ -110,10 +110,7 @@ pub struct AppState {
     /// the same live id, written on connect / removed on disconnect alongside the owner maps.
     pub conn_meta: Arc<std::sync::Mutex<HashMap<String, (String, String)>>>, // connId    -> (name, dbType)
     pub ssh_meta: Arc<std::sync::Mutex<HashMap<String, (String, String)>>>,  // sessionId -> (name, host)
-    /// SSE response routing for the server-mode MCP: sessionId → sender. `/mcp/sse` registers a
-    /// channel here; `/mcp/messages` pushes the JSON-RPC reply onto the matching one.
-    pub mcp_sessions: Arc<std::sync::Mutex<HashMap<String, tokio::sync::mpsc::UnboundedSender<String>>>>,
-    /// Network-layer IP allowlist for the `/mcp` routes, parsed ONCE from `CATIO_MCP_IP_ALLOWLIST`
+    /// Network-layer IP allowlist for the `/mcp` route, parsed ONCE from `CATIO_MCP_IP_ALLOWLIST`
     /// (comma-separated IPv4/CIDR). EMPTY ⇒ gate disabled (the token stays the sole gate), so every
     /// existing `build_router`-based test — which never sets the env — is unaffected. Loopback is
     /// always allowed by `ip_allowed`.
@@ -172,7 +169,6 @@ impl AppState {
             tunnel_owners: Arc::new(std::sync::Mutex::new(HashMap::new())),
             conn_meta: Arc::new(std::sync::Mutex::new(HashMap::new())),
             ssh_meta: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            mcp_sessions: Arc::new(std::sync::Mutex::new(HashMap::new())),
             mcp_ip_allowlist: Arc::new(
                 std::env::var("CATIO_MCP_IP_ALLOWLIST").ok().unwrap_or_default()
                     .split(',')
@@ -211,16 +207,13 @@ pub fn build_router(state: AppState) -> Router {
         // Server-mode MCP (P3a): external agents self-authenticate on `?token=` (NO cookie gate),
         // so these are NOT part of /api/invoke. The per-user token scopes them to the user's own
         // live connections/sessions (see server_mcp::ServerTargets).
-        // Streamable HTTP（2025-03-26+）：单 endpoint，POST 直接回 JSON。推荐路径。
+        // Streamable HTTP：唯一的 MCP endpoint，POST 直接回 JSON。
         .route(
             "/mcp",
             post(crate::server_mcp::mcp_streamable_handler)
                 .get(crate::server_mcp::mcp_streamable_not_allowed)
                 .delete(crate::server_mcp::mcp_streamable_not_allowed),
         )
-        // 保留的 HTTP+SSE（2024-11-05）：供尚未支持 Streamable HTTP 的客户端。
-        .route("/mcp/sse", get(crate::server_mcp::mcp_sse_handler))
-        .route("/mcp/messages", post(crate::server_mcp::mcp_messages_handler))
         .fallback(spa)
         .with_state(state)
 }

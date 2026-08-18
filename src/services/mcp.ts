@@ -10,12 +10,10 @@ async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Prom
 export interface McpInfo {
   running: boolean
   /**
-   * Streamable HTTP endpoint (`POST /mcp?token=`), including the per-run auth token.
-   * Only set while running. This is the endpoint to hand to MCP clients.
+   * MCP endpoint (`POST /mcp?token=`), including the per-run auth token.
+   * Only set while running.
    */
   url: string | null
-  /** Retained HTTP+SSE endpoint (`GET /sse?token=`) for clients without Streamable HTTP. */
-  sseUrl: string | null
   port: number | null
   /** True only when the running server is bound to 0.0.0.0 (whitelist has a non-loopback entry). */
   exposed: boolean
@@ -26,7 +24,6 @@ export interface McpLogEntry {
   ts: string
   kind: string
   ip: string
-  sessionId?: string
   tool?: string
   args?: unknown
   output?: string
@@ -51,7 +48,7 @@ export interface McpHostMeta {
   host: string
 }
 
-const STOPPED: McpInfo = { running: false, url: null, sseUrl: null, port: null, exposed: false }
+const STOPPED: McpInfo = { running: false, url: null, port: null, exposed: false }
 
 // Start the server; returns its bound URL (with auth token). Desktop-only.
 export async function mcpStart(): Promise<McpInfo> {

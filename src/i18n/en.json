@@ -1127,7 +1127,6 @@
     "mcpLogClear": "Clear",
     "mcpLogFullscreen": "Fullscreen",
     "mcpLogRestore": "Restore",
-    "mcpLegacySse": "Legacy clients (no Streamable HTTP support)",
     "mcpLogPause": "Pause",
     "mcpLogResume": "Resume",
     "mcpLogExpand": "Expand",

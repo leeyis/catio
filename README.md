@@ -90,7 +90,7 @@ Catio is an open-source operations and database client built with **Rust + Tauri
 
 - Agent providers: local **Ollama** or **OpenAI-compatible** endpoints, with model fetch/test controls.
 - The Agent can use current terminal output, selected text, active database schema/table context, and SQL snippets as prompt context.
-- Desktop MCP server exposes connected hosts and databases over Streamable HTTP (`POST /mcp`) with token auth, IP allowlist, and live logs; the legacy HTTP+SSE endpoint is retained for clients that do not speak Streamable HTTP yet.
+- Desktop MCP server exposes connected hosts and databases over Streamable HTTP (`POST /mcp`) with token auth, IP allowlist, and live logs.
 - Server mode provides per-user MCP endpoints and tokens, so external agents can reach only that user's owned connections.
 
 ### Discovery And Vault
