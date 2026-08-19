@@ -58,7 +58,7 @@ function RecentRow({ conn, ts, onOpen }: { conn: Connection; ts: number; onOpen:
   const [hover, setHover] = useState(false)
   return (
     <div onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)} onClick={() => onOpen(conn)}
-      style={{ display: 'flex', alignItems: 'center', gap: 12, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', borderRadius: 12, padding: '10px 14px', cursor: 'pointer', boxShadow: hover ? 'var(--shadow-card)' : 'none', transition: 'box-shadow .12s' }}>
+      style={{ display: 'flex', alignItems: 'center', gap: 10, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', borderRadius: 8, padding: '8px 12px', cursor: 'pointer', boxShadow: hover ? 'var(--shadow-card)' : 'none', transition: 'box-shadow .12s' }}>
       <ConnGlyph conn={conn} size={36} radius={9} />
       <div className="col" style={{ lineHeight: 1.35, minWidth: 0, flex: 1 }}>
         <div className="row gap8" style={{ minWidth: 0 }}>
@@ -112,11 +112,11 @@ export function HomeView({ onOpen, onNew, onAutoScan, canScan = true, owned = tr
 
   return (
     <div className="grow fade-in" style={{ overflowY: 'auto', overflowX: 'hidden' }}>
-      <div style={{ maxWidth: 1040, margin: '0 auto', padding: '32px 40px 48px' }}>
+      <div style={{ maxWidth: 1040, margin: '0 auto', padding: '24px 28px 36px' }}>
         {/* Hero */}
-        <div style={{ borderRadius: 20, background: 'var(--accent-soft-alt)', border: '1px solid var(--accent-border)', padding: '26px 30px', marginBottom: 32, position: 'relative', overflow: 'hidden' }}>
-          <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 20 }}>
-            <div className="col" style={{ gap: 14, maxWidth: 720 }}>
+        <div style={{ borderRadius: 8, background: 'var(--accent-soft-alt)', border: '1px solid var(--accent-border)', padding: '20px 22px', marginBottom: 22, position: 'relative', overflow: 'hidden' }}>
+          <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-start', gap: 16 }}>
+            <div className="col" style={{ gap: 12, maxWidth: 720 }}>
               <div className="row gap10">
                 <BrandMark size={40} style={{ borderRadius: 13 }} />
                 <div className="col" style={{ lineHeight: 1.1 }}>
@@ -126,7 +126,7 @@ export function HomeView({ onOpen, onNew, onAutoScan, canScan = true, owned = tr
               </div>
               <h1 style={{ margin: 0, fontSize: 26, fontWeight: 700, letterSpacing: '-0.6px', color: 'var(--text-primary)', lineHeight: 1.2 }}>{t('home.heroTitle')}<br />{t('home.heroTitleLine2')}</h1>
               <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.6, color: 'var(--text-secondary)', textWrap: 'pretty' }}>{t('home.heroDesc')}</p>
-              <div className="row gap16" style={{ marginTop: 4 }}>
+              <div className="row gap12" style={{ marginTop: 2 }}>
                 <Stat n={hostCount} label={t('home.statHosts')} icon="server" />
                 <div style={{ width: 1, height: 30, background: 'var(--accent-border)' }} />
                 <Stat n={dbCount} label={t('home.statDatabases')} icon="database" />
@@ -164,7 +164,7 @@ interface EmptySectionProps {
 
 function EmptySection({ icon, text }: EmptySectionProps) {
   return (
-    <div className="col" style={{ alignItems: 'center', justifyContent: 'center', gap: 8, padding: '28px 16px', textAlign: 'center', border: '1px dashed var(--border-hairline)', borderRadius: 14, background: 'var(--surface-subtle)' }}>
+    <div className="col" style={{ alignItems: 'center', justifyContent: 'center', gap: 6, padding: '20px 14px', textAlign: 'center', border: '1px dashed var(--border-hairline)', borderRadius: 8, background: 'var(--surface-subtle)' }}>
       <div className="icon-badge" style={{ width: 36, height: 36, borderRadius: 10, background: 'var(--surface-sunken)', color: 'var(--text-faint)' }}>
         <Icon name={icon} size={17} />
       </div>

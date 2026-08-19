@@ -809,15 +809,15 @@ select option { background: var(--surface-elevated); color: var(--text-primary);
      off-screen (clipped) on narrower windows: the only flexible child (the main
      .card-surface.grow column, which carries min-width:0) shrinks instead. */
   overflow: hidden;
-  display: flex; gap: 12px;
-  padding: 12px;
+  display: flex; gap: 8px;
+  padding: 8px;
 }
 
 /* generic card surface */
 .card-surface {
   background: var(--surface-card);
   border: 1px solid var(--border-hairline);
-  border-radius: 16px;
+  border-radius: 6px;
   box-shadow: var(--shadow-card);
   /* allow a flex-child card-surface (e.g. the main grow column) to shrink below
      its content size instead of forcing the row to overflow / clip the rail. */

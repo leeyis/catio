@@ -237,7 +237,7 @@ export function Sidebar({ activeId, onOpen, onDetail, collapsed, onToggleCollaps
 
   if (collapsed) {
     return (
-      <div className="card-surface col" style={{ width: 56, flex: 'none', padding: '12px 8px', alignItems: 'center', gap: 8 }}>
+      <div className="card-surface col" style={{ width: 56, flex: 'none', padding: '8px 6px', alignItems: 'center', gap: 6 }}>
         <button className="icon-btn bare" title={t('shell.expandSidebar')} onClick={onToggleCollapse}><Icon name="panel-left" size={17} /></button>
         <div style={{ height: 1, width: 24, background: 'var(--border-hairline)', margin: '4px 0' }} />
         {allConns.slice(0, 8).map(c => (
@@ -253,8 +253,8 @@ export function Sidebar({ activeId, onOpen, onDetail, collapsed, onToggleCollaps
   return (
     <div className="card-surface col" style={{ width: 256, flex: 'none', overflow: 'hidden' }}>
       {/* header */}
-      <div style={{ padding: '14px 12px 10px' }}>
-        <div className="row" style={{ justifyContent: 'space-between', marginBottom: 10 }}>
+      <div style={{ padding: '10px 10px 8px' }}>
+        <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
           <div className="row gap8">
             <span style={{ fontSize: 13, fontWeight: 700, letterSpacing: '0.4px', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>{t('shell.vault')}</span>
             <span className="badge-accent">{allConns.length}</span>
@@ -267,7 +267,7 @@ export function Sidebar({ activeId, onOpen, onDetail, collapsed, onToggleCollaps
           </div>
         </div>
         {/* search */}
-        <div className="row gap8" style={{ height: 32, padding: '0 10px', background: 'var(--surface-sunken)', border: '1px solid var(--border-hairline)', borderRadius: 10, marginBottom: 8 }}>
+        <div className="row gap8" style={{ height: 32, padding: '0 10px', background: 'var(--surface-sunken)', border: '1px solid var(--border-hairline)', borderRadius: 10, marginBottom: 6 }}>
           <Icon name="search" size={14} style={{ color: 'var(--text-faint)' }} />
           <input value={query} onChange={e => setQuery(e.target.value)} placeholder={t('shell.filterPlaceholder')}
             style={{ flex: 1, border: 'none', outline: 'none', background: 'transparent', fontSize: 13, color: 'var(--text-primary)' }} />
@@ -284,7 +284,7 @@ export function Sidebar({ activeId, onOpen, onDetail, collapsed, onToggleCollaps
       </div>
 
       {/* list */}
-      <div className="grow" style={{ overflowY: 'auto', padding: '2px 8px 10px' }}>
+      <div className="grow" style={{ overflowY: 'auto', padding: '2px 6px 8px' }}>
         {/* inline "new group" composer */}
         {addingGroup && (
           <div className="row gap6" style={{ padding: '6px 8px', marginBottom: 4 }}>
@@ -377,7 +377,7 @@ export function Sidebar({ activeId, onOpen, onDetail, collapsed, onToggleCollaps
           )
         })}
         {!conns.length && (
-          <div className="col" style={{ alignItems: 'center', gap: 10, padding: '32px 16px', textAlign: 'center' }}>
+          <div className="col" style={{ alignItems: 'center', gap: 8, padding: '24px 12px', textAlign: 'center' }}>
             <div className="icon-badge" style={{ width: 44, height: 44, borderRadius: 13, background: 'var(--surface-sunken)', color: 'var(--text-faint)' }}><Icon name={query ? 'search' : filter === 'favorite' ? 'star' : 'plug'} size={20} /></div>
             <div className="col" style={{ gap: 4 }}>
               <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text-secondary)' }}>{query ? t('shell.noMatchingConns') : filter === 'favorite' ? t('shell.favoriteEmptyTitle') : t('shell.vaultEmptyTitle')}</span>
@@ -389,7 +389,7 @@ export function Sidebar({ activeId, onOpen, onDetail, collapsed, onToggleCollaps
 
       {/* 批量维护操作栏：选中计数 + 移动到分组 + 删除 + 退出 */}
       {batchMode && (
-        <div className="col" style={{ gap: 8, padding: '10px 12px', borderTop: '1px solid var(--border-hairline)', background: 'var(--surface-sunken)' }}>
+        <div className="col" style={{ gap: 8, padding: '8px 10px', borderTop: '1px solid var(--border-hairline)', background: 'var(--surface-sunken)' }}>
           <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
             <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>
               {t('shell.batchSelected', { n: selectedConns.length })}
@@ -418,7 +418,7 @@ export function Sidebar({ activeId, onOpen, onDetail, collapsed, onToggleCollaps
       )}
 
       {/* footer status */}
-      <div className="row" style={{ padding: '10px 12px', borderTop: '1px solid var(--border-hairline)', gap: 8 }}>
+      <div className="row" style={{ padding: '8px 10px', borderTop: '1px solid var(--border-hairline)', gap: 8 }}>
         <div className="icon-badge" style={{ width: 26, height: 26, borderRadius: 8, background: 'var(--accent-soft)', color: 'var(--accent-primary)' }}>
           <Icon name={(serverAuth.enabled || authEnabled) ? 'user' : 'shield'} size={14} />
         </div>
@@ -566,13 +566,13 @@ export function IconRail({ active, onSelect, panelOpen, onMcp }: IconRailProps) 
   }
 
   return (
-    <div className="card-surface col" style={{ width: 48, flex: 'none', alignItems: 'center', padding: '14px 8px', justifyContent: 'space-between' }}>
-      <div className="col" style={{ gap: 10, alignItems: 'center' }}>
+    <div className="card-surface col" style={{ width: 48, flex: 'none', alignItems: 'center', padding: '10px 6px', justifyContent: 'space-between' }}>
+      <div className="col" style={{ gap: 8, alignItems: 'center' }}>
         {top.map(it => <Item key={it.id} it={it} />)}
         <div style={{ width: 22, height: 1, background: 'var(--border-hairline)', margin: '2px 0' }} />
         {bottom.map(it => <Item key={it.id} it={it} />)}
       </div>
-      <div className="col" style={{ gap: 10, alignItems: 'center' }}>
+      <div className="col" style={{ gap: 8, alignItems: 'center' }}>
         <button title={t('shell.railMcp')} onClick={onMcp} style={{ width: 32, height: 32, borderRadius: 8, display: 'grid', placeItems: 'center', color: 'var(--text-tertiary)', cursor: 'pointer' }}
           onMouseEnter={e => (e.currentTarget.style.background = 'var(--surface-sunken)')}
           onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>

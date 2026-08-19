@@ -244,7 +244,7 @@ export function Segmented({ options, value, onChange, size = 'md' }: SegmentedPr
 /* Section header (§5.1) */
 export function SectionHead({ title, count, hint, right }: SectionHeadProps) {
   return (
-    <div className="row" style={{ justifyContent: 'space-between', marginBottom: 14 }}>
+    <div className="row" style={{ justifyContent: 'space-between', marginBottom: 10 }}>
       <div className="row gap10">
         <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700, letterSpacing: '-0.3px', color: 'var(--text-primary)' }}>{title}</h2>
         {count != null && <span className="badge-accent" style={{ height: 22, fontSize: 11 }}>{count}</span>}
