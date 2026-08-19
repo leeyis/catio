@@ -54,6 +54,7 @@ describe('McpLogPanel', () => {
     // 从标题栏下沿开始，而不是 inset:0——否则会盖住主题/设置/窗口控件。
     expect(shell.style.top).toBe('48px')
     expect(shell.style.bottom).toBe('0px')
+    expect(shell.style.background).toBe('var(--bg-canvas)')
 
     // 还原按钮把它变回内联。
     act(() => { restoreBtn().click() })

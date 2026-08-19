@@ -1070,7 +1070,7 @@ export function McpLogPanel({ subscribe, showUser }: { subscribe: (cb: (e: McpLo
         margin: 0,
         padding: 16,
         gap: 10,
-        background: 'var(--surface-base)',
+        background: 'var(--bg-canvas)',
       }
     : { gap: 8, marginTop: 4 }
 
