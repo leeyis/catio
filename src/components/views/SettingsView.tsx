@@ -905,6 +905,9 @@ const LOG_RING = 200
 const FIELD_TRUNC = 160
 /** 全屏时的截断上限——有空间就多显示，仍保留上限以防单条巨型输出拖垮渲染。 */
 const FIELD_TRUNC_FULL = 4000
+/** 应用标题栏高度，与 tokens.css `.titlebar { height: 48px }` 对齐。日志全屏浮层
+ *  从它下沿开始，避免盖住主题/设置/窗口控件。 */
+const TITLEBAR_H = 48
 
 function logKindStyle(kind: string, isError?: boolean): { fg: string; bg: string } {
   if (kind === 'denied' || isError) return { fg: 'var(--danger-fg)', bg: 'color-mix(in srgb, var(--danger-fg) 13%, transparent)' }
@@ -1050,10 +1053,19 @@ export function McpLogPanel({ subscribe, showUser }: { subscribe: (cb: (e: McpLo
   }
 
   // 全屏：铺满窗口的浮层。用 fixed 而非改父容器尺寸，故不受设置页滚动/内边距影响。
+  //
+  // top 从标题栏下沿开始（不是 inset:0）：标题栏高 48px、z-index 30，浮层若从 0 起会把
+  // 它连同主题/设置/窗口控件一起盖住，本面板的按钮又正好压在同一条带上，视觉上糊成一片。
+  //
+  // 也可以改用 absolute 贴合设置页 overlay（它本就定位在标题栏以下），从而省掉这个常量；
+  // 但 absolute 会随设置页内部滚动一起移动，fixed 更稳，代价是与 .titlebar 的高度耦合。
   const shellStyle: React.CSSProperties = full
     ? {
         position: 'fixed',
-        inset: 0,
+        top: TITLEBAR_H,
+        left: 0,
+        right: 0,
+        bottom: 0,
         zIndex: 60,
         margin: 0,
         padding: 16,

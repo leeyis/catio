@@ -51,6 +51,9 @@ describe('McpLogPanel', () => {
     act(() => { fullscreenBtn().click() })
     await waitFor(() => expect(shell.style.position).toBe('fixed'))
     expect(shell.style.zIndex).toBe('60')
+    // 从标题栏下沿开始，而不是 inset:0——否则会盖住主题/设置/窗口控件。
+    expect(shell.style.top).toBe('48px')
+    expect(shell.style.bottom).toBe('0px')
 
     // 还原按钮把它变回内联。
     act(() => { restoreBtn().click() })
