@@ -1491,6 +1491,10 @@ export default function App() {
   }
 
   function selectPanel(id: string) {
+    // Rail panels follow the active workbench tab. A connection selected from
+    // the sidebar is only an explicit DetailsPanel target for that open panel;
+    // clear it before a rail action so reopening details cannot show stale data.
+    setDetailConn(null)
     if (activePanel === id && panelOpen) { setPanelOpen(false) }
     else { setActivePanel(id); setPanelOpen(true) }
   }
@@ -1508,6 +1512,9 @@ export default function App() {
   // mock byId index. This lets a workbench tab opened for a real saved DB profile
   // OR a live SSH session resolve to its Connection.
   const curConn = cur ? (vaultConns.find(c => c.id === cur.connId) ?? liveConns[cur.connId] ?? D.byId[cur.connId] ?? null) : null
+  // Sidebar clicks set an explicit target; the details rail button has no
+  // connection payload and must therefore follow the active workbench tab.
+  const detailsConn = detailConn ?? curConn
   const aiMode = cur && cur.kind === 'terminal' ? 'shell' : 'sql'
   // The AI panel's "@ 选表" needs the BACKEND live connId, not the tab's profile
   // id (cur.connId). Resolve it the same way DbWorkbench does — first active
@@ -2323,9 +2330,9 @@ export default function App() {
                   onEditDb/onDeleteDb/onConnectDb handlers; host conns use the SSH handlers. */}
               {activePanel === 'details' && (
                 <DetailsPanel
-                  conn={detailConn ?? undefined}
-                  connected={detailConn ? !!sessionMap[detailConn.id] : false}
-                  onClose={() => setPanelOpen(false)}
+                  conn={detailsConn ?? undefined}
+                  connected={detailsConn ? !!sessionMap[detailsConn.id] : false}
+                  onClose={closeDetailPanel}
                   // DB-specific actions (operate on the saved DbProfile)
                   onEditDb={editDbProfile}
                   onDeleteDb={deleteDbProfile}

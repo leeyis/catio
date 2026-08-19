@@ -3,6 +3,7 @@ import { vi, beforeEach } from 'vitest'
 import { LanguageProvider } from '../src/state/LanguageContext'
 import { DataProvider } from '../src/state/DataContext'
 import { saveProfile } from '../src/state/connections'
+import { saveOpenTabs } from '../src/state/tabPersistence'
 import App from '../src/App'
 
 // Mock the Rust AgentRuntime transport: subscribe captures the event handler,
@@ -154,6 +155,37 @@ it('clicking a vault card opens the connection details (not a terminal tab)', ()
   expect(screen.getByText('连接详情')).toBeTruthy()
   // The DetailsPanel Connect button is present; no terminal tab was opened.
   expect(screen.getByText('连接')).toBeTruthy()
+})
+
+it('opens the active terminal connection from the details rail button', () => {
+  const connId = 'live-1.2.3.4:22-deploy'
+  saveProfile({ id: connId, name: 'active-server', host: '1.2.3.4', port: 22, user: 'deploy', auth: { method: 'password' } })
+  saveOpenTabs([{ id: 'tab-active', kind: 'terminal', connId, title: 'active-server' }], 'tab-active')
+
+  wrap()
+  fireEvent.click(screen.getByTitle('详情'))
+
+  const panel = screen.getByText('连接详情').closest('.card-surface') as HTMLElement
+  expect(within(panel).getAllByText('active-server').length).toBeGreaterThan(0)
+  expect(within(panel).queryByText('个人工作区')).toBeNull()
+})
+
+it('drops an old sidebar selection before reopening details from the rail', () => {
+  const activeId = 'live-1.2.3.4:22-deploy'
+  saveProfile({ id: activeId, name: 'active-server', host: '1.2.3.4', port: 22, user: 'deploy', auth: { method: 'password' } })
+  saveProfile({ id: 'live-5.6.7.8:22-admin', name: 'other-server', host: '5.6.7.8', port: 22, user: 'admin', auth: { method: 'password' } })
+  saveOpenTabs([{ id: 'tab-active', kind: 'terminal', connId: activeId, title: 'active-server' }], 'tab-active')
+
+  wrap()
+  fireEvent.click(screen.getByRole('button', { name: '主机' }))
+  fireEvent.click(screen.getAllByText('other-server')[0])
+
+  fireEvent.click(screen.getByTitle('详情'))
+  fireEvent.click(screen.getByTitle('详情'))
+
+  const panel = screen.getByText('连接详情').closest('.card-surface') as HTMLElement
+  expect(within(panel).getAllByText('active-server').length).toBeGreaterThan(0)
+  expect(within(panel).queryByText('other-server')).toBeNull()
 })
 
 it('clicking 新建连接 opens the New Connection modal', () => {
