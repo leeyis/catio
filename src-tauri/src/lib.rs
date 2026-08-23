@@ -211,6 +211,7 @@ pub fn run() {
             automation::commands::automation_delete_prompt_history,
             automation::commands::automation_task_results,
             automation::commands::automation_set_provider,
+            automation::commands::automation_set_active_target,
             db::commands::db_connect,
             db::commands::db_test_connection,
             db::commands::db_disconnect,
@@ -326,6 +327,8 @@ pub fn run() {
                     std::sync::Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new()));
                 let provider =
                     std::sync::Arc::new(automation::dispatcher::SessionProviderConfig::default());
+                let active_target: automation::task_router::ActiveTarget =
+                    std::sync::Arc::new(parking_lot::RwLock::new(None));
                 // The scheduler dispatcher reuses the managed live-SSH sessions
                 // and Agent runtime, so fired shell tasks run on already
                 // authenticated sessions and prompt tasks through the Agent
@@ -345,6 +348,7 @@ pub fn run() {
                     vec![
                         std::sync::Arc::new(automation::task_router::TaskRouter::new(
                             store.clone(),
+                            active_target.clone(),
                         )),
                         std::sync::Arc::new(automation::McpRouter::new(
                             store.clone(),
@@ -378,6 +382,7 @@ pub fn run() {
                     http,
                     results,
                     provider,
+                    active_target,
                 });
             }
             // Default the JDBC sidecar's driver-JAR directory to

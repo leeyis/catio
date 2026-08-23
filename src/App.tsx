@@ -101,6 +101,7 @@ import { setAgentConfig } from './state/agentConfig'
 import {
   automationListPromptHistory,
   automationListSkills,
+  automationSetActiveTarget,
   automationSetProvider,
   type PromptHistoryEntry,
   type Skill,
@@ -1579,6 +1580,11 @@ export default function App() {
   }
 
   const cur = tabs.find(tb => tb.id === activeTab)
+  // Report the active connection to the backend so natural-language task
+  // creation defaults its target to the host/db the user is looking at.
+  useEffect(() => {
+    void automationSetActiveTarget(cur?.connId ?? '')
+  }, [cur?.connId])
   // Resolve the active tab's connection: prefer the live vault list (real saved DB
   // connections + saved SSH host profiles), then live SSH display conns, then the
   // mock byId index. This lets a workbench tab opened for a real saved DB profile

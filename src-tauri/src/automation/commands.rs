@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 use tauri::State;
 
 use super::dispatcher::{SessionProviderConfig, TaskResults, TaskRunInfo};
+use super::task_router::ActiveTarget;
 use super::history::PromptHistoryStore;
 use super::mcp_client::{McpClient, McpError};
 use super::repo::AutomationStore;
@@ -106,6 +107,9 @@ pub struct AutomationService {
     pub results: TaskResults,
     /// Session provider config for prompt tasks (set by the frontend).
     pub provider: Arc<SessionProviderConfig>,
+    /// The frontend's active connection id — default target for tasks created
+    /// in natural language.
+    pub active_target: ActiveTarget,
 }
 
 #[tauri::command]
@@ -288,6 +292,17 @@ pub async fn automation_task_results(
     state: State<'_, AutomationService>,
 ) -> Result<Vec<TaskRunInfo>, String> {
     Ok(state.results.read().values().cloned().collect())
+}
+
+/// The frontend reports the connection the user is currently looking at; tasks
+/// created via natural language default their target to it.
+#[tauri::command]
+pub async fn automation_set_active_target(
+    state: State<'_, AutomationService>,
+    target: String,
+) -> Result<(), String> {
+    *state.active_target.write() = if target.is_empty() { None } else { Some(target) };
+    Ok(())
 }
 
 /// Push the current AI provider config for prompt tasks (session memory only —

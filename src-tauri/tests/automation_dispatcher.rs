@@ -8,6 +8,7 @@ use catio_lib::automation::dispatcher::{
     AutomationDispatcher, SessionProviderConfig, TaskResults, TaskRunStatus,
 };
 use catio_lib::automation::history::PromptHistoryStore;
+use catio_lib::automation::mcp_client::McpClient;
 use catio_lib::automation::scheduler::TaskDispatcher;
 use catio_lib::automation::{AutomationStore, ScheduledTask, TaskKind, TaskPolicy, TaskTrigger};
 use catio_lib::ssh::conn::{connect_authenticated, AuthMethod, ConnectArgs};
@@ -70,6 +71,7 @@ fn build(dir: &std::path::Path) -> (AutomationDispatcher, Arc<AutomationStore>, 
     let runtime = Arc::new(catio_lib::agent::AgentRuntime::new(Arc::new(NoopFactory)));
     let provider = Arc::new(SessionProviderConfig::default());
     let results: TaskResults = Arc::new(RwLock::new(HashMap::new()));
+    let mcp = Arc::new(McpClient::new(reqwest::Client::new()));
     let dispatcher = AutomationDispatcher::new(
         store.clone(),
         sessions,
@@ -77,6 +79,7 @@ fn build(dir: &std::path::Path) -> (AutomationDispatcher, Arc<AutomationStore>, 
         history,
         provider,
         results.clone(),
+        mcp,
     );
     (dispatcher, store, results)
 }
@@ -154,6 +157,7 @@ async fn live_shell_task_runs_on_connected_target() {
     let runtime = Arc::new(catio_lib::agent::AgentRuntime::new(Arc::new(NoopFactory)));
     let provider = Arc::new(SessionProviderConfig::default());
     let results: TaskResults = Arc::new(RwLock::new(HashMap::new()));
+    let mcp = Arc::new(McpClient::new(reqwest::Client::new()));
     let dispatcher = AutomationDispatcher::new(
         store.clone(),
         sessions,
@@ -161,6 +165,7 @@ async fn live_shell_task_runs_on_connected_target() {
         history,
         provider,
         results.clone(),
+        mcp,
     );
 
     let mut t = task(TaskKind::Shell);

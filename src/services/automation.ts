@@ -224,6 +224,13 @@ export async function automationTaskResults(): Promise<TaskRunInfo[]> {
   return tauriInvoke<TaskRunInfo[]>('automation_task_results')
 }
 
+/** Report the currently-active connection so natural-language task creation
+ *  defaults its target to it. Empty clears the default. */
+export async function automationSetActiveTarget(target: string): Promise<void> {
+  if (!isTauri()) return
+  return tauriInvoke<void>('automation_set_active_target', { target })
+}
+
 export async function automationSetProvider(
   protocol: ProviderProtocol,
   baseUrl: string,

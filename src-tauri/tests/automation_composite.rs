@@ -62,7 +62,10 @@ async fn composite_exposes_both_task_crud_and_mcp_tools() {
 
     let client = Arc::new(McpClient::new(reqwest::Client::new()));
     let composite = Arc::new(CompositeRouter::new(vec![
-        Arc::new(TaskRouter::new(store.clone())),
+        Arc::new(TaskRouter::new(
+            store.clone(),
+            std::sync::Arc::new(parking_lot::RwLock::new(None)),
+        )),
         Arc::new(McpRouter::new(store.clone(), client)),
     ]));
 

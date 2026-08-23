@@ -28,7 +28,7 @@ fn valid_task_input() -> serde_json::Value {
 #[tokio::test]
 async fn tool_specs_expose_six_task_tools() {
     let dir = std::env::temp_dir().join(format!("catio-tr-spec-{}", std::process::id()));
-    let router = TaskRouter::new(store_in(&dir));
+    let router = TaskRouter::new(store_in(&dir), std::sync::Arc::new(parking_lot::RwLock::new(None)));
     let specs = router.tool_specs();
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
     for want in [
@@ -47,7 +47,7 @@ async fn tool_specs_expose_six_task_tools() {
 #[tokio::test]
 async fn create_then_list_then_enable_disable_then_delete() {
     let dir = std::env::temp_dir().join(format!("catio-tr-{}-{}", std::process::id(), "crud"));
-    let router = TaskRouter::new(store_in(&dir));
+    let router = TaskRouter::new(store_in(&dir), std::sync::Arc::new(parking_lot::RwLock::new(None)));
 
     // create_task — even with a spoofed ownerId, the injected owner wins.
     let mut input = valid_task_input();
@@ -120,7 +120,7 @@ async fn create_then_list_then_enable_disable_then_delete() {
 #[tokio::test]
 async fn delete_by_wrong_owner_fails() {
     let dir = std::env::temp_dir().join(format!("catio-tr-{}-{}", std::process::id(), "owner"));
-    let router = TaskRouter::new(store_in(&dir));
+    let router = TaskRouter::new(store_in(&dir), std::sync::Arc::new(parking_lot::RwLock::new(None)));
     let created = router
         .dispatch("u1", "owner-a", "create_task", valid_task_input())
         .await
@@ -152,7 +152,7 @@ async fn delete_by_wrong_owner_fails() {
 #[tokio::test]
 async fn invalid_create_input_fails() {
     let dir = std::env::temp_dir().join(format!("catio-tr-{}-{}", std::process::id(), "bad"));
-    let router = TaskRouter::new(store_in(&dir));
+    let router = TaskRouter::new(store_in(&dir), std::sync::Arc::new(parking_lot::RwLock::new(None)));
     // Missing kind / script → validate rejects.
     let bad = json!({ "id": "x", "name": "", "trigger": { "type": "once", "at": "" } });
     let res = router
@@ -166,7 +166,7 @@ async fn invalid_create_input_fails() {
 #[tokio::test]
 async fn unknown_tool_falls_through() {
     let dir = std::env::temp_dir().join(format!("catio-tr-{}-{}", std::process::id(), "unknown"));
-    let router = TaskRouter::new(store_in(&dir));
+    let router = TaskRouter::new(store_in(&dir), std::sync::Arc::new(parking_lot::RwLock::new(None)));
     let res = router.dispatch("u1", "owner-a", "nope", json!({})).await;
     assert!(res.is_none());
     let _ = std::fs::remove_dir_all(&dir);
@@ -175,7 +175,7 @@ async fn unknown_tool_falls_through() {
 #[tokio::test]
 async fn update_task_replaces_fields_same_id() {
     let dir = std::env::temp_dir().join(format!("catio-tr-{}-{}", std::process::id(), "upd"));
-    let router = TaskRouter::new(store_in(&dir));
+    let router = TaskRouter::new(store_in(&dir), std::sync::Arc::new(parking_lot::RwLock::new(None)));
     router
         .dispatch("u1", "owner-a", "create_task", valid_task_input())
         .await
