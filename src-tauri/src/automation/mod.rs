@@ -10,6 +10,7 @@ pub mod prompt;
 pub mod repo;
 pub mod scheduler;
 pub mod skill;
+pub mod task_router;
 pub mod types;
 
 pub use prompt::build_user_prompt;
@@ -18,6 +19,7 @@ pub use scheduler::{cron_matches, should_fire, Scheduler, TaskDispatcher};
 pub use skill::{
     install_skill, new_skill_from_import, parse_skill_json, render_template, SkillImport,
 };
+pub use task_router::TaskRouter;
 pub use types::{
     AutomationError, McpAuth, McpConnection, McpStatus, McpTransport, ScheduledTask, Skill,
     SkillRisk, SkillScope, SkillSource, TaskKind, TaskPolicy, TaskTrigger,

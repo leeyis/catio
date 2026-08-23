@@ -39,8 +39,16 @@ pub const TERMINAL_EXEC: &str = "terminal_exec";
 pub trait ToolRouter: Send + Sync {
     /// Extra tool specs offered to the provider this turn.
     fn tool_specs(&self) -> Vec<ToolSpec>;
-    /// Try to execute `name` in the backend.
-    async fn dispatch(&self, tool_use_id: &str, name: &str, input: Value) -> Option<ToolResult>;
+    /// Try to execute `name` in the backend. `owner_id` is the turn's
+    /// transport-injected owner; backend tools scope their data by it and never
+    /// trust a client-supplied owner.
+    async fn dispatch(
+        &self,
+        tool_use_id: &str,
+        owner_id: &str,
+        name: &str,
+        input: Value,
+    ) -> Option<ToolResult>;
 }
 
 /// Ordered event delivery for one Turn.
@@ -579,7 +587,7 @@ impl TurnEngine {
             // would wrongly drive the PTY adapter. The router handles them in-process.
             let result = match &ctx.tool_router {
                 Some(router) => match router
-                    .dispatch(&tool_use_id, name, tool_use.input.clone())
+                    .dispatch(&tool_use_id, &ctx.owner_id, name, tool_use.input.clone())
                     .await
                 {
                     Some(result) => result,

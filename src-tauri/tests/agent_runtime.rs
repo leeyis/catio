@@ -1973,7 +1973,13 @@ impl ToolRouter for ScriptedRouter {
             .collect()
     }
 
-    async fn dispatch(&self, tool_use_id: &str, name: &str, _input: Value) -> Option<ToolResult> {
+    async fn dispatch(
+        &self,
+        tool_use_id: &str,
+        _owner_id: &str,
+        name: &str,
+        _input: Value,
+    ) -> Option<ToolResult> {
         self.calls.lock().push(name.to_string());
         let content = self
             .handled
