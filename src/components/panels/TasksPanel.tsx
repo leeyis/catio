@@ -183,7 +183,8 @@ interface Draft {
   name: string
   triggerType: 'cron' | 'interval' | 'once'
   cron: string
-  seconds: string
+  intervalMinutes: string
+  intervalUnit: 'm' | 'h'
   onceAt: string
   kind: TaskKind
   script: string
@@ -196,13 +197,45 @@ interface Draft {
 }
 
 const emptyDraft: Draft = {
-  name: '', triggerType: 'cron', cron: '0 2 * * *', seconds: '1800', onceAt: '', kind: 'shell',
+  name: '', triggerType: 'cron', cron: '0 2 * * *', intervalMinutes: '30', intervalUnit: 'm', onceAt: '', kind: 'shell',
   script: '', prompt: '', targetRef: '', policy: 'reject', whitelist: '',
   skillIds: [], mcpIds: [],
 }
 
 const input = { width: '100%', height: 32, padding: '0 10px', borderRadius: 8, border: '1px solid var(--border-hairline)', background: 'var(--surface-sunken)', color: 'var(--text-primary)', fontSize: 12.5, outline: 'none' } as const
 const label = { fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)' } as const
+
+/** Friendly cron picker: common presets + a raw 5-field editor. */
+function CronField({ value, onChange }: { value: string; onChange: (expr: string) => void }) {
+  const presets: [string, string][] = [
+    ['* * * * *', '每分钟'],
+    ['0 * * * *', '每小时'],
+    ['0 0 * * *', '每天'],
+    ['0 0 * * 1', '每周一'],
+    ['0 0 1 * *', '每月'],
+  ]
+  const [custom, setCustom] = useState(presets.some(([e]) => e === value) ? '' : value)
+  const active = (expr: string) => value === expr
+  return (
+    <div className="col" style={{ gap: 6 }}>
+      <div className="row gap4" style={{ flexWrap: 'wrap' }}>
+        {presets.map(([expr, name]) => (
+          <button key={expr} type="button" onClick={() => { setCustom(''); onChange(expr) }}
+            style={{ height: 26, padding: '0 10px', borderRadius: 999, fontSize: 11.5, fontWeight: 600,
+              background: active(expr) ? 'var(--accent-soft)' : 'var(--surface-sunken)',
+              color: active(expr) ? 'var(--accent-primary)' : 'var(--text-tertiary)',
+              border: active(expr) ? '1px solid var(--accent-border)' : '1px solid transparent' }}>
+            {name}
+          </button>
+        ))}
+      </div>
+      <div className="col" style={{ gap: 3 }}>
+        <input className="mono" style={{ ...input, height: 32 }} value={custom} onChange={e => { setCustom(e.target.value); onChange(e.target.value) }} placeholder="自定义：分 时 日 月 周" />
+        <span className="mono" style={{ fontSize: 10, color: 'var(--text-faint)' }}>{value}</span>
+      </div>
+    </div>
+  )
+}
 
 function MultiSelect({ labelText, options, value, onChange }: {
   labelText: string
@@ -252,7 +285,8 @@ function fromTask(t: ScheduledTask): Draft {
     name: t.name,
     triggerType: t.trigger.type,
     cron: t.trigger.type === 'cron' ? t.trigger.expr : '0 2 * * *',
-    seconds: t.trigger.type === 'interval' ? String(t.trigger.seconds) : '1800',
+    intervalMinutes: t.trigger.type === 'interval' ? String(t.trigger.seconds % 3600 === 0 ? t.trigger.seconds / 3600 : t.trigger.seconds / 60) : '30',
+    intervalUnit: t.trigger.type === 'interval' && t.trigger.seconds % 3600 === 0 ? 'h' : 'm',
     onceAt: t.trigger.type === 'once' ? t.trigger.at : '',
     kind: t.kind,
     script: t.script ?? '',
@@ -271,7 +305,7 @@ function TaskForm({ skills, mcps, targets, onDone, initial }: { skills: Skill[];
 
   const trigger: TaskTrigger =
     d.triggerType === 'cron' ? { type: 'cron', expr: d.cron }
-      : d.triggerType === 'interval' ? { type: 'interval', seconds: Number(d.seconds) || 1800 }
+      : d.triggerType === 'interval' ? { type: 'interval', seconds: (Number(d.intervalMinutes) || 30) * (d.intervalUnit === 'h' ? 3600 : 60) }
         : { type: 'once', at: d.onceAt }
 
   const save = async () => {
@@ -300,9 +334,19 @@ function TaskForm({ skills, mcps, targets, onDone, initial }: { skills: Skill[];
         <span style={label}>触发器类型</span>
         <Segmented size="sm" value={d.triggerType} onChange={v => set({ triggerType: v as Draft['triggerType'] })}
           options={[{ value: 'cron', label: 'cron' }, { value: 'interval', label: '间隔' }, { value: 'once', label: '一次性' }]} />
-        {d.triggerType === 'cron' && <input style={input} className="mono" value={d.cron} onChange={e => set({ cron: e.target.value })} />}
-        {d.triggerType === 'interval' && <input style={input} className="mono" value={d.seconds} onChange={e => set({ seconds: e.target.value })} placeholder="秒（至少 60）" />}
-        {d.triggerType === 'once' && <input style={input} value={d.onceAt} onChange={e => set({ onceAt: e.target.value })} placeholder="2026-08-23T22:30:00Z" />}
+        {d.triggerType === 'cron' && <CronField value={d.cron} onChange={v => set({ cron: v })} />}
+        {d.triggerType === 'interval' && (
+          <div className="row gap6" style={{ alignItems: 'center' }}>
+            <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>每</span>
+            <input className="mono" style={{ ...input, width: 70, height: 30 }} value={d.intervalMinutes} onChange={e => set({ intervalMinutes: e.target.value })} />
+            <Segmented size="sm" value={d.intervalUnit} onChange={v => set({ intervalUnit: v as 'm' | 'h' })}
+              options={[{ value: 'm', label: '分钟' }, { value: 'h', label: '小时' }]} />
+          </div>
+        )}
+        {d.triggerType === 'once' && (
+          <input type="datetime-local" style={input} value={d.onceAt ? d.onceAt.slice(0, 16) : ''}
+            onChange={e => set({ onceAt: e.target.value ? new Date(e.target.value).toISOString() : '' })} />
+        )}
       </div>
       <div className="col gap4">
         <span style={label}>执行体</span>
