@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 use tauri::State;
 
 use super::dispatcher::{SessionProviderConfig, TaskResults, TaskRunInfo};
+use super::scheduler::Scheduler;
 use super::task_router::ActiveTarget;
 use super::history::PromptHistoryStore;
 use super::mcp_client::{McpClient, McpError};
@@ -110,6 +111,8 @@ pub struct AutomationService {
     /// The frontend's active connection id — default target for tasks created
     /// in natural language.
     pub active_target: ActiveTarget,
+    /// The running scheduler (heartbeat for diagnostics).
+    pub scheduler: std::sync::Arc<Scheduler>,
 }
 
 #[tauri::command]
@@ -292,6 +295,14 @@ pub async fn automation_task_results(
     state: State<'_, AutomationService>,
 ) -> Result<Vec<TaskRunInfo>, String> {
     Ok(state.results.read().values().cloned().collect())
+}
+
+/// Scheduler heartbeat (diagnostic: proves the tick loop is running).
+#[tauri::command]
+pub async fn automation_scheduler_heartbeat(
+    state: State<'_, AutomationService>,
+) -> Result<Option<String>, String> {
+    Ok(state.scheduler.last_tick().map(|t| t.to_rfc3339()))
 }
 
 /// The frontend reports the connection the user is currently looking at; tasks

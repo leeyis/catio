@@ -231,6 +231,12 @@ export async function automationSetActiveTarget(target: string): Promise<void> {
   return tauriInvoke<void>('automation_set_active_target', { target })
 }
 
+/** Scheduler last-tick time (null if the loop isn't running). */
+export async function automationSchedulerHeartbeat(): Promise<string | null> {
+  if (!isTauri()) return new Date().toISOString()
+  return tauriInvoke<string | null>('automation_scheduler_heartbeat')
+}
+
 export async function automationSetProvider(
   protocol: ProviderProtocol,
   baseUrl: string,

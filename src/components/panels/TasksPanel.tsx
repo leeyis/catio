@@ -12,6 +12,7 @@ import {
   automationListSkills,
   automationListTasks,
   automationSetTaskEnabled,
+  automationSchedulerHeartbeat,
   automationTaskResults,
   type McpConnection,
   type ScheduledTask,
@@ -66,6 +67,7 @@ export function TasksPanel({ onClose, targets }: { onClose: () => void; targets:
   const [skills, setSkills] = useState<Skill[]>([])
   const [mcps, setMcps] = useState<McpConnection[]>([])
   const [results, setResults] = useState<Record<string, TaskRunInfo>>({})
+  const [heartbeat, setHeartbeat] = useState<string | null>(null)
   const [showNew, setShowNew] = useState(false)
   const [editing, setEditing] = useState<ScheduledTask | null>(null)
 
@@ -91,6 +93,14 @@ export function TasksPanel({ onClose, targets }: { onClose: () => void; targets:
     })
     return () => { un?.() }
   }, [])
+  // Scheduler heartbeat — shows whether the tick loop is actually running.
+  useEffect(() => {
+    let alive = true
+    const poll = () => void automationSchedulerHeartbeat().then(ts => { if (alive) setHeartbeat(ts) })
+    poll()
+    const id = window.setInterval(poll, 3000)
+    return () => { alive = false; window.clearInterval(id) }
+  }, [])
 
   const toggleEnabled = (task: ScheduledTask, enabled: boolean) =>
     void automationSetTaskEnabled(task.id, enabled).then(refresh)
@@ -108,6 +118,9 @@ export function TasksPanel({ onClose, targets }: { onClose: () => void; targets:
       <div className="col grow" style={{ minHeight: 0, overflowY: 'auto', padding: 10, gap: 6 }}>
         <span className="chip" style={{ alignSelf: 'flex-start', margin: '0 2px 4px' }}>
           {t('panels.tasksRunning', { count: tasks.filter(x => x.enabled).length })}
+        </span>
+        <span className="chip" style={{ alignSelf: 'flex-start', margin: '0 2px 8px', background: heartbeat ? 'color-mix(in srgb, var(--signal-green) 14%, transparent)' : 'color-mix(in srgb, var(--signal-rose) 14%, transparent)', color: heartbeat ? 'var(--signal-green)' : 'var(--signal-rose)' }}>
+          调度器 {heartbeat ? '运行中' : '未运行'}
         </span>
         {tasks.length === 0 && (
           <div className="col" style={{ alignItems: 'center', padding: '30px 0', gap: 8, color: 'var(--text-faint)' }}>

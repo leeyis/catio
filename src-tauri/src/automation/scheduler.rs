@@ -119,6 +119,7 @@ struct SchedulerInner {
     dispatch: Arc<dyn TaskDispatcher>,
     running: RwLock<HashMap<String, ()>>,
     last_fired: RwLock<HashMap<String, DateTime<Utc>>>,
+    last_tick: RwLock<Option<DateTime<Utc>>>,
 }
 
 /// App-lifetime scheduler. `start` spawns the tick loop; `stop` aborts it.
@@ -135,9 +136,15 @@ impl Scheduler {
                 dispatch,
                 running: RwLock::new(HashMap::new()),
                 last_fired: RwLock::new(HashMap::new()),
+                last_tick: RwLock::new(None),
             }),
             handle: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Last tick time (diagnostic: proves the loop is alive in the running app).
+    pub fn last_tick(&self) -> Option<DateTime<Utc>> {
+        *self.inner.last_tick.read()
     }
 
     /// The tick loop, awaiting in a Tokio runtime. Callers spawn it with
@@ -147,6 +154,7 @@ impl Scheduler {
         let inner = self.inner.clone();
         loop {
             tokio::time::sleep(tick).await;
+            *inner.last_tick.write() = Some(Utc::now());
             tick_once(inner.clone(), Utc::now());
         }
     }

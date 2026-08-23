@@ -212,6 +212,7 @@ pub fn run() {
             automation::commands::automation_task_results,
             automation::commands::automation_set_provider,
             automation::commands::automation_set_active_target,
+            automation::commands::automation_scheduler_heartbeat,
             db::commands::db_connect,
             db::commands::db_test_connection,
             db::commands::db_disconnect,
@@ -379,8 +380,9 @@ pub fn run() {
                 ));
                 // `tauri::async_runtime::spawn` runs the loop inside the Tokio
                 // runtime (a bare `tokio::spawn` would panic in setup).
+                let scheduler_loop = scheduler.clone();
                 tauri::async_runtime::spawn(async move {
-                    scheduler.run(std::time::Duration::from_secs(1)).await
+                    scheduler_loop.run(std::time::Duration::from_secs(1)).await
                 });
                 app.manage(automation::commands::AutomationService {
                     store,
@@ -390,6 +392,7 @@ pub fn run() {
                     results,
                     provider,
                     active_target,
+                    scheduler,
                 });
             }
             // Default the JDBC sidecar's driver-JAR directory to

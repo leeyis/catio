@@ -183,6 +183,7 @@ export default function App() {
   const [activePanel, setActivePanel] = useState<string>('ai')
   const [panelOpen, setPanelOpen] = useState<boolean>(false)
   const [toolCalls, setToolCalls] = useState<Record<string, Record<string, AgentToolCall>>>({})
+  const currentRoundRef = useRef<Record<string, number>>({})
   const [promptHistory, setPromptHistory] = useState<PromptHistoryEntry[]>([])
   useEffect(() => {
     if (!(activePanel === 'history' && panelOpen)) return
@@ -1944,7 +1945,12 @@ export default function App() {
     // Surface Agent tool calls (MCP/skill/terminal) as a detail block in the panel.
     const evt = envelope.event as { type?: string } & Record<string, unknown>
     const convId = envelope.conversationId
-    const afterMsg = (activeConversation?.messages ?? []).filter(m => m.role === 'assistant').length
+    // Track the current assistant-message round so each tool call attaches to
+    // the message it belongs to (not all lumped at the end).
+    if (evt.type === 'assistantMessageStarted') {
+      currentRoundRef.current[convId] = Number(evt.round ?? 0)
+    }
+    const afterMsg = currentRoundRef.current[convId] ?? 0
     if (evt.type === 'toolProposed') {
       const toolUseId = String(evt.toolUseId ?? '')
       setToolCalls(prev => {
