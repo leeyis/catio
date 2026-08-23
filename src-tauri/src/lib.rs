@@ -356,16 +356,23 @@ pub fn run() {
                         )),
                     ],
                 )));
+                let app_handle = app.handle().clone();
                 let dispatcher =
-                    std::sync::Arc::new(automation::dispatcher::AutomationDispatcher::new(
-                        store.clone(),
-                        sessions,
-                        runtime,
-                        history.clone(),
-                        provider.clone(),
-                        results.clone(),
-                        client.clone(),
-                    ));
+                    std::sync::Arc::new(
+                        automation::dispatcher::AutomationDispatcher::new(
+                            store.clone(),
+                            sessions,
+                            runtime,
+                            history.clone(),
+                            provider.clone(),
+                            results.clone(),
+                            client.clone(),
+                        )
+                        .with_on_run(std::sync::Arc::new(move |info| {
+                            use tauri::Emitter;
+                            let _ = app_handle.emit("automation://task-run", info);
+                        })),
+                    );
                 let scheduler = std::sync::Arc::new(automation::scheduler::Scheduler::new(
                     store.clone(),
                     dispatcher,

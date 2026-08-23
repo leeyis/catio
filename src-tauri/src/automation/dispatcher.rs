@@ -82,6 +82,10 @@ impl ProviderConfigSource for SessionProviderConfig {
 /// Shared "last run" results keyed by task id.
 pub type TaskResults = Arc<RwLock<HashMap<String, TaskRunInfo>>>;
 
+/// Live-run callback (e.g. emits a Tauri event so the frontend sees a task run
+/// immediately instead of waiting for polling).
+pub type RunNotifier = Arc<dyn Fn(&TaskRunInfo) + Send + Sync>;
+
 pub struct AutomationDispatcher {
     repo: Arc<AutomationStore>,
     sessions: Arc<SessionManager>,
@@ -90,6 +94,7 @@ pub struct AutomationDispatcher {
     provider: Arc<dyn ProviderConfigSource>,
     results: TaskResults,
     mcp: Arc<McpClient>,
+    on_run: Option<RunNotifier>,
 }
 
 impl AutomationDispatcher {
@@ -111,19 +116,27 @@ impl AutomationDispatcher {
             provider,
             results,
             mcp,
+            on_run: None,
         }
     }
 
+    /// Attach a notifier invoked on every recorded run.
+    pub fn with_on_run(mut self, on_run: RunNotifier) -> Self {
+        self.on_run = Some(on_run);
+        self
+    }
+
     fn record(&self, task_id: &str, status: TaskRunStatus, summary: String) {
-        self.results.write().insert(
-            task_id.to_string(),
-            TaskRunInfo {
-                task_id: task_id.to_string(),
-                status,
-                summary,
-                at: Utc::now().to_rfc3339(),
-            },
-        );
+        let info = TaskRunInfo {
+            task_id: task_id.to_string(),
+            status,
+            summary,
+            at: Utc::now().to_rfc3339(),
+        };
+        self.results.write().insert(task_id.to_string(), info.clone());
+        if let Some(notify) = &self.on_run {
+            notify(&info);
+        }
     }
 }
 

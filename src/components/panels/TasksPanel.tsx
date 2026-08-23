@@ -4,6 +4,7 @@ import { Icon } from '../Icon'
 import { Btn, IconBtn, Segmented } from '../atoms'
 import { PanelShell } from './PanelShell'
 import { AutoModal } from './AutoModal'
+import { isTauri } from '../../services/ssh'
 import {
   automationCreateTask,
   automationDeleteTask,
@@ -72,12 +73,23 @@ export function TasksPanel({ onClose }: { onClose: () => void }) {
   useEffect(() => { refresh() }, [])
   useEffect(() => { void automationListSkills().then(setSkills) }, [])
   useEffect(() => { void automationListMcps().then(setMcps) }, [])
+  const refreshResults = () => void automationTaskResults().then(list =>
+    setResults(Object.fromEntries(list.map(r => [r.taskId, r]))))
   useEffect(() => {
     let alive = true
     const poll = () => void automationTaskResults().then(list => { if (alive) setResults(Object.fromEntries(list.map(r => [r.taskId, r]))) })
     poll()
     const id = window.setInterval(poll, 3000)
     return () => { alive = false; window.clearInterval(id) }
+  }, [])
+  // Live-run events from the backend refresh results immediately (no 3s wait).
+  useEffect(() => {
+    if (!isTauri()) return
+    let un: (() => void) | undefined
+    void import('@tauri-apps/api/event').then(async ({ listen }) => {
+      un = await listen('automation://task-run', refreshResults)
+    })
+    return () => { un?.() }
   }, [])
 
   const toggleEnabled = (task: ScheduledTask, enabled: boolean) =>
