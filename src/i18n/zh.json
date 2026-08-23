@@ -986,6 +986,7 @@
     "mcpSub": "Agent 作为 MCP client 调用外部工具；工具输出视为不可信数据。当前仅支持 Streamable HTTP。",
     "mcpAdd": "添加 MCP",
     "mcpTest": "测试连接",
+    "historySql": "数据库执行",
     "cancel": "取消",
     "sessionHistory": "会话历史",
     "newConversation": "新建对话",

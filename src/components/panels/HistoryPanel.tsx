@@ -2,7 +2,7 @@
 import React, { useState, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
-import { IconBtn, ConnGlyph, Btn } from '../atoms'
+import { IconBtn, ConnGlyph, Btn, Segmented } from '../atoms'
 import { useData } from '../../state/DataContext'
 import type { Snippet, HistoryItem, Connection } from '../../services/types'
 import type { PromptHistoryEntry } from '../../services/automation'
@@ -190,6 +190,8 @@ function SaveSnippetModal({ row, onClose, onSave }: SaveSnippetModalProps) {
 export function HistoryPanel({ onClose, onAddSnippet, items, onClear, onInsert, canInsert, canInsertEditor, onDelete, activeKind, activeEngine, noActiveConnection, onPruneOrphans, promptItems }: HistoryPanelProps) {
   const { t } = useTranslation()
   const D = useData()
+  const [kindTab, setKindTab] = useState<'shell' | 'prompt' | 'sql'>(activeKind ?? 'shell')
+  const effectiveKind: 'shell' | 'prompt' | 'sql' = activeKind ?? kindTab
   const [q, setQ] = useState('')
   const [target, setTarget] = useState('all')
   const [menuOpen, setMenuOpen] = useState(false)
@@ -227,6 +229,14 @@ export function HistoryPanel({ onClose, onAddSnippet, items, onClear, onInsert, 
     if (q && !(h.text.toLowerCase().includes(q.toLowerCase()) || h.target.toLowerCase().includes(q.toLowerCase()))) return false
     return true
   })
+  const promptRows = (promptItems ?? []).filter(p =>
+    !q || p.text.toLowerCase().includes(q.toLowerCase()) || p.target.toLowerCase().includes(q.toLowerCase()),
+  )
+  const emptyList = (
+    <div className="col" style={{ alignItems: 'center', justifyContent: 'center', padding: '30px 0', gap: 8, color: 'var(--text-faint)' }}>
+      <Icon name="search" size={22} /><span style={{ fontSize: 12.5 }}>{t('panels.noHistory')}</span>
+    </div>
+  )
   // No active connection → empty panel with a "connect first" hint (req 2).
   if (noActiveConnection) {
     return (
@@ -244,11 +254,16 @@ export function HistoryPanel({ onClose, onAddSnippet, items, onClear, onInsert, 
       actions={<IconBtn name="download" size={15} variant="bare" title={t('panels.export')} />}>
       {/* search + filters */}
       <div style={{ padding: '8px 12px 8px', borderBottom: '1px solid var(--border-hairline)' }}>
+        <div style={{ marginBottom: 8 }}>
+          <Segmented size="sm" value={effectiveKind} onChange={v => setKindTab(v as 'shell' | 'prompt' | 'sql')}
+            options={[{ value: 'shell', label: 'shell' }, { value: 'prompt', label: 'prompt' }, { value: 'sql', label: t('panels.historySql') }]} />
+        </div>
         <div className="row gap6" style={{ height: 30, padding: '0 10px', background: 'var(--surface-sunken)', border: '1px solid var(--border-hairline)', borderRadius: 9, marginBottom: 8 }}>
           <Icon name="search" size={13} style={{ color: 'var(--text-faint)' }} />
           <input value={q} onChange={e => setQ(e.target.value)} placeholder={t('panels.historySearch')} style={{ flex: 1, border: 'none', outline: 'none', background: 'transparent', fontSize: 12.5, color: 'var(--text-primary)' }} />
           {q && <button className="icon-btn bare" style={{ width: 20, height: 20 }} onClick={() => setQ('')}><Icon name="x" size={12} /></button>}
         </div>
+        {effectiveKind !== 'prompt' && (
         <div className="row gap8">
           {/* connection dropdown — scoped to the active kind/engine (req 3/4) */}
           <div style={{ position: 'relative', flex: 1, minWidth: 0 }}>
@@ -275,39 +290,32 @@ export function HistoryPanel({ onClose, onAddSnippet, items, onClear, onInsert, 
             )}
           </div>
         </div>
+        )}
       </div>
       {/* list */}
       <div className="grow" style={{ overflowY: 'auto', padding: 10, display: 'flex', flexDirection: 'column', gap: 4 }}>
-        {promptItems && promptItems.length > 0 && (
-          <>
-            <span className="chip" style={{ alignSelf: 'flex-start', margin: '0 2px 2px' }}>Agent 对话 / 定时 prompt</span>
-            {promptItems.map(p => (
-              <div key={p.id} className="row gap8" style={{ padding: '8px 10px', borderRadius: 8, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)' }}>
-                <Icon name={p.source === 'task' ? 'alarm-clock' : 'wand'} size={13} style={{ color: p.source === 'task' ? 'var(--signal-amber)' : 'var(--accent-primary)', flex: 'none' }} />
-                <div className="col grow" style={{ minWidth: 0 }}>
-                  <div className="row gap6" style={{ minWidth: 0 }}>
-                    <span className="ell" style={{ fontSize: 12, fontWeight: 600 }}>{p.target}</span>
-                    <span className="chip mono">{p.outcome}</span>
-                  </div>
-                  <span className="ell" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{p.text}</span>
-                  <span className="ell mono" style={{ fontSize: 9.5, color: 'var(--text-faint)' }}>{p.when} · {p.dur}</span>
+        {effectiveKind === 'prompt' ? (
+          promptRows.length ? promptRows.map(p => (
+            <div key={p.id} className="row gap8" style={{ padding: '8px 10px', borderRadius: 8, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)' }}>
+              <Icon name={p.source === 'task' ? 'alarm-clock' : 'wand'} size={13} style={{ color: p.source === 'task' ? 'var(--signal-amber)' : 'var(--accent-primary)', flex: 'none' }} />
+              <div className="col grow" style={{ minWidth: 0 }}>
+                <div className="row gap6" style={{ minWidth: 0 }}>
+                  <span className="ell" style={{ fontSize: 12, fontWeight: 600 }}>{p.target}</span>
+                  <span className="chip mono">{p.outcome}</span>
                 </div>
-                <span className="chip">{p.source === 'task' ? '定时' : '对话'}</span>
+                <span className="ell" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{p.text}</span>
+                <span className="ell mono" style={{ fontSize: 9.5, color: 'var(--text-faint)' }}>{p.when} · {p.dur}</span>
               </div>
-            ))}
-          </>
-        )}
-        {rows.length ? rows.map(h => <HistoryRow key={h.id} h={h} onSave={setSaveRow} onInsert={onInsert} canInsert={canInsert} canInsertEditor={canInsertEditor} onDelete={onDelete} />) : (
-          !promptItems?.length && (
-            <div className="col" style={{ alignItems: 'center', justifyContent: 'center', padding: '30px 0', gap: 8, color: 'var(--text-faint)' }}>
-              <Icon name="search" size={22} /><span style={{ fontSize: 12.5 }}>{t('panels.noHistory')}</span>
+              <span className="chip">{p.source === 'task' ? '定时' : '对话'}</span>
             </div>
-          )
+          )) : emptyList
+        ) : (
+          rows.length ? rows.map(h => <HistoryRow key={h.id} h={h} onSave={setSaveRow} onInsert={onInsert} canInsert={canInsert} canInsertEditor={canInsertEditor} onDelete={onDelete} />) : emptyList
         )}
       </div>
       {/* footer count */}
       <div className="row gap6" style={{ padding: '8px 12px', borderTop: '1px solid var(--border-hairline)', fontSize: 11, color: 'var(--text-faint)' }}>
-        <Icon name="history" size={12} /> {t('panels.showingCount', { shown: rows.length, total: scopedItems.length })}
+        <Icon name="history" size={12} /> {t('panels.showingCount', { shown: effectiveKind === 'prompt' ? promptRows.length : rows.length, total: effectiveKind === 'prompt' ? (promptItems ?? []).length : scopedItems.length })}
         {(target !== 'all' || q) && <button className="btn btn-ghost sm" style={{ height: 22, padding: '0 8px', fontSize: 11 }} onClick={() => { setTarget('all'); setQ('') }}>{t('panels.clearFilters')}</button>}
         <span className="grow" />
         {onPruneOrphans && orphanIds.length > 0 && (

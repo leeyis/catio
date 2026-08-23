@@ -9,10 +9,11 @@ describe('services/automation', () => {
     ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
   })
 
-  it('listTasks returns empty off-Tauri', async () => {
+  it('listTasks returns mock sample off-Tauri (no backend)', async () => {
     delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
     const { automationListTasks } = await import('./automation')
-    expect(await automationListTasks()).toEqual([])
+    const list = await automationListTasks()
+    expect(list.length).toBeGreaterThan(0)
     expect(invokeMock).not.toHaveBeenCalled()
   })
 

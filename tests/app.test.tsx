@@ -28,6 +28,16 @@ vi.mock('../src/services/agentRuntime', async () => {
     cancelAgentTurn: agentRuntimeMock.cancelAgentTurn,
   }
 })
+// Automation workbench: keep the real transport functions but return NO skills
+// so Agent-panel messages aren't auto-injected with skill instructions in tests.
+vi.mock('../src/services/automation', async () => {
+  const actual = await vi.importActual<typeof import('../src/services/automation')>('../src/services/automation')
+  return {
+    ...actual,
+    automationListSkills: vi.fn().mockResolvedValue([]),
+    automationSetProvider: vi.fn().mockResolvedValue(undefined),
+  }
+})
 // PTY capture adapter: no real terminal in jsdom. The busy check stays false so
 // executeAgentCommand never asks for a split.
 vi.mock('../src/services/terminalCapture', async () => ({

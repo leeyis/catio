@@ -11,6 +11,8 @@ vi.mock('../../services/automation', () => ({
   automationSetTaskEnabled: vi.fn(),
   automationTaskResults: vi.fn().mockResolvedValue([]),
   automationSetProvider: vi.fn(),
+  automationListSkills: vi.fn().mockResolvedValue([]),
+  automationListMcps: vi.fn().mockResolvedValue([]),
 }))
 import { automationListTasks } from '../../services/automation'
 
@@ -40,7 +42,7 @@ describe('TasksPanel', () => {
     vi.mocked(automationListTasks).mockResolvedValue([TASK as never])
     render(wrap(<TasksPanel onClose={() => {}} />))
     expect(await screen.findByText('每日数据库备份巡检')).toBeTruthy()
-    expect(screen.getByText('0 2 * * *')).toBeTruthy()
+    expect(screen.getByText(/0 2 \* \* \*/)).toBeTruthy()
   })
 
   it('shows an empty hint when there are no tasks', async () => {

@@ -49,11 +49,13 @@ export function McpPanel({ onClose }: { onClose: () => void }) {
               <div className="row gap6" style={{ minWidth: 0 }}>
                 <span className="ell" style={{ fontSize: 13, fontWeight: 600 }}>{m.name}</span>
                 {statusChip(m.status)}
+                <span className="chip">Streamable HTTP</span>
               </div>
               <span className="ell mono" style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{m.url}</span>
-              <span className="ell" style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>
-                {m.discoveredTools.length} 工具 · {m.auth === 'none' ? '无认证' : m.auth}
-              </span>
+              <div className="row gap6" style={{ flexWrap: 'wrap' }}>
+                <span className="chip">{m.discoveredTools.length} 工具</span>
+                <span className="chip">{m.auth === 'none' ? '无认证' : m.auth === 'bearer' ? 'Bearer token' : 'Header 认证'}</span>
+              </div>
             </div>
             <IconBtn name="trash-2" size={14} variant="bare" onClick={() => remove(m)} />
           </div>

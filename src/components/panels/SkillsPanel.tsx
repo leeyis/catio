@@ -63,6 +63,9 @@ export function SkillsPanel({ onClose }: { onClose: () => void }) {
                 <span className="ell" style={{ fontSize: 13, fontWeight: 600 }}>{s.name}</span>
                 <span className="chip mono">v{s.version}</span>
                 {scopeChip(s)}
+                {s.source.type === 'url'
+                  ? <span className="chip violet">在线安装</span>
+                  : <span className="chip">导入</span>}
               </div>
               <span className="ell" style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{s.promptTemplate}</span>
               <div className="row gap6" style={{ marginTop: 2 }}>{riskChip(s.riskPolicy)}</div>

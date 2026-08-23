@@ -986,6 +986,7 @@
     "mcpSub": "The Agent calls external tools as an MCP client; tool output is untrusted. Streamable HTTP only for now.",
     "mcpAdd": "Add MCP",
     "mcpTest": "Test Connection",
+    "historySql": "Database",
     "cancel": "Cancel",
     "sessionHistory": "Session history",
     "newConversation": "New conversation",

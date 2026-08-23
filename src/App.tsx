@@ -72,7 +72,7 @@ import {
   newConversation as makeConversation,
 } from './state/conversations'
 import type { Conversation } from './state/conversations'
-import { useAgentConfig } from './state/agentConfig'
+import { MODEL_PROVIDER_PRESETS, useAgentConfig } from './state/agentConfig'
 import {
   subscribeAgentEvents,
   startAgentTurn,
@@ -101,6 +101,7 @@ import { setAgentConfig } from './state/agentConfig'
 import {
   automationListPromptHistory,
   automationListSkills,
+  automationSetProvider,
   type PromptHistoryEntry,
   type Skill,
 } from './services/automation'
@@ -205,6 +206,18 @@ export default function App() {
 
   // ---- Catio Agent conversations (P2): per-host persisted, per-tab current ----
   const { config: agentCfg } = useAgentConfig()
+  // Scheduled prompt tasks run with the SAME global model provider from
+  // Settings — no per-task provider UI. Push it to the backend (session memory)
+  // and keep it in sync whenever the user changes the provider/model.
+  useEffect(() => {
+    const protocol = MODEL_PROVIDER_PRESETS[agentCfg.provider]?.protocol ?? 'openai'
+    const authMode = agentCfg.anthropicAuthMode === 'api-key'
+      ? 'apiKey'
+      : agentCfg.anthropicAuthMode === 'auth-token'
+        ? 'authToken'
+        : 'auto'
+    void automationSetProvider(protocol, agentCfg.baseUrl, agentCfg.model, authMode, agentCfg.apiKey)
+  }, [agentCfg.provider, agentCfg.baseUrl, agentCfg.model, agentCfg.apiKey, agentCfg.anthropicAuthMode])
   const [pendingAgentRun, setPendingAgentRun] = useState<PendingAgentRun | null>(null)
   const pendingAgentRunRef = useRef<PendingAgentRun | null>(null)
   const [conversations, setConversations] = useState<Conversation[]>(() => loadConversations())

@@ -7,33 +7,57 @@ import { AutoModal } from './AutoModal'
 import {
   automationCreateTask,
   automationDeleteTask,
+  automationListMcps,
+  automationListSkills,
   automationListTasks,
-  automationSetProvider,
   automationSetTaskEnabled,
   automationTaskResults,
-  type ProviderProtocol,
+  type McpConnection,
   type ScheduledTask,
+  type Skill,
   type TaskKind,
   type TaskPolicy,
   type TaskRunInfo,
   type TaskTrigger,
 } from '../../services/automation'
 
-function triggerLabel(t: TaskTrigger): string {
+// ── helpers ─────────────────────────────────────────────────────────────────
+
+const triggerChip = (t: TaskTrigger): [string, string] => {
+  if (t.type === 'cron') return ['blue', 'cron']
+  if (t.type === 'interval') return ['violet', 'interval']
+  return ['amber', 'once']
+}
+
+const kindChip = (k: TaskKind): [string, string] =>
+  k === 'shell' ? ['', 'shell'] : ['green', 'prompt']
+
+function triggerExpr(t: TaskTrigger): string {
   if (t.type === 'cron') return t.expr
   if (t.type === 'interval') return `每 ${t.seconds}s`
   return t.at
 }
 
+function nextLabel(t: TaskTrigger): string {
+  if (t.type === 'cron') return `每天 ${t.expr.split(/\s+/)[1] || ''}:${t.expr.split(/\s+/)[0] || ''}`
+  if (t.type === 'interval') return `每 ${Math.round(t.seconds / 60)} 分钟`
+  return t.at
+}
+
+// ── panel ───────────────────────────────────────────────────────────────────
+
 export function TasksPanel({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation()
   const [tasks, setTasks] = useState<ScheduledTask[]>([])
+  const [skills, setSkills] = useState<Skill[]>([])
+  const [mcps, setMcps] = useState<McpConnection[]>([])
   const [results, setResults] = useState<Record<string, TaskRunInfo>>({})
   const [showNew, setShowNew] = useState(false)
-  const [showProvider, setShowProvider] = useState(false)
 
   const refresh = () => void automationListTasks().then(setTasks)
   useEffect(() => { refresh() }, [])
+  useEffect(() => { void automationListSkills().then(setSkills) }, [])
+  useEffect(() => { void automationListMcps().then(setMcps) }, [])
   useEffect(() => {
     let alive = true
     const poll = () => void automationTaskResults().then(list => { if (alive) setResults(Object.fromEntries(list.map(r => [r.taskId, r]))) })
@@ -49,12 +73,12 @@ export function TasksPanel({ onClose }: { onClose: () => void }) {
     void automationDeleteTask(task.id).then(refresh)
   }
 
+  const nameOf = (ids: string[], list: { id: string; name: string }[]) =>
+    ids.map(id => list.find(x => x.id === id)?.name ?? id)
+
   return (
     <PanelShell icon="alarm-clock" title={t('panels.tasksTitle')} sub={t('panels.tasksSub')} onClose={onClose}
-      actions={<>
-        <Btn size="sm" variant="ghost" icon="zap" title="AI Provider（prompt 任务）" onClick={() => setShowProvider(true)}>Provider</Btn>
-        <Btn size="sm" variant="primary" icon="plus" onClick={() => setShowNew(true)}>{t('panels.tasksNew')}</Btn>
-      </>}>
+      actions={<Btn size="sm" variant="primary" icon="plus" onClick={() => setShowNew(true)}>{t('panels.tasksNew')}</Btn>}>
       <div className="col grow" style={{ minHeight: 0, overflowY: 'auto', padding: 10, gap: 6 }}>
         <span className="chip" style={{ alignSelf: 'flex-start', margin: '0 2px 4px' }}>
           {t('panels.tasksRunning', { count: tasks.filter(x => x.enabled).length })}
@@ -64,44 +88,63 @@ export function TasksPanel({ onClose }: { onClose: () => void }) {
             <Icon name="alarm-clock" size={22} /><span style={{ fontSize: 12.5 }}>{t('panels.tasksNew')}</span>
           </div>
         )}
-        {tasks.map(task => (
-          <div key={task.id} className="row gap10"
-            style={{ padding: '10px 12px', borderRadius: 10, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', opacity: task.enabled ? 1 : 0.55 }}>
-            <div className="icon-badge" style={{ width: 34, height: 34, borderRadius: 9, background: 'var(--accent-soft)', color: 'var(--accent-primary)' }}>
-              <Icon name="alarm-clock" size={16} />
-            </div>
-            <div className="col grow" style={{ minWidth: 0, gap: 2 }}>
-              <div className="row gap6" style={{ minWidth: 0 }}>
-                <span className="ell" style={{ fontSize: 13, fontWeight: 600 }}>{task.name}</span>
-                <span className="chip">{task.kind}</span>
-                <span className="chip mono">{triggerLabel(task.trigger)}</span>
+        {tasks.map(task => {
+          const [tc, tl] = triggerChip(task.trigger)
+          const [kc, kl] = kindChip(task.kind)
+          const skillNames = nameOf(task.skillIds, skills)
+          const mcpNames = nameOf(task.mcpIds, mcps)
+          const run = results[task.id]
+          return (
+            <div key={task.id} className="row gap10"
+              style={{ padding: '12px 14px', borderRadius: 10, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', opacity: task.enabled ? 1 : 0.55 }}>
+              <div className="icon-badge" style={{ width: 38, height: 38, borderRadius: 10, background: run && run.status === 'failed' ? 'var(--danger-soft)' : 'var(--accent-soft)', color: run && run.status === 'failed' ? 'var(--danger-fg)' : 'var(--accent-primary)' }}>
+                <Icon name="alarm-clock" size={17} />
               </div>
-              <span className="ell mono" style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>
-                {task.targetRef || '—'}{task.policy !== 'reject' ? ` · ${task.policy}` : ''}
-              </span>
-              {results[task.id] && (
-                <span className="chip" style={{ alignSelf: 'flex-start', background: results[task.id].status === 'success' ? 'color-mix(in srgb, var(--signal-green) 14%, transparent)' : 'color-mix(in srgb, var(--signal-rose) 14%, transparent)', color: results[task.id].status === 'success' ? 'var(--signal-green)' : 'var(--signal-rose)' }}>
-                  {results[task.id].status === 'success' ? '✓' : '✗'} {results[task.id].summary}
-                </span>
-              )}
+              <div className="col grow" style={{ minWidth: 0, gap: 3 }}>
+                <div className="row gap6" style={{ minWidth: 0, flexWrap: 'wrap' }}>
+                  <span className="ell" style={{ fontSize: 13, fontWeight: 600 }}>{task.name}</span>
+                  <span className={`chip${kc ? ` ${kc}` : ''}`}>{kl}</span>
+                  <span className={`chip ${tc} mono`}>{tl}</span>
+                </div>
+                <div className="row gap6" style={{ minWidth: 0, flexWrap: 'wrap' }}>
+                  <span className="ell mono" style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>
+                    {triggerExpr(task.trigger)} · 目标 {task.targetRef || '—'}
+                  </span>
+                  {skillNames.length > 0 && <span className="chip violet">{skillNames.join(' / ')}</span>}
+                  {mcpNames.length > 0 && <span className="chip">{`MCP ${mcpNames.join(' / ')}`}</span>}
+                </div>
+                <div className="row gap6" style={{ flexWrap: 'wrap', marginTop: 2 }}>
+                  <span className="chip">下次 {nextLabel(task.trigger)}</span>
+                  {(() => {
+                    const runOk = run?.status === 'success'
+                    const runColor = runOk ? 'var(--signal-green)' : 'var(--signal-rose)'
+                    return (
+                      <span className="chip" style={run ? { background: `color-mix(in srgb, ${runColor} 14%, transparent)`, color: runColor } : undefined}>
+                        上次 {run ? `${runOk ? '成功' : '失败'}: ${run.summary}` : '从未运行'}
+                      </span>
+                    )
+                  })()}
+                </div>
+              </div>
+              <button className={`toggle ${task.enabled ? 'on' : ''}`} aria-pressed={task.enabled}
+                onClick={() => toggleEnabled(task, !task.enabled)}><span className="knob" /></button>
+              <IconBtn name="trash-2" size={14} variant="bare" onClick={() => remove(task)} />
             </div>
-            <button className={`toggle ${task.enabled ? 'on' : ''}`} aria-pressed={task.enabled}
-              onClick={() => toggleEnabled(task, !task.enabled)}><span className="knob" /></button>
-            <IconBtn name="trash-2" size={14} variant="bare" onClick={() => remove(task)} />
-          </div>
-        ))}
+          )
+        })}
       </div>
 
       {showNew && (
         <AutoModal title={t('panels.tasksNew')} onClose={() => setShowNew(false)}
           footer={<Btn variant="secondary" onClick={() => setShowNew(false)}>{t('panels.cancel')}</Btn>}>
-          <TaskForm onDone={() => { setShowNew(false); refresh() }} />
+          <TaskForm skills={skills} mcps={mcps} onDone={() => { setShowNew(false); refresh() }} />
         </AutoModal>
       )}
-      {showProvider && <ProviderModal onClose={() => setShowProvider(false)} />}
     </PanelShell>
   )
 }
+
+// ── new-task form (aligns with the prototype modal) ─────────────────────────
 
 interface Draft {
   name: string
@@ -115,22 +158,70 @@ interface Draft {
   targetRef: string
   policy: TaskPolicy
   whitelist: string
+  skillIds: string[]
+  mcpIds: string[]
 }
 
 const emptyDraft: Draft = {
-  name: '', triggerType: 'cron', cron: '0 2 * * *', seconds: '3600', onceAt: '', kind: 'shell',
+  name: '', triggerType: 'cron', cron: '0 2 * * *', seconds: '1800', onceAt: '', kind: 'shell',
   script: '', prompt: '', targetRef: '', policy: 'reject', whitelist: '',
+  skillIds: [], mcpIds: [],
 }
 
-function TaskForm({ onDone }: { onDone: () => void }) {
-  const { t } = useTranslation()
+const input = { width: '100%', height: 32, padding: '0 10px', borderRadius: 8, border: '1px solid var(--border-hairline)', background: 'var(--surface-sunken)', color: 'var(--text-primary)', fontSize: 12.5, outline: 'none' } as const
+const label = { fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)' } as const
+
+function MultiSelect({ labelText, options, value, onChange }: {
+  labelText: string
+  options: { id: string; name: string; sub?: string }[]
+  value: string[]
+  onChange: (ids: string[]) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const toggle = (id: string) =>
+    onChange(value.includes(id) ? value.filter(x => x !== id) : [...value, id])
+  return (
+    <div className="col gap4">
+      <span style={label}>{labelText}</span>
+      <button type="button" onClick={() => setOpen(o => !o)}
+        style={{ ...input, display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer', height: 34 }}>
+        <span style={{ color: value.length ? 'var(--text-primary)' : 'var(--text-faint)', fontSize: 12.5 }}>
+          {value.length ? `已选 ${value.length} 项` : '选择…'}
+        </span>
+        <Icon name="chevron-down" size={13} style={{ color: 'var(--text-faint)', transform: open ? 'rotate(180deg)' : 'none', transition: 'transform .15s' }} />
+      </button>
+      {open && (
+        <div className="col" style={{ gap: 2, border: '1px solid var(--border-hairline)', borderRadius: 8, padding: 4, background: 'var(--surface-card)' }}>
+          {options.map(o => (
+            <label key={o.id} className="row gap8" style={{ padding: '6px 8px', borderRadius: 6, cursor: 'pointer', background: value.includes(o.id) ? 'var(--accent-soft)' : 'transparent' }}>
+              <input type="checkbox" checked={value.includes(o.id)} onChange={() => toggle(o.id)} style={{ accentColor: 'var(--accent-primary)' }} />
+              <span style={{ fontSize: 12.5 }}>{o.name}</span>
+              {o.sub && <span className="chip">{o.sub}</span>}
+            </label>
+          ))}
+          {options.length === 0 && <span style={{ fontSize: 11, color: 'var(--text-faint)', padding: 6 }}>暂无可用项</span>}
+        </div>
+      )}
+      {value.length > 0 && (
+        <div className="row gap4" style={{ flexWrap: 'wrap' }}>
+          {value.map(id => {
+            const o = options.find(x => x.id === id)
+            return <span key={id} className="chip">{o?.name ?? id}</span>
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function TaskForm({ skills, mcps, onDone }: { skills: Skill[]; mcps: McpConnection[]; onDone: () => void }) {
   const [d, setD] = useState<Draft>(emptyDraft)
   const set = (patch: Partial<Draft>) => setD(p => ({ ...p, ...patch }))
 
   const trigger: TaskTrigger =
     d.triggerType === 'cron' ? { type: 'cron', expr: d.cron }
-    : d.triggerType === 'interval' ? { type: 'interval', seconds: Number(d.seconds) || 3600 }
-    : { type: 'once', at: d.onceAt }
+      : d.triggerType === 'interval' ? { type: 'interval', seconds: Number(d.seconds) || 1800 }
+        : { type: 'once', at: d.onceAt }
 
   const save = async () => {
     if (!d.name.trim()) return
@@ -140,7 +231,7 @@ function TaskForm({ onDone }: { onDone: () => void }) {
         script: d.kind === 'shell' ? d.script : undefined,
         prompt: d.kind === 'prompt' ? d.prompt : undefined,
         targetRef: d.targetRef || undefined,
-        skillIds: [], mcpIds: [], policy: d.policy,
+        skillIds: d.skillIds, mcpIds: d.mcpIds, policy: d.policy,
         whitelist: d.whitelist.split('\n').map(s => s.trim()).filter(Boolean),
         enabled: true, autoConfirmed: d.policy === 'auto',
       })
@@ -148,43 +239,59 @@ function TaskForm({ onDone }: { onDone: () => void }) {
     } catch (e) { console.error(e) }
   }
 
-  const input = { width: '100%', height: 32, padding: '0 10px', borderRadius: 8, border: '1px solid var(--border-hairline)', background: 'var(--surface-sunken)', color: 'var(--text-primary)', fontSize: 12.5, outline: 'none' } as const
-  const label = { fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)' } as const
-
   return (
     <>
       <div className="col gap4">
-        <span style={label}>{t('panels.tasksTitle')} · 名称</span>
-        <input style={input} value={d.name} onChange={e => set({ name: e.target.value })} placeholder="每日数据库备份巡检" />
+        <span style={label}>任务名称</span>
+        <input style={input} value={d.name} onChange={e => set({ name: e.target.value })} placeholder="例如：每日数据库备份巡检" />
       </div>
       <div className="col gap4">
-        <span style={label}>触发器</span>
+        <span style={label}>触发器类型</span>
         <Segmented size="sm" value={d.triggerType} onChange={v => set({ triggerType: v as Draft['triggerType'] })}
           options={[{ value: 'cron', label: 'cron' }, { value: 'interval', label: '间隔' }, { value: 'once', label: '一次性' }]} />
         {d.triggerType === 'cron' && <input style={input} className="mono" value={d.cron} onChange={e => set({ cron: e.target.value })} />}
-        {d.triggerType === 'interval' && <input style={input} className="mono" value={d.seconds} onChange={e => set({ seconds: e.target.value })} placeholder="秒" />}
+        {d.triggerType === 'interval' && <input style={input} className="mono" value={d.seconds} onChange={e => set({ seconds: e.target.value })} placeholder="秒（至少 60）" />}
         {d.triggerType === 'once' && <input style={input} value={d.onceAt} onChange={e => set({ onceAt: e.target.value })} placeholder="2026-08-23T22:30:00Z" />}
       </div>
       <div className="col gap4">
         <span style={label}>执行体</span>
         <Segmented size="sm" value={d.kind} onChange={v => set({ kind: v as TaskKind })}
-          options={[{ value: 'shell', label: 'shell' }, { value: 'prompt', label: 'prompt' }]} />
+          options={[{ value: 'shell', label: 'shell 脚本' }, { value: 'prompt', label: 'prompt' }]} />
         {d.kind === 'shell'
           ? <textarea rows={3} style={{ ...input, height: 80, paddingTop: 8, fontFamily: 'var(--font-mono, monospace)' }} value={d.script} onChange={e => set({ script: e.target.value })} placeholder="pg_dump -Fc prod > /backup/prod.dump" />
-          : <textarea rows={3} style={{ ...input, height: 80, paddingTop: 8 }} value={d.prompt} onChange={e => set({ prompt: e.target.value })} placeholder="检查磁盘空间，超过 80% 时汇总最大文件" />}
+          : <>
+            <textarea rows={3} style={{ ...input, height: 80, paddingTop: 8 }} value={d.prompt} onChange={e => set({ prompt: e.target.value })} placeholder="检查磁盘空间，超过 80% 时汇总最大文件并给出清理建议" />
+            <MultiSelect labelText="引用技能" options={skills.map(s => ({ id: s.id, name: s.name, sub: s.riskPolicy === 'readonly' ? '只读' : s.riskPolicy === 'readonlyPreferred' ? '只读优先' : '确认写入' }))} value={d.skillIds} onChange={ids => set({ skillIds: ids })} />
+            <MultiSelect labelText="可用 MCP" options={mcps.map(m => ({ id: m.id, name: m.name, sub: `${m.discoveredTools.length} 工具` }))} value={d.mcpIds} onChange={ids => set({ mcpIds: ids })} />
+          </>}
       </div>
       <div className="col gap4">
-        <span style={label}>目标主机 / 数据库</span>
-        <input style={input} value={d.targetRef} onChange={e => set({ targetRef: e.target.value })} placeholder="web-01 · * = 全部" />
+        <span style={label}>目标主机 / 数据库（已连接会话 id）</span>
+        <input style={input} value={d.targetRef} onChange={e => set({ targetRef: e.target.value })} placeholder="postgres-prod · web-01 · * = 全部" />
       </div>
       <div className="col gap4">
         <span style={label}>无人值守权限策略</span>
-        <Segmented size="sm" value={d.policy} onChange={v => set({ policy: v as TaskPolicy })}
-          options={[{ value: 'reject', label: '拒绝敏感' }, { value: 'whitelist', label: '白名单' }, { value: 'auto', label: '自动放行' }]} />
+        {([['reject', '拒绝敏感命令（默认）', '敏感命令自动拒绝并记录，任务继续其余步骤。最安全。'],
+          ['whitelist', '命令白名单', '仅放行精确匹配白名单的命令，其余敏感命令拒绝。'],
+          ['auto', '自动放行敏感命令', '敏感命令不经审批直接执行。高风险。']] as [TaskPolicy, string, string][]).map(([v, title, desc]) => (
+          <label key={v} className="row gap10" style={{ padding: '9px 12px', borderRadius: 9, border: '1px solid var(--border-hairline)', cursor: 'pointer', background: d.policy === v ? 'var(--accent-soft)' : 'transparent' }}>
+            <input type="radio" checked={d.policy === v} onChange={() => set({ policy: v })} style={{ accentColor: 'var(--accent-primary)' }} />
+            <span className="col" style={{ gap: 1 }}>
+              <span style={{ fontSize: 12.5, fontWeight: 600 }}>{title}</span>
+              <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{desc}</span>
+            </span>
+          </label>
+        ))}
         {d.policy === 'auto' && (
-          <span style={{ fontSize: 11, color: 'var(--danger-fg)', background: 'var(--danger-soft)', padding: '8px 10px', borderRadius: 8, border: '1px solid var(--danger-border)' }}>
-            自动放行意味着敏感命令直接执行，可能造成不可逆操作。仅对完全可信目标开启。
-          </span>
+          <div className="col" style={{ gap: 8 }}>
+            <span style={{ fontSize: 11, color: 'var(--danger-fg)', background: 'var(--danger-soft)', padding: '8px 10px', borderRadius: 8, border: '1px solid var(--danger-border)' }}>
+              自动放行意味着模型提出的敏感命令将直接执行，可能造成数据损坏或不可逆操作。仅对完全可信、隔离的目标开启。
+            </span>
+            <label className="row gap8" style={{ cursor: 'pointer' }}>
+              <input type="checkbox" checked={d.policy === 'auto'} onChange={() => {}} style={{ accentColor: 'var(--accent-primary)' }} />
+              <span style={{ fontSize: 12 }}>我已理解风险，为这个任务显式开启自动放行</span>
+            </label>
+          </div>
         )}
         {d.policy === 'whitelist' && (
           <textarea rows={2} style={{ ...input, height: 56, paddingTop: 8 }} className="mono" value={d.whitelist} onChange={e => set({ whitelist: e.target.value })} placeholder="每行一条白名单命令" />
@@ -192,49 +299,5 @@ function TaskForm({ onDone }: { onDone: () => void }) {
       </div>
       <Btn variant="primary" style={{ alignSelf: 'flex-end' }} onClick={save}>保存任务</Btn>
     </>
-  )
-}
-
-function ProviderModal({ onClose }: { onClose: () => void }) {
-  const { t } = useTranslation()
-  const [protocol, setProtocol] = useState<ProviderProtocol>('openai')
-  const [baseUrl, setBaseUrl] = useState('')
-  const [model, setModel] = useState('')
-  const [credential, setCredential] = useState('')
-
-  const save = async () => {
-    try {
-      await automationSetProvider(protocol, baseUrl, model, 'auto', credential)
-      onClose()
-    } catch (e) { console.error(e) }
-  }
-
-  const input = { width: '100%', height: 32, padding: '0 10px', borderRadius: 8, border: '1px solid var(--border-hairline)', background: 'var(--surface-sunken)', color: 'var(--text-primary)', fontSize: 12.5, outline: 'none' } as const
-  const label = { fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)' } as const
-
-  return (
-    <AutoModal title="AI Provider（prompt 任务使用）" onClose={onClose}
-      footer={<>
-        <Btn variant="secondary" onClick={onClose}>{t('panels.cancel')}</Btn>
-        <Btn variant="primary" onClick={save}>保存</Btn>
-      </>}>
-      <div className="col gap4">
-        <span style={label}>协议</span>
-        <Segmented size="sm" value={protocol} onChange={v => setProtocol(v as ProviderProtocol)}
-          options={[{ value: 'openai', label: 'OpenAI' }, { value: 'anthropic', label: 'Anthropic' }, { value: 'ollama', label: 'Ollama' }]} />
-      </div>
-      <div className="col gap4">
-        <span style={label}>Base URL</span>
-        <input style={input} className="mono" value={baseUrl} onChange={e => setBaseUrl(e.target.value)} placeholder="https://api.openai.com/v1" />
-      </div>
-      <div className="col gap4">
-        <span style={label}>模型</span>
-        <input style={input} value={model} onChange={e => setModel(e.target.value)} placeholder="gpt-4o" />
-      </div>
-      <div className="col gap4">
-        <span style={label}>API Key（仅本会话内存，不落盘）</span>
-        <input style={input} className="mono" value={credential} onChange={e => setCredential(e.target.value)} placeholder="sk-…" />
-      </div>
-    </AutoModal>
   )
 }
