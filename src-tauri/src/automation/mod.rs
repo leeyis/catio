@@ -5,6 +5,7 @@
 //! owner-scoping happens inside the store; transport layers only ever inject
 //! `owner_id` and never trust a client-supplied one.
 
+pub mod history;
 pub mod mcp_client;
 pub mod prompt;
 pub mod repo;
@@ -13,6 +14,7 @@ pub mod skill;
 pub mod task_router;
 pub mod types;
 
+pub use history::{PromptHistoryEntry, PromptHistoryStore, PromptOutcome, PromptSource};
 pub use prompt::build_user_prompt;
 pub use repo::AutomationStore;
 pub use scheduler::{cron_matches, should_fire, Scheduler, TaskDispatcher};
