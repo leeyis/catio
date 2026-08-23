@@ -13,7 +13,7 @@ use catio_lib::agent::{
     AgentRuntime, AnthropicAuthMode, ApiCredential, ApprovalDecision, ClientTurnResponse,
     ContentBlock, ExecutionMode, ProviderConfig, ProviderFactory, ProviderProtocol,
     StartTurnRequest, ToolExecutionOutcome, ToolExecutionStatus, ToolResult, ToolResultStatus,
-    ToolSpec, TurnHandle,
+    ToolSpec, TurnHandle, UnattendedPolicy,
 };
 use parking_lot::Mutex;
 use serde_json::{json, Value};
@@ -720,6 +720,7 @@ async fn run_turn_with(
             catio_lib::agent::ExpectedResponse::None,
         )),
         tool_router: None,
+        unattended: None,
     };
     TurnEngine.run(ctx).await
 }
@@ -746,6 +747,7 @@ async fn run_tool_turn_with_provider<P: Provider + Send + Sync + 'static>(
             catio_lib::agent::ExpectedResponse::None,
         )),
         tool_router: None,
+        unattended: None,
     };
     TurnEngine.run(ctx).await
 }
@@ -1034,6 +1036,7 @@ async fn text_delta_is_emitted_before_completion_releases() {
             catio_lib::agent::ExpectedResponse::None,
         )),
         tool_router: None,
+        unattended: None,
     };
     let task = tokio::spawn(TurnEngine.run(ctx));
     // The provider has produced a delta and is still blocked inside `complete`:
@@ -1079,6 +1082,7 @@ async fn provider_deltas_are_backpressured_when_the_sink_is_slow() {
             catio_lib::agent::ExpectedResponse::None,
         )),
         tool_router: None,
+        unattended: None,
     };
     // Register the waiter BEFORE the engine can emit, so no notification is
     // lost.
@@ -1133,6 +1137,7 @@ async fn burst_deltas_arrive_in_order_without_loss() {
             catio_lib::agent::ExpectedResponse::None,
         )),
         tool_router: None,
+        unattended: None,
     };
     TurnEngine.run(ctx).await.unwrap();
     let deltas: Vec<String> = sink
@@ -1330,6 +1335,7 @@ async fn approval_timeout_fails_closed_as_blocked() {
             catio_lib::agent::ExpectedResponse::None,
         )),
         tool_router: None,
+        unattended: None,
     };
     TurnEngine.run(ctx).await.unwrap();
     // Fail-closed: the tool never executes, the paired result is Blocked.
@@ -1355,6 +1361,7 @@ async fn tool_result_timeout_after_dispatch_is_outcome_unknown() {
             catio_lib::agent::ExpectedResponse::None,
         )),
         tool_router: None,
+        unattended: None,
     };
     TurnEngine.run(ctx).await.unwrap();
     assert_eq!(
@@ -1535,6 +1542,7 @@ async fn legacy_round_cap_prevents_final_synthesis_fence_execution() {
             catio_lib::agent::ExpectedResponse::None,
         )),
         tool_router: None,
+        unattended: None,
     };
     let err = TurnEngine.run(ctx).await.unwrap_err();
     // Round cap reached: the ONE tools-disabled final synthesis must fail the
@@ -1616,6 +1624,7 @@ async fn arbitrary_credential_never_leaks_into_terminal_event() {
             catio_lib::agent::ExpectedResponse::None,
         )),
         tool_router: None,
+        unattended: None,
     };
     let err = TurnEngine.run(ctx).await.unwrap_err();
     let message = err.to_string();
@@ -1734,6 +1743,7 @@ async fn run_file_turn(
             cancel_token: CancellationToken::new(),
             expected: Arc::new(Mutex::new(catio_lib::agent::ExpectedResponse::None)),
             tool_router: None,
+            unattended: None,
         })
         .await
 }
@@ -2027,6 +2037,7 @@ async fn run_turn_with_router(
             catio_lib::agent::ExpectedResponse::None,
         )),
         tool_router,
+        unattended: None,
     };
     TurnEngine.run(ctx).await
 }
@@ -2146,4 +2157,132 @@ async fn router_tool_specs_are_offered_to_provider() {
     let names: Vec<&str> = requests[0].tools.iter().map(|t| t.name.as_str()).collect();
     assert!(names.contains(&"read_file"));
     assert!(names.contains(&"terminal_exec"));
+}
+
+// ── Task 6: unattended policy for scheduled prompt tasks ─────────────────────
+
+async fn run_tool_turn_with_unattended(
+    mode: ExecutionMode,
+    command: &str,
+    unattended: Option<UnattendedPolicy>,
+    bridge: ScriptedBridge,
+    sink: RecordingSink,
+) -> Result<(), AgentError> {
+    let provider = ScriptedProvider::tool_then_text(command, "done");
+    let ctx = TurnContext {
+        owner_id: "owner-a".into(),
+        turn_id: "turn-1".into(),
+        request: valid_request(mode),
+        provider: Arc::new(provider),
+        sink: Arc::new(sink),
+        bridge: Arc::new(bridge),
+        cancel_token: CancellationToken::new(),
+        expected: Arc::new(parking_lot::Mutex::new(
+            catio_lib::agent::ExpectedResponse::None,
+        )),
+        tool_router: None,
+        unattended,
+    };
+    TurnEngine.run(ctx).await
+}
+
+#[tokio::test]
+async fn unattended_auto_runs_sensitive_command_without_approval() {
+    let bridge = ScriptedBridge::succeed("exit 0");
+    let sink = RecordingSink::default();
+    run_tool_turn_with_unattended(
+        ExecutionMode::Ask,
+        "rm -rf /tmp/demo",
+        Some(UnattendedPolicy::Auto),
+        bridge.clone(),
+        sink.clone(),
+    )
+    .await
+    .unwrap();
+    sink.wait_for_terminal().await;
+    assert_eq!(bridge.executions(), ["tool-1"]);
+    assert!(
+        !sink.event_types().contains(&"approvalRequested"),
+        "auto unattended must not wait for approval"
+    );
+    assert_eq!(sink.tool_finished_statuses(), [ToolResultStatus::Succeeded]);
+}
+
+#[tokio::test]
+async fn unattended_reject_blocks_sensitive_command() {
+    let bridge = ScriptedBridge::succeed("exit 0");
+    let sink = RecordingSink::default();
+    run_tool_turn_with_unattended(
+        ExecutionMode::Ask,
+        "rm -rf /tmp/demo",
+        Some(UnattendedPolicy::RejectSensitive),
+        bridge.clone(),
+        sink.clone(),
+    )
+    .await
+    .unwrap();
+    sink.wait_for_terminal().await;
+    assert!(
+        bridge.executions().is_empty(),
+        "rejected command must not dispatch"
+    );
+    assert_eq!(sink.tool_finished_statuses(), [ToolResultStatus::Blocked]);
+    assert!(!sink.event_types().contains(&"approvalRequested"));
+}
+
+#[tokio::test]
+async fn unattended_whitelist_allows_listed_sensitive_and_rejects_others() {
+    // Listed sensitive command → allowed.
+    let bridge = ScriptedBridge::succeed("exit 0");
+    let sink = RecordingSink::default();
+    run_tool_turn_with_unattended(
+        ExecutionMode::Ask,
+        "rm -rf /tmp/demo",
+        Some(UnattendedPolicy::Whitelist {
+            commands: vec!["rm -rf /tmp/demo".into()],
+        }),
+        bridge.clone(),
+        sink.clone(),
+    )
+    .await
+    .unwrap();
+    sink.wait_for_terminal().await;
+    assert_eq!(bridge.executions(), ["tool-1"]);
+    assert_eq!(sink.tool_finished_statuses(), [ToolResultStatus::Succeeded]);
+
+    // Sensitive command outside the whitelist → rejected.
+    let bridge2 = ScriptedBridge::succeed("exit 0");
+    let sink2 = RecordingSink::default();
+    run_tool_turn_with_unattended(
+        ExecutionMode::Ask,
+        "rm -rf /tmp/demo",
+        Some(UnattendedPolicy::Whitelist {
+            commands: vec!["ls".into()],
+        }),
+        bridge2.clone(),
+        sink2.clone(),
+    )
+    .await
+    .unwrap();
+    sink2.wait_for_terminal().await;
+    assert!(bridge2.executions().is_empty());
+    assert_eq!(sink2.tool_finished_statuses(), [ToolResultStatus::Blocked]);
+}
+
+#[tokio::test]
+async fn unattended_auto_still_allows_ordinary_command() {
+    let bridge = ScriptedBridge::succeed("exit 0");
+    let sink = RecordingSink::default();
+    run_tool_turn_with_unattended(
+        ExecutionMode::Ask,
+        "ls -la",
+        Some(UnattendedPolicy::Auto),
+        bridge.clone(),
+        sink.clone(),
+    )
+    .await
+    .unwrap();
+    sink.wait_for_terminal().await;
+    assert_eq!(bridge.executions(), ["tool-1"]);
+    assert_eq!(sink.tool_finished_statuses(), [ToolResultStatus::Succeeded]);
 }

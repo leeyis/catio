@@ -197,6 +197,20 @@ pub enum ExecutionMode {
     Auto,
 }
 
+/// Unattended policy for scheduled prompt tasks: no human is around to answer
+/// an approval prompt, so the engine resolves sensitive commands up front.
+/// `Some` overrides the interactive ask flow for this turn only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UnattendedPolicy {
+    /// Sensitive commands run without approval (user explicitly confirmed).
+    Auto,
+    /// Sensitive commands are rejected (recorded, not executed).
+    RejectSensitive,
+    /// Only exact-match whitelist commands may be sensitive; everything else
+    /// sensitive is rejected.
+    Whitelist { commands: Vec<String> },
+}
+
 /// Provider configuration for a single Turn.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

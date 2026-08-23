@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
-use crate::agent::types::ExecutionMode;
+use crate::agent::types::{ExecutionMode, UnattendedPolicy};
 
 /// Risk category codes, mirroring the TypeScript `RiskCode` union.
 pub const RISK_CODES: [&str; 13] = [
@@ -92,6 +92,43 @@ impl ToolPolicy {
                 reason: "sensitiveCommand".into(),
             },
             ExecutionMode::Ask | ExecutionMode::Auto => PolicyDecision::Allowed { risk },
+        }
+    }
+}
+
+/// Applies an unattended policy on top of the interactive decision. With no
+/// human to approve, `ApprovalRequired` resolves up front:
+/// - `Auto`: allowed (the task owner explicitly confirmed);
+/// - `RejectSensitive`: hidden/rejected;
+/// - `Whitelist`: whitelisted commands allowed, other sensitive rejected.
+pub fn apply_unattended(
+    decision: PolicyDecision,
+    policy: &UnattendedPolicy,
+    command: &str,
+) -> PolicyDecision {
+    match policy {
+        UnattendedPolicy::Auto => match decision {
+            PolicyDecision::ApprovalRequired { risk, .. } => PolicyDecision::Allowed { risk },
+            d => d,
+        },
+        UnattendedPolicy::RejectSensitive => match decision {
+            PolicyDecision::ApprovalRequired { .. } => PolicyDecision::Hidden,
+            d => d,
+        },
+        UnattendedPolicy::Whitelist { commands } => {
+            if commands.iter().any(|c| c == command) {
+                PolicyDecision::Allowed {
+                    risk: ToolRisk {
+                        sensitive: false,
+                        reasons: Vec::new(),
+                    },
+                }
+            } else {
+                match decision {
+                    PolicyDecision::ApprovalRequired { .. } => PolicyDecision::Hidden,
+                    d => d,
+                }
+            }
         }
     }
 }

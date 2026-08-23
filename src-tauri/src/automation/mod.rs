@@ -6,11 +6,13 @@
 //! `owner_id` and never trust a client-supplied one.
 
 pub mod mcp_client;
+pub mod prompt;
 pub mod repo;
 pub mod scheduler;
 pub mod skill;
 pub mod types;
 
+pub use prompt::build_user_prompt;
 pub use repo::AutomationStore;
 pub use scheduler::{cron_matches, should_fire, Scheduler, TaskDispatcher};
 pub use skill::{

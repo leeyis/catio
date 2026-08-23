@@ -17,7 +17,7 @@ use crate::agent::engine::{ToolRouter, TurnContext, TurnEngine};
 use crate::agent::provider::Provider;
 use crate::agent::types::{
     ActorContext, AgentError, ClientTurnResponse, ExpectedResponse, ProviderConfig,
-    StartTurnRequest, TurnHandle,
+    StartTurnRequest, TurnHandle, UnattendedPolicy,
 };
 use crate::agent::AgentEventSink;
 
@@ -87,6 +87,19 @@ impl AgentRuntime {
         request: StartTurnRequest,
         events: Arc<dyn AgentEventSink>,
     ) -> Result<TurnHandle, AgentError> {
+        self.start_turn_with_unattended(actor, request, events, None)
+            .await
+    }
+
+    /// Internal entry for scheduled prompt tasks: runs with an unattended
+    /// policy so no approval is awaited.
+    pub async fn start_turn_with_unattended(
+        &self,
+        actor: ActorContext,
+        request: StartTurnRequest,
+        events: Arc<dyn AgentEventSink>,
+        unattended: Option<UnattendedPolicy>,
+    ) -> Result<TurnHandle, AgentError> {
         request.validate()?;
         let files = self.local_workspaces.as_ref().and_then(|w| w.snapshot());
         let provider = self.factory.create(&request.provider).await?;
@@ -107,6 +120,7 @@ impl AgentRuntime {
             cancel_token: cancel_token.clone(),
             expected: expected.clone(),
             tool_router: self.tool_router.clone(),
+            unattended,
         };
 
         // Insert the active entry BEFORE the engine task can run: a fast (or

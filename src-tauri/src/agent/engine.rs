@@ -14,14 +14,14 @@ use tokio_util::sync::CancellationToken;
 use crate::agent::bridge::ClientBridge;
 use crate::agent::legacy::first_shell_tool;
 use crate::agent::local_files::{self, FileInput, READ_FILE, WRITE_FILE};
-use crate::agent::policy::{PolicyDecision, ToolPolicy};
+use crate::agent::policy::{apply_unattended, PolicyDecision, ToolPolicy};
 use crate::agent::provider::{
     redact_diagnostics, Provider, ProviderError, ProviderRequest, ProviderRound,
 };
 use crate::agent::types::{
     AgentError, AgentEvent, AgentEventEnvelope, ApiCredential, ApprovalDecision, ContentBlock,
     ExecutionMode, ExpectedResponse, StartTurnRequest, ToolExecutionOutcome, ToolExecutionStatus,
-    ToolResult, ToolResultStatus, ToolSpec, ToolUse,
+    ToolResult, ToolResultStatus, ToolSpec, ToolUse, UnattendedPolicy,
 };
 
 /// Terminal tool; local file tools are injected only for desktop workspaces.
@@ -64,6 +64,9 @@ pub struct TurnContext {
     /// Optional backend router for non-`terminal_exec` tools. Absent → unknown
     /// tools stay `Unsupported` (P0 baseline).
     pub tool_router: Option<Arc<dyn ToolRouter>>,
+    /// Unattended policy (scheduled prompt tasks): resolves approvals up front
+    /// instead of waiting on a human. Absent → interactive flow unchanged.
+    pub unattended: Option<UnattendedPolicy>,
 }
 
 /// The only component that can create `AgentEventEnvelope`s. Emits a strictly
@@ -648,13 +651,16 @@ impl TurnEngine {
                 }
             }
         }
+        let terminal_command =
+            validate_terminal_input(&tool_use.input, single_line).unwrap_or_default();
         let decision = if let Some(input) = &file_input {
             ToolPolicy::authorize_file(mode, input.replaces())
         } else {
-            ToolPolicy::authorize(
-                mode,
-                &validate_terminal_input(&tool_use.input, single_line).unwrap_or_default(),
-            )
+            ToolPolicy::authorize(mode, &terminal_command)
+        };
+        let decision = match &ctx.unattended {
+            None => decision,
+            Some(unattended) => apply_unattended(decision, unattended, &terminal_command),
         };
         match decision {
             PolicyDecision::Hidden => {
