@@ -989,6 +989,7 @@
     "historySql": "数据库执行",
     "builtinTasks": "任务管理",
     "builtinTasksSub": "Agent 可 CRUD 定时任务",
+    "tasksEdit": "编辑任务",
     "cancel": "取消",
     "sessionHistory": "会话历史",
     "newConversation": "新建对话",

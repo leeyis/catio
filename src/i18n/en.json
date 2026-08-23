@@ -989,6 +989,7 @@
     "historySql": "Database",
     "builtinTasks": "Task Management",
     "builtinTasksSub": "Agent can CRUD scheduled tasks",
+    "tasksEdit": "Edit Task",
     "cancel": "Cancel",
     "sessionHistory": "Session history",
     "newConversation": "New conversation",

@@ -66,6 +66,7 @@ export function TasksPanel({ onClose }: { onClose: () => void }) {
   const [mcps, setMcps] = useState<McpConnection[]>([])
   const [results, setResults] = useState<Record<string, TaskRunInfo>>({})
   const [showNew, setShowNew] = useState(false)
+  const [editing, setEditing] = useState<ScheduledTask | null>(null)
 
   const refresh = () => void automationListTasks().then(setTasks)
   useEffect(() => { refresh() }, [])
@@ -141,6 +142,7 @@ export function TasksPanel({ onClose }: { onClose: () => void }) {
               </div>
               <button className={`toggle ${task.enabled ? 'on' : ''}`} aria-pressed={task.enabled}
                 onClick={() => toggleEnabled(task, !task.enabled)}><span className="knob" /></button>
+              <IconBtn name="pencil" size={14} variant="bare" title="编辑任务" onClick={() => setEditing(task)} />
               <IconBtn name="trash-2" size={14} variant="bare" onClick={() => remove(task)} />
             </div>
           )
@@ -151,6 +153,12 @@ export function TasksPanel({ onClose }: { onClose: () => void }) {
         <AutoModal title={t('panels.tasksNew')} onClose={() => setShowNew(false)}
           footer={<Btn variant="secondary" onClick={() => setShowNew(false)}>{t('panels.cancel')}</Btn>}>
           <TaskForm skills={skills} mcps={mcps} onDone={() => { setShowNew(false); refresh() }} />
+        </AutoModal>
+      )}
+      {editing && (
+        <AutoModal title={t('panels.tasksEdit')} onClose={() => setEditing(null)}
+          footer={<Btn variant="secondary" onClick={() => setEditing(null)}>{t('panels.cancel')}</Btn>}>
+          <TaskForm initial={editing} skills={skills} mcps={mcps} onDone={() => { setEditing(null); refresh() }} />
         </AutoModal>
       )}
     </PanelShell>
@@ -227,8 +235,26 @@ function MultiSelect({ labelText, options, value, onChange }: {
   )
 }
 
-function TaskForm({ skills, mcps, onDone }: { skills: Skill[]; mcps: McpConnection[]; onDone: () => void }) {
-  const [d, setD] = useState<Draft>(emptyDraft)
+function fromTask(t: ScheduledTask): Draft {
+  return {
+    name: t.name,
+    triggerType: t.trigger.type,
+    cron: t.trigger.type === 'cron' ? t.trigger.expr : '0 2 * * *',
+    seconds: t.trigger.type === 'interval' ? String(t.trigger.seconds) : '1800',
+    onceAt: t.trigger.type === 'once' ? t.trigger.at : '',
+    kind: t.kind,
+    script: t.script ?? '',
+    prompt: t.prompt ?? '',
+    targetRef: t.targetRef ?? '',
+    policy: t.policy,
+    whitelist: t.whitelist.join('\n'),
+    skillIds: t.skillIds,
+    mcpIds: t.mcpIds,
+  }
+}
+
+function TaskForm({ skills, mcps, onDone, initial }: { skills: Skill[]; mcps: McpConnection[]; onDone: () => void; initial?: ScheduledTask }) {
+  const [d, setD] = useState<Draft>(() => initial ? fromTask(initial) : emptyDraft)
   const set = (patch: Partial<Draft>) => setD(p => ({ ...p, ...patch }))
 
   const trigger: TaskTrigger =
@@ -240,7 +266,7 @@ function TaskForm({ skills, mcps, onDone }: { skills: Skill[]; mcps: McpConnecti
     if (!d.name.trim()) return
     try {
       await automationCreateTask({
-        id: `task-${Date.now()}`, name: d.name.trim(), trigger, kind: d.kind,
+        id: initial?.id ?? `task-${Date.now()}`, name: d.name.trim(), trigger, kind: d.kind,
         script: d.kind === 'shell' ? d.script : undefined,
         prompt: d.kind === 'prompt' ? d.prompt : undefined,
         targetRef: d.targetRef || undefined,
