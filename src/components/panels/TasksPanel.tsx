@@ -8,10 +8,14 @@ import {
   automationCreateTask,
   automationDeleteTask,
   automationListTasks,
+  automationSetProvider,
   automationSetTaskEnabled,
+  automationTaskResults,
+  type ProviderProtocol,
   type ScheduledTask,
   type TaskKind,
   type TaskPolicy,
+  type TaskRunInfo,
   type TaskTrigger,
 } from '../../services/automation'
 
@@ -24,10 +28,19 @@ function triggerLabel(t: TaskTrigger): string {
 export function TasksPanel({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation()
   const [tasks, setTasks] = useState<ScheduledTask[]>([])
+  const [results, setResults] = useState<Record<string, TaskRunInfo>>({})
   const [showNew, setShowNew] = useState(false)
+  const [showProvider, setShowProvider] = useState(false)
 
   const refresh = () => void automationListTasks().then(setTasks)
   useEffect(() => { refresh() }, [])
+  useEffect(() => {
+    let alive = true
+    const poll = () => void automationTaskResults().then(list => { if (alive) setResults(Object.fromEntries(list.map(r => [r.taskId, r]))) })
+    poll()
+    const id = window.setInterval(poll, 3000)
+    return () => { alive = false; window.clearInterval(id) }
+  }, [])
 
   const toggleEnabled = (task: ScheduledTask, enabled: boolean) =>
     void automationSetTaskEnabled(task.id, enabled).then(refresh)
@@ -38,7 +51,10 @@ export function TasksPanel({ onClose }: { onClose: () => void }) {
 
   return (
     <PanelShell icon="alarm-clock" title={t('panels.tasksTitle')} sub={t('panels.tasksSub')} onClose={onClose}
-      actions={<Btn size="sm" variant="primary" icon="plus" onClick={() => setShowNew(true)}>{t('panels.tasksNew')}</Btn>}>
+      actions={<>
+        <Btn size="sm" variant="ghost" icon="zap" title="AI Provider（prompt 任务）" onClick={() => setShowProvider(true)}>Provider</Btn>
+        <Btn size="sm" variant="primary" icon="plus" onClick={() => setShowNew(true)}>{t('panels.tasksNew')}</Btn>
+      </>}>
       <div className="col grow" style={{ minHeight: 0, overflowY: 'auto', padding: 10, gap: 6 }}>
         <span className="chip" style={{ alignSelf: 'flex-start', margin: '0 2px 4px' }}>
           {t('panels.tasksRunning', { count: tasks.filter(x => x.enabled).length })}
@@ -63,6 +79,11 @@ export function TasksPanel({ onClose }: { onClose: () => void }) {
               <span className="ell mono" style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>
                 {task.targetRef || '—'}{task.policy !== 'reject' ? ` · ${task.policy}` : ''}
               </span>
+              {results[task.id] && (
+                <span className="chip" style={{ alignSelf: 'flex-start', background: results[task.id].status === 'success' ? 'color-mix(in srgb, var(--signal-green) 14%, transparent)' : 'color-mix(in srgb, var(--signal-rose) 14%, transparent)', color: results[task.id].status === 'success' ? 'var(--signal-green)' : 'var(--signal-rose)' }}>
+                  {results[task.id].status === 'success' ? '✓' : '✗'} {results[task.id].summary}
+                </span>
+              )}
             </div>
             <button className={`toggle ${task.enabled ? 'on' : ''}`} aria-pressed={task.enabled}
               onClick={() => toggleEnabled(task, !task.enabled)}><span className="knob" /></button>
@@ -77,6 +98,7 @@ export function TasksPanel({ onClose }: { onClose: () => void }) {
           <TaskForm onDone={() => { setShowNew(false); refresh() }} />
         </AutoModal>
       )}
+      {showProvider && <ProviderModal onClose={() => setShowProvider(false)} />}
     </PanelShell>
   )
 }
@@ -170,5 +192,49 @@ function TaskForm({ onDone }: { onDone: () => void }) {
       </div>
       <Btn variant="primary" style={{ alignSelf: 'flex-end' }} onClick={save}>保存任务</Btn>
     </>
+  )
+}
+
+function ProviderModal({ onClose }: { onClose: () => void }) {
+  const { t } = useTranslation()
+  const [protocol, setProtocol] = useState<ProviderProtocol>('openai')
+  const [baseUrl, setBaseUrl] = useState('')
+  const [model, setModel] = useState('')
+  const [credential, setCredential] = useState('')
+
+  const save = async () => {
+    try {
+      await automationSetProvider(protocol, baseUrl, model, 'auto', credential)
+      onClose()
+    } catch (e) { console.error(e) }
+  }
+
+  const input = { width: '100%', height: 32, padding: '0 10px', borderRadius: 8, border: '1px solid var(--border-hairline)', background: 'var(--surface-sunken)', color: 'var(--text-primary)', fontSize: 12.5, outline: 'none' } as const
+  const label = { fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)' } as const
+
+  return (
+    <AutoModal title="AI Provider（prompt 任务使用）" onClose={onClose}
+      footer={<>
+        <Btn variant="secondary" onClick={onClose}>{t('panels.cancel')}</Btn>
+        <Btn variant="primary" onClick={save}>保存</Btn>
+      </>}>
+      <div className="col gap4">
+        <span style={label}>协议</span>
+        <Segmented size="sm" value={protocol} onChange={v => setProtocol(v as ProviderProtocol)}
+          options={[{ value: 'openai', label: 'OpenAI' }, { value: 'anthropic', label: 'Anthropic' }, { value: 'ollama', label: 'Ollama' }]} />
+      </div>
+      <div className="col gap4">
+        <span style={label}>Base URL</span>
+        <input style={input} className="mono" value={baseUrl} onChange={e => setBaseUrl(e.target.value)} placeholder="https://api.openai.com/v1" />
+      </div>
+      <div className="col gap4">
+        <span style={label}>模型</span>
+        <input style={input} value={model} onChange={e => setModel(e.target.value)} placeholder="gpt-4o" />
+      </div>
+      <div className="col gap4">
+        <span style={label}>API Key（仅本会话内存，不落盘）</span>
+        <input style={input} className="mono" value={credential} onChange={e => setCredential(e.target.value)} placeholder="sk-…" />
+      </div>
+    </AutoModal>
   )
 }

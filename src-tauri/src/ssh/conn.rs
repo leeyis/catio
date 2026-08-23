@@ -248,7 +248,9 @@ async fn authenticate_with_password(
         .map_err(|e| SshError::Io(e.to_string()))?
     {
         client::AuthResult::Success => return Ok(true),
-        client::AuthResult::Failure { remaining_methods, .. } => remaining_methods,
+        client::AuthResult::Failure {
+            remaining_methods, ..
+        } => remaining_methods,
     };
     // MethodSet derefs 到 &[MethodKind]。空集(个别实现不返回列表)时两种都按序尝试,
     // 保证兼容性。
@@ -622,7 +624,7 @@ pub async fn ssh_test(args: ConnectArgs) -> Result<TestResult, SshError> {
 #[tauri::command]
 pub async fn ssh_connect(
     args: ConnectArgs,
-    mgr: tauri::State<'_, SessionManager>,
+    mgr: tauri::State<'_, std::sync::Arc<SessionManager>>,
     app: tauri::AppHandle,
 ) -> Result<ConnectResult, SshError> {
     use tauri::Manager;
@@ -680,7 +682,7 @@ pub async fn ssh_connect(
 #[tauri::command]
 pub async fn ssh_disconnect(
     session_id: String,
-    mgr: tauri::State<'_, SessionManager>,
+    mgr: tauri::State<'_, std::sync::Arc<SessionManager>>,
 ) -> Result<(), SshError> {
     // 先中止监控任务，避免它在已死的 handle 上继续 exec。无监控任务时为 no-op。
     mgr.remove_monitor(&session_id).await;
@@ -746,8 +748,14 @@ mod tests {
         assert!(ecdh < pos(russh::kex::DH_G18_SHA512), "ecdh 应先于 group18");
         // 最快的固定群 group14(2048bit)必须排在 group-exchange 与大群之前。
         let g14 = pos(russh::kex::DH_G14_SHA256);
-        assert!(g14 < pos(russh::kex::DH_GEX_SHA256), "group14 应先于 DH_GEX");
-        assert!(g14 < pos(russh::kex::DH_G18_SHA512), "group14 应先于 group18");
+        assert!(
+            g14 < pos(russh::kex::DH_GEX_SHA256),
+            "group14 应先于 DH_GEX"
+        );
+        assert!(
+            g14 < pos(russh::kex::DH_G18_SHA512),
+            "group14 应先于 group18"
+        );
     }
 
     #[test]

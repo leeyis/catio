@@ -21,8 +21,8 @@ pub mod runtime_diagnostics;
 pub mod optical;
 pub mod installation;
 
-use ssh::manager::SessionManager;
 use db::manager::ConnManager;
+use ssh::manager::SessionManager;
 
 #[cfg(desktop)]
 const TRAY_SHOW_WINDOW_ID: &str = "show-window";
@@ -132,9 +132,9 @@ pub fn run() {
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .manage(SessionManager::default())
+        .manage(std::sync::Arc::new(SessionManager::default()))
         .manage(ConnManager::default())
-        .manage(agent::AgentRuntime::production().with_local_workspaces(local_workspaces.clone()))
+        .manage(std::sync::Arc::new(agent::AgentRuntime::production().with_local_workspaces(local_workspaces.clone())))
         .manage(local_workspaces)
         .manage(mcp::McpState::default())
         .manage(scan::ScanState::default())
@@ -209,6 +209,8 @@ pub fn run() {
             automation::commands::automation_list_prompt_history,
             automation::commands::automation_clear_prompt_history,
             automation::commands::automation_delete_prompt_history,
+            automation::commands::automation_task_results,
+            automation::commands::automation_set_provider,
             db::commands::db_connect,
             db::commands::db_test_connection,
             db::commands::db_disconnect,
@@ -319,11 +321,40 @@ pub fn run() {
                 let history = std::sync::Arc::new(automation::PromptHistoryStore::open(&auto_dir));
                 let http = reqwest::Client::new();
                 let client = automation::mcp_client::McpClient::new(http.clone());
+                let results: automation::dispatcher::TaskResults =
+                    std::sync::Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new()));
+                let provider =
+                    std::sync::Arc::new(automation::dispatcher::SessionProviderConfig::default());
+                // The scheduler dispatcher reuses the managed live-SSH sessions
+                // and Agent runtime, so fired shell tasks run on already
+                // authenticated sessions and prompt tasks through the Agent
+                // runtime — no secrets ever stored.
+                let sessions = app
+                    .state::<std::sync::Arc<ssh::manager::SessionManager>>()
+                    .inner()
+                    .clone();
+                let runtime = app
+                    .state::<std::sync::Arc<agent::AgentRuntime>>()
+                    .inner()
+                    .clone();
+                let dispatcher =
+                    std::sync::Arc::new(automation::dispatcher::AutomationDispatcher::new(
+                        store.clone(),
+                        sessions,
+                        runtime,
+                        history.clone(),
+                        provider.clone(),
+                        results.clone(),
+                    ));
+                let scheduler = automation::scheduler::Scheduler::new(store.clone(), dispatcher);
+                scheduler.start(std::time::Duration::from_secs(1));
                 app.manage(automation::commands::AutomationService {
                     store,
                     history,
                     client,
                     http,
+                    results,
+                    provider,
                 });
             }
             // Default the JDBC sidecar's driver-JAR directory to
@@ -343,12 +374,17 @@ pub fn run() {
             // （它优先读取 CATIO_JDBC_PLUGIN_JAR）。开发态该资源不存在时无副作用，
             // 仍走 CARGO_MANIFEST_DIR 下的构建产物回退。
             if std::env::var_os("CATIO_JDBC_PLUGIN_JAR").is_none() {
-                use tauri::Manager;
                 use tauri::path::BaseDirectory;
-                if let Ok(jar) = app.path().resolve("catio-jdbc-plugin.jar", BaseDirectory::Resource) {
+                use tauri::Manager;
+                if let Ok(jar) = app
+                    .path()
+                    .resolve("catio-jdbc-plugin.jar", BaseDirectory::Resource)
+                {
                     // 仅当资源 jar 存在且非空才注入——避免 0 字节占位/损坏 jar 让运行时
                     // 报模糊的 Java 错误，而不是清晰的"jar not found"。
-                    let usable = std::fs::metadata(&jar).map(|m| m.is_file() && m.len() > 0).unwrap_or(false);
+                    let usable = std::fs::metadata(&jar)
+                        .map(|m| m.is_file() && m.len() > 0)
+                        .unwrap_or(false);
                     if usable {
                         std::env::set_var("CATIO_JDBC_PLUGIN_JAR", jar);
                     }

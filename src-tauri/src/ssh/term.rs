@@ -67,8 +67,13 @@ fn finish_owner(sink: &dyn EventSink, evt: &str, pending: &mut Vec<u8>) {
 
 fn append_visible(pending: &mut Vec<u8>, visible: &[u8], strip_lead_nl: &mut bool) {
     let skip = if *strip_lead_nl {
-        visible.iter().take_while(|&&b| b == b'\r' || b == b'\n').count()
-    } else { 0 };
+        visible
+            .iter()
+            .take_while(|&&b| b == b'\r' || b == b'\n')
+            .count()
+    } else {
+        0
+    };
     if skip < visible.len() {
         *strip_lead_nl = false;
         pending.extend_from_slice(&visible[skip..]);
@@ -101,9 +106,17 @@ pub async fn term_open(
     cols: u32,
     rows: u32,
     app: tauri::AppHandle,
-    mgr: tauri::State<'_, SessionManager>,
+    mgr: tauri::State<'_, std::sync::Arc<SessionManager>>,
 ) -> Result<String, SshError> {
-    term_open_core(session_id, cols, rows, Arc::new(crate::events::TauriSink(app)), &mgr, |_| {}).await
+    term_open_core(
+        session_id,
+        cols,
+        rows,
+        Arc::new(crate::events::TauriSink(app)),
+        &mgr,
+        |_| {},
+    )
+    .await
 }
 
 /// Transport-agnostic terminal open. Identical to the desktop command body, but emits frames
@@ -314,8 +327,13 @@ fn emit_scanned(
     pending: &mut Vec<u8>,
 ) {
     let (visible, events, _) = scanner.feed(data);
-    let has_ready = events.iter().any(|event| matches!(&event.event, osc::OscEvent::Ready));
-    if *muted && !has_ready && started.elapsed() > std::time::Duration::from_millis(MUTE_FALLBACK_MS) {
+    let has_ready = events
+        .iter()
+        .any(|event| matches!(&event.event, osc::OscEvent::Ready));
+    if *muted
+        && !has_ready
+        && started.elapsed() > std::time::Duration::from_millis(MUTE_FALLBACK_MS)
+    {
         // 无我方集成的 shell(如 ESXi ash)靠 3s 兜底解除 mute。
         *muted = false;
     }
@@ -411,7 +429,7 @@ pub async fn term_write(
     session_id: String,
     chan_id: String,
     data_base64: String,
-    mgr: tauri::State<'_, SessionManager>,
+    mgr: tauri::State<'_, std::sync::Arc<SessionManager>>,
 ) -> Result<(), SshError> {
     term_write_core(&mgr, &session_id, &chan_id, &data_base64).await
 }
@@ -446,7 +464,7 @@ pub async fn term_resize(
     chan_id: String,
     cols: u32,
     rows: u32,
-    mgr: tauri::State<'_, SessionManager>,
+    mgr: tauri::State<'_, std::sync::Arc<SessionManager>>,
 ) -> Result<(), SshError> {
     term_resize_core(&mgr, &session_id, &chan_id, cols, rows).await
 }
@@ -477,7 +495,7 @@ pub async fn term_resize_core(
 pub async fn term_close(
     session_id: String,
     chan_id: String,
-    mgr: tauri::State<'_, SessionManager>,
+    mgr: tauri::State<'_, std::sync::Arc<SessionManager>>,
 ) -> Result<(), SshError> {
     term_close_core(&mgr, &session_id, &chan_id).await
 }
@@ -562,9 +580,17 @@ mod tests {
         );
 
         let frames = sink.0.lock().unwrap();
-        assert_eq!(B64.decode(frames[0].1["bytesBase64"].as_str().unwrap()).unwrap(), b"prompt$ ");
+        assert_eq!(
+            B64.decode(frames[0].1["bytesBase64"].as_str().unwrap())
+                .unwrap(),
+            b"prompt$ "
+        );
         assert_eq!(frames[1].1["execStart"], true);
-        assert_eq!(B64.decode(frames[2].1["bytesBase64"].as_str().unwrap()).unwrap(), b"up 3 days\r\n");
+        assert_eq!(
+            B64.decode(frames[2].1["bytesBase64"].as_str().unwrap())
+                .unwrap(),
+            b"up 3 days\r\n"
+        );
         assert_eq!(frames[3].1["execEnd"], true);
         assert_eq!(frames[3].1["command"], "uptime");
         assert_eq!(frames[3].1["exitCode"], 0);
@@ -644,11 +670,24 @@ mod tests {
         assert_eq!(frames.len(), 2);
         assert!(frames[0].1.get("bytesBase64").is_some());
         assert_eq!(frames[1].1["closed"], true);
-        assert_eq!(frames.iter().filter(|(_, payload)| payload["closed"] == true).count(), 1);
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|(_, payload)| payload["closed"] == true)
+                .count(),
+            1
+        );
     }
 
     /// 用一批数据驱动 emit_scanned,返回该批发往 `term://` 事件的 visible 字节(拼接)。
-    fn run_batch(sink: &CapturingSink, evt: &str, scanner: &mut osc::Scanner, muted: &mut bool, started: &std::time::Instant, data: &[u8]) -> Vec<u8> {
+    fn run_batch(
+        sink: &CapturingSink,
+        evt: &str,
+        scanner: &mut osc::Scanner,
+        muted: &mut bool,
+        started: &std::time::Instant,
+        data: &[u8],
+    ) -> Vec<u8> {
         let mut cur_cmd = None;
         let mut cur_cwd = String::new();
         let mut cur_start = std::time::Instant::now();
@@ -657,9 +696,19 @@ mod tests {
         let mut pending: Vec<u8> = Vec::new();
         let before = sink.0.lock().unwrap().len();
         emit_scanned(
-            sink, evt, "history://s", "host", scanner, data,
-            &mut cur_cmd, &mut cur_cwd, &mut cur_start,
-            muted, started, &mut last_emit, &mut strip_lead_nl,
+            sink,
+            evt,
+            "history://s",
+            "host",
+            scanner,
+            data,
+            &mut cur_cmd,
+            &mut cur_cwd,
+            &mut cur_start,
+            muted,
+            started,
+            &mut last_emit,
+            &mut strip_lead_nl,
             &mut pending,
         );
         // 合帧后可见字节可能仍在 pending(无 inputStart/execStart 触发即时 flush 时),
@@ -689,7 +738,14 @@ mod tests {
         let started = std::time::Instant::now();
         // 主机自带集成先发 633;A(不应解除 mute),接着是回显噪声,最后我方哨兵 + 干净 prompt。
         let batch = b"\x1b]633;A\x07 __c=\"$__c\"'QUJD'\r\n eval \"...\"\r\n\x1b]633;P;CatioReady=N\x07admin@spark:~$ ";
-        let visible = run_batch(&sink, "term://c1", &mut scanner, &mut muted, &started, batch);
+        let visible = run_batch(
+            &sink,
+            "term://c1",
+            &mut scanner,
+            &mut muted,
+            &started,
+            batch,
+        );
         assert!(!muted, "收到我方就绪哨兵后必须解除 mute");
         assert_eq!(
             String::from_utf8_lossy(&visible),
@@ -708,7 +764,14 @@ mod tests {
         let started = std::time::Instant::now();
         // 一批含主机自带的 prompt-start/exec 标记 + 回显,但无我方哨兵。
         let batch = b"\x1b]633;A\x07host$ \x1b]633;C\x07 __c=\"$__c\"'QUJD'\r\n";
-        let visible = run_batch(&sink, "term://c1", &mut scanner, &mut muted, &started, batch);
+        let visible = run_batch(
+            &sink,
+            "term://c1",
+            &mut scanner,
+            &mut muted,
+            &started,
+            batch,
+        );
         assert!(muted, "无我方哨兵时必须保持 mute");
         assert!(visible.is_empty(), "mute 阶段不应显示任何回显噪声");
     }
@@ -720,7 +783,14 @@ mod tests {
         let mut scanner = osc::Scanner::new("N");
         let mut muted = true;
         let started = std::time::Instant::now();
-        let visible = run_batch(&sink, "term://c1", &mut scanner, &mut muted, &started, b" __c=\"$__c\"'QUJD'\r\n");
+        let visible = run_batch(
+            &sink,
+            "term://c1",
+            &mut scanner,
+            &mut muted,
+            &started,
+            b" __c=\"$__c\"'QUJD'\r\n",
+        );
         assert!(muted, "无哨兵时仍处于 mute");
         assert!(visible.is_empty(), "mute 阶段不应显示任何回显噪声");
     }

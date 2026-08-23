@@ -387,7 +387,9 @@ where
             return Ok(true);
         }
         // 500ms 超时轮询，使取消即使在数据停滞时也能及时响应。
-        let msg = match tokio::time::timeout(std::time::Duration::from_millis(500), channel.wait()).await {
+        let msg = match tokio::time::timeout(std::time::Duration::from_millis(500), channel.wait())
+            .await
+        {
             Ok(m) => m,
             Err(_) => continue, // 超时 → 回到循环顶部重新检查取消标志
         };
@@ -395,7 +397,10 @@ where
             Some(ChannelMsg::Data { ref data }) => {
                 b64_buf.push_str(&String::from_utf8_lossy(data));
                 while let Some(nl) = b64_buf.find('\n') {
-                    let line: String = b64_buf[..nl].chars().filter(|c| !c.is_whitespace()).collect();
+                    let line: String = b64_buf[..nl]
+                        .chars()
+                        .filter(|c| !c.is_whitespace())
+                        .collect();
                     b64_buf = b64_buf[nl + 1..].to_string();
                     if line.is_empty() {
                         continue;
@@ -447,7 +452,9 @@ where
             .map_err(|e| SshError::Io(e.to_string()))?;
         written += decoded.len() as u64;
     }
-    file.flush().await.map_err(|e| SshError::Io(e.to_string()))?;
+    file.flush()
+        .await
+        .map_err(|e| SshError::Io(e.to_string()))?;
     on_progress(written);
     Ok(false)
 }
@@ -917,7 +924,7 @@ async fn wait_exit(channel: &mut Channel<Msg>) -> Result<(), SshError> {
 pub async fn sftp_list(
     session_id: String,
     path: String,
-    mgr: tauri::State<'_, SessionManager>,
+    mgr: tauri::State<'_, std::sync::Arc<SessionManager>>,
 ) -> Result<Vec<SftpItem>, SshError> {
     list_directory(&mgr, &session_id, &path).await
 }
@@ -927,7 +934,7 @@ pub async fn sftp_list(
 pub async fn sftp_realpath(
     session_id: String,
     path: String,
-    mgr: tauri::State<'_, SessionManager>,
+    mgr: tauri::State<'_, std::sync::Arc<SessionManager>>,
 ) -> Result<String, SshError> {
     realpath(&mgr, &session_id, &path).await
 }
@@ -940,7 +947,7 @@ pub async fn sftp_upload(
     local_path: String,
     remote_path: String,
     app: tauri::AppHandle,
-    mgr: tauri::State<'_, SessionManager>,
+    mgr: tauri::State<'_, std::sync::Arc<SessionManager>>,
 ) -> Result<String, SshError> {
     let total_bytes = tokio::fs::metadata(&local_path)
         .await
@@ -991,7 +998,7 @@ pub async fn sftp_download(
     remote_path: String,
     local_path: String,
     app: tauri::AppHandle,
-    mgr: tauri::State<'_, SessionManager>,
+    mgr: tauri::State<'_, std::sync::Arc<SessionManager>>,
 ) -> Result<String, SshError> {
     let filename = basename(&remote_path);
 
@@ -1043,9 +1050,15 @@ pub async fn sftp_download(
 /// 根据传输结果发出对应的终态事件：完成 / 取消 / 出错。
 fn dispatch_outcome(app: &tauri::AppHandle, tid: &str, result: Result<bool, SshError>) {
     match result {
-        Ok(false) => { let _ = app.emit(&format!("transfer-complete-{}", tid), ()); }
-        Ok(true) => { let _ = app.emit(&format!("transfer-cancelled-{}", tid), ()); }
-        Err(e) => { let _ = app.emit(&format!("transfer-error-{}", tid), e.to_string()); }
+        Ok(false) => {
+            let _ = app.emit(&format!("transfer-complete-{}", tid), ());
+        }
+        Ok(true) => {
+            let _ = app.emit(&format!("transfer-cancelled-{}", tid), ());
+        }
+        Err(e) => {
+            let _ = app.emit(&format!("transfer-error-{}", tid), e.to_string());
+        }
     }
 }
 
@@ -1053,7 +1066,7 @@ fn dispatch_outcome(app: &tauri::AppHandle, tid: &str, result: Result<bool, SshE
 #[tauri::command]
 pub async fn sftp_transfer_cancel(
     transfer_id: String,
-    mgr: tauri::State<'_, SessionManager>,
+    mgr: tauri::State<'_, std::sync::Arc<SessionManager>>,
 ) -> Result<(), SshError> {
     mgr.cancel_transfer(&transfer_id).await;
     Ok(())
@@ -1064,15 +1077,24 @@ pub async fn sftp_transfer_cancel(
 pub async fn sftp_mkdir(
     session_id: String,
     path: String,
-    mgr: tauri::State<'_, SessionManager>,
+    mgr: tauri::State<'_, std::sync::Arc<SessionManager>>,
 ) -> Result<(), SshError> {
     sftp_mkdir_core(&mgr, &session_id, &path).await
 }
 
-pub async fn sftp_mkdir_core(mgr: &SessionManager, session_id: &str, path: &str) -> Result<(), SshError> {
+pub async fn sftp_mkdir_core(
+    mgr: &SessionManager,
+    session_id: &str,
+    path: &str,
+) -> Result<(), SshError> {
     // `--` stops a path beginning with `-` from being parsed as an option (shell_escape blocks
     // shell injection but not option injection).
-    exec(mgr, session_id, &format!("mkdir -p -- {}", shell_escape(path))).await?;
+    exec(
+        mgr,
+        session_id,
+        &format!("mkdir -p -- {}", shell_escape(path)),
+    )
+    .await?;
     Ok(())
 }
 
@@ -1082,10 +1104,27 @@ fn is_dangerous_delete_path(path: &str) -> bool {
     let p = path.trim().trim_end_matches('/');
     matches!(
         p,
-        "" | "/" | "." | ".." | "~" | "~/*"
-            | "/root" | "/home" | "/etc" | "/usr" | "/var" | "/bin" | "/sbin"
-            | "/lib" | "/lib64" | "/boot" | "/dev" | "/proc" | "/sys" | "/opt"
-    ) || p == "~" || path.trim() == "~/"
+        "" | "/"
+            | "."
+            | ".."
+            | "~"
+            | "~/*"
+            | "/root"
+            | "/home"
+            | "/etc"
+            | "/usr"
+            | "/var"
+            | "/bin"
+            | "/sbin"
+            | "/lib"
+            | "/lib64"
+            | "/boot"
+            | "/dev"
+            | "/proc"
+            | "/sys"
+            | "/opt"
+    ) || p == "~"
+        || path.trim() == "~/"
 }
 
 /// 重命名/移动。
@@ -1094,13 +1133,23 @@ pub async fn sftp_rename(
     session_id: String,
     from: String,
     to: String,
-    mgr: tauri::State<'_, SessionManager>,
+    mgr: tauri::State<'_, std::sync::Arc<SessionManager>>,
 ) -> Result<(), SshError> {
     sftp_rename_core(&mgr, &session_id, &from, &to).await
 }
 
-pub async fn sftp_rename_core(mgr: &SessionManager, session_id: &str, from: &str, to: &str) -> Result<(), SshError> {
-    exec(mgr, session_id, &format!("mv -- {} {}", shell_escape(from), shell_escape(to))).await?;
+pub async fn sftp_rename_core(
+    mgr: &SessionManager,
+    session_id: &str,
+    from: &str,
+    to: &str,
+) -> Result<(), SshError> {
+    exec(
+        mgr,
+        session_id,
+        &format!("mv -- {} {}", shell_escape(from), shell_escape(to)),
+    )
+    .await?;
     Ok(())
 }
 
@@ -1110,17 +1159,26 @@ pub async fn sftp_delete(
     session_id: String,
     path: String,
     is_dir: bool,
-    mgr: tauri::State<'_, SessionManager>,
+    mgr: tauri::State<'_, std::sync::Arc<SessionManager>>,
 ) -> Result<(), SshError> {
     let _ = is_dir; // rm -rf 同时适用文件与目录；保留参数兼容前端签名。
     sftp_delete_core(&mgr, &session_id, &path).await
 }
 
-pub async fn sftp_delete_core(mgr: &SessionManager, session_id: &str, path: &str) -> Result<(), SshError> {
+pub async fn sftp_delete_core(
+    mgr: &SessionManager,
+    session_id: &str,
+    path: &str,
+) -> Result<(), SshError> {
     if is_dangerous_delete_path(path) {
         return Err(SshError::Io(format!("拒绝删除危险路径: {path}")));
     }
-    exec(mgr, session_id, &format!("rm -rf -- {}", shell_escape(path))).await?;
+    exec(
+        mgr,
+        session_id,
+        &format!("rm -rf -- {}", shell_escape(path)),
+    )
+    .await?;
     Ok(())
 }
 
@@ -1129,12 +1187,16 @@ pub async fn sftp_delete_core(mgr: &SessionManager, session_id: &str, path: &str
 pub async fn sftp_touch(
     session_id: String,
     path: String,
-    mgr: tauri::State<'_, SessionManager>,
+    mgr: tauri::State<'_, std::sync::Arc<SessionManager>>,
 ) -> Result<(), SshError> {
     sftp_touch_core(&mgr, &session_id, &path).await
 }
 
-pub async fn sftp_touch_core(mgr: &SessionManager, session_id: &str, path: &str) -> Result<(), SshError> {
+pub async fn sftp_touch_core(
+    mgr: &SessionManager,
+    session_id: &str,
+    path: &str,
+) -> Result<(), SshError> {
     exec(mgr, session_id, &format!("touch -- {}", shell_escape(path))).await?;
     Ok(())
 }
@@ -1149,7 +1211,7 @@ pub async fn sftp_read_file(
     session_id: String,
     path: String,
     max_bytes: Option<u64>,
-    mgr: tauri::State<'_, SessionManager>,
+    mgr: tauri::State<'_, std::sync::Arc<SessionManager>>,
 ) -> Result<RemoteFileContent, SshError> {
     sftp_read_file_core(&mgr, session_id, path, max_bytes).await
 }
@@ -1234,7 +1296,7 @@ pub async fn sftp_write_file(
     content: String,
     base_modified: Option<i64>,
     mode: Option<u32>,
-    mgr: tauri::State<'_, SessionManager>,
+    mgr: tauri::State<'_, std::sync::Arc<SessionManager>>,
 ) -> Result<i64, SshError> {
     sftp_write_file_core(&mgr, session_id, path, content, base_modified, mode).await
 }
@@ -1315,7 +1377,11 @@ const READ_TIMEOUT_SECS: u64 = 30;
 
 /// 把远端文件读入内存(web 下载端点用)。带上限 + 每次读超时:超过 [`MAX_TRANSFER_BYTES`] 即拒绝
 /// (防超大文件/`/dev/zero` 之类的 OOM),单次读阻塞超时即报错(防 FIFO/特殊文件挂起)。
-pub async fn read_remote_bytes(mgr: &SessionManager, session_id: &str, path: &str) -> Result<Vec<u8>, SshError> {
+pub async fn read_remote_bytes(
+    mgr: &SessionManager,
+    session_id: &str,
+    path: &str,
+) -> Result<Vec<u8>, SshError> {
     use russh_sftp::protocol::OpenFlags;
     use std::time::Duration;
     use tokio::io::AsyncReadExt;
@@ -1327,10 +1393,13 @@ pub async fn read_remote_bytes(mgr: &SessionManager, session_id: &str, path: &st
     let mut buf = Vec::new();
     let mut chunk = vec![0u8; 64 * 1024];
     loop {
-        let n = tokio::time::timeout(Duration::from_secs(READ_TIMEOUT_SECS), remote.read(&mut chunk))
-            .await
-            .map_err(|_| SshError::Io("下载读取超时(可能是特殊文件)".into()))?
-            .map_err(|e| SshError::Sftp(e.to_string()))?;
+        let n = tokio::time::timeout(
+            Duration::from_secs(READ_TIMEOUT_SECS),
+            remote.read(&mut chunk),
+        )
+        .await
+        .map_err(|_| SshError::Io("下载读取超时(可能是特殊文件)".into()))?
+        .map_err(|e| SshError::Sftp(e.to_string()))?;
         if n == 0 {
             break;
         }
@@ -1344,7 +1413,12 @@ pub async fn read_remote_bytes(mgr: &SessionManager, session_id: &str, path: &st
 
 /// 把字节原子写入远端文件(web 上传端点用)。先写临时文件 `<path>.catio.upload.tmp`(SFTP),
 /// 再 `mv -f` 覆盖目标——与在线编辑保存同语义,避免上传中断把已有文件截断/写半截。
-pub async fn write_remote_bytes(mgr: &SessionManager, session_id: &str, path: &str, bytes: &[u8]) -> Result<(), SshError> {
+pub async fn write_remote_bytes(
+    mgr: &SessionManager,
+    session_id: &str,
+    path: &str,
+    bytes: &[u8],
+) -> Result<(), SshError> {
     use russh_sftp::protocol::OpenFlags;
     use tokio::io::AsyncWriteExt;
     if bytes.len() > MAX_TRANSFER_BYTES {
@@ -1354,14 +1428,19 @@ pub async fn write_remote_bytes(mgr: &SessionManager, session_id: &str, path: &s
     let tmp = format!("{path}.catio.upload.tmp");
     {
         let mut f = sftp
-            .open_with_flags(tmp.as_str(), OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE)
+            .open_with_flags(
+                tmp.as_str(),
+                OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
+            )
             .await
             .map_err(|e| SshError::Sftp(e.to_string()))?;
         if let Err(e) = f.write_all(bytes).await {
             let _ = sftp.remove_file(tmp.as_str()).await;
             return Err(SshError::Sftp(e.to_string()));
         }
-        f.shutdown().await.map_err(|e| SshError::Sftp(e.to_string()))?;
+        f.shutdown()
+            .await
+            .map_err(|e| SshError::Sftp(e.to_string()))?;
     }
     let mv = format!("mv -f -- {} {}", shell_escape(&tmp), shell_escape(path));
     if let Err(e) = exec(mgr, session_id, &mv).await {
@@ -1374,7 +1453,13 @@ pub async fn write_remote_bytes(mgr: &SessionManager, session_id: &str, path: &s
 /// Stream an upload to the remote file CHUNK BY CHUNK (atomic temp + `mv`), without ever holding
 /// the whole file in memory — so multi-GB uploads work and don't OOM the server. No size cap (the
 /// remote disk is the bound), matching the desktop SFTP path. Returns the total bytes written.
-pub async fn write_remote_stream<S, B>(mgr: &SessionManager, session_id: &str, path: &str, mut stream: S, max_bytes: Option<u64>) -> Result<u64, SshError>
+pub async fn write_remote_stream<S, B>(
+    mgr: &SessionManager,
+    session_id: &str,
+    path: &str,
+    mut stream: S,
+    max_bytes: Option<u64>,
+) -> Result<u64, SshError>
 where
     S: futures_util::Stream<Item = Result<B, std::io::Error>> + Unpin,
     B: AsRef<[u8]>,
@@ -1389,7 +1474,10 @@ where
     // this way EVERY error path (write / stream / shutdown / cap-exceeded) cleans up uniformly.
     let written: Result<u64, SshError> = async {
         let mut f = sftp
-            .open_with_flags(tmp.as_str(), OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE)
+            .open_with_flags(
+                tmp.as_str(),
+                OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
+            )
             .await
             .map_err(|e| SshError::Sftp(e.to_string()))?;
         let mut total: u64 = 0;
@@ -1401,15 +1489,22 @@ where
                     return Err(SshError::Io(format!("上传超出服务器上限({max} 字节)")));
                 }
             }
-            f.write_all(chunk.as_ref()).await.map_err(|e| SshError::Sftp(e.to_string()))?;
+            f.write_all(chunk.as_ref())
+                .await
+                .map_err(|e| SshError::Sftp(e.to_string()))?;
         }
-        f.shutdown().await.map_err(|e| SshError::Sftp(e.to_string()))?;
+        f.shutdown()
+            .await
+            .map_err(|e| SshError::Sftp(e.to_string()))?;
         Ok(total)
     }
     .await; // `f` dropped here (scope end), so the temp file is closed before any remove below.
     let total = match written {
         Ok(t) => t,
-        Err(e) => { let _ = sftp.remove_file(tmp.as_str()).await; return Err(e); }
+        Err(e) => {
+            let _ = sftp.remove_file(tmp.as_str()).await;
+            return Err(e);
+        }
     };
     let mv = format!("mv -f -- {} {}", shell_escape(&tmp), shell_escape(path));
     if let Err(e) = exec(mgr, session_id, &mv).await {
@@ -1443,11 +1538,18 @@ mod tests {
 
     #[test]
     fn dangerous_delete_paths_are_rejected() {
-        for p in ["", "/", ".", "..", "~", "~/", "/home", "/root", "/etc", "/usr/", "/", "  /  "] {
+        for p in [
+            "", "/", ".", "..", "~", "~/", "/home", "/root", "/etc", "/usr/", "/", "  /  ",
+        ] {
             assert!(is_dangerous_delete_path(p), "should reject {p:?}");
         }
         // Normal user paths are allowed.
-        for p in ["/home/alice/notes.txt", "/tmp/x", "/home/alice/dir", "relative/file"] {
+        for p in [
+            "/home/alice/notes.txt",
+            "/tmp/x",
+            "/home/alice/dir",
+            "relative/file",
+        ] {
             assert!(!is_dangerous_delete_path(p), "should allow {p:?}");
         }
     }
@@ -1494,7 +1596,10 @@ mod tests {
         let items = parse_ls_output(out, "/x/");
         let link = items.iter().find(|i| i.name == "link").expect("link");
         assert_eq!(link.kind, "link");
-        let spaced = items.iter().find(|i| i.name == "my file.txt").expect("spaced");
+        let spaced = items
+            .iter()
+            .find(|i| i.name == "my file.txt")
+            .expect("spaced");
         assert_eq!(spaced.path, "/x/my file.txt");
     }
 

@@ -335,9 +335,15 @@ pub async fn monitor_start(
     session_id: String,
     interval_ms: u64,
     app: tauri::AppHandle,
-    mgr: tauri::State<'_, SessionManager>,
+    mgr: tauri::State<'_, std::sync::Arc<SessionManager>>,
 ) -> Result<(), SshError> {
-    monitor_start_core(session_id, interval_ms, Arc::new(crate::events::TauriSink(app)), &mgr).await
+    monitor_start_core(
+        session_id,
+        interval_ms,
+        Arc::new(crate::events::TauriSink(app)),
+        &mgr,
+    )
+    .await
 }
 
 /// Transport-agnostic monitor loop — emits `monitor://{sessionId}` frames through an `EventSink`
@@ -428,7 +434,7 @@ pub async fn monitor_start_core(
 #[tauri::command]
 pub async fn monitor_stop(
     session_id: String,
-    mgr: tauri::State<'_, SessionManager>,
+    mgr: tauri::State<'_, std::sync::Arc<SessionManager>>,
 ) -> Result<(), SshError> {
     mgr.remove_monitor(&session_id).await;
     Ok(())
@@ -446,13 +452,16 @@ pub async fn monitor_stop(
 #[tauri::command]
 pub async fn ssh_sysinfo(
     session_id: String,
-    mgr: tauri::State<'_, SessionManager>,
+    mgr: tauri::State<'_, std::sync::Arc<SessionManager>>,
 ) -> Result<String, SshError> {
     ssh_sysinfo_core(session_id, &mgr).await
 }
 
 /// Transport-agnostic host summary — shared by the Tauri command and the web dispatch.
-pub async fn ssh_sysinfo_core(session_id: String, mgr: &SessionManager) -> Result<String, SshError> {
+pub async fn ssh_sysinfo_core(
+    session_id: String,
+    mgr: &SessionManager,
+) -> Result<String, SshError> {
     let sess = mgr
         .get(&session_id)
         .await
@@ -494,13 +503,16 @@ pub async fn ssh_sysinfo_core(session_id: String, mgr: &SessionManager) -> Resul
 #[tauri::command]
 pub async fn ssh_detect_os(
     session_id: String,
-    mgr: tauri::State<'_, SessionManager>,
+    mgr: tauri::State<'_, std::sync::Arc<SessionManager>>,
 ) -> Result<String, SshError> {
     ssh_detect_os_core(session_id, &mgr).await
 }
 
 /// Transport-agnostic OS detection — shared by the Tauri command and the web dispatch.
-pub async fn ssh_detect_os_core(session_id: String, mgr: &SessionManager) -> Result<String, SshError> {
+pub async fn ssh_detect_os_core(
+    session_id: String,
+    mgr: &SessionManager,
+) -> Result<String, SshError> {
     let sess = mgr
         .get(&session_id)
         .await
@@ -530,9 +542,12 @@ pub async fn ssh_detect_os_core(session_id: String, mgr: &SessionManager) -> Res
 mod tests {
     use super::*;
 
-    const STAT_PREV: &str = "cpu  400 0 100 450 50 0 0 0\ncpu0 200 0 50 225 25 0 0 0\ncpu1 200 0 50 225 25 0 0 0\n";
-    const STAT_NOW: &str = "cpu  450 0 110 490 60 0 0 0\ncpu0 225 0 55 245 30 0 0 0\ncpu1 225 0 55 245 30 0 0 0\n";
-    const MEMINFO: &str = "MemTotal:       16384000 kB\nMemFree:         4096000 kB\nMemAvailable:    8192000 kB\n";
+    const STAT_PREV: &str =
+        "cpu  400 0 100 450 50 0 0 0\ncpu0 200 0 50 225 25 0 0 0\ncpu1 200 0 50 225 25 0 0 0\n";
+    const STAT_NOW: &str =
+        "cpu  450 0 110 490 60 0 0 0\ncpu0 225 0 55 245 30 0 0 0\ncpu1 225 0 55 245 30 0 0 0\n";
+    const MEMINFO: &str =
+        "MemTotal:       16384000 kB\nMemFree:         4096000 kB\nMemAvailable:    8192000 kB\n";
     const NET_PREV: &str = "Inter-|...\n face|...\n lo: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n eth0: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n";
     const NET_NOW: &str = "Inter-|...\n face|...\n lo: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n eth0: 1048576 0 0 0 0 0 0 0 1048576 0 0 0 0 0 0 0\n";
     const DF: &str = "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/sda1 102400 43000 59400 42% /\n";

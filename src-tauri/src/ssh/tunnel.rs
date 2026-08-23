@@ -1,4 +1,4 @@
-﻿//! 端口转发隧道。L（本地，C1）、R（远程/反向，C2）与 D（动态 SOCKS5，C3）。
+//! 端口转发隧道。L（本地，C1）、R（远程/反向，C2）与 D（动态 SOCKS5，C3）。
 //!
 //! 本地 (L) 转发：在本地起一个 TCP 监听器，每个入站连接都通过 SSH
 //! `direct-tcpip` channel 桥接到远端目标；双向字节都被计数。
@@ -334,7 +334,11 @@ pub async fn open_remote_forward(
             }
         };
         // port==0 → 服务端返回实际端口；否则沿用请求端口。
-        let actual = if remote_port == 0 { allocated } else { remote_port };
+        let actual = if remote_port == 0 {
+            allocated
+        } else {
+            remote_port
+        };
         // 若实际端口与预登记键不同（仅 port==0 时），改用实际端口作键
         // （forwarded channel 的 connected_port 会是它）。
         if actual != remote_port {
@@ -534,12 +538,7 @@ pub async fn open_dynamic_forward(
                 let channel_result = {
                     let s = session.lock().await;
                     s.handle
-                        .channel_open_direct_tcpip(
-                            host.clone(),
-                            port as u32,
-                            "127.0.0.1",
-                            0,
-                        )
+                        .channel_open_direct_tcpip(host.clone(), port as u32, "127.0.0.1", 0)
                         .await
                 };
 
@@ -656,9 +655,15 @@ pub async fn tunnel_open(
     session_id: String,
     spec: TunnelSpec,
     app: tauri::AppHandle,
-    mgr: tauri::State<'_, SessionManager>,
+    mgr: tauri::State<'_, std::sync::Arc<SessionManager>>,
 ) -> Result<String, SshError> {
-    tunnel_open_core(session_id, spec, Arc::new(crate::events::TauriSink(app)), &mgr).await
+    tunnel_open_core(
+        session_id,
+        spec,
+        Arc::new(crate::events::TauriSink(app)),
+        &mgr,
+    )
+    .await
 }
 
 /// 打开一条隧道（transport-agnostic 核心）。L → 本地转发；R → 远程/反向转发；D → 动态 SOCKS5。
@@ -780,7 +785,7 @@ pub async fn tunnel_open_core(
 #[tauri::command]
 pub async fn tunnel_close(
     tunnel_id: String,
-    mgr: tauri::State<'_, SessionManager>,
+    mgr: tauri::State<'_, std::sync::Arc<SessionManager>>,
 ) -> Result<(), SshError> {
     mgr.remove_tunnel(&tunnel_id).await;
     Ok(())
@@ -789,7 +794,7 @@ pub async fn tunnel_close(
 /// 列出当前所有隧道的状态。
 #[tauri::command]
 pub async fn tunnel_list(
-    mgr: tauri::State<'_, SessionManager>,
+    mgr: tauri::State<'_, std::sync::Arc<SessionManager>>,
 ) -> Result<Vec<crate::ssh::manager::TunnelStatus>, SshError> {
     Ok(mgr.tunnel_status_list().await)
 }

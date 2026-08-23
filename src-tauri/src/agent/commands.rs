@@ -77,7 +77,7 @@ pub async fn cancel_for_actor(
 #[tauri::command]
 pub async fn agent_start_turn(
     app: AppHandle,
-    state: State<'_, AgentRuntime>,
+    state: State<'_, std::sync::Arc<AgentRuntime>>,
     request: StartTurnRequest,
 ) -> Result<TurnHandle, String> {
     let sink = TauriAgentEventSink::new(app);
@@ -88,7 +88,7 @@ pub async fn agent_start_turn(
 
 #[tauri::command]
 pub async fn agent_respond(
-    state: State<'_, AgentRuntime>,
+    state: State<'_, std::sync::Arc<AgentRuntime>>,
     turn_id: String,
     response: ClientTurnResponse,
 ) -> Result<(), String> {
@@ -98,7 +98,10 @@ pub async fn agent_respond(
 }
 
 #[tauri::command]
-pub async fn agent_cancel(state: State<'_, AgentRuntime>, turn_id: String) -> Result<(), String> {
+pub async fn agent_cancel(
+    state: State<'_, std::sync::Arc<AgentRuntime>>,
+    turn_id: String,
+) -> Result<(), String> {
     cancel_for_actor(&state, desktop_actor(), turn_id)
         .await
         .map_err(|e| e.to_string())

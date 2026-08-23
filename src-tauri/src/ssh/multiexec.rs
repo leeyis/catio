@@ -63,7 +63,7 @@ pub async fn multiexec_run(
     session_ids: Vec<String>,
     cmd: String,
     app: tauri::AppHandle,
-    mgr: tauri::State<'_, SessionManager>,
+    mgr: tauri::State<'_, std::sync::Arc<SessionManager>>,
 ) -> Result<String, SshError> {
     let run_id = RUN_IDS.next();
     let evt = format!("multiexec://{run_id}");
@@ -98,30 +98,28 @@ pub async fn multiexec_run(
                         },
                     );
                 }
-                Some(sess) => {
-                    match run_on(sess, &cmd2).await {
-                        Ok(output) => {
-                            let _ = app2.emit(
-                                &evt2,
-                                &MultiExecEvent {
-                                    session_id: sid2,
-                                    state: "done",
-                                    chunk: Some(output),
-                                },
-                            );
-                        }
-                        Err(e) => {
-                            let _ = app2.emit(
-                                &evt2,
-                                &MultiExecEvent {
-                                    session_id: sid2,
-                                    state: "error",
-                                    chunk: Some(e.to_string()),
-                                },
-                            );
-                        }
+                Some(sess) => match run_on(sess, &cmd2).await {
+                    Ok(output) => {
+                        let _ = app2.emit(
+                            &evt2,
+                            &MultiExecEvent {
+                                session_id: sid2,
+                                state: "done",
+                                chunk: Some(output),
+                            },
+                        );
                     }
-                }
+                    Err(e) => {
+                        let _ = app2.emit(
+                            &evt2,
+                            &MultiExecEvent {
+                                session_id: sid2,
+                                state: "error",
+                                chunk: Some(e.to_string()),
+                            },
+                        );
+                    }
+                },
             }
         });
     }

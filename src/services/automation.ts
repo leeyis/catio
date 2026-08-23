@@ -71,6 +71,17 @@ export interface McpConnection {
 export type PromptSource = 'task' | 'chat'
 export type PromptOutcome = 'completed' | 'failed' | 'cancelled' | 'outcomeUnknown'
 
+export type TaskRunStatus = 'success' | 'failed'
+export interface TaskRunInfo {
+  taskId: string
+  status: TaskRunStatus
+  summary: string
+  at: string
+}
+
+export type ProviderProtocol = 'openai' | 'anthropic' | 'ollama'
+export type AnthropicAuthMode = 'auto' | 'apiKey' | 'authToken'
+
 export interface PromptHistoryEntry {
   id: string
   kind: 'prompt'
@@ -166,4 +177,27 @@ export async function automationClearPromptHistory(): Promise<void> {
 
 export async function automationDeletePromptHistory(id: string): Promise<void> {
   return tauriInvoke<void>('automation_delete_prompt_history', { id })
+}
+
+// ---- task run results + provider (prompt tasks) ----
+
+export async function automationTaskResults(): Promise<TaskRunInfo[]> {
+  if (!isTauri()) return []
+  return tauriInvoke<TaskRunInfo[]>('automation_task_results')
+}
+
+export async function automationSetProvider(
+  protocol: ProviderProtocol,
+  baseUrl: string,
+  model: string,
+  anthropicAuthMode: AnthropicAuthMode,
+  credential: string,
+): Promise<void> {
+  return tauriInvoke<void>('automation_set_provider', {
+    protocol,
+    baseUrl,
+    model,
+    anthropicAuthMode,
+    credential,
+  })
 }

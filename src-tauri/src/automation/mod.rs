@@ -6,6 +6,7 @@
 //! `owner_id` and never trust a client-supplied one.
 
 pub mod commands;
+pub mod dispatcher;
 pub mod history;
 pub mod mcp_client;
 pub mod prompt;

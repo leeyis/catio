@@ -9,6 +9,8 @@ vi.mock('../../services/automation', () => ({
   automationCreateTask: vi.fn(),
   automationDeleteTask: vi.fn(),
   automationSetTaskEnabled: vi.fn(),
+  automationTaskResults: vi.fn().mockResolvedValue([]),
+  automationSetProvider: vi.fn(),
 }))
 import { automationListTasks } from '../../services/automation'
 

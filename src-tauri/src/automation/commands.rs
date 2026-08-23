@@ -10,11 +10,13 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 use tauri::State;
 
+use super::dispatcher::{SessionProviderConfig, TaskResults, TaskRunInfo};
 use super::history::PromptHistoryStore;
 use super::mcp_client::{McpClient, McpError};
 use super::repo::AutomationStore;
 use super::skill::{install_skill, parse_skill_json};
 use super::types::{AutomationError, McpConnection, ScheduledTask, Skill, SkillScope, SkillSource};
+use crate::agent::types::{AnthropicAuthMode, ApiCredential, ProviderConfig, ProviderProtocol};
 
 /// Desktop owner — fixed, never request-supplied.
 pub const DESKTOP_OWNER: &str = "local";
@@ -100,6 +102,10 @@ pub struct AutomationService {
     pub history: Arc<PromptHistoryStore>,
     pub client: McpClient,
     pub http: reqwest::Client,
+    /// Last-run results for scheduled tasks, surfaced to the task list.
+    pub results: TaskResults,
+    /// Session provider config for prompt tasks (set by the frontend).
+    pub provider: Arc<SessionProviderConfig>,
 }
 
 #[tauri::command]
@@ -274,4 +280,33 @@ pub async fn automation_delete_prompt_history(
         .history
         .delete(DESKTOP_OWNER, &id)
         .map_err(|e| e.to_string())
+}
+
+/// Last-run results for scheduled tasks (what the task list shows).
+#[tauri::command]
+pub async fn automation_task_results(
+    state: State<'_, AutomationService>,
+) -> Result<Vec<TaskRunInfo>, String> {
+    Ok(state.results.read().values().cloned().collect())
+}
+
+/// Push the current AI provider config for prompt tasks (session memory only —
+/// the credential never persists).
+#[tauri::command]
+pub async fn automation_set_provider(
+    state: State<'_, AutomationService>,
+    protocol: ProviderProtocol,
+    base_url: String,
+    model: String,
+    anthropic_auth_mode: AnthropicAuthMode,
+    credential: String,
+) -> Result<(), String> {
+    state.provider.set(ProviderConfig {
+        protocol,
+        base_url,
+        model,
+        credential: ApiCredential::from(credential),
+        anthropic_auth_mode,
+    });
+    Ok(())
 }
