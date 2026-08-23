@@ -81,6 +81,7 @@ import {
   isAgentEventEnvelope,
   type AgentEventEnvelope,
   type AgentTurnRequest,
+  type AgentToolCall,
 } from './services/agentRuntime'
 import { projectAgentEvent, initialProjectorState, type AgentProjectorState } from './services/agentProjector'
 import {
@@ -180,6 +181,7 @@ export default function App() {
   const mruRef = useRef<Record<string, string>>({})
   const [activePanel, setActivePanel] = useState<string>('ai')
   const [panelOpen, setPanelOpen] = useState<boolean>(false)
+  const [toolCalls, setToolCalls] = useState<Record<string, Record<string, AgentToolCall>>>({})
   const [promptHistory, setPromptHistory] = useState<PromptHistoryEntry[]>([])
   useEffect(() => {
     if (!(activePanel === 'history' && panelOpen)) return
@@ -1936,6 +1938,25 @@ export default function App() {
   }
 
   function enqueueAgentEvent(envelope: AgentEventEnvelope): void {
+    // Surface Agent tool calls (MCP/skill/terminal) as a detail block in the panel.
+    const evt = envelope.event as { type?: string } & Record<string, unknown>
+    const convId = envelope.conversationId
+    if (evt.type === 'toolProposed') {
+      const toolUseId = String(evt.toolUseId ?? '')
+      setToolCalls(prev => {
+        const conv = { ...(prev[convId] ?? {}) }
+        conv[toolUseId] = { id: toolUseId, name: String(evt.name ?? ''), input: evt.input }
+        return { ...prev, [convId]: conv }
+      })
+    } else if (evt.type === 'toolFinished') {
+      const toolUseId = String(evt.toolUseId ?? '')
+      setToolCalls(prev => {
+        const conv = { ...(prev[convId] ?? {}) }
+        const result = evt.result as { content?: string; status?: string }
+        conv[toolUseId] = { ...(conv[toolUseId] ?? { id: toolUseId }), status: result?.status, result: result?.content }
+        return { ...prev, [convId]: conv }
+      })
+    }
     agentEventQueue.current = agentEventQueue.current
       .then(() => handleAgentEnvelope(envelope))
       .catch(() => diagnosticLog({
@@ -2401,6 +2422,7 @@ export default function App() {
               {activePanel === 'ai' && <AIPanel contextKey={cur?.id} visible={panelOpen} onClose={() => setPanelOpen(false)} mode={aiMode} conn={curConn ?? undefined} connId={aiConnId} engine={curConn?.engine} attachment={aiAttachment} onClearAttachment={() => setAiAttachment(null)} onInsert={insertToTerminal} canInsert={canInsert} onOpenSettings={() => goSettings('ai')}
                 conversation={activeConversation} busy={activeConvBusy || activeTabBusy} history={agentHistory}
                 fileActivity={activeConversation ? agentFileActivity[activeConversation.id] : undefined}
+                toolCalls={activeConversation ? Object.values(toolCalls[activeConversation.id] ?? {}) : undefined}
                 onSend={cur ? ((text, opts) => void sendAgentMessage(cur.id, text, opts)) : undefined}
                 onAbort={cur ? (() => abortAgentStream(cur.id)) : undefined}
                 onNewConversation={cur ? (() => newAgentConversation(cur.id)) : undefined}

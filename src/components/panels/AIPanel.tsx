@@ -49,6 +49,8 @@ export interface AIPanelProps {
   conversation?: Conversation
   /** True while a send is streaming for the active conversation. */
   busy?: boolean
+  /** Tool calls the Agent made this turn (MCP/skill/terminal), for a detail block. */
+  toolCalls?: import('../../services/agentRuntime').AgentToolCall[]
   /** Past conversations for the active tab's host (newest first). */
   history?: Conversation[]
   /** Send a user message in the current conversation. `hasSelection` is true when
@@ -489,7 +491,7 @@ interface MentionTable {
   kind: 'table' | 'view'
 }
 
-export function AIPanel({ visible = true, contextKey, onClose, mode = 'sql', conn, connId, engine, attachment, onClearAttachment, onInsert, canInsert, onOpenSettings, conversation, busy = false, history = [], onSend, onAbort, onNewConversation, onRestoreConversation, onDeleteConversation, fileActivity = [] }: AIPanelProps) {
+export function AIPanel({ visible = true, contextKey, onClose, mode = 'sql', conn, connId, engine, attachment, onClearAttachment, onInsert, canInsert, onOpenSettings, conversation, busy = false, history = [], onSend, onAbort, onNewConversation, onRestoreConversation, onDeleteConversation, fileActivity = [], toolCalls }: AIPanelProps) {
   const workspace = useAgentWorkspace()
   const { t } = useTranslation()
   const { config: cfg, update: updateAgentConfig } = useAgentConfig()
@@ -800,6 +802,28 @@ export function AIPanel({ visible = true, contextKey, onClose, mode = 'sql', con
           {busy && msgs.length > 0 && msgs[msgs.length - 1].content === '' && (
             <div className="row gap6" style={{ color: 'var(--text-tertiary)', fontSize: 12 }}>
               <Icon name="loader" size={13} style={{ animation: 'spin 1s linear infinite' }} /> {t('panels.agentThinking')}
+            </div>
+          )}
+          {toolCalls && toolCalls.length > 0 && (
+            <div className="col" style={{ gap: 6 }}>
+              <span className="chip" style={{ alignSelf: 'flex-start', background: 'color-mix(in srgb, var(--signal-violet) 14%, transparent)', color: 'var(--signal-violet)' }}>工具调用</span>
+              {toolCalls.map(c => (
+                <div key={c.id} className="col" style={{ gap: 4, padding: '8px 10px', borderRadius: 8, border: '1px solid var(--border-hairline)', background: 'var(--surface-subtle)' }}>
+                  <div className="row gap6" style={{ minWidth: 0 }}>
+                    <Icon name="zap" size={12} style={{ color: 'var(--signal-violet)', flex: 'none' }} />
+                    <span className="ell mono" style={{ fontSize: 12, fontWeight: 600 }}>{c.name || c.id}</span>
+                    {c.status && (
+                      <span className="chip" style={{ background: c.status === 'succeeded' || c.status === 'success' ? 'color-mix(in srgb, var(--signal-green) 14%, transparent)' : 'color-mix(in srgb, var(--signal-rose) 14%, transparent)', color: c.status === 'succeeded' || c.status === 'success' ? 'var(--signal-green)' : 'var(--signal-rose)' }}>{c.status}</span>
+                    )}
+                  </div>
+                  {c.input !== undefined && (
+                    <pre className="mono" style={{ margin: 0, fontSize: 10.5, whiteSpace: 'pre-wrap', wordBreak: 'break-all', color: 'var(--text-tertiary)' }}>{typeof c.input === 'string' ? c.input : JSON.stringify(c.input)}</pre>
+                  )}
+                  {c.result ? (
+                    <span className="mono" style={{ fontSize: 10.5, color: 'var(--text-faint)', wordBreak: 'break-all' }}>{String(c.result).slice(0, 300)}</span>
+                  ) : null}
+                </div>
+              ))}
             </div>
           )}
         </div>

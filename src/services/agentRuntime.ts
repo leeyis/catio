@@ -68,6 +68,15 @@ export interface ProviderConfig {
 }
 
 /** The frontend payload; `ownerId` is transport-owned and rejected server-side. */
+/** A tool the Agent called this turn — surfaced as a detail block in the panel. */
+export interface AgentToolCall {
+  id: string
+  name?: string
+  input?: unknown
+  status?: string
+  result?: string
+}
+
 export interface AgentTurnRequest {
   conversationId: string
   messages: AgentMessage[]
