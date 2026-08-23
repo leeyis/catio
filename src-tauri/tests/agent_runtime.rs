@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use catio_lib::agent::bridge::{ClientBridge, NoopBridge};
-use catio_lib::agent::engine::{AgentEventSink, TurnContext, TurnEngine};
+use catio_lib::agent::engine::{AgentEventSink, ToolRouter, TurnContext, TurnEngine};
 use catio_lib::agent::provider::{
     Provider, ProviderError, ProviderObserver, ProviderRequest, ProviderRound, ProviderStop,
 };
@@ -12,7 +12,8 @@ use catio_lib::agent::{
     ActorContext, AgentError, AgentEvent, AgentEventEnvelope, AgentMessage, AgentRole,
     AgentRuntime, AnthropicAuthMode, ApiCredential, ApprovalDecision, ClientTurnResponse,
     ContentBlock, ExecutionMode, ProviderConfig, ProviderFactory, ProviderProtocol,
-    StartTurnRequest, ToolExecutionOutcome, ToolExecutionStatus, ToolResultStatus, TurnHandle,
+    StartTurnRequest, ToolExecutionOutcome, ToolExecutionStatus, ToolResult, ToolResultStatus,
+    ToolSpec, TurnHandle,
 };
 use parking_lot::Mutex;
 use serde_json::{json, Value};
@@ -718,6 +719,7 @@ async fn run_turn_with(
         expected: Arc::new(parking_lot::Mutex::new(
             catio_lib::agent::ExpectedResponse::None,
         )),
+        tool_router: None,
     };
     TurnEngine.run(ctx).await
 }
@@ -743,6 +745,7 @@ async fn run_tool_turn_with_provider<P: Provider + Send + Sync + 'static>(
         expected: Arc::new(parking_lot::Mutex::new(
             catio_lib::agent::ExpectedResponse::None,
         )),
+        tool_router: None,
     };
     TurnEngine.run(ctx).await
 }
@@ -1030,6 +1033,7 @@ async fn text_delta_is_emitted_before_completion_releases() {
         expected: Arc::new(parking_lot::Mutex::new(
             catio_lib::agent::ExpectedResponse::None,
         )),
+        tool_router: None,
     };
     let task = tokio::spawn(TurnEngine.run(ctx));
     // The provider has produced a delta and is still blocked inside `complete`:
@@ -1074,6 +1078,7 @@ async fn provider_deltas_are_backpressured_when_the_sink_is_slow() {
         expected: Arc::new(parking_lot::Mutex::new(
             catio_lib::agent::ExpectedResponse::None,
         )),
+        tool_router: None,
     };
     // Register the waiter BEFORE the engine can emit, so no notification is
     // lost.
@@ -1127,6 +1132,7 @@ async fn burst_deltas_arrive_in_order_without_loss() {
         expected: Arc::new(parking_lot::Mutex::new(
             catio_lib::agent::ExpectedResponse::None,
         )),
+        tool_router: None,
     };
     TurnEngine.run(ctx).await.unwrap();
     let deltas: Vec<String> = sink
@@ -1323,6 +1329,7 @@ async fn approval_timeout_fails_closed_as_blocked() {
         expected: Arc::new(parking_lot::Mutex::new(
             catio_lib::agent::ExpectedResponse::None,
         )),
+        tool_router: None,
     };
     TurnEngine.run(ctx).await.unwrap();
     // Fail-closed: the tool never executes, the paired result is Blocked.
@@ -1347,6 +1354,7 @@ async fn tool_result_timeout_after_dispatch_is_outcome_unknown() {
         expected: Arc::new(parking_lot::Mutex::new(
             catio_lib::agent::ExpectedResponse::None,
         )),
+        tool_router: None,
     };
     TurnEngine.run(ctx).await.unwrap();
     assert_eq!(
@@ -1526,6 +1534,7 @@ async fn legacy_round_cap_prevents_final_synthesis_fence_execution() {
         expected: Arc::new(parking_lot::Mutex::new(
             catio_lib::agent::ExpectedResponse::None,
         )),
+        tool_router: None,
     };
     let err = TurnEngine.run(ctx).await.unwrap_err();
     // Round cap reached: the ONE tools-disabled final synthesis must fail the
@@ -1606,6 +1615,7 @@ async fn arbitrary_credential_never_leaks_into_terminal_event() {
         expected: Arc::new(parking_lot::Mutex::new(
             catio_lib::agent::ExpectedResponse::None,
         )),
+        tool_router: None,
     };
     let err = TurnEngine.run(ctx).await.unwrap_err();
     let message = err.to_string();
@@ -1723,6 +1733,7 @@ async fn run_file_turn(
             bridge: Arc::new(bridge),
             cancel_token: CancellationToken::new(),
             expected: Arc::new(Mutex::new(catio_lib::agent::ExpectedResponse::None)),
+            tool_router: None,
         })
         .await
 }
@@ -1919,6 +1930,148 @@ async fn server_runtime_without_local_capability_never_advertises_or_executes_fi
     assert!(terminal.executions().is_empty());
 }
 
+// ── Task 3: backend ToolRouter (external MCP / task-CRUD tools) ─────────────
+
+/// A router that "handles" a fixed set of tool names with a canned succeeded
+/// result; anything else falls through (`None` → engine `Unsupported`).
+#[derive(Clone)]
+struct ScriptedRouter {
+    handled: Arc<Mutex<Vec<(String, String)>>>, // (name, content)
+    calls: Arc<Mutex<Vec<String>>>,             // names actually dispatched
+}
+
+impl ScriptedRouter {
+    fn handle(name: &str, content: &str) -> Self {
+        Self {
+            handled: Arc::new(Mutex::new(vec![(name.into(), content.into())])),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+#[async_trait]
+impl ToolRouter for ScriptedRouter {
+    fn tool_specs(&self) -> Vec<ToolSpec> {
+        self.handled
+            .lock()
+            .iter()
+            .map(|(name, _)| ToolSpec {
+                name: name.clone(),
+                description: format!("backend tool {name}"),
+                input_schema: json!({ "type": "object", "properties": {} }),
+            })
+            .collect()
+    }
+
+    async fn dispatch(&self, tool_use_id: &str, name: &str, _input: Value) -> Option<ToolResult> {
+        self.calls.lock().push(name.to_string());
+        let content = self
+            .handled
+            .lock()
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, c)| c.clone())?;
+        Some(ToolResult {
+            tool_use_id: tool_use_id.to_string(),
+            content,
+            status: ToolResultStatus::Succeeded,
+        })
+    }
+}
+
+/// Provider: one `ToolUse` round (custom name/input) then a text round.
+fn tool_named_then_text(name: &str, input: Value, synthesis: &str) -> ScriptedProvider {
+    ScriptedProvider {
+        rounds: Arc::new(Mutex::new(VecDeque::from([
+            ScriptedRound {
+                round: ProviderRound {
+                    message: AgentMessage {
+                        role: AgentRole::Assistant,
+                        content: vec![ContentBlock::ToolUse {
+                            id: "tool-1".into(),
+                            name: name.into(),
+                            input,
+                        }],
+                    },
+                    stop: ProviderStop::ToolUse,
+                    usage: None,
+                },
+                deltas: vec![],
+            },
+            ScriptedRound {
+                round: text_round(synthesis),
+                deltas: vec![synthesis.to_string()],
+            },
+        ]))),
+        failures: Arc::new(Mutex::new(VecDeque::new())),
+        requests: Arc::new(Mutex::new(Vec::new())),
+        pending_when_empty: false,
+    }
+}
+
+async fn run_turn_with_router(
+    provider: ScriptedProvider,
+    sink: RecordingSink,
+    mode: ExecutionMode,
+    tool_router: Option<Arc<dyn ToolRouter>>,
+) -> Result<(), AgentError> {
+    let ctx = TurnContext {
+        owner_id: "owner-a".into(),
+        turn_id: "turn-1".into(),
+        request: valid_request(mode),
+        provider: Arc::new(provider),
+        sink: Arc::new(sink),
+        bridge: Arc::new(NoopBridge),
+        cancel_token: CancellationToken::new(),
+        expected: Arc::new(parking_lot::Mutex::new(
+            catio_lib::agent::ExpectedResponse::None,
+        )),
+        tool_router,
+    };
+    TurnEngine.run(ctx).await
+}
+
+#[tokio::test]
+async fn external_tool_is_dispatched_by_backend_router() {
+    let router = Arc::new(ScriptedRouter::handle("read_file", "content: hello"));
+    let sink = RecordingSink::default();
+    run_turn_with_router(
+        tool_named_then_text("read_file", json!({ "path": "/a" }), "done"),
+        sink.clone(),
+        ExecutionMode::Ask,
+        Some(router),
+    )
+    .await
+    .unwrap();
+    sink.wait_for_terminal().await;
+    assert_eq!(sink.tool_finished_statuses(), [ToolResultStatus::Succeeded]);
+    // The frontend must never receive an execution request for a backend tool.
+    assert!(
+        !sink.event_types().contains(&"toolExecutionRequested"),
+        "frontend must not execute backend tools"
+    );
+    assert!(sink.event_types().contains(&"toolProposed"));
+}
+
+#[tokio::test]
+async fn unknown_external_tool_is_unsupported() {
+    let router = Arc::new(ScriptedRouter::handle("read_file", "content"));
+    let sink = RecordingSink::default();
+    run_turn_with_router(
+        tool_named_then_text("nope", json!({}), "done"),
+        sink.clone(),
+        ExecutionMode::Ask,
+        Some(router),
+    )
+    .await
+    .unwrap();
+    sink.wait_for_terminal().await;
+    assert_eq!(
+        sink.tool_finished_statuses(),
+        [ToolResultStatus::Unsupported]
+    );
+}
+
 #[tokio::test]
 async fn final_action_round_can_save_report_and_final_synthesis_has_no_tools() {
     let root = tempfile::tempdir().unwrap();
@@ -1954,4 +2107,43 @@ async fn final_action_round_can_save_report_and_final_synthesis_has_no_tools() {
         .system_prompt
         .contains("final action round"));
     assert!(provider.request(2).tools.is_empty());
+}
+
+#[tokio::test]
+async fn no_router_keeps_unknown_tools_unsupported() {
+    let sink = RecordingSink::default();
+    run_turn_with_router(
+        tool_named_then_text("nope", json!({}), "done"),
+        sink.clone(),
+        ExecutionMode::Ask,
+        None,
+    )
+    .await
+    .unwrap();
+    sink.wait_for_terminal().await;
+    assert_eq!(
+        sink.tool_finished_statuses(),
+        [ToolResultStatus::Unsupported]
+    );
+}
+
+#[tokio::test]
+async fn router_tool_specs_are_offered_to_provider() {
+    let router = Arc::new(ScriptedRouter::handle("read_file", "content"));
+    let provider = tool_named_then_text("read_file", json!({}), "done");
+    let sink = RecordingSink::default();
+    run_turn_with_router(
+        provider.clone(),
+        sink.clone(),
+        ExecutionMode::Ask,
+        Some(router),
+    )
+    .await
+    .unwrap();
+    sink.wait_for_terminal().await;
+    let requests = provider.requests.lock();
+    assert!(!requests.is_empty());
+    let names: Vec<&str> = requests[0].tools.iter().map(|t| t.name.as_str()).collect();
+    assert!(names.contains(&"read_file"));
+    assert!(names.contains(&"terminal_exec"));
 }

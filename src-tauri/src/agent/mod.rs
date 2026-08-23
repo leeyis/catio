@@ -14,7 +14,7 @@ pub mod runtime;
 pub mod types;
 
 pub use bridge::{ClientBridge, NoopBridge, RuntimeBridge};
-pub use engine::{AgentEventSink, SequenceEmitter, TurnContext, TurnEngine};
+pub use engine::{AgentEventSink, SequenceEmitter, ToolRouter, TurnContext, TurnEngine};
 pub use legacy::{first_shell_tool, LegacyParseError};
 pub use policy::{PolicyDecision, ToolPolicy, ToolRisk};
 pub use provider::{

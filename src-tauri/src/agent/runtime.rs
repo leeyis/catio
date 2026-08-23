@@ -13,7 +13,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::bridge::RuntimeBridge;
-use crate::agent::engine::{TurnContext, TurnEngine};
+use crate::agent::engine::{ToolRouter, TurnContext, TurnEngine};
 use crate::agent::provider::Provider;
 use crate::agent::types::{
     ActorContext, AgentError, ClientTurnResponse, ExpectedResponse, ProviderConfig,
@@ -44,6 +44,7 @@ pub struct AgentRuntime {
     local_workspaces: Option<Arc<super::local_files::LocalWorkspaces>>,
     turns: Arc<Mutex<HashMap<String, ActiveTurn>>>,
     factory: Arc<dyn ProviderFactory>,
+    tool_router: Option<Arc<dyn ToolRouter>>,
 }
 
 impl AgentRuntime {
@@ -52,6 +53,7 @@ impl AgentRuntime {
             local_workspaces: None,
             turns: Arc::new(Mutex::new(HashMap::new())),
             factory,
+            tool_router: None,
         }
     }
 
@@ -60,6 +62,13 @@ impl AgentRuntime {
         workspaces: Arc<super::local_files::LocalWorkspaces>,
     ) -> Self {
         self.local_workspaces = Some(workspaces);
+        self
+    }
+
+    /// Attach a backend tool router (external MCP tools, task-CRUD tools).
+    /// Builder-style so the production/runtime wiring can stay explicit.
+    pub fn with_tool_router(mut self, tool_router: Arc<dyn ToolRouter>) -> Self {
+        self.tool_router = Some(tool_router);
         self
     }
 
@@ -97,6 +106,7 @@ impl AgentRuntime {
             ),
             cancel_token: cancel_token.clone(),
             expected: expected.clone(),
+            tool_router: self.tool_router.clone(),
         };
 
         // Insert the active entry BEFORE the engine task can run: a fast (or

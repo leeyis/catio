@@ -27,6 +27,22 @@ use crate::agent::types::{
 /// Terminal tool; local file tools are injected only for desktop workspaces.
 pub const TERMINAL_EXEC: &str = "terminal_exec";
 
+/// Optional backend tool router. When a provider proposes a non-`terminal_exec`
+/// tool (external MCP tool, task-CRUD tool), the engine asks the router to
+/// dispatch it in the backend instead of delegating to the frontend bridge —
+/// frontends must never receive an execution request for a backend tool.
+///
+/// `tool_specs` are merged into the per-round tool list the provider may
+/// propose; `dispatch` returns `Some(result)` when it handled the tool and
+/// `None` when the name is unknown (engine reports `Unsupported`).
+#[async_trait]
+pub trait ToolRouter: Send + Sync {
+    /// Extra tool specs offered to the provider this turn.
+    fn tool_specs(&self) -> Vec<ToolSpec>;
+    /// Try to execute `name` in the backend.
+    async fn dispatch(&self, tool_use_id: &str, name: &str, input: Value) -> Option<ToolResult>;
+}
+
 /// Ordered event delivery for one Turn.
 #[async_trait]
 pub trait AgentEventSink: Send + Sync {
@@ -45,6 +61,9 @@ pub struct TurnContext {
     /// Set by the engine before the matching UI event; `respond` validates
     /// against it without racing the engine task.
     pub expected: Arc<Mutex<ExpectedResponse>>,
+    /// Optional backend router for non-`terminal_exec` tools. Absent → unknown
+    /// tools stay `Unsupported` (P0 baseline).
+    pub tool_router: Option<Arc<dyn ToolRouter>>,
 }
 
 /// The only component that can create `AgentEventEnvelope`s. Emits a strictly
@@ -301,6 +320,9 @@ impl TurnEngine {
                 if files.is_some() {
                     tools.extend(local_files::tool_specs());
                 }
+                if let Some(router) = &ctx.tool_router {
+                    tools.extend(router.tool_specs());
+                }
                 tools
             };
             let allowed_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
@@ -517,7 +539,7 @@ impl TurnEngine {
         let name = tool_use.name.as_str();
         let is_file = matches!(name, READ_FILE | WRITE_FILE);
         let files = ctx.bridge.local_files().filter(|f| f.is_active());
-        if (name != TERMINAL_EXEC && !(is_file && files.is_some()))
+        if (name != TERMINAL_EXEC && !(is_file && files.is_some()) && ctx.tool_router.is_none())
             || allowed_names.is_some_and(|names| !names.iter().any(|n| n == name))
         {
             let result = ToolResult {
@@ -533,6 +555,43 @@ impl TurnEngine {
                     risk: Vec::new(),
                 })
                 .await?;
+            emitter
+                .emit(AgentEvent::ToolFinished {
+                    tool_use_id: tool_use_id.clone(),
+                    result: result.clone(),
+                })
+                .await?;
+            return Ok(result);
+        }
+        if name != TERMINAL_EXEC && !(is_file && files.is_some()) {
+            emitter
+                .emit(AgentEvent::ToolProposed {
+                    tool_use_id: tool_use_id.clone(),
+                    name: name.to_string(),
+                    input: tool_use.input.clone(),
+                    risk: Vec::new(),
+                })
+                .await?;
+            // Backend tools never reach the frontend bridge: a `ToolExecutionRequested`
+            // would wrongly drive the PTY adapter. The router handles them in-process.
+            let result = match &ctx.tool_router {
+                Some(router) => match router
+                    .dispatch(&tool_use_id, name, tool_use.input.clone())
+                    .await
+                {
+                    Some(result) => result,
+                    None => ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        content: format!("unknown tool: {name}"),
+                        status: ToolResultStatus::Unsupported,
+                    },
+                },
+                None => ToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    content: format!("unknown tool: {name}"),
+                    status: ToolResultStatus::Unsupported,
+                },
+            };
             emitter
                 .emit(AgentEvent::ToolFinished {
                     tool_use_id: tool_use_id.clone(),
