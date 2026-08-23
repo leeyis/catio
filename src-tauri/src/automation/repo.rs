@@ -87,6 +87,18 @@ impl AutomationStore {
         self.save_locked(&g)
     }
 
+    /// All enabled tasks across owners — the scheduler's view. Owner identity
+    /// stays attached to each task so dispatch can route by owner.
+    pub fn all_enabled_tasks(&self) -> Vec<ScheduledTask> {
+        self.inner
+            .read()
+            .tasks
+            .iter()
+            .filter(|t| t.enabled)
+            .cloned()
+            .collect()
+    }
+
     pub fn set_task_enabled(
         &self,
         owner: &str,

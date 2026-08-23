@@ -7,10 +7,12 @@
 
 pub mod mcp_client;
 pub mod repo;
+pub mod scheduler;
 pub mod skill;
 pub mod types;
 
 pub use repo::AutomationStore;
+pub use scheduler::{cron_matches, should_fire, Scheduler, TaskDispatcher};
 pub use skill::{
     install_skill, new_skill_from_import, parse_skill_json, render_template, SkillImport,
 };
