@@ -354,8 +354,15 @@ pub fn run() {
                         results.clone(),
                         client.clone(),
                     ));
-                let scheduler = automation::scheduler::Scheduler::new(store.clone(), dispatcher);
-                scheduler.start(std::time::Duration::from_secs(1));
+                let scheduler = std::sync::Arc::new(automation::scheduler::Scheduler::new(
+                    store.clone(),
+                    dispatcher,
+                ));
+                // `tauri::async_runtime::spawn` runs the loop inside the Tokio
+                // runtime (a bare `tokio::spawn` would panic in setup).
+                tauri::async_runtime::spawn(async move {
+                    scheduler.run(std::time::Duration::from_secs(1)).await
+                });
                 app.manage(automation::commands::AutomationService {
                     store,
                     history,

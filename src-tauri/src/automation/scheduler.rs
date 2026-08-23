@@ -140,7 +140,19 @@ impl Scheduler {
         }
     }
 
+    /// The tick loop, awaiting in a Tokio runtime. Callers spawn it with
+    /// `tokio::spawn` (tests) or `tauri::async_runtime::spawn` (app setup,
+    /// where a bare `tokio::spawn` would panic on a non-runtime thread).
+    pub async fn run(self: Arc<Self>, tick: Duration) {
+        let inner = self.inner.clone();
+        loop {
+            tokio::time::sleep(tick).await;
+            tick_once(inner.clone(), Utc::now());
+        }
+    }
+
     /// Start the tick loop. Re-spawning replaces the previous loop.
+    /// Requires an active Tokio runtime (tests); app setup must use `run`.
     pub fn start(&self, tick: Duration) {
         let inner = self.inner.clone();
         let handle = tokio::spawn(async move {
