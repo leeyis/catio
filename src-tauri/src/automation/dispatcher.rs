@@ -28,6 +28,8 @@ use crate::ssh::manager::SessionManager;
 use crate::ssh::multiexec::run_on;
 
 use super::history::{PromptHistoryEntry, PromptHistoryStore, PromptOutcome, PromptSource};
+use super::mcp_client::McpClient;
+use super::mcp_router::McpRouter;
 use super::prompt::build_user_prompt;
 use super::repo::AutomationStore;
 use super::scheduler::TaskDispatcher;
@@ -87,6 +89,7 @@ pub struct AutomationDispatcher {
     history: Arc<PromptHistoryStore>,
     provider: Arc<dyn ProviderConfigSource>,
     results: TaskResults,
+    mcp: Arc<McpClient>,
 }
 
 impl AutomationDispatcher {
@@ -98,6 +101,7 @@ impl AutomationDispatcher {
         history: Arc<PromptHistoryStore>,
         provider: Arc<dyn ProviderConfigSource>,
         results: TaskResults,
+        mcp: Arc<McpClient>,
     ) -> Self {
         Self {
             repo,
@@ -106,6 +110,7 @@ impl AutomationDispatcher {
             history,
             provider,
             results,
+            mcp,
         }
     }
 
@@ -165,7 +170,7 @@ impl AutomationDispatcher {
                 let summary = if out.trim().is_empty() {
                     "exit 0（无输出）".to_string()
                 } else {
-                    truncate(&out.trim(), 200)
+                    truncate(out.trim(), 200)
                 };
                 self.record(&task.id, TaskRunStatus::Success, summary);
             }
@@ -222,9 +227,20 @@ impl AutomationDispatcher {
         };
         let sink =
             HistoryCollectingSink::new(self.history.clone(), self.results.clone(), task.clone());
+        // Scope the turn's external-MCP tools to the task's chosen connections.
+        let mcp_router: Option<Arc<dyn crate::agent::engine::ToolRouter>> =
+            if task.mcp_ids.is_empty() {
+                None
+            } else {
+                Some(Arc::new(McpRouter::scoped(
+                    self.repo.clone(),
+                    self.mcp.clone(),
+                    task.mcp_ids.clone(),
+                )))
+            };
         if let Err(e) = self
             .runtime
-            .start_turn_with_unattended(actor, request, Arc::new(sink), unattended)
+            .start_turn_with_router(actor, request, Arc::new(sink), unattended, mcp_router)
             .await
         {
             self.record(&task.id, TaskRunStatus::Failed, format!("启动失败: {e}"));

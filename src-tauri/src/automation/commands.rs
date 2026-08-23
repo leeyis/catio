@@ -100,7 +100,7 @@ pub async fn install_skill_for_owner(
 pub struct AutomationService {
     pub store: Arc<AutomationStore>,
     pub history: Arc<PromptHistoryStore>,
-    pub client: McpClient,
+    pub client: Arc<McpClient>,
     pub http: reqwest::Client,
     /// Last-run results for scheduled tasks, surfaced to the task list.
     pub results: TaskResults,
@@ -249,7 +249,7 @@ pub async fn automation_test_mcp(
 ) -> Result<Vec<String>, String> {
     let mut conn = conn;
     conn.owner_id = DESKTOP_OWNER.to_string();
-    test_mcp(&state.client, conn)
+    test_mcp(state.client.as_ref(), conn)
         .await
         .map_err(|e| e.to_string())
 }

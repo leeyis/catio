@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use rand::RngExt as _;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -44,7 +44,10 @@ pub struct AgentRuntime {
     local_workspaces: Option<Arc<super::local_files::LocalWorkspaces>>,
     turns: Arc<Mutex<HashMap<String, ActiveTurn>>>,
     factory: Arc<dyn ProviderFactory>,
-    tool_router: Option<Arc<dyn ToolRouter>>,
+    /// Global backend tool router (external MCP tools, task-CRUD tools).
+    /// Mutable at runtime so connections added after startup take effect; a
+    /// per-turn router may still override it.
+    tool_router: RwLock<Option<Arc<dyn ToolRouter>>>,
 }
 
 impl AgentRuntime {
@@ -53,7 +56,7 @@ impl AgentRuntime {
             local_workspaces: None,
             turns: Arc::new(Mutex::new(HashMap::new())),
             factory,
-            tool_router: None,
+            tool_router: RwLock::new(None),
         }
     }
 
@@ -65,11 +68,9 @@ impl AgentRuntime {
         self
     }
 
-    /// Attach a backend tool router (external MCP tools, task-CRUD tools).
-    /// Builder-style so the production/runtime wiring can stay explicit.
-    pub fn with_tool_router(mut self, tool_router: Arc<dyn ToolRouter>) -> Self {
-        self.tool_router = Some(tool_router);
-        self
+    /// Set the global backend tool router (replaces any previous one).
+    pub fn set_tool_router(&self, tool_router: Arc<dyn ToolRouter>) {
+        *self.tool_router.write() = Some(tool_router);
     }
 
     /// Production runtime with the shared reqwest-backed provider factory.
@@ -100,6 +101,21 @@ impl AgentRuntime {
         events: Arc<dyn AgentEventSink>,
         unattended: Option<UnattendedPolicy>,
     ) -> Result<TurnHandle, AgentError> {
+        self.start_turn_with_router(actor, request, events, unattended, None)
+            .await
+    }
+
+    /// Like `start_turn_with_unattended`, but lets the caller scope the backend
+    /// tool router to this turn (e.g. a task's chosen MCP connections). Falls
+    /// back to the runtime's global router when `tool_router` is `None`.
+    pub async fn start_turn_with_router(
+        &self,
+        actor: ActorContext,
+        request: StartTurnRequest,
+        events: Arc<dyn AgentEventSink>,
+        unattended: Option<UnattendedPolicy>,
+        tool_router: Option<Arc<dyn ToolRouter>>,
+    ) -> Result<TurnHandle, AgentError> {
         request.validate()?;
         let files = self.local_workspaces.as_ref().and_then(|w| w.snapshot());
         let provider = self.factory.create(&request.provider).await?;
@@ -119,7 +135,7 @@ impl AgentRuntime {
             ),
             cancel_token: cancel_token.clone(),
             expected: expected.clone(),
-            tool_router: self.tool_router.clone(),
+            tool_router: tool_router.or_else(|| self.tool_router.read().clone()),
             unattended,
         };
 

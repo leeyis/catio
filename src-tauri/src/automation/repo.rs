@@ -198,6 +198,12 @@ impl AutomationStore {
             .collect()
     }
 
+    /// All connections regardless of owner — used only by the Agent's tool
+    /// router to advertise tool names (dispatch still enforces owner scope).
+    pub fn all_mcps(&self) -> Vec<McpConnection> {
+        self.inner.read().mcps.clone()
+    }
+
     pub fn upsert_mcp(&self, mcp: &McpConnection) -> Result<(), AutomationError> {
         if mcp.name.trim().is_empty() {
             return Err(AutomationError::Invalid("mcp name is required".into()));

@@ -9,6 +9,7 @@ pub mod commands;
 pub mod dispatcher;
 pub mod history;
 pub mod mcp_client;
+pub mod mcp_router;
 pub mod prompt;
 pub mod repo;
 pub mod scheduler;
@@ -17,6 +18,7 @@ pub mod task_router;
 pub mod types;
 
 pub use history::{PromptHistoryEntry, PromptHistoryStore, PromptOutcome, PromptSource};
+pub use mcp_router::McpRouter;
 pub use prompt::build_user_prompt;
 pub use repo::AutomationStore;
 pub use scheduler::{cron_matches, should_fire, Scheduler, TaskDispatcher};

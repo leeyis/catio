@@ -320,7 +320,7 @@ pub fn run() {
                 let store = std::sync::Arc::new(automation::AutomationStore::open(&auto_dir));
                 let history = std::sync::Arc::new(automation::PromptHistoryStore::open(&auto_dir));
                 let http = reqwest::Client::new();
-                let client = automation::mcp_client::McpClient::new(http.clone());
+                let client = std::sync::Arc::new(automation::mcp_client::McpClient::new(http.clone()));
                 let results: automation::dispatcher::TaskResults =
                     std::sync::Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new()));
                 let provider =
@@ -337,6 +337,13 @@ pub fn run() {
                     .state::<std::sync::Arc<agent::AgentRuntime>>()
                     .inner()
                     .clone();
+                // External-MCP tools are wired into the Agent runtime globally, so
+                // the in-app Agent panel can call them too (the scheduler scopes
+                // them per task via a scoped router).
+                runtime.set_tool_router(std::sync::Arc::new(automation::McpRouter::new(
+                    store.clone(),
+                    client.clone(),
+                )));
                 let dispatcher =
                     std::sync::Arc::new(automation::dispatcher::AutomationDispatcher::new(
                         store.clone(),
@@ -345,6 +352,7 @@ pub fn run() {
                         history.clone(),
                         provider.clone(),
                         results.clone(),
+                        client.clone(),
                     ));
                 let scheduler = automation::scheduler::Scheduler::new(store.clone(), dispatcher);
                 scheduler.start(std::time::Duration::from_secs(1));

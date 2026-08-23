@@ -98,7 +98,12 @@ import type { AuthUser } from './components/auth/AuthGate'
 import type { Attachment, AgentFileActivity } from './components/panels/AIPanel'
 import { prepareAgentWorkspace, setAgentWorkspaceScope } from './state/agentWorkspace'
 import { setAgentConfig } from './state/agentConfig'
-import { automationListPromptHistory, type PromptHistoryEntry } from './services/automation'
+import {
+  automationListPromptHistory,
+  automationListSkills,
+  type PromptHistoryEntry,
+  type Skill,
+} from './services/automation'
 
 type AgentRunTarget = CapturableTerminalTarget | { kind: 'uncaptured'; chanId: string }
 
@@ -178,6 +183,10 @@ export default function App() {
     if (!(activePanel === 'history' && panelOpen)) return
     void automationListPromptHistory().then(setPromptHistory)
   }, [activePanel, panelOpen])
+  // Enabled global skills are auto-injected into Agent-panel messages so the
+  // in-app Agent uses them without extra UI.
+  const [agentSkills, setAgentSkills] = useState<Skill[]>([])
+  useEffect(() => { void automationListSkills().then(setAgentSkills) }, [])
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false)
   const [detailConn, setDetailConn] = useState<Connection | null>(null)
   const [showNew, setShowNew] = useState<boolean>(false)
@@ -2140,13 +2149,19 @@ export default function App() {
         content: [{ type: 'text', text: m.content }],
       }))
 
+      // Enabled global skills are prepended so the in-app Agent follows their
+      // instructions (target-scoped skills bind to specific hosts/dbs only).
+      const enabledGlobal = agentSkills.filter(s => s.enabled && s.scope === 'global')
+      const skillBlock = enabledGlobal.map(s => s.promptTemplate.trim()).filter(Boolean).join('\n\n')
+      const userText = skillBlock ? `${skillBlock}\n\n${text}` : text
+
       const request: AgentTurnRequest = {
         conversationId: convId,
         // Prior history enters as text snapshots; the CURRENT user message is
         // always the last request message (never the empty assistant placeholder).
         messages: [
           ...priorMessages,
-          { role: 'user', content: [{ type: 'text', text }] },
+          { role: 'user', content: [{ type: 'text', text: userText }] },
         ],
         systemPrompt,
         terminalContext: termTail,
