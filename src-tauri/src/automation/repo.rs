@@ -133,7 +133,14 @@ impl AutomationStore {
         }
         let mut g = self.inner.write();
         if let Some(existing) = g.skills.iter_mut().find(|s| s.id == skill.id) {
-            *existing = skill.clone();
+            // Immutable versions: an edit never overwrites an equal-or-stale
+            // version — it publishes a new one. (History of old versions is a
+            // later-stage concern; P0 keeps the current version + bump count.)
+            let mut updated = skill.clone();
+            if updated.version <= existing.version {
+                updated.version = existing.version + 1;
+            }
+            *existing = updated;
         } else {
             g.skills.push(skill.clone());
         }

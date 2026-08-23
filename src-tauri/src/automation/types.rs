@@ -16,6 +16,8 @@ pub enum AutomationError {
     NotFound(String),
     #[error("storage: {0}")]
     Storage(String),
+    #[error("network: {0}")]
+    Network(String),
 }
 
 /// A scheduled task fires on a trigger and executes a shell script or an Agent

@@ -177,3 +177,21 @@ fn store_set_task_enabled_toggles() {
     assert!(store.list_tasks("owner-a")[0].enabled);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn store_skill_version_bumps_on_update() {
+    let dir = std::env::temp_dir().join(format!("catio-auto-v-{}", std::process::id()));
+    let store = store_in(&dir);
+
+    let mut s = skill("owner-a"); // version 1
+    store.upsert_skill(&s).unwrap();
+    assert_eq!(store.list_skills("owner-a")[0].version, 1);
+
+    // Editing the same skill with a stale/equal version must bump, not overwrite.
+    s.name = "改名巡检".into();
+    store.upsert_skill(&s).unwrap();
+    assert_eq!(store.list_skills("owner-a")[0].version, 2);
+    assert_eq!(store.list_skills("owner-a")[0].name, "改名巡检");
+    assert_eq!(store.list_skills("owner-a").len(), 1);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
