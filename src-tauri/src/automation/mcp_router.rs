@@ -96,8 +96,20 @@ impl ToolRouter for McpRouter {
             .into_iter()
             .find(|c| c.discovered_tools.iter().any(|t| t == name))?;
 
-        // Attach the session-only credential, then call the tool.
-        let credential = self.repo.mcp_credential(owner_id, &conn.id)?;
+        // Attach the session-only credential, then call the tool. A connection
+        // with no credential this session is a real failure (tool exists but
+        // can't be called), not an "unknown tool".
+        let credential = match self.repo.mcp_credential(owner_id, &conn.id) {
+            Some(c) => c,
+            None => {
+                return Some(ToolResult {
+                    tool_use_id: tool_use_id.to_string(),
+                    content: "mcp tool unavailable: connection credential not set this session"
+                        .into(),
+                    status: ToolResultStatus::Failed,
+                });
+            }
+        };
         conn.credential = credential;
 
         match self.client.call_tool(&conn, name, &input).await {

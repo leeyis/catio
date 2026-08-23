@@ -987,6 +987,8 @@
     "mcpAdd": "Add MCP",
     "mcpTest": "Test Connection",
     "historySql": "Database",
+    "builtinTasks": "Task Management",
+    "builtinTasksSub": "Agent can CRUD scheduled tasks",
     "cancel": "Cancel",
     "sessionHistory": "Session history",
     "newConversation": "New conversation",

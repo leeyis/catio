@@ -37,6 +37,24 @@ export function McpPanel({ onClose }: { onClose: () => void }) {
     <PanelShell icon="m" title={t('panels.mcpTitle')} sub={t('panels.mcpSub')} onClose={onClose}
       actions={<Btn size="sm" variant="primary" icon="plus" onClick={() => setShowNew(true)}>{t('panels.mcpAdd')}</Btn>}>
       <div className="col grow" style={{ minHeight: 0, overflowY: 'auto', padding: 10, gap: 6 }}>
+        <div key="__builtin__" className="row gap10"
+          style={{ padding: '10px 12px', borderRadius: 10, background: 'color-mix(in srgb, var(--accent-primary) 5%, var(--surface-card))', border: '1px solid var(--accent-border)' }}>
+          <div className="icon-badge" style={{ width: 34, height: 34, borderRadius: 9, background: 'var(--accent-soft)', color: 'var(--accent-primary)' }}>
+            <Icon name="alarm-clock" size={16} />
+          </div>
+          <div className="col grow" style={{ minWidth: 0, gap: 2 }}>
+            <div className="row gap6" style={{ minWidth: 0, flexWrap: 'wrap' }}>
+              <span className="ell" style={{ fontSize: 13, fontWeight: 600 }}>{t('panels.builtinTasks')}</span>
+              <span className="chip" style={{ background: 'color-mix(in srgb, var(--signal-green) 14%, transparent)', color: 'var(--signal-green)' }}>内置</span>
+              <span className="chip">MCP</span>
+            </div>
+            <span className="ell mono" style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>catio://builtin/tasks</span>
+            <div className="row gap6" style={{ flexWrap: 'wrap' }}>
+              <span className="chip">6 工具</span>
+              <span className="chip">{t('panels.builtinTasksSub')}</span>
+            </div>
+          </div>
+        </div>
         {mcps.length === 0 && (
           <div className="col" style={{ alignItems: 'center', padding: '30px 0', gap: 8, color: 'var(--text-faint)' }}>
             <Icon name="m" size={22} /><span style={{ fontSize: 12.5 }}>{t('panels.mcpAdd')}</span>

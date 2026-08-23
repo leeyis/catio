@@ -6,6 +6,7 @@
 //! `owner_id` and never trust a client-supplied one.
 
 pub mod commands;
+pub mod composite;
 pub mod dispatcher;
 pub mod history;
 pub mod mcp_client;
@@ -17,6 +18,7 @@ pub mod skill;
 pub mod task_router;
 pub mod types;
 
+pub use composite::CompositeRouter;
 pub use history::{PromptHistoryEntry, PromptHistoryStore, PromptOutcome, PromptSource};
 pub use mcp_router::McpRouter;
 pub use prompt::build_user_prompt;
