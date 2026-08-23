@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn, IconBtn, Segmented } from '../atoms'
 import { PanelShell } from './PanelShell'
-import { AutoModal } from './AutoModal'
+import { AutoModal, SearchSelect, type TargetOption } from './AutoModal'
 import {
   automationDeleteSkill,
   automationImportSkill,
@@ -29,7 +29,7 @@ const riskChip = (risk: Skill['riskPolicy']) => {
   return <span className="chip" style={{ background: `color-mix(in srgb, ${color} 14%, transparent)`, color }}>{label}</span>
 }
 
-export function SkillsPanel({ onClose }: { onClose: () => void }) {
+export function SkillsPanel({ onClose, targets }: { onClose: () => void; targets: TargetOption[] }) {
   const { t } = useTranslation()
   const [skills, setSkills] = useState<Skill[]>([])
   const [mode, setMode] = useState<'import' | 'install' | null>(null)
@@ -76,12 +76,12 @@ export function SkillsPanel({ onClose }: { onClose: () => void }) {
         ))}
       </div>
 
-      {mode && <SkillFormModal mode={mode} onClose={() => setMode(null)} onDone={() => { setMode(null); refresh() }} />}
+      {mode && <SkillFormModal mode={mode} targets={targets} onClose={() => setMode(null)} onDone={() => { setMode(null); refresh() }} />}
     </PanelShell>
   )
 }
 
-function SkillFormModal({ mode, onClose, onDone }: { mode: 'import' | 'install'; onClose: () => void; onDone: () => void }) {
+function SkillFormModal({ mode, targets, onClose, onDone }: { mode: 'import' | 'install'; targets: TargetOption[]; onClose: () => void; onDone: () => void }) {
   const { t } = useTranslation()
   const [scope, setScope] = useState<SkillScope>('global')
   const [targetRef, setTargetRef] = useState('')
@@ -112,7 +112,7 @@ function SkillFormModal({ mode, onClose, onDone }: { mode: 'import' | 'install';
         <span style={label}>{t('panels.skillScope')}</span>
         <Segmented size="sm" value={scope} onChange={v => setScope(v as SkillScope)}
           options={[{ value: 'global', label: '全局' }, { value: 'target', label: '指定连接' }]} />
-        {scope === 'target' && <input style={input} value={targetRef} onChange={e => setTargetRef(e.target.value)} placeholder="web-01 / postgres-prod" />}
+        {scope === 'target' && <SearchSelect options={targets} value={targetRef} onChange={setTargetRef} placeholder="选择已连接的主机或数据库…" />}
       </div>
       {mode === 'import' ? (
         <div className="col gap4">

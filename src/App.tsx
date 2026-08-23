@@ -1,5 +1,5 @@
 /* ported from ref-ui/_extract/blob15.txt — verbatim per plan T1-T7 */
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { TitleBar, Sidebar, IconRail } from './components/shell/Sidebar'
 import { HomeView } from './components/views/HomeView'
@@ -99,6 +99,7 @@ import type { AuthUser } from './components/auth/AuthGate'
 import type { Attachment, AgentFileActivity } from './components/panels/AIPanel'
 import { prepareAgentWorkspace, setAgentWorkspaceScope } from './state/agentWorkspace'
 import { setAgentConfig } from './state/agentConfig'
+import type { TargetOption } from './components/panels/AutoModal'
 import {
   automationListPromptHistory,
   automationListSkills,
@@ -2317,6 +2318,19 @@ export default function App() {
   // the panel always has something to render for the active tab's host).
   const activeConvId = cur ? currentConvByTab[cur.id] : undefined
   const activeConversation = activeConvId ? conversations.find(c => c.id === activeConvId) : undefined
+  // Selectable targets for task/skill forms: live SSH sessions (keyed by their
+  // session id — what the backend session registry uses) + saved databases.
+  const taskTargets = useMemo<TargetOption[]>(() => {
+    const out: TargetOption[] = []
+    for (const [connId, sid] of Object.entries(sessionMap)) {
+      const conn = liveConns[connId]
+      out.push({ id: sid, name: conn?.name ?? connId, kind: 'host' })
+    }
+    for (const c of vaultConns) {
+      if (c.kind === 'db') out.push({ id: c.id, name: c.name, kind: 'db' })
+    }
+    return out
+  }, [sessionMap, liveConns, vaultConns])
   const activeConvBusy = activeConvId ? !!busyConvs[activeConvId] : false
   const activeTabBusy = cur ? !!agentAborts.current[cur.id] : false
   const agentHistory = cur ? conversationsForHost(cur.connId) : []
@@ -2475,8 +2489,8 @@ export default function App() {
                   void (async () => { for (const id of ids) await deleteDbHistory(id) })()
                 }}
                 onInsert={insertToTerminal} canInsert={canInsert} canInsertEditor={canInsertEditor} />}
-              {activePanel === 'tasks' && <TasksPanel onClose={() => setPanelOpen(false)} />}
-              {activePanel === 'skills' && <SkillsPanel onClose={() => setPanelOpen(false)} />}
+              {activePanel === 'tasks' && <TasksPanel onClose={() => setPanelOpen(false)} targets={taskTargets} />}
+              {activePanel === 'skills' && <SkillsPanel onClose={() => setPanelOpen(false)} targets={taskTargets} />}
               {activePanel === 'mcp' && <McpPanel onClose={() => setPanelOpen(false)} />}
               {/* DetailsPanel branches internally on conn.kind === 'db': DB conns use the
                   onEditDb/onDeleteDb/onConnectDb handlers; host conns use the SSH handlers. */}

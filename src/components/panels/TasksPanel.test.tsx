@@ -40,14 +40,14 @@ describe('TasksPanel', () => {
 
   it('renders tasks from the automation store', async () => {
     vi.mocked(automationListTasks).mockResolvedValue([TASK as never])
-    render(wrap(<TasksPanel onClose={() => {}} />))
+    render(wrap(<TasksPanel onClose={() => {}} targets={[]} />))
     expect(await screen.findByText('每日数据库备份巡检')).toBeTruthy()
     expect(screen.getByText(/0 2 \* \* \*/)).toBeTruthy()
   })
 
   it('shows an empty hint when there are no tasks', async () => {
     vi.mocked(automationListTasks).mockResolvedValue([])
-    render(wrap(<TasksPanel onClose={() => {}} />))
+    render(wrap(<TasksPanel onClose={() => {}} targets={[]} />))
     // The panel still renders its header title.
     expect(await screen.findByText('定时任务')).toBeTruthy()
   })

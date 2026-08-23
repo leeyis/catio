@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn, IconBtn, Segmented } from '../atoms'
 import { PanelShell } from './PanelShell'
-import { AutoModal } from './AutoModal'
+import { AutoModal, SearchSelect, type TargetOption } from './AutoModal'
 import { isTauri } from '../../services/ssh'
 import {
   automationCreateTask,
@@ -60,7 +60,7 @@ function nextLabel(t: TaskTrigger): string {
 
 // ── panel ───────────────────────────────────────────────────────────────────
 
-export function TasksPanel({ onClose }: { onClose: () => void }) {
+export function TasksPanel({ onClose, targets }: { onClose: () => void; targets: TargetOption[] }) {
   const { t } = useTranslation()
   const [tasks, setTasks] = useState<ScheduledTask[]>([])
   const [skills, setSkills] = useState<Skill[]>([])
@@ -164,13 +164,13 @@ export function TasksPanel({ onClose }: { onClose: () => void }) {
       {showNew && (
         <AutoModal title={t('panels.tasksNew')} onClose={() => setShowNew(false)}
           footer={<Btn variant="secondary" onClick={() => setShowNew(false)}>{t('panels.cancel')}</Btn>}>
-          <TaskForm skills={skills} mcps={mcps} onDone={() => { setShowNew(false); refresh() }} />
+          <TaskForm skills={skills} mcps={mcps} targets={targets} onDone={() => { setShowNew(false); refresh() }} />
         </AutoModal>
       )}
       {editing && (
         <AutoModal title={t('panels.tasksEdit')} onClose={() => setEditing(null)}
           footer={<Btn variant="secondary" onClick={() => setEditing(null)}>{t('panels.cancel')}</Btn>}>
-          <TaskForm initial={editing} skills={skills} mcps={mcps} onDone={() => { setEditing(null); refresh() }} />
+          <TaskForm initial={editing} skills={skills} mcps={mcps} targets={targets} onDone={() => { setEditing(null); refresh() }} />
         </AutoModal>
       )}
     </PanelShell>
@@ -265,7 +265,7 @@ function fromTask(t: ScheduledTask): Draft {
   }
 }
 
-function TaskForm({ skills, mcps, onDone, initial }: { skills: Skill[]; mcps: McpConnection[]; onDone: () => void; initial?: ScheduledTask }) {
+function TaskForm({ skills, mcps, targets, onDone, initial }: { skills: Skill[]; mcps: McpConnection[]; targets: TargetOption[]; onDone: () => void; initial?: ScheduledTask }) {
   const [d, setD] = useState<Draft>(() => initial ? fromTask(initial) : emptyDraft)
   const set = (patch: Partial<Draft>) => setD(p => ({ ...p, ...patch }))
 
@@ -317,8 +317,8 @@ function TaskForm({ skills, mcps, onDone, initial }: { skills: Skill[]; mcps: Mc
           </>}
       </div>
       <div className="col gap4">
-        <span style={label}>目标主机 / 数据库（已连接会话 id）</span>
-        <input style={input} value={d.targetRef} onChange={e => set({ targetRef: e.target.value })} placeholder="postgres-prod · web-01 · * = 全部" />
+        <span style={label}>目标主机 / 数据库</span>
+        <SearchSelect options={targets} value={d.targetRef} onChange={id => set({ targetRef: id })} placeholder="选择已连接的主机或数据库…" />
       </div>
       <div className="col gap4">
         <span style={label}>无人值守权限策略</span>
