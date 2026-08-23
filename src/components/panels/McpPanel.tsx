@@ -46,7 +46,7 @@ export function McpPanel({ onClose }: { onClose: () => void }) {
           <div key={m.id} className="row gap10" style={{ padding: '10px 12px', borderRadius: 10, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)' }}>
             <div className="icon-badge" style={{ width: 34, height: 34, borderRadius: 9, background: 'var(--accent-soft)', color: 'var(--accent-primary)' }}><Icon name="m" size={16} /></div>
             <div className="col grow" style={{ minWidth: 0, gap: 2 }}>
-              <div className="row gap6" style={{ minWidth: 0 }}>
+              <div className="row gap6" style={{ minWidth: 0, flexWrap: 'wrap' }}>
                 <span className="ell" style={{ fontSize: 13, fontWeight: 600 }}>{m.name}</span>
                 {statusChip(m.status)}
                 <span className="chip">Streamable HTTP</span>

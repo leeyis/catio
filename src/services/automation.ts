@@ -213,8 +213,14 @@ export async function automationDeletePromptHistory(id: string): Promise<void> {
 
 // ---- task run results + provider (prompt tasks) ----
 
+const MOCK_RESULTS: TaskRunInfo[] = [
+  { taskId: 't1', status: 'success', summary: '34s', at: '2026-08-23T02:00:00Z' },
+  { taskId: 't2', status: 'failed', summary: '敏感命令被拒', at: '2026-08-23T16:30:00Z' },
+  { taskId: 't4', status: 'success', summary: '12s', at: '2026-08-23T09:00:00Z' },
+]
+
 export async function automationTaskResults(): Promise<TaskRunInfo[]> {
-  if (!isTauri()) return []
+  if (!isTauri()) return MOCK_RESULTS
   return tauriInvoke<TaskRunInfo[]>('automation_task_results')
 }
 

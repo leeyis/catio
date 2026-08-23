@@ -32,16 +32,29 @@ const triggerChip = (t: TaskTrigger): [string, string] => {
 const kindChip = (k: TaskKind): [string, string] =>
   k === 'shell' ? ['', 'shell'] : ['green', 'prompt']
 
+function fmtClock(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+function intervalLabel(seconds: number): string {
+  return seconds % 60 === 0 ? `每 ${seconds / 60} 分钟` : `每 ${seconds} 秒`
+}
+
 function triggerExpr(t: TaskTrigger): string {
   if (t.type === 'cron') return t.expr
-  if (t.type === 'interval') return `每 ${t.seconds}s`
-  return t.at
+  if (t.type === 'interval') return intervalLabel(t.seconds)
+  return fmtClock(t.at)
 }
 
 function nextLabel(t: TaskTrigger): string {
-  if (t.type === 'cron') return `每天 ${t.expr.split(/\s+/)[1] || ''}:${t.expr.split(/\s+/)[0] || ''}`
-  if (t.type === 'interval') return `每 ${Math.round(t.seconds / 60)} 分钟`
-  return t.at
+  if (t.type === 'cron') {
+    const [mm, hh] = t.expr.split(/\s+/)
+    return `每天 ${String(hh || '').padStart(2, '0')}:${String(mm || '').padStart(2, '0')}`
+  }
+  if (t.type === 'interval') return intervalLabel(t.seconds)
+  return fmtClock(t.at)
 }
 
 // ── panel ───────────────────────────────────────────────────────────────────
@@ -107,7 +120,7 @@ export function TasksPanel({ onClose }: { onClose: () => void }) {
                   <span className={`chip ${tc} mono`}>{tl}</span>
                 </div>
                 <div className="row gap6" style={{ minWidth: 0, flexWrap: 'wrap' }}>
-                  <span className="ell mono" style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>
+                  <span className="ell mono" style={{ fontSize: 10.5, color: 'var(--text-faint)' }} title={`${triggerExpr(task.trigger)} · 目标 ${task.targetRef ?? '—'}`}>
                     {triggerExpr(task.trigger)} · 目标 {task.targetRef || '—'}
                   </span>
                   {skillNames.length > 0 && <span className="chip violet">{skillNames.join(' / ')}</span>}

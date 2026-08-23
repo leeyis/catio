@@ -26,7 +26,7 @@ const riskChip = (risk: Skill['riskPolicy']) => {
     confirmedWrite: ['确认写入', 'var(--signal-amber)'],
   }
   const [label, color] = map[risk]
-  return <span className="chip" style={{ background: 'color-mix(in srgb, var(--signal-amber) 14%, transparent)', color }}>{label}</span>
+  return <span className="chip" style={{ background: `color-mix(in srgb, ${color} 14%, transparent)`, color }}>{label}</span>
 }
 
 export function SkillsPanel({ onClose }: { onClose: () => void }) {
@@ -59,7 +59,7 @@ export function SkillsPanel({ onClose }: { onClose: () => void }) {
           <div key={s.id} className="row gap10" style={{ padding: '10px 12px', borderRadius: 10, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', opacity: s.enabled ? 1 : 0.55 }}>
             <div className="icon-badge" style={{ width: 34, height: 34, borderRadius: 9, background: 'var(--accent-soft)', color: 'var(--accent-primary)' }}><Icon name="zap" size={16} /></div>
             <div className="col grow" style={{ minWidth: 0, gap: 2 }}>
-              <div className="row gap6" style={{ minWidth: 0 }}>
+              <div className="row gap6" style={{ minWidth: 0, flexWrap: 'wrap' }}>
                 <span className="ell" style={{ fontSize: 13, fontWeight: 600 }}>{s.name}</span>
                 <span className="chip mono">v{s.version}</span>
                 {scopeChip(s)}
