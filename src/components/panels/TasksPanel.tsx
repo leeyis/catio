@@ -313,6 +313,7 @@ function fromTask(t: ScheduledTask): Draft {
 }
 
 function TaskForm({ skills, mcps, targets, onDone, initial }: { skills: Skill[]; mcps: McpConnection[]; targets: TargetOption[]; onDone: () => void; initial?: ScheduledTask }) {
+  const { t } = useTranslation()
   const [d, setD] = useState<Draft>(() => initial ? fromTask(initial) : emptyDraft)
   const set = (patch: Partial<Draft>) => setD(p => ({ ...p, ...patch }))
 
@@ -366,7 +367,8 @@ function TaskForm({ skills, mcps, targets, onDone, initial }: { skills: Skill[];
         <Segmented size="sm" value={d.kind} onChange={v => set({ kind: v as TaskKind })}
           options={[{ value: 'shell', label: 'shell 脚本' }, { value: 'prompt', label: 'prompt' }]} />
         {d.kind === 'shell'
-          ? <textarea rows={3} style={{ ...input, height: 80, paddingTop: 8, fontFamily: 'var(--font-mono, monospace)' }} value={d.script} onChange={e => set({ script: e.target.value })} placeholder="pg_dump -Fc prod > /backup/prod.dump" />
+          ? <><textarea rows={3} style={{ ...input, height: 80, paddingTop: 8, fontFamily: 'var(--font-mono, monospace)' }} value={d.script} onChange={e => set({ script: e.target.value })} placeholder="pg_dump -Fc prod > /backup/prod.dump" />
+            <span style={{ fontSize: 11, color: 'var(--text-faint)', lineHeight: 1.5 }}>{t('panels.taskNeedSession')}</span></>
           : <>
             <textarea rows={3} style={{ ...input, height: 80, paddingTop: 8 }} value={d.prompt} onChange={e => set({ prompt: e.target.value })} placeholder="检查磁盘空间，超过 80% 时汇总最大文件并给出清理建议" />
             <MultiSelect labelText="引用技能" options={skills.map(s => ({ id: s.id, name: s.name, sub: s.riskPolicy === 'readonly' ? '只读' : s.riskPolicy === 'readonlyPreferred' ? '只读优先' : '确认写入' }))} value={d.skillIds} onChange={ids => set({ skillIds: ids })} />

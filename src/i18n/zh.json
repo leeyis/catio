@@ -990,6 +990,7 @@
     "builtinTasks": "任务管理",
     "builtinTasksSub": "Agent 可 CRUD 定时任务",
     "tasksEdit": "编辑任务",
+    "taskNeedSession": "shell 任务在目标主机上执行，需保持该主机已连接。目标断开时任务会失败并记录「目标未连接」。",
     "cancel": "取消",
     "sessionHistory": "会话历史",
     "newConversation": "新建对话",

@@ -184,6 +184,9 @@ export default function App() {
   const [panelOpen, setPanelOpen] = useState<boolean>(false)
   const [toolCalls, setToolCalls] = useState<Record<string, Record<string, AgentToolCall>>>({})
   const currentRoundRef = useRef<Record<string, number>>({})
+  // Assistant-message index at the start of the current turn, so a turn-local
+  // `round` maps to an absolute assistant-message index across history.
+  const turnStartAssistantIndexRef = useRef<Record<string, number>>({})
   const [promptHistory, setPromptHistory] = useState<PromptHistoryEntry[]>([])
   useEffect(() => {
     if (!(activePanel === 'history' && panelOpen)) return
@@ -1950,7 +1953,7 @@ export default function App() {
     if (evt.type === 'assistantMessageStarted') {
       currentRoundRef.current[convId] = Number(evt.round ?? 0)
     }
-    const afterMsg = currentRoundRef.current[convId] ?? 0
+    const afterMsg = (turnStartAssistantIndexRef.current[convId] ?? 0) + (currentRoundRef.current[convId] ?? 0)
     if (evt.type === 'toolProposed') {
       const toolUseId = String(evt.toolUseId ?? '')
       setToolCalls(prev => {
@@ -2154,6 +2157,9 @@ export default function App() {
 
       // Snapshot the prior messages for the outgoing payload BEFORE appending.
       const prior = conversationsRef.current.find(c => c.id === convId)?.messages ?? []
+      // Record the assistant-message index this turn starts at, so tool calls
+      // attach to the correct assistant message across a multi-turn history.
+      turnStartAssistantIndexRef.current[convId] = prior.filter(m => m.role === 'assistant').length
 
       // Append the user message + an empty assistant placeholder; persist.
       patchConversation(convId, c => ({

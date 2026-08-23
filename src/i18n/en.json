@@ -990,6 +990,7 @@
     "builtinTasks": "Task Management",
     "builtinTasksSub": "Agent can CRUD scheduled tasks",
     "tasksEdit": "Edit Task",
+    "taskNeedSession": "Shell tasks run on the target host and require it to stay connected. If it disconnects the run fails and records 'target not connected'.",
     "cancel": "Cancel",
     "sessionHistory": "Session history",
     "newConversation": "New conversation",
