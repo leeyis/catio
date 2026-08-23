@@ -38,7 +38,7 @@ fn field_matches(field: &str, min: u32, max: u32, value: u32) -> bool {
         }
         if let Some(rest) = part.strip_prefix("*/") {
             let n: u32 = rest.parse().unwrap_or(1);
-            if n > 0 && value % n == 0 {
+            if n > 0 && value.is_multiple_of(n) {
                 return true;
             }
         } else if let Some((a, b)) = part.split_once('-') {
