@@ -193,6 +193,22 @@ pub fn run() {
             ssh::monitor::ssh_sysinfo,
             ssh::monitor::ssh_detect_os,
             ssh::multiexec::multiexec_run,
+            automation::commands::automation_list_tasks,
+            automation::commands::automation_create_task,
+            automation::commands::automation_delete_task,
+            automation::commands::automation_set_task_enabled,
+            automation::commands::automation_list_skills,
+            automation::commands::automation_import_skill,
+            automation::commands::automation_install_skill,
+            automation::commands::automation_delete_skill,
+            automation::commands::automation_set_skill_enabled,
+            automation::commands::automation_list_mcps,
+            automation::commands::automation_add_mcp,
+            automation::commands::automation_delete_mcp,
+            automation::commands::automation_test_mcp,
+            automation::commands::automation_list_prompt_history,
+            automation::commands::automation_clear_prompt_history,
+            automation::commands::automation_delete_prompt_history,
             db::commands::db_connect,
             db::commands::db_test_connection,
             db::commands::db_disconnect,
@@ -290,6 +306,26 @@ pub fn run() {
             }
             app.manage(optical::OpticalState::from_installation(app.path().app_data_dir()?.join("optical.hash")));
             app.manage(installation::InstallationSettings::from_installation());
+            // Automation workbench storage (tasks / skills / MCP / prompt history)
+            // rooted at <app_data>/automation.
+            {
+                use tauri::Manager;
+                let auto_dir = app
+                    .path()
+                    .app_data_dir()
+                    .unwrap_or_else(|_| std::env::temp_dir())
+                    .join("automation");
+                let store = std::sync::Arc::new(automation::AutomationStore::open(&auto_dir));
+                let history = std::sync::Arc::new(automation::PromptHistoryStore::open(&auto_dir));
+                let http = reqwest::Client::new();
+                let client = automation::mcp_client::McpClient::new(http.clone());
+                app.manage(automation::commands::AutomationService {
+                    store,
+                    history,
+                    client,
+                    http,
+                });
+            }
             // Default the JDBC sidecar's driver-JAR directory to
             // <app_data>/jdbc/drivers (created if missing) unless the user
             // overrode CATIO_JDBC_DRIVERS_DIR. JDBC engines load their
