@@ -794,36 +794,48 @@ export function AIPanel({ visible = true, contextKey, onClose, mode = 'sql', con
         </div>
       ) : (
         <div ref={scrollRef} className="grow" style={{ overflowY: 'auto', padding: '14px 12px', display: 'flex', flexDirection: 'column', gap: 14 }}>
-          {msgs.map((m, i) => m.role === 'user'
-            ? <UserMessage key={i} text={m.content} busy={busy || preparing}
-                onAskAgain={onSend ? text => onSend(text, { hasSelection: false }) : undefined} />
-            : <AssistantMessage key={i} text={m.content} mode={mode} conn={conn} onInsert={onInsert} canInsert={canInsert}
-                isStreaming={busy && i === msgs.length - 1} />)}
+          {(() => {
+            let ai = 0
+            return msgs.map((m, i) => {
+              const isAsst = m.role === 'assistant'
+              const tools = isAsst ? (toolCalls ?? []).filter(c => c.afterMsg === ai) : []
+              if (isAsst) ai += 1
+              const ok = (s?: string) => s === 'succeeded' || s === 'success'
+              return (
+                <div key={i} className="col" style={{ gap: 10 }}>
+                  {m.role === 'user'
+                    ? <UserMessage text={m.content} busy={busy || preparing}
+                        onAskAgain={onSend ? text => onSend(text, { hasSelection: false }) : undefined} />
+                    : <AssistantMessage text={m.content} mode={mode} conn={conn} onInsert={onInsert} canInsert={canInsert}
+                        isStreaming={busy && i === msgs.length - 1} />}
+                  {tools.map(tc => (
+                    <details key={tc.id} style={{ border: '1px solid var(--border-hairline)', borderRadius: 8, background: 'var(--surface-subtle)', overflow: 'hidden' }}>
+                      <summary style={{ cursor: 'pointer', padding: '7px 10px', display: 'flex', alignItems: 'center', gap: 6, listStyle: 'none' }}>
+                        <Icon name="zap" size={12} style={{ color: 'var(--signal-violet)', flex: 'none' }} />
+                        <span className="mono" style={{ fontSize: 12, fontWeight: 600 }}>{tc.name || tc.id}</span>
+                        {tc.status && (
+                          <span className="chip" style={{ background: ok(tc.status) ? 'color-mix(in srgb, var(--signal-green) 14%, transparent)' : 'color-mix(in srgb, var(--signal-rose) 14%, transparent)', color: ok(tc.status) ? 'var(--signal-green)' : 'var(--signal-rose)' }}>{tc.status}</span>
+                        )}
+                        <span className="grow" />
+                        <Icon name="chevron-down" size={12} style={{ color: 'var(--text-faint)' }} />
+                      </summary>
+                      <div style={{ padding: '0 10px 8px', display: 'flex', flexDirection: 'column', gap: 4 }}>
+                        {tc.input !== undefined && (
+                          <pre className="mono" style={{ margin: 0, fontSize: 10.5, whiteSpace: 'pre-wrap', wordBreak: 'break-all', color: 'var(--text-tertiary)' }}>{typeof tc.input === 'string' ? tc.input : JSON.stringify(tc.input)}</pre>
+                        )}
+                        {tc.result ? (
+                          <span className="mono" style={{ fontSize: 10.5, color: 'var(--text-faint)', wordBreak: 'break-all' }}>{String(tc.result).slice(0, 300)}</span>
+                        ) : null}
+                      </div>
+                    </details>
+                  ))}
+                </div>
+              )
+            })
+          })()}
           {busy && msgs.length > 0 && msgs[msgs.length - 1].content === '' && (
             <div className="row gap6" style={{ color: 'var(--text-tertiary)', fontSize: 12 }}>
               <Icon name="loader" size={13} style={{ animation: 'spin 1s linear infinite' }} /> {t('panels.agentThinking')}
-            </div>
-          )}
-          {toolCalls && toolCalls.length > 0 && (
-            <div className="col" style={{ gap: 6 }}>
-              <span className="chip" style={{ alignSelf: 'flex-start', background: 'color-mix(in srgb, var(--signal-violet) 14%, transparent)', color: 'var(--signal-violet)' }}>工具调用</span>
-              {toolCalls.map(c => (
-                <div key={c.id} className="col" style={{ gap: 4, padding: '8px 10px', borderRadius: 8, border: '1px solid var(--border-hairline)', background: 'var(--surface-subtle)' }}>
-                  <div className="row gap6" style={{ minWidth: 0 }}>
-                    <Icon name="zap" size={12} style={{ color: 'var(--signal-violet)', flex: 'none' }} />
-                    <span className="ell mono" style={{ fontSize: 12, fontWeight: 600 }}>{c.name || c.id}</span>
-                    {c.status && (
-                      <span className="chip" style={{ background: c.status === 'succeeded' || c.status === 'success' ? 'color-mix(in srgb, var(--signal-green) 14%, transparent)' : 'color-mix(in srgb, var(--signal-rose) 14%, transparent)', color: c.status === 'succeeded' || c.status === 'success' ? 'var(--signal-green)' : 'var(--signal-rose)' }}>{c.status}</span>
-                    )}
-                  </div>
-                  {c.input !== undefined && (
-                    <pre className="mono" style={{ margin: 0, fontSize: 10.5, whiteSpace: 'pre-wrap', wordBreak: 'break-all', color: 'var(--text-tertiary)' }}>{typeof c.input === 'string' ? c.input : JSON.stringify(c.input)}</pre>
-                  )}
-                  {c.result ? (
-                    <span className="mono" style={{ fontSize: 10.5, color: 'var(--text-faint)', wordBreak: 'break-all' }}>{String(c.result).slice(0, 300)}</span>
-                  ) : null}
-                </div>
-              ))}
             </div>
           )}
         </div>

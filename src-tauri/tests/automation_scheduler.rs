@@ -211,3 +211,38 @@ async fn scheduler_fires_once_and_skips_overlap() {
     scheduler.stop();
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[tokio::test]
+async fn interval_task_fires_on_first_scan_and_not_again_until_interval() {
+    let dir = std::env::temp_dir().join(format!("catio-sched-int-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = AutomationStore::open(&dir);
+    store
+        .upsert_task(&task(TaskTrigger::Interval { seconds: 60 }))
+        .unwrap();
+
+    let dispatcher = ScriptedDispatcher::new();
+    let scheduler = Scheduler::new(Arc::new(store), Arc::new(dispatcher.clone()));
+    scheduler.start(std::time::Duration::from_millis(20));
+
+    // Interval "first scan" semantics: fires immediately when no prior run.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        dispatcher.hold.notified(),
+    )
+    .await
+    .expect("first dispatch never fired");
+    assert_eq!(dispatcher.calls.lock().len(), 1);
+
+    // Release it; a 60s interval must NOT re-fire shortly after.
+    dispatcher.releases.lock().first().unwrap().notify_one();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(
+        dispatcher.calls.lock().len(),
+        1,
+        "interval re-fired before the interval elapsed"
+    );
+
+    scheduler.stop();
+    std::fs::remove_dir_all(&dir).unwrap();
+}

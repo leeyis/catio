@@ -1583,10 +1583,12 @@ export default function App() {
 
   const cur = tabs.find(tb => tb.id === activeTab)
   // Report the active connection to the backend so natural-language task
-  // creation defaults its target to the host/db the user is looking at.
+  // creation defaults its target to the host/db the user is looking at. For a
+  // live SSH terminal we send its SESSION id (that's what the backend session
+  // registry is keyed by — a connId would never resolve to a session).
   useEffect(() => {
-    void automationSetActiveTarget(cur?.connId ?? '')
-  }, [cur?.connId])
+    void automationSetActiveTarget(cur?.kind === 'terminal' ? (cur.sessionId ?? '') : (cur?.connId ?? ''))
+  }, [cur?.connId, cur?.kind, cur?.sessionId])
   // Resolve the active tab's connection: prefer the live vault list (real saved DB
   // connections + saved SSH host profiles), then live SSH display conns, then the
   // mock byId index. This lets a workbench tab opened for a real saved DB profile
@@ -1941,11 +1943,12 @@ export default function App() {
     // Surface Agent tool calls (MCP/skill/terminal) as a detail block in the panel.
     const evt = envelope.event as { type?: string } & Record<string, unknown>
     const convId = envelope.conversationId
+    const afterMsg = (activeConversation?.messages ?? []).filter(m => m.role === 'assistant').length
     if (evt.type === 'toolProposed') {
       const toolUseId = String(evt.toolUseId ?? '')
       setToolCalls(prev => {
         const conv = { ...(prev[convId] ?? {}) }
-        conv[toolUseId] = { id: toolUseId, name: String(evt.name ?? ''), input: evt.input }
+        conv[toolUseId] = { id: toolUseId, name: String(evt.name ?? ''), input: evt.input, afterMsg }
         return { ...prev, [convId]: conv }
       })
     } else if (evt.type === 'toolFinished') {
@@ -1953,7 +1956,7 @@ export default function App() {
       setToolCalls(prev => {
         const conv = { ...(prev[convId] ?? {}) }
         const result = evt.result as { content?: string; status?: string }
-        conv[toolUseId] = { ...(conv[toolUseId] ?? { id: toolUseId }), status: result?.status, result: result?.content }
+        conv[toolUseId] = { ...(conv[toolUseId] ?? { id: toolUseId }), status: result?.status, result: result?.content, afterMsg }
         return { ...prev, [convId]: conv }
       })
     }

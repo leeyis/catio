@@ -75,6 +75,8 @@ export interface AgentToolCall {
   input?: unknown
   status?: string
   result?: string
+  /** Index of the assistant message this call belongs to (mid-conversation display). */
+  afterMsg?: number
 }
 
 export interface AgentTurnRequest {
