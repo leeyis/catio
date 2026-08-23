@@ -5,6 +5,7 @@
 //! owner-scoping happens inside the store; transport layers only ever inject
 //! `owner_id` and never trust a client-supplied one.
 
+pub mod mcp_client;
 pub mod repo;
 pub mod types;
 

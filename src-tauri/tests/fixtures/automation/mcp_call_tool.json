@@ -1,0 +1,11 @@
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "content": [
+      { "type": "text", "text": "file.txt 2048 bytes" },
+      { "type": "text", "text": "\nmodified 2h ago" }
+    ],
+    "isError": false
+  }
+}

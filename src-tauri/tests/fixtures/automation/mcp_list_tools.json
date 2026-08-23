@@ -1,0 +1,11 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "tools": [
+      { "name": "read_file", "description": "Read a file", "inputSchema": { "type": "object" } },
+      { "name": "write_file", "description": "Write a file", "inputSchema": { "type": "object" } },
+      { "name": "list_directory", "description": "List a directory", "inputSchema": { "type": "object" } }
+    ]
+  }
+}
