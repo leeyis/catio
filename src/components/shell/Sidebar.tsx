@@ -542,6 +542,9 @@ export function IconRail({ active, onSelect, panelOpen, onMcp }: IconRailProps) 
     { id: 'tunnels', icon: 'link', label: t('shell.railTunnels') },
     { id: 'snippets', icon: 'snippet', label: t('shell.railSnippets') },
     { id: 'history', icon: 'history', label: t('shell.railHistory') },
+    { id: 'tasks', icon: 'alarm-clock', label: t('shell.railTasks') },
+    { id: 'skills', icon: 'zap', label: t('shell.railSkills') },
+    { id: 'mcp', icon: 'm', label: t('shell.railMcpConn') },
   ]
   const bottom: RailItem[] = [
     { id: 'details', icon: 'info', label: t('shell.details') },

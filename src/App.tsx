@@ -20,6 +20,9 @@ import { TunnelsPanel } from './components/panels/TunnelsPanel'
 import { SnippetsPanel } from './components/panels/SnippetsPanel'
 import { HistoryPanel } from './components/panels/HistoryPanel'
 import { DetailsPanel } from './components/panels/DetailsPanel'
+import { TasksPanel } from './components/panels/TasksPanel'
+import { SkillsPanel } from './components/panels/SkillsPanel'
+import { McpPanel } from './components/panels/McpPanel'
 import { NewConnectionModal } from './components/modals/NewConnectionModal'
 import { ConnectSecretPrompt } from './components/modals/ConnectSecretPrompt'
 import { HostKeyPrompt } from './components/modals/HostKeyPrompt'
@@ -95,6 +98,7 @@ import type { AuthUser } from './components/auth/AuthGate'
 import type { Attachment, AgentFileActivity } from './components/panels/AIPanel'
 import { prepareAgentWorkspace, setAgentWorkspaceScope } from './state/agentWorkspace'
 import { setAgentConfig } from './state/agentConfig'
+import { automationListPromptHistory, type PromptHistoryEntry } from './services/automation'
 
 type AgentRunTarget = CapturableTerminalTarget | { kind: 'uncaptured'; chanId: string }
 
@@ -169,6 +173,11 @@ export default function App() {
   const mruRef = useRef<Record<string, string>>({})
   const [activePanel, setActivePanel] = useState<string>('ai')
   const [panelOpen, setPanelOpen] = useState<boolean>(false)
+  const [promptHistory, setPromptHistory] = useState<PromptHistoryEntry[]>([])
+  useEffect(() => {
+    if (!(activePanel === 'history' && panelOpen)) return
+    void automationListPromptHistory().then(setPromptHistory)
+  }, [activePanel, panelOpen])
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false)
   const [detailConn, setDetailConn] = useState<Connection | null>(null)
   const [showNew, setShowNew] = useState<boolean>(false)
@@ -2386,7 +2395,7 @@ export default function App() {
                   await saveTunnelConnection({ id: generateTunnelId(), name, kind, bind, target: target || undefined, hostProfileId })
                 } : undefined} />}
               {activePanel === 'snippets' && <SnippetsPanel onClose={() => setPanelOpen(false)} snippets={snippets} onChange={() => setSnippets(loadSnippets())} onInsert={insertToTerminal} canInsert={canInsert} canInsertEditor={canInsertEditor} />}
-              {activePanel === 'history' && <HistoryPanel onClose={() => setPanelOpen(false)} onAddSnippet={addSnippet} items={mergedHistory} onClear={() => { clearHistory(); setHistory([]); setDbHistory([]); void clearDbHistory() }}
+              {activePanel === 'history' && <HistoryPanel onClose={() => setPanelOpen(false)} onAddSnippet={addSnippet} items={mergedHistory} promptItems={promptHistory} onClear={() => { clearHistory(); setHistory([]); setDbHistory([]); void clearDbHistory() }}
                 // History is scoped to the active tab: no active tab → empty hint;
                 // a host tab → shell history; a DB tab → that engine's SQL history.
                 noActiveConnection={!cur}
@@ -2407,6 +2416,9 @@ export default function App() {
                   void (async () => { for (const id of ids) await deleteDbHistory(id) })()
                 }}
                 onInsert={insertToTerminal} canInsert={canInsert} canInsertEditor={canInsertEditor} />}
+              {activePanel === 'tasks' && <TasksPanel onClose={() => setPanelOpen(false)} />}
+              {activePanel === 'skills' && <SkillsPanel onClose={() => setPanelOpen(false)} />}
+              {activePanel === 'mcp' && <McpPanel onClose={() => setPanelOpen(false)} />}
               {/* DetailsPanel branches internally on conn.kind === 'db': DB conns use the
                   onEditDb/onDeleteDb/onConnectDb handlers; host conns use the SSH handlers. */}
               {activePanel === 'details' && (

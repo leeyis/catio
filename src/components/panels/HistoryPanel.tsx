@@ -5,6 +5,7 @@ import { Icon } from '../Icon'
 import { IconBtn, ConnGlyph, Btn } from '../atoms'
 import { useData } from '../../state/DataContext'
 import type { Snippet, HistoryItem, Connection } from '../../services/types'
+import type { PromptHistoryEntry } from '../../services/automation'
 import { PanelShell } from './PanelShell'
 import { ConfirmModal } from '../modals/ConfirmModal'
 import { useCopyFeedback } from '../useCopyFeedback'
@@ -35,6 +36,9 @@ export interface HistoryPanelProps {
   /** Delete the given history-entry ids belonging to connections that no longer
    *  exist (legacy rows still showing a raw `conn-N` id). */
   onPruneOrphans?: (ids: string[]) => void
+  /** Prompt execution history (scheduled tasks + in-app Agent chats), shown as
+   *  a distinct section above the shell/SQL rows. */
+  promptItems?: PromptHistoryEntry[]
 }
 
 interface MenuItemProps {
@@ -183,7 +187,7 @@ function SaveSnippetModal({ row, onClose, onSave }: SaveSnippetModalProps) {
   )
 }
 
-export function HistoryPanel({ onClose, onAddSnippet, items, onClear, onInsert, canInsert, canInsertEditor, onDelete, activeKind, activeEngine, noActiveConnection, onPruneOrphans }: HistoryPanelProps) {
+export function HistoryPanel({ onClose, onAddSnippet, items, onClear, onInsert, canInsert, canInsertEditor, onDelete, activeKind, activeEngine, noActiveConnection, onPruneOrphans, promptItems }: HistoryPanelProps) {
   const { t } = useTranslation()
   const D = useData()
   const [q, setQ] = useState('')
@@ -274,10 +278,31 @@ export function HistoryPanel({ onClose, onAddSnippet, items, onClear, onInsert, 
       </div>
       {/* list */}
       <div className="grow" style={{ overflowY: 'auto', padding: 10, display: 'flex', flexDirection: 'column', gap: 4 }}>
+        {promptItems && promptItems.length > 0 && (
+          <>
+            <span className="chip" style={{ alignSelf: 'flex-start', margin: '0 2px 2px' }}>Agent 对话 / 定时 prompt</span>
+            {promptItems.map(p => (
+              <div key={p.id} className="row gap8" style={{ padding: '8px 10px', borderRadius: 8, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)' }}>
+                <Icon name={p.source === 'task' ? 'alarm-clock' : 'wand'} size={13} style={{ color: p.source === 'task' ? 'var(--signal-amber)' : 'var(--accent-primary)', flex: 'none' }} />
+                <div className="col grow" style={{ minWidth: 0 }}>
+                  <div className="row gap6" style={{ minWidth: 0 }}>
+                    <span className="ell" style={{ fontSize: 12, fontWeight: 600 }}>{p.target}</span>
+                    <span className="chip mono">{p.outcome}</span>
+                  </div>
+                  <span className="ell" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{p.text}</span>
+                  <span className="ell mono" style={{ fontSize: 9.5, color: 'var(--text-faint)' }}>{p.when} · {p.dur}</span>
+                </div>
+                <span className="chip">{p.source === 'task' ? '定时' : '对话'}</span>
+              </div>
+            ))}
+          </>
+        )}
         {rows.length ? rows.map(h => <HistoryRow key={h.id} h={h} onSave={setSaveRow} onInsert={onInsert} canInsert={canInsert} canInsertEditor={canInsertEditor} onDelete={onDelete} />) : (
-          <div className="col" style={{ alignItems: 'center', justifyContent: 'center', padding: '30px 0', gap: 8, color: 'var(--text-faint)' }}>
-            <Icon name="search" size={22} /><span style={{ fontSize: 12.5 }}>{t('panels.noHistory')}</span>
-          </div>
+          !promptItems?.length && (
+            <div className="col" style={{ alignItems: 'center', justifyContent: 'center', padding: '30px 0', gap: 8, color: 'var(--text-faint)' }}>
+              <Icon name="search" size={22} /><span style={{ fontSize: 12.5 }}>{t('panels.noHistory')}</span>
+            </div>
+          )
         )}
       </div>
       {/* footer count */}
