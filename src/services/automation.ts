@@ -237,6 +237,34 @@ export async function automationSchedulerHeartbeat(): Promise<string | null> {
   return tauriInvoke<string | null>('automation_scheduler_heartbeat')
 }
 
+/** Payload of the `automation://task-fired` event (shell task to run in a terminal). */
+export interface ShellFiringPayload {
+  taskId: string
+  target: string // SSH session id
+  command: string
+  at: string
+}
+
+/** Report a shell task's terminal-execution outcome back to the backend. */
+export async function automationTaskResult(
+  taskId: string,
+  succeeded: boolean,
+  summary: string,
+): Promise<void> {
+  if (!isTauri()) return
+  return tauriInvoke<void>('automation_task_result', { taskId, succeeded, summary })
+}
+
+/** Subscribe to shell-task firing events (run command in a terminal). */
+export async function onAutomationTaskFired(
+  cb: (f: ShellFiringPayload) => void,
+): Promise<() => void> {
+  if (!isTauri()) return () => {}
+  const { listen } = await import('@tauri-apps/api/event')
+  const un = await listen<ShellFiringPayload>('automation://task-fired', ev => cb(ev.payload))
+  return un
+}
+
 export async function automationSetProvider(
   protocol: ProviderProtocol,
   baseUrl: string,

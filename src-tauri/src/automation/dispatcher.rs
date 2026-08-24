@@ -86,6 +86,20 @@ pub type TaskResults = Arc<RwLock<HashMap<String, TaskRunInfo>>>;
 /// immediately instead of waiting for polling).
 pub type RunNotifier = Arc<dyn Fn(&TaskRunInfo) + Send + Sync>;
 
+/// Fired when a shell task triggers and must run in the user's terminal: the
+/// frontend listens, writes the command into that terminal's PTY (so it's
+/// visible + captured to history), then reports the result back.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShellFiring {
+    pub task_id: String,
+    pub target: String, // SSH session id
+    pub command: String,
+    pub at: String,
+}
+
+pub type ShellFiringNotifier = Arc<dyn Fn(&ShellFiring) + Send + Sync>;
+
 pub struct AutomationDispatcher {
     repo: Arc<AutomationStore>,
     sessions: Arc<SessionManager>,
@@ -95,6 +109,7 @@ pub struct AutomationDispatcher {
     results: TaskResults,
     mcp: Arc<McpClient>,
     on_run: Option<RunNotifier>,
+    on_shell_firing: Option<ShellFiringNotifier>,
 }
 
 impl AutomationDispatcher {
@@ -117,12 +132,20 @@ impl AutomationDispatcher {
             results,
             mcp,
             on_run: None,
+            on_shell_firing: None,
         }
     }
 
     /// Attach a notifier invoked on every recorded run.
     pub fn with_on_run(mut self, on_run: RunNotifier) -> Self {
         self.on_run = Some(on_run);
+        self
+    }
+
+    /// Attach a notifier invoked when a shell task fires (frontend runs it in
+    /// the terminal and reports back).
+    pub fn with_on_shell_firing(mut self, n: ShellFiringNotifier) -> Self {
+        self.on_shell_firing = Some(n);
         self
     }
 
@@ -133,7 +156,9 @@ impl AutomationDispatcher {
             summary,
             at: Utc::now().to_rfc3339(),
         };
-        self.results.write().insert(task_id.to_string(), info.clone());
+        self.results
+            .write()
+            .insert(task_id.to_string(), info.clone());
         if let Some(notify) = &self.on_run {
             notify(&info);
         }
@@ -166,6 +191,21 @@ impl AutomationDispatcher {
             self.record(&task.id, TaskRunStatus::Failed, "任务未指定目标连接".into());
             return Ok(());
         }
+        // Tell the frontend the task fired so it can run the command in the
+        // user's terminal (visible + captured to history). The frontend then
+        // reports the result back via `automation_task_result`.
+        if let Some(notify) = &self.on_shell_firing {
+            notify(&ShellFiring {
+                task_id: task.id.clone(),
+                target,
+                command: task.script.clone().unwrap_or_default(),
+                at: Utc::now().to_rfc3339(),
+            });
+            // Mark as "running" until the frontend reports the outcome.
+            self.record(&task.id, TaskRunStatus::Failed, "正在执行…".to_string());
+            return Ok(());
+        }
+        // Fallback (no frontend attached / tests): execute directly.
         let session = match self.sessions.get(&target).await {
             Some(s) => s,
             None => {

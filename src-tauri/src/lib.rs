@@ -1,22 +1,22 @@
-pub mod ssh;
 pub mod agent;
+pub mod auth;
 pub mod automation;
 pub mod db;
+pub mod diagnostics;
+pub mod events;
+pub mod localterm;
+pub mod mcp;
+pub mod netmatch;
+pub mod rdp;
+pub mod scan;
+pub mod secrets;
 pub mod server;
 pub mod server_mcp;
 pub mod server_ws;
+pub mod ssh;
 mod server_sql_file;
-pub mod auth;
-pub mod secrets;
-pub mod events;
-pub mod mcp;
-pub mod netmatch;
-pub mod scan;
-pub mod localterm;
 pub mod vnc;
 pub mod vncconn;
-pub mod rdp;
-pub mod diagnostics;
 pub mod runtime_diagnostics;
 pub mod optical;
 pub mod installation;
@@ -213,6 +213,7 @@ pub fn run() {
             automation::commands::automation_set_provider,
             automation::commands::automation_set_active_target,
             automation::commands::automation_scheduler_heartbeat,
+            automation::commands::automation_task_result,
             db::commands::db_connect,
             db::commands::db_test_connection,
             db::commands::db_disconnect,
@@ -358,22 +359,31 @@ pub fn run() {
                     ],
                 )));
                 let app_handle = app.handle().clone();
-                let dispatcher =
-                    std::sync::Arc::new(
-                        automation::dispatcher::AutomationDispatcher::new(
-                            store.clone(),
-                            sessions,
-                            runtime,
-                            history.clone(),
-                            provider.clone(),
-                            results.clone(),
-                            client.clone(),
-                        )
-                        .with_on_run(std::sync::Arc::new(move |info| {
+                let dispatcher = std::sync::Arc::new(
+                    automation::dispatcher::AutomationDispatcher::new(
+                        store.clone(),
+                        sessions,
+                        runtime,
+                        history.clone(),
+                        provider.clone(),
+                        results.clone(),
+                        client.clone(),
+                    )
+                    .with_on_run({
+                        let app_handle = app_handle.clone();
+                        std::sync::Arc::new(move |info| {
                             use tauri::Emitter;
                             let _ = app_handle.emit("automation://task-run", info);
-                        })),
-                    );
+                        })
+                    })
+                    .with_on_shell_firing({
+                        let app_handle = app_handle.clone();
+                        std::sync::Arc::new(move |firing| {
+                            use tauri::Emitter;
+                            let _ = app_handle.emit("automation://task-fired", firing);
+                        })
+                    }),
+                );
                 let scheduler = std::sync::Arc::new(automation::scheduler::Scheduler::new(
                     store.clone(),
                     dispatcher,

@@ -231,7 +231,9 @@ fn parse_trigger(input: &Value) -> Result<TaskTrigger, AutomationError> {
                         .or_else(|| o.get("cron"))
                         .and_then(Value::as_str)
                         .filter(|s| !s.trim().is_empty())
-                        .ok_or_else(|| AutomationError::Invalid("cron trigger needs expr".into()))?;
+                        .ok_or_else(|| {
+                            AutomationError::Invalid("cron trigger needs expr".into())
+                        })?;
                     Ok(TaskTrigger::Cron {
                         expr: expr.trim().to_string(),
                     })
@@ -241,7 +243,9 @@ fn parse_trigger(input: &Value) -> Result<TaskTrigger, AutomationError> {
                         .get("seconds")
                         .or_else(|| o.get("interval"))
                         .and_then(Value::as_u64)
-                        .ok_or_else(|| AutomationError::Invalid("interval trigger needs seconds".into()))?;
+                        .ok_or_else(|| {
+                            AutomationError::Invalid("interval trigger needs seconds".into())
+                        })?;
                     Ok(TaskTrigger::Interval { seconds: secs })
                 }
                 "once" => {
@@ -275,9 +279,8 @@ fn parse_task_lenient(
 ) -> Result<ScheduledTask, AutomationError> {
     let name = str_field(input, "name")
         .ok_or_else(|| AutomationError::Invalid("task name is required".into()))?;
-    let id = str_field(input, "id").unwrap_or_else(|| {
-        format!("task-{}", rand::rng().random::<u64>())
-    });
+    let id =
+        str_field(input, "id").unwrap_or_else(|| format!("task-{}", rand::rng().random::<u64>()));
     let kind = match input.get("kind").and_then(Value::as_str) {
         Some("prompt") | Some("Prompt") => TaskKind::Prompt,
         Some("shell") | Some("Shell") | None => TaskKind::Shell,

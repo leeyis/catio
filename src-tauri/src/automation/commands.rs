@@ -10,13 +10,13 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 use tauri::State;
 
-use super::dispatcher::{SessionProviderConfig, TaskResults, TaskRunInfo};
-use super::scheduler::Scheduler;
-use super::task_router::ActiveTarget;
+use super::dispatcher::{SessionProviderConfig, TaskResults, TaskRunInfo, TaskRunStatus};
 use super::history::PromptHistoryStore;
 use super::mcp_client::{McpClient, McpError};
 use super::repo::AutomationStore;
+use super::scheduler::Scheduler;
 use super::skill::{install_skill, parse_skill_json};
+use super::task_router::ActiveTarget;
 use super::types::{AutomationError, McpConnection, ScheduledTask, Skill, SkillScope, SkillSource};
 use crate::agent::types::{AnthropicAuthMode, ApiCredential, ProviderConfig, ProviderProtocol};
 
@@ -297,6 +297,31 @@ pub async fn automation_task_results(
     Ok(state.results.read().values().cloned().collect())
 }
 
+/// The frontend reports the outcome of a shell task it ran in the terminal.
+/// `succeeded` maps to Success; anything else is a failure summary.
+#[tauri::command]
+pub async fn automation_task_result(
+    state: State<'_, AutomationService>,
+    task_id: String,
+    succeeded: bool,
+    summary: String,
+) -> Result<(), String> {
+    state.results.write().insert(
+        task_id.clone(),
+        TaskRunInfo {
+            task_id,
+            status: if succeeded {
+                TaskRunStatus::Success
+            } else {
+                TaskRunStatus::Failed
+            },
+            summary,
+            at: chrono::Utc::now().to_rfc3339(),
+        },
+    );
+    Ok(())
+}
+
 /// Scheduler heartbeat (diagnostic: proves the tick loop is running).
 #[tauri::command]
 pub async fn automation_scheduler_heartbeat(
@@ -312,7 +337,11 @@ pub async fn automation_set_active_target(
     state: State<'_, AutomationService>,
     target: String,
 ) -> Result<(), String> {
-    *state.active_target.write() = if target.is_empty() { None } else { Some(target) };
+    *state.active_target.write() = if target.is_empty() {
+        None
+    } else {
+        Some(target)
+    };
     Ok(())
 }
 

@@ -105,7 +105,10 @@ import {
   automationListSkills,
   automationSetActiveTarget,
   automationSetProvider,
+  automationTaskResult,
+  onAutomationTaskFired,
   type PromptHistoryEntry,
+  type ShellFiringPayload,
   type Skill,
 } from './services/automation'
 
@@ -1908,6 +1911,49 @@ export default function App() {
   }
 
   // ---- Rust AgentRuntime event wiring (single subscription, per-turn routing) ----
+
+  // Scheduled shell tasks: run the fired command in the user's terminal so it's
+  // visible + captured to history. Reuse the idle terminal tab for that session,
+  // or split a new one if it's busy.
+  useEffect(() => {
+    let un: (() => void) | undefined
+    void onAutomationTaskFired(async (firing: ShellFiringPayload) => {
+      const { sessionId, command, taskId } = { sessionId: firing.target, command: firing.command, taskId: firing.taskId }
+      const tab = tabsRef.current.find(tb => tb.kind === 'terminal' && tb.sessionId === sessionId)
+      const tabConn: { name: string } | undefined = tab ? (vaultConns.find(c => c.id === tab.connId) ?? D.byId[tab.connId]) : undefined
+      if (!tab || !tabConn) {
+        void automationTaskResult(taskId, false, '目标终端未打开（请打开该主机的终端标签）')
+        return
+      }
+      const chanId = chanMapRef.current[tab.id]
+      if (chanId && isTerminalChannelBusy(chanId)) {
+        // Busy → split a new terminal tab for this session, then run there.
+        let splitChan: string | undefined
+        try {
+          const controller = new AbortController()
+          splitChan = (await requestAgentTerminalSplit(tab.id, controller.signal)) ?? undefined
+        } catch { /* fall through */ }
+        const sid: string = splitChan ?? chanId
+        try {
+          const { termWrite } = await import('./services/ssh')
+          await termWrite(sessionId, sid, btoa(unescape(encodeURIComponent(command + '\r'))))
+        } catch { /* split may still be registering */ }
+        void automationTaskResult(taskId, true, `已在新终端执行: ${command}`)
+        appendHistory({ kind: 'shell', target: tabConn.name, text: command, when: new Date().toLocaleTimeString(), dur: '', ts: Date.now() / 1000 })
+        setHistory(loadHistory())
+      } else {
+        const wrote = await sendToPty(sessionId, command)
+        if (!wrote) {
+          void automationTaskResult(taskId, false, '写入终端失败')
+          return
+        }
+        void automationTaskResult(taskId, true, `已执行: ${command}`)
+        appendHistory({ kind: 'shell', target: tabConn.name, text: command, when: new Date().toLocaleTimeString(), dur: '', ts: Date.now() / 1000 })
+        setHistory(loadHistory())
+      }
+    }).then(fn => { un = fn })
+    return () => { un?.() }
+  }, [])
 
   function ensureAgentSubscription(): Promise<void> {
     if (!agentSubReady.current) {
