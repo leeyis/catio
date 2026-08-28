@@ -100,7 +100,7 @@ export interface McpConnection {
 export type PromptSource = 'task' | 'chat'
 export type PromptOutcome = 'completed' | 'failed' | 'cancelled' | 'outcomeUnknown'
 
-export type TaskRunStatus = 'success' | 'failed'
+export type TaskRunStatus = 'success' | 'failed' | 'running'
 export interface TaskRunInfo {
   taskId: string
   status: TaskRunStatus
@@ -157,16 +157,23 @@ export async function automationImportSkill(
   body: string,
   scope: SkillScope,
   targetRef?: string,
+  riskPolicy?: SkillRisk,
 ): Promise<Skill> {
-  return tauriInvoke<Skill>('automation_import_skill', { body, scope, targetRef })
+  return tauriInvoke<Skill>('automation_import_skill', { body, scope, targetRef, riskPolicy })
 }
 
 export async function automationInstallSkill(
   url: string,
   scope: SkillScope,
   targetRef?: string,
+  riskPolicy?: SkillRisk,
 ): Promise<Skill> {
-  return tauriInvoke<Skill>('automation_install_skill', { url, scope, targetRef })
+  return tauriInvoke<Skill>('automation_install_skill', { url, scope, targetRef, riskPolicy })
+}
+
+/** Read a skill-pack file (JSON/Markdown) selected via the dialog. Desktop-only. */
+export async function automationReadSkillFile(path: string): Promise<string> {
+  return tauriInvoke<string>('automation_read_skill_file', { path })
 }
 
 export async function automationDeleteSkill(id: string): Promise<void> {

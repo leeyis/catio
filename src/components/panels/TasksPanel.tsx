@@ -156,10 +156,12 @@ export function TasksPanel({ onClose, targets }: { onClose: () => void; targets:
                   <span className="chip">下次 {nextLabel(task.trigger)}</span>
                   {(() => {
                     const runOk = run?.status === 'success'
-                    const runColor = runOk ? 'var(--signal-green)' : 'var(--signal-rose)'
+                    const runRun = run?.status === 'running'
+                    const runColor = runOk ? 'var(--signal-green)' : runRun ? 'var(--signal-blue)' : 'var(--signal-rose)'
+                    const runLabel = runOk ? '成功' : runRun ? '运行中' : '失败'
                     return (
                       <span className="chip" style={run ? { background: `color-mix(in srgb, ${runColor} 14%, transparent)`, color: runColor } : undefined}>
-                        上次 {run ? `${runOk ? '成功' : '失败'}: ${run.summary}` : '从未运行'}
+                        上次 {run ? `${runLabel}: ${run.summary}` : '从未运行'}
                       </span>
                     )
                   })()}

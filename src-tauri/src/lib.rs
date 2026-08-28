@@ -214,6 +214,7 @@ pub fn run() {
             automation::commands::automation_set_active_target,
             automation::commands::automation_scheduler_heartbeat,
             automation::commands::automation_task_result,
+            automation::commands::automation_read_skill_file,
             db::commands::db_connect,
             db::commands::db_test_connection,
             db::commands::db_disconnect,

@@ -52,6 +52,7 @@ describe('services/automation', () => {
       body: '{ "name": "巡检" }',
       scope: 'global',
       targetRef: undefined,
+      riskPolicy: undefined,
     })
   })
 
@@ -63,6 +64,7 @@ describe('services/automation', () => {
       url: 'https://skills.example/s.json',
       scope: 'target',
       targetRef: 'web-01',
+      riskPolicy: undefined,
     })
   })
 

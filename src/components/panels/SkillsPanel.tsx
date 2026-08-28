@@ -9,8 +9,10 @@ import {
   automationImportSkill,
   automationInstallSkill,
   automationListSkills,
+  automationReadSkillFile,
   automationSetSkillEnabled,
   type Skill,
+  type SkillRisk,
   type SkillScope,
 } from '../../services/automation'
 
@@ -86,13 +88,25 @@ function SkillFormModal({ mode, targets, onClose, onDone }: { mode: 'import' | '
   const [scope, setScope] = useState<SkillScope>('global')
   const [targetRef, setTargetRef] = useState('')
   const [body, setBody] = useState('')
+  const [fileName, setFileName] = useState('')
   const [url, setUrl] = useState('')
+  const [risk, setRisk] = useState<SkillRisk>('readonly')
   const [error, setError] = useState('')
+
+  const pickFile = async () => {
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog')
+      const picked = await open({ multiple: false, filters: [{ name: 'Skill', extensions: ['json', 'md'] }] })
+      if (!picked || Array.isArray(picked)) return
+      const text = await automationReadSkillFile(picked)
+      setBody(text); setFileName(picked)
+    } catch { /* fall through to manual paste */ }
+  }
 
   const save = async () => {
     try {
-      if (mode === 'import') await automationImportSkill(body, scope, targetRef || undefined)
-      else await automationInstallSkill(url, scope, targetRef || undefined)
+      if (mode === 'import') await automationImportSkill(body, scope, targetRef || undefined, risk)
+      else await automationInstallSkill(url, scope, targetRef || undefined, risk)
       onDone()
     } catch (e) {
       setError(String(e))
@@ -114,10 +128,20 @@ function SkillFormModal({ mode, targets, onClose, onDone }: { mode: 'import' | '
           options={[{ value: 'global', label: '全局' }, { value: 'target', label: '指定连接' }]} />
         {scope === 'target' && <SearchSelect options={targets} value={targetRef} onChange={setTargetRef} placeholder="选择已连接的主机或数据库…" />}
       </div>
+      <div className="col gap4">
+        <span style={label}>{t('panels.skillRisk')}</span>
+        <Segmented size="sm" value={risk} onChange={v => setRisk(v as SkillRisk)}
+          options={[{ value: 'readonly', label: '只读' }, { value: 'readonlyPreferred', label: '只读优先' }, { value: 'confirmedWrite', label: '确认写入' }]} />
+      </div>
       {mode === 'import' ? (
         <div className="col gap4">
-          <span style={label}>技能 JSON</span>
-          <textarea rows={5} style={{ ...input, height: 110, paddingTop: 8 }} className="mono" value={body} onChange={e => setBody(e.target.value)} placeholder='{ "name": "巡检", "promptTemplate": "检查 {{host}}" }' />
+          <span style={label}>技能文件</span>
+          <div className="row gap8" style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid var(--border-hairline)', background: 'var(--surface-sunken)', cursor: 'pointer' }}
+            onClick={pickFile}>
+            <Icon name="file-plus" size={15} style={{ color: 'var(--accent-primary)' }} />
+            <span style={{ fontSize: 12.5, color: fileName ? 'var(--text-primary)' : 'var(--text-faint)' }}>{fileName || '选择文件（JSON / Markdown）'}</span>
+          </div>
+          <textarea rows={5} style={{ ...input, height: 110, paddingTop: 8 }} className="mono" value={body} onChange={e => setBody(e.target.value)} placeholder='JSON: { "name": "巡检", "promptTemplate": "..." }  或  Markdown: # 巡检\n...' />
         </div>
       ) : (
         <div className="col gap4">

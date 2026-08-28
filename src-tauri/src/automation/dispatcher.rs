@@ -51,6 +51,7 @@ pub struct TaskRunInfo {
 pub enum TaskRunStatus {
     Success,
     Failed,
+    Running,
 }
 
 /// Supplies the provider config for prompt tasks. Desktop keeps one in session
@@ -185,6 +186,24 @@ impl TaskDispatcher for AutomationDispatcher {
 }
 
 impl AutomationDispatcher {
+    /// Build the placeholder context for a prompt task from its target session
+    /// (host/user), so skill templates resolve `{{host}}` to the real host.
+    async fn target_ctx(&self, task: &ScheduledTask) -> std::collections::HashMap<String, String> {
+        let mut ctx = std::collections::HashMap::new();
+        let target = task.target_ref.clone().unwrap_or_default();
+        if !target.is_empty() {
+            if let Some(session) = self.sessions.get(&target).await {
+                if !session.lock().await.host.is_empty() {
+                    ctx.insert("host".into(), session.lock().await.host.clone());
+                }
+                if !session.lock().await.user.is_empty() {
+                    ctx.insert("user".into(), session.lock().await.user.clone());
+                }
+            }
+        }
+        ctx
+    }
+
     async fn run_shell(&self, task: &ScheduledTask) -> Result<(), AutomationError> {
         let target = task.target_ref.clone().unwrap_or_default();
         if target.is_empty() {
@@ -202,7 +221,7 @@ impl AutomationDispatcher {
                 at: Utc::now().to_rfc3339(),
             });
             // Mark as "running" until the frontend reports the outcome.
-            self.record(&task.id, TaskRunStatus::Failed, "正在执行…".to_string());
+            self.record(&task.id, TaskRunStatus::Running, "正在执行…".to_string());
             return Ok(());
         }
         // Fallback (no frontend attached / tests): execute directly.
@@ -251,7 +270,10 @@ impl AutomationDispatcher {
             .into_iter()
             .filter(|s| task.skill_ids.contains(&s.id))
             .collect::<Vec<_>>();
-        let ctx = HashMap::new();
+        // Render skill templates against the target context so `{{host}}` /
+        // `{{db}}` placeholders resolve to the actual session host. `target`
+        // is the live SSH session id; the session carries the host+user.
+        let ctx = self.target_ctx(&task).await;
         let user_prompt = build_user_prompt(task, &skills, &ctx);
 
         let request = StartTurnRequest {

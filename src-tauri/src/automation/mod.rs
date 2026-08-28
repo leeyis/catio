@@ -25,7 +25,8 @@ pub use prompt::build_user_prompt;
 pub use repo::AutomationStore;
 pub use scheduler::{cron_matches, should_fire, Scheduler, TaskDispatcher};
 pub use skill::{
-    install_skill, new_skill_from_import, parse_skill_json, render_template, SkillImport,
+    install_skill, new_skill_from_import, parse_skill_json, parse_skill_markdown, parse_skill_pack,
+    render_template, SkillImport,
 };
 pub use task_router::TaskRouter;
 pub use types::{

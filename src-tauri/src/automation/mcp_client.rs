@@ -137,15 +137,40 @@ pub fn parse_call_tool(body: &[u8]) -> Result<McpToolResult, McpError> {
 
 pub struct McpClient {
     http: reqwest::Client,
+    /// Connections already `initialize`-handshaked this session, keyed by
+    /// `url|credential`. The handshake happens once per connection; strictly
+    /// speaking MCP allows re-init, but tools must not be listed before it.
+    initialized: parking_lot::Mutex<std::collections::HashSet<String>>,
 }
 
 impl McpClient {
     pub fn new(http: reqwest::Client) -> Self {
-        Self { http }
+        Self {
+            http,
+            initialized: parking_lot::Mutex::new(std::collections::HashSet::new()),
+        }
+    }
+
+    fn init_key(conn: &McpConnection) -> String {
+        format!("{}|{}", conn.url, conn.credential.expose())
+    }
+
+    /// POST an `initialize` request once per connection. Best-effort: a server
+    /// that rejects it (e.g. permissive endpoints) still proceeds to the real
+    /// call — we never block a tool on the handshake.
+    async fn ensure_initialized(&self, conn: &McpConnection) {
+        let key = Self::init_key(conn);
+        if self.initialized.lock().contains(&key) {
+            return;
+        }
+        if self.request(conn, initialize_body()).await.is_ok() {
+            self.initialized.lock().insert(key);
+        }
     }
 
     /// Call `tools/list` and return the discovered tool names.
     pub async fn list_tools(&self, conn: &McpConnection) -> Result<Vec<String>, McpError> {
+        self.ensure_initialized(conn).await;
         let body = self.request(conn, list_tools_body()).await?;
         parse_tools_list(&body)
     }

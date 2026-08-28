@@ -33,6 +33,51 @@ fn default_risk() -> SkillRisk {
 pub fn parse_skill_json(bytes: &[u8]) -> Result<SkillImport, AutomationError> {
     let imp: SkillImport = serde_json::from_slice(bytes)
         .map_err(|e| AutomationError::Invalid(format!("invalid skill JSON: {e}")))?;
+    validate_import(imp)
+}
+
+/// Parse a Markdown skill pack: the first `# Name` heading (or frontmatter
+/// `name:`) becomes the name, the body becomes the prompt template.
+pub fn parse_skill_markdown(text: &str) -> Result<SkillImport, AutomationError> {
+    let mut name = String::new();
+    for line in text.lines() {
+        let t = line.trim();
+        if name.is_empty() {
+            if let Some(rest) = t.strip_prefix("# ") {
+                name = rest.trim().to_string();
+                continue;
+            }
+            if let Some(rest) = t.strip_prefix("name:") {
+                name = rest.trim().trim_matches('"').to_string();
+                continue;
+            }
+        }
+    }
+    let body = text.trim();
+    if name.is_empty() {
+        return Err(AutomationError::Invalid(
+            "markdown skill needs a '# Name' heading or 'name:' frontmatter".into(),
+        ));
+    }
+    validate_import(SkillImport {
+        name,
+        prompt_template: body.to_string(),
+        risk_policy: SkillRisk::Readonly,
+    })
+}
+
+/// Auto-detect JSON vs Markdown skill packs.
+pub fn parse_skill_pack(bytes: &[u8]) -> Result<SkillImport, AutomationError> {
+    let text = String::from_utf8_lossy(bytes);
+    let trimmed = text.trim_start();
+    if trimmed.starts_with('{') {
+        parse_skill_json(bytes)
+    } else {
+        parse_skill_markdown(&text)
+    }
+}
+
+fn validate_import(imp: SkillImport) -> Result<SkillImport, AutomationError> {
     if imp.name.trim().is_empty() {
         return Err(AutomationError::Invalid("skill name is required".into()));
     }

@@ -24,6 +24,7 @@ export function McpPanel({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation()
   const [mcps, setMcps] = useState<McpConnection[]>([])
   const [showNew, setShowNew] = useState(false)
+  const [testingId, setTestingId] = useState<string | null>(null)
 
   const refresh = () => void automationListMcps().then(setMcps)
   useEffect(() => { refresh() }, [])
@@ -31,6 +32,19 @@ export function McpPanel({ onClose }: { onClose: () => void }) {
   const remove = (m: McpConnection) => {
     if (!window.confirm(`删除 MCP「${m.name}」？`)) return
     void automationDeleteMcp(m.id).then(refresh)
+  }
+
+  const retest = async (m: McpConnection) => {
+    setTestingId(m.id)
+    try {
+      const tools = await automationTestMcp(m)
+      // Refresh the in-memory list so the chip/工具数 update for this save session.
+      setMcps(prev => prev.map(x => x.id === m.id ? { ...x, status: 'connected', discoveredTools: tools } : x))
+    } catch {
+      setMcps(prev => prev.map(x => x.id === m.id ? { ...x, status: 'error' } : x))
+    } finally {
+      setTestingId(null)
+    }
   }
 
   return (
@@ -75,6 +89,14 @@ export function McpPanel({ onClose }: { onClose: () => void }) {
                 <span className="chip">{m.auth === 'none' ? '无认证' : m.auth === 'bearer' ? 'Bearer token' : 'Header 认证'}</span>
               </div>
             </div>
+            <button className="icon-btn bare" title="测试连接 / 刷新工具"
+              onClick={() => void retest(m)}
+              disabled={testingId === m.id}
+              style={{ width: 28, height: 28, display: 'grid', placeItems: 'center' }}>
+              <span style={{ animation: testingId === m.id ? 'spin .8s linear infinite' : 'none' }}>
+                <Icon name="refresh-cw" size={14} />
+              </span>
+            </button>
             <IconBtn name="trash-2" size={14} variant="bare" onClick={() => remove(m)} />
           </div>
         ))}
@@ -124,6 +146,12 @@ function McpFormModal({ onClose, onDone }: { onClose: () => void; onDone: () => 
       <div className="col gap4">
         <span style={label}>名称</span>
         <input style={input} value={name} onChange={e => setName(e.target.value)} placeholder="GitHub" />
+      </div>
+      <div className="col gap4">
+        <span style={label}>传输</span>
+        <Segmented size="sm" value="http" onChange={() => {}}
+          options={[{ value: 'http', label: 'Streamable HTTP' }, { value: 'stdio', label: 'stdio（待支持）' }]} />
+        <span style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>当前仅支持 Streamable HTTP</span>
       </div>
       <div className="col gap4">
         <span style={label}>Endpoint URL</span>

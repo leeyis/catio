@@ -15,9 +15,11 @@ use super::history::PromptHistoryStore;
 use super::mcp_client::{McpClient, McpError};
 use super::repo::AutomationStore;
 use super::scheduler::Scheduler;
-use super::skill::{install_skill, parse_skill_json};
+use super::skill::{install_skill, parse_skill_pack};
 use super::task_router::ActiveTarget;
-use super::types::{AutomationError, McpConnection, ScheduledTask, Skill, SkillScope, SkillSource};
+use super::types::{
+    AutomationError, McpConnection, ScheduledTask, Skill, SkillRisk, SkillScope, SkillSource,
+};
 use crate::agent::types::{AnthropicAuthMode, ApiCredential, ProviderConfig, ProviderProtocol};
 
 /// Desktop owner — fixed, never request-supplied.
@@ -43,14 +45,19 @@ pub fn parse_task_input(owner: &str, input: Value) -> Result<ScheduledTask, Auto
     Ok(task)
 }
 
-/// Compose a skill from imported bytes + desktop owner.
+/// Compose a skill from imported bytes + desktop owner. A form-selected
+/// `risk_override` (if any) replaces the risk inside the skill JSON.
 pub fn skill_from_import(
     owner: &str,
     body: String,
     scope: SkillScope,
     target_ref: Option<String>,
+    risk_override: Option<SkillRisk>,
 ) -> Result<Skill, AutomationError> {
-    let imp = parse_skill_json(body.as_bytes())?;
+    let mut imp = parse_skill_pack(body.as_bytes())?;
+    if let Some(risk) = risk_override {
+        imp.risk_policy = risk;
+    }
     Ok(super::skill::new_skill_from_import(
         &imp,
         scope,
@@ -93,8 +100,13 @@ pub async fn install_skill_for_owner(
     url: String,
     scope: SkillScope,
     target_ref: Option<String>,
+    risk_override: Option<SkillRisk>,
 ) -> Result<Skill, AutomationError> {
-    install_skill(http, &url, scope, target_ref, DESKTOP_OWNER).await
+    let mut skill = install_skill(http, &url, scope, target_ref, DESKTOP_OWNER).await?;
+    if let Some(risk) = risk_override {
+        skill.risk_policy = risk;
+    }
+    Ok(skill)
 }
 
 // ---- Tauri command wrappers ----
@@ -167,9 +179,10 @@ pub async fn automation_import_skill(
     body: String,
     scope: SkillScope,
     target_ref: Option<String>,
+    risk_policy: Option<SkillRisk>,
 ) -> Result<Skill, String> {
-    let skill =
-        skill_from_import(DESKTOP_OWNER, body, scope, target_ref).map_err(|e| e.to_string())?;
+    let skill = skill_from_import(DESKTOP_OWNER, body, scope, target_ref, risk_policy)
+        .map_err(|e| e.to_string())?;
     state
         .store
         .upsert_skill(&skill)
@@ -183,8 +196,9 @@ pub async fn automation_install_skill(
     url: String,
     scope: SkillScope,
     target_ref: Option<String>,
+    risk_policy: Option<SkillRisk>,
 ) -> Result<Skill, String> {
-    let skill = install_skill_for_owner(&state.http, url, scope, target_ref)
+    let skill = install_skill_for_owner(&state.http, url, scope, target_ref, risk_policy)
         .await
         .map_err(|e| e.to_string())?;
     state
@@ -320,6 +334,13 @@ pub async fn automation_task_result(
         },
     );
     Ok(())
+}
+
+/// Read a skill-pack file (JSON/Markdown) selected in the frontend picker. The
+/// desktop backend has filesystem access; the webview's dialog returns a path.
+#[tauri::command]
+pub async fn automation_read_skill_file(path: String) -> Result<String, String> {
+    std::fs::read_to_string(&path).map_err(|e| format!("read skill file failed: {e}"))
 }
 
 /// Scheduler heartbeat (diagnostic: proves the tick loop is running).
