@@ -1,171 +1,26 @@
-/* ported from ref-ui/_extract/blob9.txt — verbatim per plan T1-T7 */
-import { useState, useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { IconBtn } from '../atoms'
-import type { Connection, Gpu, Monitor } from '../../services/types'
+import type { Connection, Gpu, Monitor, MonitorDiskUsage } from '../../services/types'
 import { PanelShell } from './PanelShell'
 import { PanelEmpty } from './PanelEmpty'
-import { monitorStart, monitorStop, listen } from '../../services/ssh'
+import { listen, monitorStart, monitorStop } from '../../services/ssh'
+import './MonitorPanel.css'
 
-// Mirror the Tauri guard used in SftpPanel / TerminalPane.
-// Live monitor engages in the desktop app AND the browser deploy (server mode), where the
-// monitor:// stream rides the WebSocket.
 function isServerEnv(): boolean {
   return typeof window !== 'undefined' && '__CATIO_SERVER__' in window &&
     (window as unknown as Record<string, unknown>).__CATIO_SERVER__ === true
 }
+
 function isTauriEnv(): boolean {
-  return (
-    typeof window !== 'undefined' &&
+  return typeof window !== 'undefined' &&
     ('__TAURI_INTERNALS__' in window || '__TAURI__' in window)
-  )
 }
 
 export interface MonitorPanelProps {
   onClose: () => void
-  conn?: Connection // reserved for future use
+  conn?: Connection
   sessionId?: string
-}
-
-interface SparkProps {
-  data: number[]
-  color: string
-}
-
-function Spark({ data, color }: SparkProps) {
-  // Guard: need ≥1 point; with a single point treat it as a flat line at x=0..w.
-  const safeData = data.length > 0 ? data : [0]
-  const max = Math.max(...safeData, 100)
-  const w = 100, h = 32
-  const denom = safeData.length > 1 ? safeData.length - 1 : 1
-  const pts = safeData.map((v, i) => `${(i / denom) * w},${h - (v / max) * h}`).join(' ')
-  return (
-    <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" style={{ width: '100%', height: 36 }}>
-      <polyline points={pts} fill="none" stroke={color} strokeWidth="1.6" vectorEffect="non-scaling-stroke" />
-      <polyline points={`0,${h} ${pts} ${w},${h}`} fill={color} opacity="0.10" stroke="none" />
-    </svg>
-  )
-}
-
-interface StatProps {
-  label: string
-  val: number
-  unit: string
-  data: number[]
-  color: string
-  /** Optional caption, e.g. "9.6 GB / 16 GB" for memory used/total. */
-  sub?: string
-}
-
-function Stat({ label, val, unit, data, color, sub }: StatProps) {
-  return (
-    <div className="col" style={{ background: 'var(--surface-subtle)', border: '1px solid var(--border-hairline)', borderRadius: 12, padding: 10 }}>
-      <div className="row" style={{ justifyContent: 'space-between' }}>
-        <span style={{ fontSize: 11.5, color: 'var(--text-tertiary)', fontWeight: 500 }}>{label}</span>
-        <span className="mono" style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>{val}<span style={{ fontSize: 10, color: 'var(--text-faint)' }}>{unit}</span></span>
-      </div>
-      {sub && <span className="mono" style={{ fontSize: 9.5, color: 'var(--text-faint)', marginTop: -2 }}>{sub}</span>}
-      <Spark data={data} color={color} />
-    </div>
-  )
-}
-
-interface MiniProps {
-  label: string
-  value: string
-  tone?: string
-}
-
-function Mini({ label, value, tone }: MiniProps) {
-  return (
-    <div className="col" style={{ gap: 1, minWidth: 0 }}>
-      <span style={{ fontSize: 9.5, color: 'var(--text-faint)', letterSpacing: '0.2px' }}>{label}</span>
-      <span className="mono" style={{ fontSize: 12, fontWeight: 600, color: tone || 'var(--text-secondary)' }}>{value}</span>
-    </div>
-  )
-}
-
-interface GpuCardProps {
-  g: Gpu
-}
-
-function GpuCard({ g }: GpuCardProps) {
-  const { t } = useTranslation()
-  const memPct = Math.round((g.memUsed / g.memTotal) * 100)
-  const tempTone = g.temp >= 80 ? 'var(--danger-fg)' : g.temp >= 65 ? 'var(--signal-amber)' : 'var(--signal-green)'
-  const utilTone = g.utilNow >= 80 ? 'var(--signal-amber)' : 'var(--signal-green)'
-  return (
-    <div className="col" style={{ background: 'var(--surface-subtle)', border: '1px solid var(--border-hairline)', borderRadius: 12, padding: 10, gap: 8 }}>
-      <div className="row" style={{ justifyContent: 'space-between', gap: 8 }}>
-        <div className="row gap7" style={{ minWidth: 0 }}>
-          <div className="icon-badge" style={{ width: 22, height: 22, borderRadius: 6, background: 'color-mix(in srgb, var(--signal-green) 14%, transparent)', color: 'var(--signal-green)', flex: 'none' }}>
-            <span className="mono" style={{ fontSize: 10, fontWeight: 700 }}>{g.idx}</span>
-          </div>
-          <div className="col" style={{ lineHeight: 1.2, minWidth: 0 }}>
-            <span className="ell" style={{ fontSize: 12, fontWeight: 600 }}>{g.name}</span>
-            <span className="ell mono" style={{ fontSize: 9.5, color: 'var(--text-faint)' }}>{g.procs}</span>
-          </div>
-        </div>
-        <span className="mono" style={{ fontSize: 15, fontWeight: 700, color: utilTone, flex: 'none' }}>{g.utilNow}<span style={{ fontSize: 9, color: 'var(--text-faint)' }}>%</span></span>
-      </div>
-      <Spark data={g.util} color={utilTone} />
-      {/* VRAM bar */}
-      <div className="col" style={{ gap: 4 }}>
-        <div className="row" style={{ justifyContent: 'space-between' }}>
-          <span style={{ fontSize: 9.5, color: 'var(--text-faint)' }}>{t('panels.gpuVram')}</span>
-          <span className="mono" style={{ fontSize: 10.5, color: 'var(--text-tertiary)' }}>{g.memUsed} / {g.memTotal} GB</span>
-        </div>
-        <div style={{ height: 6, borderRadius: 999, background: 'var(--surface-inset)', overflow: 'hidden' }}>
-          <div style={{ width: memPct + '%', height: '100%', background: memPct > 85 ? 'var(--danger-fg)' : 'var(--signal-green)' }} />
-        </div>
-      </div>
-      {/* telemetry row */}
-      <div className="row" style={{ justifyContent: 'space-between', paddingTop: 2, borderTop: '1px solid var(--border-hairline)' }}>
-        <Mini label={t('panels.gpuTemp')} value={g.temp + '°C'} tone={tempTone} />
-        <Mini label={t('panels.gpuPower')} value={g.power + 'W'} />
-        <Mini label={t('panels.gpuPowerCap')} value={g.powerCap + 'W'} />
-        <Mini label={t('panels.gpuFan')} value={g.fan + '%'} />
-      </div>
-    </div>
-  )
-}
-
-// ---- loading skeleton (shimmer placeholder shown until first sample arrives) ----
-function Sk({ w, h = 12, r = 6 }: { w: number | string; h?: number; r?: number }) {
-  return <div className="skel" style={{ width: w, height: h, borderRadius: r, flex: 'none' }} />
-}
-function SkCard({ children }: { children: React.ReactNode }) {
-  return <div className="col" style={{ background: 'var(--surface-subtle)', border: '1px solid var(--border-hairline)', borderRadius: 12, padding: 10, gap: 10 }}>{children}</div>
-}
-function MonitorSkeleton() {
-  const statCard = (
-    <SkCard>
-      <div className="row" style={{ justifyContent: 'space-between' }}><Sk w={48} /><Sk w={32} /></div>
-      <Sk w="100%" h={36} r={8} />
-    </SkCard>
-  )
-  return (
-    <div className="grow" style={{ overflowY: 'auto', padding: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>{statCard}{statCard}</div>
-      <SkCard>
-        <div className="row" style={{ justifyContent: 'space-between' }}><Sk w={64} /><Sk w={40} /></div>
-        <Sk w="100%" h={48} r={8} />
-      </SkCard>
-      <div className="row" style={{ justifyContent: 'space-between', padding: '4px 2px 0' }}><Sk w={72} h={11} /><Sk w={66} h={19} r={9} /></div>
-      <SkCard>
-        <div className="row" style={{ justifyContent: 'space-between' }}><Sk w={48} /><Sk w={28} /></div>
-        <Sk w="100%" h={7} r={999} />
-      </SkCard>
-      <div className="col" style={{ gap: 6 }}>
-        <Sk w={72} h={11} />
-        {[0, 1, 2, 3].map(i => (
-          <div key={i} className="row" style={{ gap: 8, padding: '4px 8px', alignItems: 'center' }}>
-            <Sk w={34} h={10} /><Sk w="50%" h={10} /><div className="grow" /><Sk w={26} h={10} /><Sk w={26} h={10} />
-          </div>
-        ))}
-      </div>
-    </div>
-  )
 }
 
 const EMPTY_MONITOR: Monitor = {
@@ -173,6 +28,8 @@ const EMPTY_MONITOR: Monitor = {
   cpu: [],
   mem: [],
   net: [],
+  netRx: [],
+  netTx: [],
   disk: 0,
   diskTotal: '',
   diskUsed: '',
@@ -181,6 +38,410 @@ const EMPTY_MONITOR: Monitor = {
   memUsed: '',
   gpus: [],
   procs: [],
+  system: { os: '', kernel: '', uptimeSeconds: 0, processCount: 0 },
+  cpuInfo: {
+    model: '', sockets: 0, physicalCores: 0, threads: 0, frequencyMhz: null,
+    l3Cache: '', temperatureC: null, load1: 0, load5: 0, load15: 0,
+    userPct: 0, systemPct: 0, iowaitPct: 0,
+  },
+  memoryInfo: { total: '', used: '', available: '', cache: '', swapTotal: '', swapUsed: '' },
+  networkInfo: {
+    interface: '', interfaceCount: 0, rxMbps: 0, txMbps: 0, linkSpeedMbps: null,
+    duplex: '', ipv4: '', packetsPerSecond: 0, tcpConnections: 0, drops: 0, errors: 0,
+  },
+  disks: [],
+  diskIo: { readMbps: 0, writeMbps: 0 },
+}
+
+function normalizeMonitor(payload: Monitor): Monitor {
+  const legacyNet = payload.net ?? []
+  const netRx = payload.netRx ?? legacyNet
+  const netTx = payload.netTx ?? legacyNet.map(() => 0)
+  return {
+    ...EMPTY_MONITOR,
+    ...payload,
+    cpu: payload.cpu ?? [],
+    mem: payload.mem ?? [],
+    net: legacyNet,
+    netRx,
+    netTx,
+    gpus: (payload.gpus ?? []).map(gpu => ({ ...gpu, driver: gpu.driver ?? '' })),
+    procs: payload.procs ?? [],
+    disks: payload.disks ?? [],
+    system: { ...EMPTY_MONITOR.system, ...payload.system },
+    cpuInfo: { ...EMPTY_MONITOR.cpuInfo, ...payload.cpuInfo },
+    memoryInfo: { ...EMPTY_MONITOR.memoryInfo, ...payload.memoryInfo },
+    networkInfo: {
+      ...EMPTY_MONITOR.networkInfo,
+      ...payload.networkInfo,
+      rxMbps: payload.networkInfo?.rxMbps ?? netRx[netRx.length - 1] ?? 0,
+      txMbps: payload.networkInfo?.txMbps ?? netTx[netTx.length - 1] ?? 0,
+    },
+    diskIo: { ...EMPTY_MONITOR.diskIo, ...payload.diskIo },
+  }
+}
+
+function latest(values: number[]): number {
+  return values[values.length - 1] ?? 0
+}
+
+function clampPct(value: number): number {
+  return Math.max(0, Math.min(100, Number.isFinite(value) ? value : 0))
+}
+
+function formatDecimal(value: number, digits = 1): string {
+  return Number.isFinite(value) ? value.toFixed(digits) : '0.0'
+}
+
+function formatRate(value: number): string {
+  if (value >= 100) return `${value.toFixed(0)} MB/s`
+  if (value >= 10) return `${value.toFixed(1)} MB/s`
+  return `${value.toFixed(2)} MB/s`
+}
+
+function formatFrequency(mhz: number | null): string {
+  if (!mhz || mhz <= 0) return '—'
+  return mhz >= 1000 ? `${(mhz / 1000).toFixed(2)} GHz` : `${mhz.toFixed(0)} MHz`
+}
+
+function formatUptime(seconds: number, language: string): string {
+  if (!seconds) return '—'
+  const days = Math.floor(seconds / 86400)
+  const hours = Math.floor((seconds % 86400) / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  if (language.startsWith('zh')) {
+    if (days > 0) return `${days}天 ${hours}小时`
+    if (hours > 0) return `${hours}小时 ${minutes}分`
+    return `${minutes}分钟`
+  }
+  if (days > 0) return `${days}d ${hours}h`
+  if (hours > 0) return `${hours}h ${minutes}m`
+  return `${minutes}m`
+}
+
+interface SparkProps {
+  data: number[]
+  color: string
+  ceiling?: number
+  height?: number
+}
+
+function Spark({ data, color, ceiling, height = 34 }: SparkProps) {
+  const safeData = data.length > 0 ? data : [0]
+  const max = ceiling ?? Math.max(...safeData, 1)
+  const width = 100
+  const chartHeight = 30
+  const denominator = safeData.length > 1 ? safeData.length - 1 : 1
+  const points = safeData
+    .map((value, index) => {
+      const bounded = Math.max(0, Math.min(max, value))
+      return `${(index / denominator) * width},${chartHeight - (bounded / max) * chartHeight}`
+    })
+    .join(' ')
+  return (
+    <svg aria-hidden="true" viewBox={`0 0 ${width} ${chartHeight}`} preserveAspectRatio="none" className="monitor-spark" style={{ height }}>
+      <polyline points={points} fill="none" stroke={color} strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
+      <polyline points={`0,${chartHeight} ${points} ${width},${chartHeight}`} fill={color} opacity="0.09" stroke="none" />
+    </svg>
+  )
+}
+
+function Metric({ label, value, tone, title }: { label: string; value: string; tone?: string; title?: string }) {
+  return (
+    <div className="monitor-metric" title={title}>
+      <span className="monitor-metric-label">{label}</span>
+      <span className="monitor-metric-value mono" style={tone ? { color: tone } : undefined}>{value || '—'}</span>
+    </div>
+  )
+}
+
+function Progress({ value, tone }: { value: number; tone: string }) {
+  return (
+    <div className="monitor-progress" role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(clampPct(value))}>
+      <div className="monitor-progress-fill" style={{ width: `${clampPct(value)}%`, background: tone }} />
+    </div>
+  )
+}
+
+function SectionTitle({ title, aside }: { title: string; aside?: React.ReactNode }) {
+  return (
+    <div className="monitor-section-title">
+      <span>{title}</span>
+      {aside}
+    </div>
+  )
+}
+
+function HostStrip({ mon }: { mon: Monitor }) {
+  const { t, i18n } = useTranslation()
+  return (
+    <div className="monitor-host-strip">
+      <Metric label={t('panels.monitorOs')} value={mon.system.os} title={mon.system.os} />
+      <Metric label={t('panels.monitorKernel')} value={mon.system.kernel} title={mon.system.kernel} />
+      <Metric label={t('panels.monitorUptime')} value={formatUptime(mon.system.uptimeSeconds, i18n.language)} />
+      <Metric label={t('panels.monitorProcesses')} value={mon.system.processCount ? String(mon.system.processCount) : '—'} />
+    </div>
+  )
+}
+
+function CpuCard({ mon }: { mon: Monitor }) {
+  const { t } = useTranslation()
+  const cpu = mon.cpuInfo
+  const cpuNow = latest(mon.cpu)
+  const temperatureTone = (cpu.temperatureC ?? 0) >= 80
+    ? 'var(--danger-fg)'
+    : (cpu.temperatureC ?? 0) >= 65 ? 'var(--signal-amber)' : 'var(--signal-green)'
+  return (
+    <section className="monitor-card">
+      <div className="monitor-card-heading">
+        <div className="monitor-card-heading-main">
+          <span className="monitor-card-kicker">{t('panels.cpu')}</span>
+          <span className="monitor-card-model" title={cpu.model}>{cpu.model || t('panels.monitorUnavailable')}</span>
+        </div>
+        <span className="monitor-primary-value mono">{formatDecimal(cpuNow)}<small>%</small></span>
+      </div>
+      <Spark data={mon.cpu} color="var(--signal-blue)" ceiling={100} height={42} />
+      <div className="monitor-detail-grid monitor-detail-grid-cpu">
+        <Metric label={t('panels.cpuPhysicalCores')} value={cpu.physicalCores ? String(cpu.physicalCores) : '—'} />
+        <Metric label={t('panels.cpuThreads')} value={cpu.threads ? String(cpu.threads) : String(mon.cores || '—')} />
+        <Metric label={t('panels.cpuSockets')} value={cpu.sockets ? String(cpu.sockets) : '—'} />
+        <Metric label={t('panels.cpuFrequency')} value={formatFrequency(cpu.frequencyMhz)} />
+        <Metric label={t('panels.cpuL3Cache')} value={cpu.l3Cache || '—'} title={cpu.l3Cache} />
+        <Metric label={t('panels.cpuTemperature')} value={cpu.temperatureC == null ? '—' : `${formatDecimal(cpu.temperatureC)}°C`} tone={temperatureTone} />
+      </div>
+      <div className="monitor-inline-stats mono">
+        <span>{t('panels.cpuUser')} <b>{formatDecimal(cpu.userPct)}%</b></span>
+        <span>{t('panels.cpuSystem')} <b>{formatDecimal(cpu.systemPct)}%</b></span>
+        <span>{t('panels.cpuIowait')} <b>{formatDecimal(cpu.iowaitPct)}%</b></span>
+        <span>{t('panels.cpuLoad')} <b>{formatDecimal(cpu.load1, 2)} / {formatDecimal(cpu.load5, 2)} / {formatDecimal(cpu.load15, 2)}</b></span>
+      </div>
+    </section>
+  )
+}
+
+function MemoryCard({ mon }: { mon: Monitor }) {
+  const { t } = useTranslation()
+  const memoryNow = latest(mon.mem)
+  const info = mon.memoryInfo
+  const used = info.used || mon.memUsed
+  const total = info.total || mon.memTotal
+  return (
+    <section className="monitor-card">
+      <div className="monitor-card-heading">
+        <div className="monitor-card-heading-main">
+          <span className="monitor-card-kicker">{t('panels.mem')}</span>
+          <span className="monitor-card-model mono">{used && total ? `${used} / ${total}` : t('panels.monitorUnavailable')}</span>
+        </div>
+        <span className="monitor-primary-value mono">{formatDecimal(memoryNow)}<small>%</small></span>
+      </div>
+      <Spark data={mon.mem} color="var(--signal-violet)" ceiling={100} height={36} />
+      <Progress value={memoryNow} tone={memoryNow > 85 ? 'var(--danger-fg)' : 'var(--signal-violet)'} />
+      <div className="monitor-detail-grid">
+        <Metric label={t('panels.memAvailable')} value={info.available} />
+        <Metric label={t('panels.memCache')} value={info.cache} />
+        <Metric label={t('panels.memSwap')} value={info.swapUsed && info.swapTotal ? `${info.swapUsed} / ${info.swapTotal}` : '—'} />
+      </div>
+    </section>
+  )
+}
+
+function NetworkCard({ mon }: { mon: Monitor }) {
+  const { t } = useTranslation()
+  const network = mon.networkInfo
+  const rx = latest(mon.netRx)
+  const tx = latest(mon.netTx)
+  const duplex = network.duplex === 'full'
+    ? t('panels.netFullDuplex')
+    : network.duplex === 'half' ? t('panels.netHalfDuplex') : '—'
+  const interfaceLabel = network.interface
+    ? `${network.interface}${network.interfaceCount > 1 ? ` +${network.interfaceCount - 1}` : ''}`
+    : '—'
+  return (
+    <section className="monitor-card">
+      <div className="monitor-card-heading">
+        <div className="monitor-card-heading-main">
+          <span className="monitor-card-kicker">{t('panels.netIO')}</span>
+          <span className="monitor-card-model mono">{interfaceLabel}</span>
+        </div>
+        <span className="monitor-chip mono">{network.ipv4 || t('panels.monitorUnavailable')}</span>
+      </div>
+      <div className="monitor-throughput-grid">
+        <div className="monitor-throughput">
+          <div className="monitor-throughput-heading">
+            <span className="monitor-direction monitor-direction-down">↓</span>
+            <span>{t('panels.netDownload')}</span>
+            <b className="mono">{formatRate(rx)}</b>
+          </div>
+          <Spark data={mon.netRx} color="var(--signal-green)" height={34} />
+        </div>
+        <div className="monitor-throughput">
+          <div className="monitor-throughput-heading">
+            <span className="monitor-direction monitor-direction-up">↑</span>
+            <span>{t('panels.netUpload')}</span>
+            <b className="mono">{formatRate(tx)}</b>
+          </div>
+          <Spark data={mon.netTx} color="var(--signal-blue)" height={34} />
+        </div>
+      </div>
+      <div className="monitor-detail-grid">
+        <Metric label={t('panels.netLink')} value={network.linkSpeedMbps ? `${network.linkSpeedMbps} Mbps` : '—'} />
+        <Metric label={t('panels.netDuplex')} value={duplex} />
+        <Metric label={t('panels.netPackets')} value={`${formatDecimal(network.packetsPerSecond, 0)} pps`} />
+        <Metric label={t('panels.netTcp')} value={String(network.tcpConnections)} />
+        <Metric label={t('panels.netDrops')} value={String(network.drops)} tone={network.drops ? 'var(--signal-amber)' : undefined} />
+        <Metric label={t('panels.netErrors')} value={String(network.errors)} tone={network.errors ? 'var(--danger-fg)' : undefined} />
+      </div>
+    </section>
+  )
+}
+
+function diskTone(percentage: number): string {
+  if (percentage >= 90) return 'var(--danger-fg)'
+  if (percentage >= 75) return 'var(--signal-amber)'
+  return 'var(--signal-blue)'
+}
+
+function DiskRow({ disk }: { disk: MonitorDiskUsage }) {
+  const { t } = useTranslation()
+  const tone = diskTone(disk.usedPct)
+  return (
+    <div className="monitor-disk-row">
+      <div className="monitor-disk-main">
+        <div className="monitor-disk-path">
+          <strong className="mono" title={disk.mount}>{disk.mount}</strong>
+          <span className="mono" title={`${disk.device} ${disk.fsType}`}>{disk.device}{disk.fsType ? ` · ${disk.fsType}` : ''}</span>
+        </div>
+        <div className="monitor-disk-usage mono">
+          <strong style={{ color: tone }}>{disk.usedPct}%</strong>
+          <span>{disk.used} / {disk.total}</span>
+        </div>
+      </div>
+      <Progress value={disk.usedPct} tone={tone} />
+      <div className="monitor-disk-meta mono">
+        <span>{t('panels.diskAvailable')} {disk.available || '—'}</span>
+        <span>{t('panels.diskInode')} {disk.inodePct == null ? '—' : `${disk.inodePct}%`}</span>
+      </div>
+    </div>
+  )
+}
+
+function DiskSection({ mon }: { mon: Monitor }) {
+  const { t } = useTranslation()
+  const legacyDisk: MonitorDiskUsage = {
+    device: '', fsType: '', mount: '/', total: mon.diskTotal, used: mon.diskUsed,
+    available: '', usedPct: mon.disk, inodePct: null,
+  }
+  const disks = mon.disks.length > 0 ? mon.disks : [legacyDisk]
+  return (
+    <section>
+      <SectionTitle
+        title={t('panels.diskSection', { count: disks.length })}
+        aside={(
+          <div className="monitor-io-summary mono">
+            <span>R {formatRate(mon.diskIo.readMbps)}</span>
+            <span>W {formatRate(mon.diskIo.writeMbps)}</span>
+          </div>
+        )}
+      />
+      <div className="monitor-disk-list">{disks.map(disk => <DiskRow key={`${disk.device}:${disk.mount}`} disk={disk} />)}</div>
+    </section>
+  )
+}
+
+function Mini({ label, value, tone }: { label: string; value: string; tone?: string }) {
+  return <Metric label={label} value={value} tone={tone} />
+}
+
+function GpuCard({ gpu }: { gpu: Gpu }) {
+  const { t } = useTranslation()
+  const memoryPercentage = gpu.memTotal > 0 ? Math.round((gpu.memUsed / gpu.memTotal) * 100) : 0
+  const temperatureTone = gpu.temp >= 80
+    ? 'var(--danger-fg)'
+    : gpu.temp >= 65 ? 'var(--signal-amber)' : 'var(--signal-green)'
+  const utilisationTone = gpu.utilNow >= 80 ? 'var(--signal-amber)' : 'var(--signal-green)'
+  return (
+    <div className="monitor-card monitor-gpu-card">
+      <div className="monitor-gpu-heading">
+        <div className="monitor-gpu-identity">
+          <span className="monitor-gpu-index mono">{gpu.idx}</span>
+          <div>
+            <strong title={gpu.name}>{gpu.name}</strong>
+            <span className="mono" title={gpu.procs}>{gpu.procs || t('panels.gpuNoProcess')}</span>
+          </div>
+        </div>
+        <span className="monitor-primary-value mono" style={{ color: utilisationTone }}>{gpu.utilNow}<small>%</small></span>
+      </div>
+      <Spark data={gpu.util} color={utilisationTone} ceiling={100} height={36} />
+      <div className="monitor-gpu-memory">
+        <div><span>{t('panels.gpuVram')}</span><b className="mono">{gpu.memUsed} / {gpu.memTotal} GB</b></div>
+        <Progress value={memoryPercentage} tone={memoryPercentage > 85 ? 'var(--danger-fg)' : 'var(--signal-green)'} />
+      </div>
+      <div className="monitor-detail-grid monitor-gpu-details">
+        <Mini label={t('panels.gpuTemp')} value={`${gpu.temp}°C`} tone={temperatureTone} />
+        <Mini label={t('panels.gpuPower')} value={`${gpu.power}W`} />
+        <Mini label={t('panels.gpuPowerCap')} value={`${gpu.powerCap}W`} />
+        <Mini label={t('panels.gpuFan')} value={`${gpu.fan}%`} />
+      </div>
+    </div>
+  )
+}
+
+function GpuSection({ mon }: { mon: Monitor }) {
+  const { t } = useTranslation()
+  const driver = mon.gpus.find(gpu => gpu.driver)?.driver
+  return (
+    <section>
+      <SectionTitle
+        title={t('panels.gpuSection', { count: mon.gpus.length })}
+        aside={<span className="monitor-chip mono">{driver ? `${t('panels.gpuDriver')} ${driver}` : 'nvidia-smi'}</span>}
+      />
+      {mon.gpus.length > 0
+        ? <div className="monitor-gpu-grid">{mon.gpus.map(gpu => <GpuCard key={gpu.idx} gpu={gpu} />)}</div>
+        : <div className="monitor-empty-inline">{t('panels.gpuUnavailable')}</div>}
+    </section>
+  )
+}
+
+function ProcessSection({ mon }: { mon: Monitor }) {
+  const { t } = useTranslation()
+  return (
+    <section>
+      <SectionTitle title={t('panels.topProcs')} />
+      <div className="monitor-process-table">
+        <div className="monitor-process-row monitor-process-head mono">
+          <span>{t('panels.procPid')}</span><span>{t('panels.procCmd')}</span><span>{t('panels.procCpu')}</span><span>{t('panels.procMem')}</span>
+        </div>
+        {mon.procs.map(process => (
+          <div key={process.pid} className="monitor-process-row mono">
+            <span>{process.pid}</span>
+            <span title={process.cmd}>{process.cmd}</span>
+            <span style={{ color: process.cpu > 10 ? 'var(--signal-amber)' : undefined }}>{process.cpu}</span>
+            <span>{process.mem}</span>
+          </div>
+        ))}
+      </div>
+    </section>
+  )
+}
+
+function SkeletonBlock({ width, height = 11 }: { width: number | string; height?: number }) {
+  return <div className="skel" style={{ width, height, borderRadius: 6 }} />
+}
+
+function MonitorSkeleton() {
+  return (
+    <div className="monitor-scroll">
+      <div className="monitor-host-strip">{[0, 1, 2, 3].map(index => <SkeletonBlock key={index} width="70%" height={28} />)}</div>
+      {[0, 1, 2].map(index => (
+        <div className="monitor-card monitor-skeleton-card" key={index}>
+          <div><SkeletonBlock width={58} /><SkeletonBlock width={index === 0 ? '78%' : '46%'} /></div>
+          <SkeletonBlock width="100%" height={42} />
+          <div className="monitor-detail-grid"><SkeletonBlock width="70%" /><SkeletonBlock width="70%" /><SkeletonBlock width="70%" /></div>
+        </div>
+      ))}
+      <div className="monitor-card"><SkeletonBlock width="100%" height={54} /></div>
+    </div>
+  )
 }
 
 export function MonitorPanel({ onClose, conn: _conn, sessionId }: MonitorPanelProps) {
@@ -196,24 +457,24 @@ export function MonitorPanel({ onClose, conn: _conn, sessionId }: MonitorPanelPr
     let unlisten: (() => void) | null = null
     let active = true
 
-    monitorStart(sessionId, 2000).catch(() => { /* ignore if already running */ })
-    listen<Monitor>('monitor://' + sessionId, (payload) => {
-      if (active) setMon(payload)
+    monitorStart(sessionId, 2000).catch(() => { /* already running or disconnected */ })
+    listen<Monitor>(`monitor://${sessionId}`, payload => {
+      if (active) setMon(normalizeMonitor(payload))
     }).then(fn => {
-      if (!active) { fn(); return }
+      if (!active) {
+        fn()
+        return
+      }
       unlisten = fn
-    }).catch(() => { /* no-op outside Tauri */ })
+    }).catch(() => { /* no-op outside a live transport */ })
 
     return () => {
       active = false
-      if (unlisten) unlisten()
-      monitorStop(sessionId).catch(() => { /* best-effort */ })
+      unlisten?.()
+      monitorStop(sessionId).catch(() => { /* best effort */ })
     }
-    // Re-run when sessionId changes (new connection)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId])
 
-  // Refresh button: in live mode restart the polling interval; in demo mode no-op.
   function handleRefresh() {
     if (sessionId && (isTauriEnv() || isServerEnv())) {
       monitorStart(sessionId, 2000).catch(() => {})
@@ -221,43 +482,26 @@ export function MonitorPanel({ onClose, conn: _conn, sessionId }: MonitorPanelPr
   }
 
   return (
-    <PanelShell icon="gauge" title={t('panels.monitorTitle')} sub={sessionId ? (mon.host + ' · ' + t('panels.monitorRealtime')) : undefined} onClose={onClose} actions={<IconBtn name="refresh-cw" size={15} variant="bare" onClick={handleRefresh} />}>
+    <PanelShell
+      icon="gauge"
+      title={t('panels.monitorTitle')}
+      sub={sessionId ? `${mon.host} · ${t('panels.monitorRealtime')}` : undefined}
+      onClose={onClose}
+      actions={<IconBtn name="refresh-cw" size={15} variant="bare" onClick={handleRefresh} />}
+    >
       {!sessionId ? (
         <PanelEmpty icon="gauge" text={t('panels.noSessionHint')} />
       ) : mon.cpu.length === 0 ? (
         <MonitorSkeleton />
       ) : (
-        <div className="grow" style={{ overflowY: 'auto', padding: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-            <Stat label={t('panels.cpu')} val={mon.cpu[mon.cpu.length - 1]} unit="%" data={mon.cpu} color="var(--signal-blue)" />
-            <Stat label={t('panels.mem')} val={mon.mem[mon.mem.length - 1]} unit="%" data={mon.mem} color="var(--signal-violet)"
-              sub={mon.memUsed && mon.memTotal ? `${mon.memUsed} / ${mon.memTotal}` : undefined} />
-          </div>
-          <Stat label={t('panels.netIO')} val={mon.net[mon.net.length - 1]} unit=" MB/s" data={mon.net} color="var(--signal-green)" />
-
-          {/* GPU — multi-GPU telemetry */}
-          <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', padding: '4px 2px 0' }}>
-            <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.4px', textTransform: 'uppercase', color: 'var(--text-faint)' }}>{t('panels.gpuSection', { count: mon.gpus.length })}</span>
-            <span className="chip mono" style={{ height: 19, fontSize: 9.5 }}>nvidia-smi</span>
-          </div>
-          {mon.gpus.map(g => <GpuCard key={g.idx} g={g} />)}
-
-          <div className="col" style={{ background: 'var(--surface-subtle)', border: '1px solid var(--border-hairline)', borderRadius: 12, padding: 10, gap: 8 }}>
-            <div className="row" style={{ justifyContent: 'space-between' }}><span style={{ fontSize: 11.5, color: 'var(--text-tertiary)', fontWeight: 500 }}>{t('panels.disk')}</span><span className="mono" style={{ fontSize: 12 }}>{mon.diskUsed && mon.diskTotal ? <span style={{ color: 'var(--text-faint)' }}>{mon.diskUsed} / {mon.diskTotal} · </span> : null}{mon.disk}%</span></div>
-            <div style={{ height: 7, borderRadius: 999, background: 'var(--surface-inset)', overflow: 'hidden' }}><div style={{ width: mon.disk + '%', height: '100%', background: mon.disk > 80 ? 'var(--danger-fg)' : 'var(--signal-amber)' }} /></div>
-          </div>
-          <div className="col" style={{ gap: 2 }}>
-            <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.4px', textTransform: 'uppercase', color: 'var(--text-faint)', padding: '4px 2px' }}>{t('panels.topProcs')}</span>
-            <div className="row mono" style={{ fontSize: 10, color: 'var(--text-faint)', padding: '0 8px 4px', gap: 10 }}><span style={{ width: 56, flexShrink: 0 }}>{t('panels.procPid')}</span><span className="grow">{t('panels.procCmd')}</span><span style={{ width: 38, textAlign: 'right' }}>{t('panels.procCpu')}</span><span style={{ width: 38, textAlign: 'right' }}>{t('panels.procMem')}</span></div>
-            {mon.procs.map(p => (
-              <div key={p.pid} className="row mono" style={{ fontSize: 11, padding: '5px 8px', borderRadius: 7, color: 'var(--text-secondary)', gap: 10 }}>
-                <span style={{ width: 56, flexShrink: 0, color: 'var(--text-faint)' }}>{p.pid}</span>
-                <span className="grow ell">{p.cmd}</span>
-                <span style={{ width: 38, textAlign: 'right', color: p.cpu > 10 ? 'var(--signal-amber)' : 'var(--text-secondary)' }}>{p.cpu}</span>
-                <span style={{ width: 38, textAlign: 'right' }}>{p.mem}</span>
-              </div>
-            ))}
-          </div>
+        <div className="monitor-scroll">
+          <HostStrip mon={mon} />
+          <CpuCard mon={mon} />
+          <MemoryCard mon={mon} />
+          <NetworkCard mon={mon} />
+          <DiskSection mon={mon} />
+          <GpuSection mon={mon} />
+          <ProcessSection mon={mon} />
         </div>
       )}
     </PanelShell>

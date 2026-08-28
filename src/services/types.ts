@@ -354,6 +354,7 @@ export interface Gpu {
   powerCap: number
   fan: number
   procs: string
+  driver: string
 }
 
 export interface Proc {
@@ -363,11 +364,75 @@ export interface Proc {
   mem: number
 }
 
+export interface MonitorSystemInfo {
+  os: string
+  kernel: string
+  uptimeSeconds: number
+  processCount: number
+}
+
+export interface MonitorCpuInfo {
+  model: string
+  sockets: number
+  physicalCores: number
+  threads: number
+  frequencyMhz: number | null
+  l3Cache: string
+  temperatureC: number | null
+  load1: number
+  load5: number
+  load15: number
+  userPct: number
+  systemPct: number
+  iowaitPct: number
+}
+
+export interface MonitorMemoryInfo {
+  total: string
+  used: string
+  available: string
+  cache: string
+  swapTotal: string
+  swapUsed: string
+}
+
+export interface MonitorNetworkInfo {
+  interface: string
+  interfaceCount: number
+  rxMbps: number
+  txMbps: number
+  linkSpeedMbps: number | null
+  duplex: string
+  ipv4: string
+  packetsPerSecond: number
+  tcpConnections: number
+  drops: number
+  errors: number
+}
+
+export interface MonitorDiskUsage {
+  device: string
+  fsType: string
+  mount: string
+  total: string
+  used: string
+  available: string
+  usedPct: number
+  inodePct: number | null
+}
+
+export interface MonitorDiskIo {
+  readMbps: number
+  writeMbps: number
+}
+
 export interface Monitor {
   host: string
   cpu: number[]
   mem: number[]
   net: number[]
+  netRx: number[]
+  netTx: number[]
   disk: number
   /** Total / used root-filesystem size, human-readable (e.g. "500 GB"). */
   diskTotal: string
@@ -377,6 +442,12 @@ export interface Monitor {
   memUsed: string
   gpus: Gpu[]
   procs: Proc[]
+  system: MonitorSystemInfo
+  cpuInfo: MonitorCpuInfo
+  memoryInfo: MonitorMemoryInfo
+  networkInfo: MonitorNetworkInfo
+  disks: MonitorDiskUsage[]
+  diskIo: MonitorDiskIo
 }
 
 // ---- Multi-Exec ----

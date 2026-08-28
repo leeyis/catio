@@ -1,6 +1,6 @@
 //! 无代理（agentless）系统监控：通过 SSH exec channel 跑标准命令
 //! （`cat /proc/stat` 等），用 D1 的纯函数解析，组装 `Monitor`，并周期性地
-//! 经 `monitor://{sessionId}` 事件发往前端；cpu/mem/net 维护滚动 sparkline 窗口。
+//! 经 `monitor://{sessionId}` 事件发往前端；cpu/mem/net/rx/tx 维护滚动 sparkline 窗口。
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -14,8 +14,10 @@ use crate::ssh::conn::ClientHandler;
 use crate::ssh::exec::run_cmd;
 use crate::ssh::manager::SessionManager;
 use crate::ssh::parse::{
-    parse_cpu_cores, parse_cpu_pct, parse_disk, parse_gpus, parse_mem, parse_net_mbps,
-    parse_procs, Gpu, Proc,
+    parse_cpu_breakdown, parse_cpu_cores, parse_cpu_pct, parse_disk, parse_disk_io, parse_disks,
+    parse_gpus, parse_host_info, parse_mem, parse_memory_info, parse_net_mbps, parse_network_info,
+    parse_process_count, parse_procs, CpuInfo, DiskIo, DiskUsage, Gpu, MemoryInfo, NetworkInfo,
+    Proc, SystemInfo,
 };
 use crate::ssh::SshError;
 
@@ -29,7 +31,7 @@ const PROC_LIMIT: usize = 10;
 // ────────────────────────────────────────────────
 
 /// 一次（或一段窗口的）监控快照。
-/// `cpu`/`mem`/`net` 是 sparkline 历史；单次采样时为单元素向量，
+/// `cpu`/`mem`/`net`/`net_rx`/`net_tx` 是 sparkline 历史；单次采样时为单元素向量，
 /// 周期任务会替换为完整滚动窗口。
 #[derive(Serialize, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -38,6 +40,8 @@ pub struct Monitor {
     pub cpu: Vec<f64>,
     pub mem: Vec<f64>,
     pub net: Vec<f64>,
+    pub net_rx: Vec<f64>,
+    pub net_tx: Vec<f64>,
     pub disk: u8,
     pub disk_total: String,
     pub disk_used: String,
@@ -46,6 +50,12 @@ pub struct Monitor {
     pub mem_used: String,
     pub gpus: Vec<Gpu>,
     pub procs: Vec<Proc>,
+    pub system: SystemInfo,
+    pub cpu_info: CpuInfo,
+    pub memory_info: MemoryInfo,
+    pub network_info: NetworkInfo,
+    pub disks: Vec<DiskUsage>,
+    pub disk_io: DiskIo,
 }
 
 // ────────────────────────────────────────────────
@@ -67,19 +77,68 @@ pub fn assemble_monitor(
     ps: &str,
     nvidia_csv: &str,
 ) -> Monitor {
+    assemble_monitor_detailed(
+        host,
+        stat_prev,
+        stat_now,
+        meminfo,
+        netdev_prev,
+        netdev_now,
+        secs,
+        df,
+        "",
+        "",
+        ps,
+        nvidia_csv,
+        "",
+        "",
+    )
+}
+
+/// Rich monitor assembler used by the live sampler. The original `assemble_monitor` remains as a
+/// compatibility wrapper for existing callers and tests.
+#[allow(clippy::too_many_arguments)]
+pub fn assemble_monitor_detailed(
+    host: &str,
+    stat_prev: &str,
+    stat_now: &str,
+    meminfo: &str,
+    netdev_prev: &str,
+    netdev_now: &str,
+    secs: f64,
+    df: &str,
+    diskstats_prev: &str,
+    diskstats_now: &str,
+    ps: &str,
+    nvidia_csv: &str,
+    host_info: &str,
+    net_info: &str,
+) -> Monitor {
     let cpu_pct = parse_cpu_pct(stat_prev, stat_now);
     let cores = parse_cpu_cores(stat_now);
     let (mem_pct, mem_total, mem_used) = parse_mem(meminfo);
+    let memory_info = parse_memory_info(meminfo);
     let net_mbps = parse_net_mbps(netdev_prev, netdev_now, secs);
+    let network_info = parse_network_info(netdev_prev, netdev_now, secs, net_info);
     let (disk, disk_total, disk_used) = parse_disk(df);
+    let disks = parse_disks(df);
+    let disk_io = parse_disk_io(diskstats_prev, diskstats_now, secs);
     let procs = parse_procs(ps, PROC_LIMIT);
+    let process_count = parse_process_count(ps);
     let gpus = parse_gpus(nvidia_csv);
+    let (system, mut cpu_info) = parse_host_info(host_info, cores, process_count);
+    let (user_pct, system_pct, iowait_pct) = parse_cpu_breakdown(stat_prev, stat_now);
+    cpu_info.user_pct = user_pct;
+    cpu_info.system_pct = system_pct;
+    cpu_info.iowait_pct = iowait_pct;
 
     Monitor {
         host: host.to_string(),
         cpu: vec![cpu_pct],
         mem: vec![mem_pct],
         net: vec![net_mbps],
+        net_rx: vec![network_info.rx_mbps],
+        net_tx: vec![network_info.tx_mbps],
         disk,
         disk_total,
         disk_used,
@@ -88,6 +147,12 @@ pub fn assemble_monitor(
         mem_used,
         gpus,
         procs,
+        system,
+        cpu_info,
+        memory_info,
+        network_info,
+        disks,
+        disk_io,
     }
 }
 
@@ -98,16 +163,44 @@ pub fn assemble_monitor(
 /// 监控所用的标准命令集（agentless）。
 const CMD_STAT: &str = "cat /proc/stat";
 const CMD_NETDEV: &str = "cat /proc/net/dev";
+const CMD_DISKSTATS: &str = "cat /proc/diskstats";
 const CMD_MEMINFO: &str = "cat /proc/meminfo";
-const CMD_DF: &str = "df -P /";
+const CMD_DF: &str = concat!(
+    "{ df -PT -x tmpfs -x devtmpfs -x squashfs 2>/dev/null || df -P 2>/dev/null; ",
+    "printf '__CATIO_INODES__\\n'; ",
+    "df -Pi -x tmpfs -x devtmpfs -x squashfs 2>/dev/null || true; }"
+);
 const CMD_PS: &str = "ps -eo pid,comm,%cpu,%mem --sort=-%cpu";
-const CMD_NVIDIA: &str = "nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,power.limit,fan.speed --format=csv,noheader,nounits";
+const CMD_NVIDIA: &str = "nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw,power.limit,fan.speed,driver_version --format=csv,noheader,nounits";
+const CMD_HOSTINFO: &str = concat!(
+    "printf '__CATIO_OS__\\n'; cat /etc/os-release 2>/dev/null; ",
+    "printf '__CATIO_KERNEL__\\n'; uname -r 2>/dev/null; ",
+    "printf '__CATIO_UPTIME__\\n'; cat /proc/uptime 2>/dev/null; ",
+    "printf '__CATIO_LOAD__\\n'; cat /proc/loadavg 2>/dev/null; ",
+    "printf '__CATIO_LSCPU__\\n'; LC_ALL=C lscpu 2>/dev/null; ",
+    "printf '__CATIO_FREQ__\\n'; ",
+    "cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null; ",
+    "printf '__CATIO_CPU_FALLBACK__\\n'; ",
+    "grep -m1 -E '^(model name|Hardware|Processor)' /proc/cpuinfo 2>/dev/null; ",
+    "printf '__CATIO_TEMP__\\n'; ",
+    "for f in /sys/class/thermal/thermal_zone*/temp; do [ -r \"$f\" ] && cat \"$f\"; done"
+);
+const CMD_NETINFO: &str = concat!(
+    "for p in /sys/class/net/*; do [ -d \"$p\" ] || continue; ",
+    "i=${p##*/}; [ \"$i\" = lo ] && continue; ",
+    "speed=$(cat \"$p/speed\" 2>/dev/null); ",
+    "duplex=$(cat \"$p/duplex\" 2>/dev/null); ",
+    "addr=$(ip -o -4 addr show dev \"$i\" scope global 2>/dev/null | awk 'NR==1 {print $4}'); ",
+    "printf '%s|%s|%s|%s\\n' \"$i\" \"$speed\" \"$duplex\" \"$addr\"; ",
+    "done; printf '__CATIO_TCP__|'; ",
+    "awk 'FNR>1 {n++} END {print n+0}' /proc/net/tcp /proc/net/tcp6 2>/dev/null"
+);
 
 /// 通过 SSH 采集一次监控快照：
-/// - 先取 `stat_prev` / `net_prev`；
+/// - 先取 `stat_prev` / `net_prev` / `diskstats_prev`；
 /// - sleep `interval`；
-/// - 再取 `stat_now` / `net_now` 与 meminfo/df/ps/nvidia；
-/// - 调 `assemble_monitor`，`secs = interval` 的秒数。
+/// - 再取动态快照与 meminfo/df/ps/host/network/nvidia 元数据；
+/// - 调 `assemble_monitor_detailed`，`secs = interval` 的秒数。
 ///
 /// nvidia 命令出错时（理论上 `run_cmd` 不会因退出码报错，仅 I/O 故障才报）
 /// 用 `""` 兜底，使 `parse_gpus("")` → 空列表。
@@ -118,20 +211,37 @@ pub async fn sample(
 ) -> Result<Monitor, SshError> {
     let stat_prev = run_cmd(handle, CMD_STAT).await?;
     let net_prev = run_cmd(handle, CMD_NETDEV).await?;
+    let diskstats_prev = run_cmd(handle, CMD_DISKSTATS).await.unwrap_or_default();
 
     tokio::time::sleep(interval).await;
 
     let stat_now = run_cmd(handle, CMD_STAT).await?;
     let net_now = run_cmd(handle, CMD_NETDEV).await?;
+    let diskstats_now = run_cmd(handle, CMD_DISKSTATS).await.unwrap_or_default();
     let meminfo = run_cmd(handle, CMD_MEMINFO).await?;
     let df = run_cmd(handle, CMD_DF).await?;
     let ps = run_cmd(handle, CMD_PS).await?;
+    let host_info = run_cmd(handle, CMD_HOSTINFO).await.unwrap_or_default();
+    let net_info = run_cmd(handle, CMD_NETINFO).await.unwrap_or_default();
     // nvidia：无 GPU 时退出非零且无 stdout → run_cmd 返回 Ok("")；I/O 故障兜底为 ""。
     let nvidia = run_cmd(handle, CMD_NVIDIA).await.unwrap_or_default();
 
     let secs = interval.as_secs_f64();
-    Ok(assemble_monitor(
-        host, &stat_prev, &stat_now, &meminfo, &net_prev, &net_now, secs, &df, &ps, &nvidia,
+    Ok(assemble_monitor_detailed(
+        host,
+        &stat_prev,
+        &stat_now,
+        &meminfo,
+        &net_prev,
+        &net_now,
+        secs,
+        &df,
+        &diskstats_prev,
+        &diskstats_now,
+        &ps,
+        &nvidia,
+        &host_info,
+        &net_info,
     ))
 }
 
@@ -171,27 +281,46 @@ async fn sample_locked(
 ) -> Result<Monitor, SshError> {
     let stat_prev = run_cmd_locked(sess, CMD_STAT).await?;
     let net_prev = run_cmd_locked(sess, CMD_NETDEV).await?;
+    let diskstats_prev = run_cmd_locked(sess, CMD_DISKSTATS)
+        .await
+        .unwrap_or_default();
 
     // sleep 在锁外——其他操作（term/sftp/tunnel）可在此期间自由获取会话锁。
     tokio::time::sleep(interval).await;
 
     let stat_now = run_cmd_locked(sess, CMD_STAT).await?;
     let net_now = run_cmd_locked(sess, CMD_NETDEV).await?;
+    let diskstats_now = run_cmd_locked(sess, CMD_DISKSTATS)
+        .await
+        .unwrap_or_default();
     let meminfo = run_cmd_locked(sess, CMD_MEMINFO).await?;
     let df = run_cmd_locked(sess, CMD_DF).await?;
     let ps = run_cmd_locked(sess, CMD_PS).await?;
-    let nvidia = run_cmd_locked(sess, CMD_NVIDIA)
-        .await
-        .unwrap_or_default();
+    let host_info = run_cmd_locked(sess, CMD_HOSTINFO).await.unwrap_or_default();
+    let net_info = run_cmd_locked(sess, CMD_NETINFO).await.unwrap_or_default();
+    let nvidia = run_cmd_locked(sess, CMD_NVIDIA).await.unwrap_or_default();
 
     let secs = interval.as_secs_f64();
-    Ok(assemble_monitor(
-        host, &stat_prev, &stat_now, &meminfo, &net_prev, &net_now, secs, &df, &ps, &nvidia,
+    Ok(assemble_monitor_detailed(
+        host,
+        &stat_prev,
+        &stat_now,
+        &meminfo,
+        &net_prev,
+        &net_now,
+        secs,
+        &df,
+        &diskstats_prev,
+        &diskstats_now,
+        &ps,
+        &nvidia,
+        &host_info,
+        &net_info,
     ))
 }
 
 /// 启动一个会话的周期监控任务。每 `interval_ms` 调一次 `sample_locked`，把新值压入
-/// cpu/mem/net（及每个 gpu idx 的 util）滚动窗口（容量 60），用完整窗口构建
+/// cpu/mem/net/rx/tx（及每个 gpu idx 的 util）滚动窗口（容量 60），用完整窗口构建
 /// `Monitor` 后经 `monitor://{session_id}` 发出。任务的 AbortHandle 存入 manager。
 /// 同一会话再次启动会先停掉旧任务。
 ///
@@ -231,6 +360,8 @@ pub async fn monitor_start_core(
         let mut cpu_win: VecDeque<f64> = VecDeque::new();
         let mut mem_win: VecDeque<f64> = VecDeque::new();
         let mut net_win: VecDeque<f64> = VecDeque::new();
+        let mut net_rx_win: VecDeque<f64> = VecDeque::new();
+        let mut net_tx_win: VecDeque<f64> = VecDeque::new();
         // 每个 gpu idx 一个 util 窗口。
         let mut gpu_wins: HashMap<u32, VecDeque<u32>> = HashMap::new();
 
@@ -248,10 +379,20 @@ pub async fn monitor_start_core(
             let cpu = push_window(&mut cpu_win, *snap.cpu.first().unwrap_or(&0.0), WINDOW_CAP);
             let mem = push_window(&mut mem_win, *snap.mem.first().unwrap_or(&0.0), WINDOW_CAP);
             let net = push_window(&mut net_win, *snap.net.first().unwrap_or(&0.0), WINDOW_CAP);
+            let net_rx = push_window(
+                &mut net_rx_win,
+                *snap.net_rx.first().unwrap_or(&0.0),
+                WINDOW_CAP,
+            );
+            let net_tx = push_window(
+                &mut net_tx_win,
+                *snap.net_tx.first().unwrap_or(&0.0),
+                WINDOW_CAP,
+            );
 
             // 每个 gpu 的 util 也做窗口（按 idx）。
-            let gpus: Vec<Gpu> = snap
-                .gpus
+            let mut monitor = snap;
+            let gpus: Vec<Gpu> = std::mem::take(&mut monitor.gpus)
                 .into_iter()
                 .map(|mut g| {
                     let win = gpu_wins.entry(g.idx).or_default();
@@ -260,22 +401,18 @@ pub async fn monitor_start_core(
                 })
                 .collect();
 
-            let monitor = Monitor {
-                host: host.clone(),
-                cpu,
-                mem,
-                net,
-                disk: snap.disk,
-                disk_total: snap.disk_total,
-                disk_used: snap.disk_used,
-                cores: snap.cores,
-                mem_total: snap.mem_total,
-                mem_used: snap.mem_used,
-                gpus,
-                procs: snap.procs,
-            };
+            monitor.host = host.clone();
+            monitor.cpu = cpu;
+            monitor.mem = mem;
+            monitor.net = net;
+            monitor.net_rx = net_rx;
+            monitor.net_tx = net_tx;
+            monitor.gpus = gpus;
 
-            sink.emit(&evt, serde_json::to_value(&monitor).unwrap_or(serde_json::Value::Null));
+            sink.emit(
+                &evt,
+                serde_json::to_value(&monitor).unwrap_or(serde_json::Value::Null),
+            );
         }
     });
 
@@ -396,6 +533,8 @@ mod tests {
     const NET_NOW: &str = "Inter-|...\n face|...\n lo: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n eth0: 1048576 0 0 0 0 0 0 0 1048576 0 0 0 0 0 0 0\n";
     const DF: &str = "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/sda1 102400 43000 59400 42% /\n";
     const PS: &str = "  PID COMM         %CPU %MEM\n 1234 firefox      45.2  3.1\n  567 code          8.5  2.0\n   89 bash          0.1  0.1\n";
+    const HOST_INFO: &str = "__CATIO_OS__\nPRETTY_NAME=\"Debian GNU/Linux 12\"\n__CATIO_KERNEL__\n6.1.0\n__CATIO_UPTIME__\n3600.5 0\n__CATIO_LOAD__\n0.50 0.25 0.10\n__CATIO_LSCPU__\nCPU(s): 2\nModel name: Test CPU\nSocket(s): 1\nCore(s) per socket: 1\nL3 cache: 8 MiB\n__CATIO_FREQ__\n3200000\n__CATIO_TEMP__\n42000\n";
+    const NET_INFO: &str = "eth0|1000|full|192.168.1.5/24\n__CATIO_TCP__|7\n";
 
     #[test]
     fn assemble_single_sample_no_gpu() {
@@ -434,6 +573,43 @@ mod tests {
         assert_eq!(m.gpus[0].util_now, 45);
         // 单次采样 util 窗口为单元素
         assert_eq!(m.gpus[0].util, vec![45]);
+    }
+
+    #[test]
+    fn assemble_detailed_populates_rich_monitor_fields() {
+        let df = "Filesystem Type 1024-blocks Used Available Capacity Mounted on\n/dev/sda1 ext4 102400 43000 59400 42% /\n/dev/sdb1 xfs 204800 102400 102400 50% /data\n__CATIO_INODES__\nFilesystem Inodes IUsed IFree IUse% Mounted on\n/dev/sda1 1000 100 900 10% /\n/dev/sdb1 1000 200 800 20% /data\n";
+        let disk_prev = "8 0 sda 1 0 1000 0 1 0 1000 0 0 0 0\n";
+        let disk_now = "8 0 sda 1 0 3048 0 1 0 5096 0 0 0 0\n";
+        let m = assemble_monitor_detailed(
+            "rich-host",
+            STAT_PREV,
+            STAT_NOW,
+            MEMINFO,
+            NET_PREV,
+            NET_NOW,
+            1.0,
+            df,
+            disk_prev,
+            disk_now,
+            PS,
+            "",
+            HOST_INFO,
+            NET_INFO,
+        );
+
+        assert_eq!(m.system.os, "Debian GNU/Linux 12");
+        assert_eq!(m.system.process_count, 3);
+        assert_eq!(m.cpu_info.model, "Test CPU");
+        assert_eq!(m.cpu_info.sockets, 1);
+        assert_eq!(m.cpu_info.physical_cores, 1);
+        assert_eq!(m.cpu_info.threads, 2);
+        assert_eq!(m.net_rx, vec![1.0]);
+        assert_eq!(m.net_tx, vec![1.0]);
+        assert_eq!(m.network_info.interface, "eth0");
+        assert_eq!(m.disks.len(), 2);
+        assert_eq!(m.disks[1].mount, "/data");
+        assert_eq!(m.disk_io.read_mbps, 1.0);
+        assert_eq!(m.disk_io.write_mbps, 2.0);
     }
 
     #[test]

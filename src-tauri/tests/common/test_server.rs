@@ -29,7 +29,7 @@ pub const TEST_PW: &str = "catio-test-pw";
 /// Fixed values that monitor tests assert on:
 ///   * /proc/stat → aggregate `cpu` + `cpu0`/`cpu1` → 2 cores.
 ///   * /proc/meminfo → MemTotal 16384000 kB, MemAvailable 8192000 kB → 50% used.
-///   * df -P / → `/` row at 42%.
+///   * df → `/` row at 42% plus a `/data` partition at 25%.
 ///   * ps → 3 rows, first = pid 1234 "firefox".
 fn canned_monitor_output(cmd: &str) -> Option<String> {
     let out = match cmd {
@@ -44,7 +44,11 @@ fn canned_monitor_output(cmd: &str) -> Option<String> {
             "MemTotal:       16384000 kB\n\
              MemFree:         4096000 kB\n\
              MemAvailable:    8192000 kB\n\
-             Buffers:          512000 kB\n"
+             Buffers:          512000 kB\n\
+             Cached:          2048000 kB\n\
+             SReclaimable:     256000 kB\n\
+             SwapTotal:       4194304 kB\n\
+             SwapFree:        3145728 kB\n"
         }
         "cat /proc/net/dev" => {
             "Inter-|   Receive                                                |  Transmit\n\
@@ -52,9 +56,9 @@ fn canned_monitor_output(cmd: &str) -> Option<String> {
                 lo:    1000      10    0    0    0     0          0         0     1000      10    0    0    0     0       0          0\n\
               eth0: 5000000    1000    0    0    0     0          0         0  3000000     900    0    0    0     0       0          0\n"
         }
-        "df -P /" => {
-            "Filesystem      1024-blocks      Used Available Capacity Mounted on\n\
-             /dev/sda1          102400000  43008000  59392000      42% /\n"
+        "cat /proc/diskstats" => {
+            "   8       0 sda 100 0 204800 0 80 0 102400 0 0 0 0 0 0 0 0\n\
+               8      16 sdb 50 0 102400 0 40 0 51200 0 0 0 0 0 0 0 0\n"
         }
         // ps -eo pid,comm,%cpu,%mem --sort=-%cpu (match the exact command)
         "ps -eo pid,comm,%cpu,%mem --sort=-%cpu" => {
@@ -62,6 +66,41 @@ fn canned_monitor_output(cmd: &str) -> Option<String> {
               1234 firefox         45.2  3.1\n\
                567 code             8.5  2.0\n\
                 89 bash             0.1  0.1\n"
+        }
+        command if command.starts_with("{ df -PT -x tmpfs") => {
+            "Filesystem     Type 1024-blocks     Used Available Capacity Mounted on\n\
+             /dev/sda1      ext4    102400000 43008000  59392000      42% /\n\
+             /dev/sdb1      xfs     204800000 51200000 153600000      25% /data\n\
+             __CATIO_INODES__\n\
+             Filesystem      Inodes  IUsed   IFree IUse% Mounted on\n\
+             /dev/sda1      6400000 640000 5760000   10% /\n\
+             /dev/sdb1     12800000 640000 12160000    5% /data\n"
+        }
+        command if command.starts_with("printf '__CATIO_OS__") => {
+            "__CATIO_OS__\n\
+             PRETTY_NAME=\"Ubuntu 24.04.1 LTS\"\n\
+             NAME=Ubuntu\n\
+             __CATIO_KERNEL__\n\
+             6.8.0-51-generic\n\
+             __CATIO_UPTIME__\n\
+             93784.50 1234.00\n\
+             __CATIO_LOAD__\n\
+             1.25 0.80 0.55 2/512 1234\n\
+             __CATIO_LSCPU__\n\
+             CPU(s):                 2\n\
+             Model name:             AMD EPYC 7763 64-Core Processor\n\
+             Socket(s):              1\n\
+             Core(s) per socket:     2\n\
+             L3 cache:               32 MiB\n\
+             __CATIO_FREQ__\n\
+             2450000\n\
+             __CATIO_CPU_FALLBACK__\n\
+             model name : AMD EPYC 7763 64-Core Processor\n\
+             __CATIO_TEMP__\n\
+             47000\n"
+        }
+        command if command.starts_with("for p in /sys/class/net/*") => {
+            "eth0|1000|full|10.0.0.12/24\n__CATIO_TCP__|18\n"
         }
         _ => return None,
     };

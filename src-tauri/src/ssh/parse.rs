@@ -1,5 +1,7 @@
 //! SFTP 列表项 + 纯函数格式化（人类可读字节）。
 //! Also: pure monitor-output parsers for cpu/mem/net/disk/procs/gpu (Task D1).
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde::Serialize;
 
 // ────────────────────────────────────────────────
@@ -51,7 +53,7 @@ pub struct Proc {
 /// `memUsed` / `memTotal` are stored as GB (integer rounded from MiB / 1024).
 /// `util` is a sparkline history; the single-sample parser sets `util = vec![util_now]`.
 /// D2 will maintain the rolling window and replace `util` before emitting.
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Debug, PartialEq, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Gpu {
     pub idx: u32,
@@ -74,6 +76,88 @@ pub struct Gpu {
     pub fan: u32,
     /// Per-process info string (filled by D2; empty at parse time).
     pub procs: String,
+    /// NVIDIA driver version reported by nvidia-smi (empty on older payloads).
+    pub driver: String,
+}
+
+/// Static and slowly-changing host metadata shown in the monitor header.
+#[derive(Serialize, Debug, PartialEq, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemInfo {
+    pub os: String,
+    pub kernel: String,
+    pub uptime_seconds: u64,
+    pub process_count: usize,
+}
+
+/// CPU topology and the latest detailed utilisation breakdown.
+#[derive(Serialize, Debug, PartialEq, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CpuInfo {
+    pub model: String,
+    pub sockets: usize,
+    pub physical_cores: usize,
+    pub threads: usize,
+    pub frequency_mhz: Option<f64>,
+    pub l3_cache: String,
+    pub temperature_c: Option<f64>,
+    pub load1: f64,
+    pub load5: f64,
+    pub load15: f64,
+    pub user_pct: f64,
+    pub system_pct: f64,
+    pub iowait_pct: f64,
+}
+
+/// Human-readable memory and swap details. The legacy percentage history remains on `Monitor`.
+#[derive(Serialize, Debug, PartialEq, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryInfo {
+    pub total: String,
+    pub used: String,
+    pub available: String,
+    pub cache: String,
+    pub swap_total: String,
+    pub swap_used: String,
+}
+
+/// Latest aggregate network telemetry plus metadata for the busiest non-loopback interface.
+#[derive(Serialize, Debug, PartialEq, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkInfo {
+    pub interface: String,
+    pub interface_count: usize,
+    pub rx_mbps: f64,
+    pub tx_mbps: f64,
+    pub link_speed_mbps: Option<u64>,
+    pub duplex: String,
+    pub ipv4: String,
+    pub packets_per_second: f64,
+    pub tcp_connections: usize,
+    pub drops: u64,
+    pub errors: u64,
+}
+
+/// One real filesystem row returned by `df`, including inode pressure when available.
+#[derive(Serialize, Debug, PartialEq, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskUsage {
+    pub device: String,
+    pub fs_type: String,
+    pub mount: String,
+    pub total: String,
+    pub used: String,
+    pub available: String,
+    pub used_pct: u8,
+    pub inode_pct: Option<u8>,
+}
+
+/// Aggregate physical block-device throughput from two `/proc/diskstats` snapshots.
+#[derive(Serialize, Debug, PartialEq, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskIo {
+    pub read_mbps: f64,
+    pub write_mbps: f64,
 }
 
 // ────────────────────────────────────────────────
@@ -91,9 +175,9 @@ fn stat_totals(stat: &str) -> (u64, u64) {
                 .filter_map(|s| s.parse().ok())
                 .collect();
             // /proc/stat columns: user nice system idle iowait irq softirq steal guest guest_nice
-            let idle = fields.get(3).copied().unwrap_or(0)
-                + fields.get(4).copied().unwrap_or(0); // idle + iowait
-            let total: u64 = fields.iter().sum();
+            let idle = fields.get(3).copied().unwrap_or(0) + fields.get(4).copied().unwrap_or(0); // idle + iowait
+                                                                                                  // guest/guest_nice are already included in user/nice; summing them again inflates total.
+            let total: u64 = fields.iter().take(8).sum();
             return (total, idle);
         }
     }
@@ -118,6 +202,44 @@ pub fn parse_cpu_pct(prev: &str, now: &str) -> f64 {
     (pct * 10.0).round() / 10.0
 }
 
+/// Return `(user, system, iowait)` percentages from two aggregate `/proc/stat` samples.
+/// The three values intentionally do not need to add up to the legacy total CPU percentage:
+/// idle, steal and other kernel buckets remain visible through that total.
+pub fn parse_cpu_breakdown(prev: &str, now: &str) -> (f64, f64, f64) {
+    fn fields(stat: &str) -> Vec<u64> {
+        stat.lines()
+            .find(|line| line.starts_with("cpu "))
+            .map(|line| {
+                line.split_whitespace()
+                    .skip(1)
+                    .filter_map(|value| value.parse().ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    let before = fields(prev);
+    let after = fields(now);
+    // The first eight columns are the independent counters. guest/guest_nice duplicate user/nice.
+    let width = before.len().max(after.len()).min(8);
+    let delta = |index: usize| {
+        after
+            .get(index)
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(before.get(index).copied().unwrap_or(0))
+    };
+    let total: u64 = (0..width).map(delta).sum();
+    if total == 0 {
+        return (0.0, 0.0, 0.0);
+    }
+
+    let pct = |value: u64| ((1000.0 * value as f64 / total as f64).round()) / 10.0;
+    let user = delta(0).saturating_add(delta(1));
+    let system = delta(2).saturating_add(delta(5)).saturating_add(delta(6));
+    (pct(user), pct(system), pct(delta(4)))
+}
+
 /// Count logical CPU cores from /proc/stat (lines matching `cpu0`, `cpu1`, …).
 pub fn parse_cpu_cores(stat: &str) -> usize {
     stat.lines()
@@ -134,119 +256,565 @@ pub fn parse_cpu_cores(stat: &str) -> usize {
 // 2. Memory — /proc/meminfo
 // ────────────────────────────────────────────────
 
+fn meminfo_kb(meminfo: &str, key: &str) -> u64 {
+    meminfo
+        .lines()
+        .find(|line| line.starts_with(key))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0)
+}
+
+/// Parse the full memory/swap detail used by the dense monitor card.
+pub fn parse_memory_info(meminfo: &str) -> MemoryInfo {
+    let total_kb = meminfo_kb(meminfo, "MemTotal:");
+    let available_kb = meminfo_kb(meminfo, "MemAvailable:");
+    let used_kb = total_kb.saturating_sub(available_kb);
+    let cache_kb = meminfo_kb(meminfo, "Cached:")
+        .saturating_add(meminfo_kb(meminfo, "SReclaimable:"))
+        .saturating_add(meminfo_kb(meminfo, "Buffers:"));
+    let swap_total_kb = meminfo_kb(meminfo, "SwapTotal:");
+    let swap_used_kb = swap_total_kb.saturating_sub(meminfo_kb(meminfo, "SwapFree:"));
+
+    MemoryInfo {
+        total: human_size(total_kb * 1024),
+        used: human_size(used_kb * 1024),
+        available: human_size(available_kb * 1024),
+        cache: human_size(cache_kb * 1024),
+        swap_total: human_size(swap_total_kb * 1024),
+        swap_used: human_size(swap_used_kb * 1024),
+    }
+}
+
 /// Parse /proc/meminfo.
 /// Returns `(used_pct, total_str, used_str)`.
-/// `used = MemTotal - MemAvailable`.  Strings are human-readable (e.g. "15.6 GB").
+/// `used = MemTotal - MemAvailable`. Strings are human-readable (e.g. "15.6 GB").
 pub fn parse_mem(meminfo: &str) -> (f64, String, String) {
-    let mut total_kb: u64 = 0;
-    let mut avail_kb: u64 = 0;
-
-    for line in meminfo.lines() {
-        if line.starts_with("MemTotal:") {
-            total_kb = line
-                .split_whitespace()
-                .nth(1)
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0);
-        } else if line.starts_with("MemAvailable:") {
-            avail_kb = line
-                .split_whitespace()
-                .nth(1)
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0);
-        }
-    }
-
+    let total_kb = meminfo_kb(meminfo, "MemTotal:");
+    let available_kb = meminfo_kb(meminfo, "MemAvailable:");
     if total_kb == 0 {
         return (0.0, "0 B".to_string(), "0 B".to_string());
     }
 
-    let used_kb = total_kb.saturating_sub(avail_kb);
-    let pct = 100.0 * used_kb as f64 / total_kb as f64;
-    let pct = (pct * 10.0).round() / 10.0;
-
-    let total_str = human_size(total_kb * 1024);
-    let used_str = human_size(used_kb * 1024);
-
-    (pct, total_str, used_str)
+    let used_kb = total_kb.saturating_sub(available_kb);
+    let pct = ((1000.0 * used_kb as f64 / total_kb as f64).round()) / 10.0;
+    (pct, human_size(total_kb * 1024), human_size(used_kb * 1024))
 }
 
 // ────────────────────────────────────────────────
 // 3. Network throughput — two /proc/net/dev samples
 // ────────────────────────────────────────────────
 
-/// Sum rx+tx bytes across all non-loopback interfaces from one /proc/net/dev snapshot.
-fn net_total_bytes(dev: &str) -> u64 {
-    let mut total: u64 = 0;
+#[derive(Clone, Copy, Default)]
+struct NetCounters {
+    rx_bytes: u64,
+    rx_packets: u64,
+    rx_errors: u64,
+    rx_drops: u64,
+    tx_bytes: u64,
+    tx_packets: u64,
+    tx_errors: u64,
+    tx_drops: u64,
+}
+
+fn parse_net_devices(dev: &str) -> BTreeMap<String, NetCounters> {
+    let mut interfaces = BTreeMap::new();
     for line in dev.lines() {
         let trimmed = line.trim();
-        // Lines look like: "  eth0:  123456  ..."
-        // Skip header lines (no colon, or colon not followed by numeric data)
-        let colon_pos = match trimmed.find(':') {
-            Some(p) => p,
-            None => continue,
+        let Some(colon_pos) = trimmed.find(':') else {
+            continue;
         };
-        let iface = trimmed[..colon_pos].trim();
-        if iface == "lo" {
+        let interface = trimmed[..colon_pos].trim();
+        if interface == "lo" || interface.is_empty() {
             continue;
         }
-        let rest = trimmed[colon_pos + 1..].trim();
-        let fields: Vec<u64> = rest
+        let fields: Vec<u64> = trimmed[colon_pos + 1..]
             .split_whitespace()
-            .filter_map(|s| s.parse().ok())
+            .filter_map(|value| value.parse().ok())
             .collect();
-        // /proc/net/dev columns after iface: rx_bytes rx_packets ... (8 rx fields) tx_bytes tx_packets ...
-        let rx = fields.first().copied().unwrap_or(0);
-        let tx = fields.get(8).copied().unwrap_or(0);
-        total += rx + tx;
+        if fields.len() < 12 {
+            continue;
+        }
+        interfaces.insert(
+            interface.to_string(),
+            NetCounters {
+                rx_bytes: fields[0],
+                rx_packets: fields[1],
+                rx_errors: fields[2],
+                rx_drops: fields[3],
+                tx_bytes: fields[8],
+                tx_packets: fields[9],
+                tx_errors: fields[10],
+                tx_drops: fields[11],
+            },
+        );
     }
-    total
+    interfaces
+}
+
+#[derive(Default)]
+struct NetMeta {
+    speed_mbps: Option<u64>,
+    duplex: String,
+    ipv4: String,
+}
+
+fn parse_net_metadata(metadata: &str) -> (BTreeMap<String, NetMeta>, usize) {
+    let mut interfaces = BTreeMap::new();
+    let mut tcp_connections = 0;
+    for line in metadata
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        if let Some(value) = line.strip_prefix("__CATIO_TCP__|") {
+            tcp_connections = value.trim().parse().unwrap_or(0);
+            continue;
+        }
+        let mut fields = line.splitn(4, '|');
+        let Some(interface) = fields.next() else {
+            continue;
+        };
+        if interface.is_empty() || interface == "lo" {
+            continue;
+        }
+        let speed_mbps = fields
+            .next()
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .filter(|value| *value > 0)
+            .map(|value| value as u64);
+        let duplex = fields.next().unwrap_or_default().trim().to_string();
+        let ipv4 = fields.next().unwrap_or_default().trim().to_string();
+        interfaces.insert(
+            interface.to_string(),
+            NetMeta {
+                speed_mbps,
+                duplex,
+                ipv4,
+            },
+        );
+    }
+    (interfaces, tcp_connections)
+}
+
+fn round_two(value: f64) -> f64 {
+    (value * 100.0).round() / 100.0
+}
+
+/// Parse separate receive/transmit speeds plus interface health from two `/proc/net/dev` samples.
+pub fn parse_network_info(prev: &str, now: &str, secs: f64, metadata: &str) -> NetworkInfo {
+    let before = parse_net_devices(prev);
+    let after = parse_net_devices(now);
+    let (meta, tcp_connections) = parse_net_metadata(metadata);
+    let elapsed = if secs > 0.0 { secs } else { 1.0 };
+
+    let mut rx_delta = 0_u64;
+    let mut tx_delta = 0_u64;
+    let mut packet_delta = 0_u64;
+    let mut drops = 0_u64;
+    let mut errors = 0_u64;
+    let mut primary = String::new();
+    let mut primary_delta = 0_u64;
+    let mut primary_total = 0_u64;
+
+    for (name, current) in &after {
+        let previous = before.get(name).copied().unwrap_or_default();
+        let interface_rx = current.rx_bytes.saturating_sub(previous.rx_bytes);
+        let interface_tx = current.tx_bytes.saturating_sub(previous.tx_bytes);
+        let interface_delta = interface_rx.saturating_add(interface_tx);
+        let current_total = current.rx_bytes.saturating_add(current.tx_bytes);
+
+        rx_delta = rx_delta.saturating_add(interface_rx);
+        tx_delta = tx_delta.saturating_add(interface_tx);
+        packet_delta = packet_delta
+            .saturating_add(current.rx_packets.saturating_sub(previous.rx_packets))
+            .saturating_add(current.tx_packets.saturating_sub(previous.tx_packets));
+        drops = drops
+            .saturating_add(current.rx_drops)
+            .saturating_add(current.tx_drops);
+        errors = errors
+            .saturating_add(current.rx_errors)
+            .saturating_add(current.tx_errors);
+
+        if interface_delta > primary_delta || (primary_delta == 0 && current_total > primary_total)
+        {
+            primary = name.clone();
+            primary_delta = interface_delta;
+            primary_total = current_total;
+        }
+    }
+
+    let selected_meta = meta.get(&primary);
+    NetworkInfo {
+        interface: primary,
+        interface_count: after.len(),
+        rx_mbps: if secs > 0.0 {
+            round_two(rx_delta as f64 / elapsed / (1024.0 * 1024.0))
+        } else {
+            0.0
+        },
+        tx_mbps: if secs > 0.0 {
+            round_two(tx_delta as f64 / elapsed / (1024.0 * 1024.0))
+        } else {
+            0.0
+        },
+        link_speed_mbps: selected_meta.and_then(|value| value.speed_mbps),
+        duplex: selected_meta
+            .map(|value| value.duplex.clone())
+            .unwrap_or_default(),
+        ipv4: selected_meta
+            .map(|value| value.ipv4.clone())
+            .unwrap_or_default(),
+        packets_per_second: if secs > 0.0 {
+            round_two(packet_delta as f64 / elapsed)
+        } else {
+            0.0
+        },
+        tcp_connections,
+        drops,
+        errors,
+    }
 }
 
 /// Returns combined rx+tx throughput in MB/s across all non-loopback interfaces.
-/// Returns 0.0 if `secs` ≤ 0 or input is malformed.
+/// Kept for backwards compatibility with the original monitor payload.
 pub fn parse_net_mbps(prev: &str, now: &str, secs: f64) -> f64 {
-    if secs <= 0.0 {
-        return 0.0;
-    }
-    let bytes_prev = net_total_bytes(prev);
-    let bytes_now = net_total_bytes(now);
-    let delta = bytes_now.saturating_sub(bytes_prev) as f64;
-    let mbps = delta / secs / (1024.0 * 1024.0);
-    (mbps * 10.0).round() / 10.0
+    let network = parse_network_info(prev, now, secs, "");
+    ((network.rx_mbps + network.tx_mbps) * 10.0).round() / 10.0
 }
 
 // ────────────────────────────────────────────────
 // 4. Disk % — df -P output
 // ────────────────────────────────────────────────
 
-/// Parse `df -P` output and return the use% of the `/` filesystem.
-/// Looks for the row whose mountpoint (last whitespace-separated token) is exactly `/`.
-/// The capacity column is formatted as `73%`; we strip the `%` and parse.
-/// Returns 0 on parse failure.
-/// Parse `df -P /` → (capacity %, total human size, used human size).
-/// POSIX df -P columns: Filesystem  1024-blocks  Used  Available  Capacity  Mounted-on.
-pub fn parse_disk(df_out: &str) -> (u8, String, String) {
-    for line in df_out.lines() {
+fn is_pseudo_filesystem(fs_type: &str) -> bool {
+    matches!(
+        fs_type,
+        "tmpfs"
+            | "devtmpfs"
+            | "squashfs"
+            | "proc"
+            | "sysfs"
+            | "cgroup"
+            | "cgroup2"
+            | "tracefs"
+            | "debugfs"
+            | "securityfs"
+            | "pstore"
+            | "efivarfs"
+            | "mqueue"
+            | "hugetlbfs"
+            | "fusectl"
+            | "configfs"
+    )
+}
+
+fn parse_inode_usage(inode_output: &str) -> BTreeMap<String, u8> {
+    let mut usages = BTreeMap::new();
+    for line in inode_output.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() < 6 {
+        if fields.len() < 6 || fields[0] == "Filesystem" {
             continue;
         }
-        let mountpoint = fields[fields.len() - 1];
-        if mountpoint != "/" {
-            continue;
+        let mount = fields[5..].join(" ");
+        let pct = fields[4].trim_end_matches('%').parse().ok();
+        if let Some(pct) = pct {
+            usages.insert(mount, pct);
         }
-        let pct = fields[fields.len() - 2].trim_end_matches('%').parse().unwrap_or(0);
-        // df -P blocks are 1024 bytes: total = blocks col, used = used col.
-        let total_kb: u64 = fields[fields.len() - 5].parse().unwrap_or(0);
-        let used_kb: u64 = fields[fields.len() - 4].parse().unwrap_or(0);
-        return (pct, human_size(total_kb * 1024), human_size(used_kb * 1024));
     }
-    (0, "0 B".to_string(), "0 B".to_string())
+    usages
+}
+
+/// Parse all real filesystem rows from a combined `df -PT` + `df -Pi` response.
+pub fn parse_disks(df_out: &str) -> Vec<DiskUsage> {
+    let (capacity_output, inode_output) = df_out
+        .split_once("__CATIO_INODES__")
+        .unwrap_or((df_out, ""));
+    let inode_usage = parse_inode_usage(inode_output);
+    let mut disks = Vec::new();
+    let mut seen_mounts = BTreeSet::new();
+
+    for line in capacity_output.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 6 || fields[0] == "Filesystem" {
+            continue;
+        }
+
+        // GNU `df -PT` includes a filesystem type column. The fallback `df -P` does not.
+        let has_type = fields
+            .get(1)
+            .is_some_and(|value| value.parse::<u64>().is_err());
+        let (fs_type, total_idx, used_idx, available_idx, pct_idx, mount_idx) = if has_type {
+            if fields.len() < 7 {
+                continue;
+            }
+            (fields[1], 2, 3, 4, 5, 6)
+        } else {
+            ("", 1, 2, 3, 4, 5)
+        };
+        if is_pseudo_filesystem(fs_type) {
+            continue;
+        }
+
+        let mount = fields[mount_idx..].join(" ");
+        if mount.is_empty() || !seen_mounts.insert(mount.clone()) {
+            continue;
+        }
+        let total_kb: u64 = fields[total_idx].parse().unwrap_or(0);
+        let used_kb: u64 = fields[used_idx].parse().unwrap_or(0);
+        let available_kb: u64 = fields[available_idx].parse().unwrap_or(0);
+        let used_pct = fields[pct_idx].trim_end_matches('%').parse().unwrap_or(0);
+
+        disks.push(DiskUsage {
+            device: fields[0].to_string(),
+            fs_type: fs_type.to_string(),
+            mount: mount.clone(),
+            total: human_size(total_kb * 1024),
+            used: human_size(used_kb * 1024),
+            available: human_size(available_kb * 1024),
+            used_pct,
+            inode_pct: inode_usage.get(&mount).copied(),
+        });
+    }
+
+    disks.sort_by(|left, right| {
+        let left_root = left.mount == "/";
+        let right_root = right.mount == "/";
+        right_root
+            .cmp(&left_root)
+            .then_with(|| left.mount.cmp(&right.mount))
+    });
+    disks
+}
+
+/// Parse the legacy root-filesystem summary from the richer multi-filesystem response.
+pub fn parse_disk(df_out: &str) -> (u8, String, String) {
+    parse_disks(df_out)
+        .into_iter()
+        .find(|disk| disk.mount == "/")
+        .map(|disk| (disk.used_pct, disk.total, disk.used))
+        .unwrap_or_else(|| (0, "0 B".to_string(), "0 B".to_string()))
+}
+
+fn is_whole_disk(name: &str) -> bool {
+    if ["sd", "vd", "xvd", "hd"]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+    {
+        return name
+            .chars()
+            .last()
+            .is_some_and(|value| value.is_ascii_alphabetic());
+    }
+    if name.starts_with("nvme") {
+        return name.rsplit_once('n').is_some_and(|(_, suffix)| {
+            !suffix.is_empty() && suffix.chars().all(|value| value.is_ascii_digit())
+        });
+    }
+    if let Some(suffix) = name.strip_prefix("mmcblk") {
+        return !suffix.is_empty() && suffix.chars().all(|value| value.is_ascii_digit());
+    }
+    false
+}
+
+fn diskstats_sectors(snapshot: &str) -> (u64, u64) {
+    let mut read_sectors = 0_u64;
+    let mut write_sectors = 0_u64;
+    for line in snapshot.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 10 || !is_whole_disk(fields[2]) {
+            continue;
+        }
+        read_sectors = read_sectors.saturating_add(fields[5].parse().unwrap_or(0));
+        write_sectors = write_sectors.saturating_add(fields[9].parse().unwrap_or(0));
+    }
+    (read_sectors, write_sectors)
+}
+
+/// Parse aggregate read/write throughput. Linux diskstats sectors are 512 bytes.
+pub fn parse_disk_io(prev: &str, now: &str, secs: f64) -> DiskIo {
+    if secs <= 0.0 {
+        return DiskIo::default();
+    }
+    let (read_before, write_before) = diskstats_sectors(prev);
+    let (read_after, write_after) = diskstats_sectors(now);
+    let bytes_per_sector = 512.0;
+    DiskIo {
+        read_mbps: round_two(
+            read_after.saturating_sub(read_before) as f64 * bytes_per_sector
+                / secs
+                / (1024.0 * 1024.0),
+        ),
+        write_mbps: round_two(
+            write_after.saturating_sub(write_before) as f64 * bytes_per_sector
+                / secs
+                / (1024.0 * 1024.0),
+        ),
+    }
 }
 
 // ────────────────────────────────────────────────
-// 5. Processes — ps -eo pid,comm,%cpu,%mem --sort=-%cpu
+// 5. Host and CPU metadata — tagged os-release/lscpu/proc output
+// ────────────────────────────────────────────────
+
+fn unquote(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.len() >= 2
+        && ((trimmed.starts_with('"') && trimmed.ends_with('"'))
+            || (trimmed.starts_with('\'') && trimmed.ends_with('\'')))
+    {
+        trimmed[1..trimmed.len() - 1].to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn parse_number(value: &str) -> Option<f64> {
+    value
+        .split_whitespace()
+        .next()
+        .and_then(|part| part.replace(',', "").parse().ok())
+}
+
+/// Parse the tagged host information command output. `threads` and `process_count` come from
+/// already-collected `/proc/stat` and `ps`, so the metadata command stays small and portable.
+pub fn parse_host_info(raw: &str, threads: usize, process_count: usize) -> (SystemInfo, CpuInfo) {
+    let mut section = "";
+    let mut os = String::new();
+    let mut os_fallback = String::new();
+    let mut kernel = String::new();
+    let mut uptime_seconds = 0_u64;
+    let mut load = [0.0_f64; 3];
+    let mut model = String::new();
+    let mut sockets = 0_usize;
+    let mut cores_per_socket = 0_usize;
+    let mut lscpu_threads = 0_usize;
+    let mut frequency_mhz = None;
+    let mut l3_cache = String::new();
+    let mut fallback_model = String::new();
+    let mut temperatures = Vec::new();
+
+    for raw_line in raw.lines() {
+        let line = raw_line.trim();
+        if line.starts_with("__CATIO_") {
+            section = line;
+            continue;
+        }
+        if line.is_empty() {
+            continue;
+        }
+
+        match section {
+            "__CATIO_OS__" => {
+                if let Some(value) = line.strip_prefix("PRETTY_NAME=") {
+                    os = unquote(value);
+                } else if let Some(value) = line.strip_prefix("NAME=") {
+                    os_fallback = unquote(value);
+                }
+            }
+            "__CATIO_KERNEL__" if kernel.is_empty() => kernel = line.to_string(),
+            "__CATIO_UPTIME__" => {
+                uptime_seconds = parse_number(line).unwrap_or(0.0).max(0.0) as u64;
+            }
+            "__CATIO_LOAD__" => {
+                for (index, value) in line
+                    .split_whitespace()
+                    .take(3)
+                    .filter_map(|value| value.parse().ok())
+                    .enumerate()
+                {
+                    load[index] = value;
+                }
+            }
+            "__CATIO_LSCPU__" => {
+                let Some((key, value)) = line.split_once(':') else {
+                    continue;
+                };
+                let value = value.trim();
+                match key.trim() {
+                    "Model name" => model = value.to_string(),
+                    "Socket(s)" => sockets = value.parse().unwrap_or(0),
+                    "Core(s) per socket" => cores_per_socket = value.parse().unwrap_or(0),
+                    "CPU(s)" => lscpu_threads = value.parse().unwrap_or(0),
+                    "CPU MHz" | "CPU max MHz" if frequency_mhz.is_none() => {
+                        frequency_mhz = parse_number(value)
+                    }
+                    "L3 cache" => l3_cache = value.to_string(),
+                    _ => {}
+                }
+            }
+            "__CATIO_FREQ__" => {
+                if let Some(khz) = parse_number(line) {
+                    if khz > 0.0 {
+                        frequency_mhz = Some(((khz / 1000.0) * 10.0).round() / 10.0);
+                    }
+                }
+            }
+            "__CATIO_CPU_FALLBACK__" => {
+                if fallback_model.is_empty() {
+                    fallback_model = line
+                        .split_once(':')
+                        .map(|(_, value)| value.trim())
+                        .unwrap_or(line)
+                        .to_string();
+                }
+            }
+            "__CATIO_TEMP__" => {
+                if let Some(mut value) = parse_number(line) {
+                    if value > 1000.0 {
+                        value /= 1000.0;
+                    }
+                    if (0.0..=150.0).contains(&value) {
+                        temperatures.push(value);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if os.is_empty() {
+        os = os_fallback;
+    }
+    if model.is_empty() {
+        model = fallback_model;
+    }
+    let threads = if threads > 0 { threads } else { lscpu_threads };
+    let physical_cores = if sockets > 0 && cores_per_socket > 0 {
+        sockets.saturating_mul(cores_per_socket)
+    } else {
+        threads
+    };
+    let temperature_c = temperatures
+        .into_iter()
+        .reduce(f64::max)
+        .map(|value| (value * 10.0).round() / 10.0);
+
+    (
+        SystemInfo {
+            os,
+            kernel,
+            uptime_seconds,
+            process_count,
+        },
+        CpuInfo {
+            model,
+            sockets,
+            physical_cores,
+            threads,
+            frequency_mhz,
+            l3_cache,
+            temperature_c,
+            load1: load[0],
+            load5: load[1],
+            load15: load[2],
+            ..CpuInfo::default()
+        },
+    )
+}
+
+// ────────────────────────────────────────────────
+// 6. Processes — ps -eo pid,comm,%cpu,%mem --sort=-%cpu
 // ────────────────────────────────────────────────
 
 /// Parse `ps -eo pid,comm,%cpu,%mem --sort=-%cpu` output.
@@ -276,12 +844,22 @@ pub fn parse_procs(ps_out: &str, limit: usize) -> Vec<Proc> {
     result
 }
 
+/// Count all non-empty process rows in the same `ps` response used for the Top list.
+pub fn parse_process_count(ps_out: &str) -> usize {
+    ps_out
+        .lines()
+        .skip(1)
+        .filter(|line| !line.trim().is_empty())
+        .count()
+}
+
 // ────────────────────────────────────────────────
-// 6. GPUs — nvidia-smi CSV
+// 7. GPUs — nvidia-smi CSV
 // ────────────────────────────────────────────────
 
 /// Parse `nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total,
-/// temperature.gpu,power.draw,power.limit,fan.speed --format=csv,noheader,nounits`.
+/// temperature.gpu,power.draw,power.limit,fan.speed,driver_version
+/// --format=csv,noheader,nounits`.
 ///
 /// MiB→GB conversion: `(mib as f64 / 1024.0).round() as u32` (integer GB).
 /// Returns empty vec if input is empty or all lines fail to parse.
@@ -309,6 +887,10 @@ pub fn parse_gpus(csv: &str) -> Vec<Gpu> {
         let power: u32 = fields[6].trim().parse::<f64>().unwrap_or(0.0).round() as u32;
         let power_cap: u32 = fields[7].trim().parse::<f64>().unwrap_or(0.0).round() as u32;
         let fan: u32 = fields[8].trim().parse().unwrap_or(0);
+        let driver = fields
+            .get(9)
+            .map(|value| value.trim().to_string())
+            .unwrap_or_default();
 
         // Convert MiB → GB (integer, rounded)
         let mem_used = (mem_used_mib / 1024.0).round() as u32;
@@ -326,6 +908,7 @@ pub fn parse_gpus(csv: &str) -> Vec<Gpu> {
             power_cap,
             fan,
             procs: String::new(),
+            driver,
         });
     }
     result
@@ -354,8 +937,10 @@ mod tests {
         // Fields: user nice system idle iowait irq softirq steal
         // prev: total=1000, idle+iowait=500  (50% busy so far — absolute values don't matter)
         // now:  total=1100, idle+iowait=550  → Δtotal=100, Δidle=50 → 50%
-        let prev = "cpu  400 0 100 450 50 0 0 0\ncpu0 200 0 50 225 25 0 0 0\ncpu1 200 0 50 225 25 0 0 0\n";
-        let now  = "cpu  450 0 110 490 60 0 0 0\ncpu0 225 0 55 245 30 0 0 0\ncpu1 225 0 55 245 30 0 0 0\n";
+        let prev =
+            "cpu  400 0 100 450 50 0 0 0\ncpu0 200 0 50 225 25 0 0 0\ncpu1 200 0 50 225 25 0 0 0\n";
+        let now =
+            "cpu  450 0 110 490 60 0 0 0\ncpu0 225 0 55 245 30 0 0 0\ncpu1 225 0 55 245 30 0 0 0\n";
         // Δtotal = (450+110+490+60) - (400+100+450+50) = 1110 - 1000 = 110
         // Δidle  = (490+60) - (450+50) = 550 - 500 = 50
         // pct = 100 * (110-50)/110 = 100*60/110 ≈ 54.5%
@@ -372,6 +957,24 @@ mod tests {
     #[test]
     fn cpu_pct_malformed_returns_zero() {
         assert_eq!(parse_cpu_pct("garbage\n", "more garbage\n"), 0.0);
+    }
+
+    #[test]
+    fn cpu_pct_does_not_double_count_guest_time() {
+        let prev = "cpu 100 0 0 100 0 0 0 0 50 0\n";
+        let now = "cpu 200 0 0 200 0 0 0 0 100 0\n";
+        assert_eq!(parse_cpu_pct(prev, now), 50.0);
+    }
+
+    #[test]
+    fn cpu_breakdown_separates_user_system_and_iowait() {
+        let prev = "cpu  100 10 20 500 5 2 3 0\n";
+        let now = "cpu  140 20 40 520 15 4 8 0\n";
+        let (user, system, iowait) = parse_cpu_breakdown(prev, now);
+        // Total delta 107: user+nice 50, system+irq+softirq 27, iowait 10.
+        assert!((user - 46.7).abs() < 0.2, "user {user}");
+        assert!((system - 25.2).abs() < 0.2, "system {system}");
+        assert!((iowait - 9.3).abs() < 0.2, "iowait {iowait}");
     }
 
     // ── parse_cpu_cores ───────────────────────────
@@ -404,6 +1007,18 @@ mod tests {
         let (pct, total_str, _) = parse_mem("SomeOtherField: 1234 kB\n");
         assert_eq!(pct, 0.0);
         assert_eq!(total_str, "0 B");
+    }
+
+    #[test]
+    fn memory_info_includes_available_cache_and_swap() {
+        let meminfo = "MemTotal: 8192000 kB\nMemAvailable: 4096000 kB\nBuffers: 1000 kB\nCached: 2000 kB\nSReclaimable: 500 kB\nSwapTotal: 2048000 kB\nSwapFree: 1536000 kB\n";
+        let info = parse_memory_info(meminfo);
+        assert_eq!(info.total, human_size(8192000 * 1024));
+        assert_eq!(info.used, human_size(4096000 * 1024));
+        assert_eq!(info.available, human_size(4096000 * 1024));
+        assert_eq!(info.cache, human_size(3500 * 1024));
+        assert_eq!(info.swap_used, human_size(512000 * 1024));
+        assert_eq!(info.swap_total, human_size(2048000 * 1024));
     }
 
     // ── parse_net_mbps ────────────────────────────
@@ -440,6 +1055,29 @@ mod tests {
         assert_eq!(parse_net_mbps(s, s, -1.0), 0.0);
     }
 
+    #[test]
+    fn network_info_keeps_download_and_upload_separate() {
+        let prev = "eth0: 0 100 1 2 0 0 0 0 0 200 3 4 0 0 0 0\n";
+        let now = "eth0: 2097152 112 1 2 0 0 0 0 1048576 208 3 4 0 0 0 0\n";
+        let info = parse_network_info(
+            prev,
+            now,
+            2.0,
+            "eth0|1000|full|192.168.1.8/24\n__CATIO_TCP__|23\n",
+        );
+        assert_eq!(info.interface, "eth0");
+        assert_eq!(info.interface_count, 1);
+        assert_eq!(info.rx_mbps, 1.0);
+        assert_eq!(info.tx_mbps, 0.5);
+        assert_eq!(info.link_speed_mbps, Some(1000));
+        assert_eq!(info.duplex, "full");
+        assert_eq!(info.ipv4, "192.168.1.8/24");
+        assert_eq!(info.packets_per_second, 10.0);
+        assert_eq!(info.tcp_connections, 23);
+        assert_eq!(info.drops, 6);
+        assert_eq!(info.errors, 4);
+    }
+
     // ── parse_disk ────────────────────────────
     #[test]
     fn disk_root_filesystem_pct_and_sizes() {
@@ -452,10 +1090,24 @@ mod tests {
     }
 
     #[test]
-    fn disk_ignores_non_root_mounts() {
-        let df = "Filesystem      1024-blocks      Used Available Capacity Mounted on\n\
-                  /dev/sdb1            102400     10000     92000      10%  /data\n\
-                  /dev/sda1            102400     75000     27000      73%     /\n";
+    fn disks_include_real_mounts_and_inode_usage() {
+        let df = "Filesystem Type 1024-blocks Used Available Capacity Mounted on\n\
+                  /dev/sdb1 xfs 204800 51200 153600 25% /data\n\
+                  /dev/sda1 ext4 102400 75000 27000 73% /\n\
+                  tmpfs tmpfs 1000 1 999 1% /run\n\
+                  __CATIO_INODES__\n\
+                  Filesystem Inodes IUsed IFree IUse% Mounted on\n\
+                  /dev/sda1 1000 120 880 12% /\n\
+                  /dev/sdb1 2000 100 1900 5% /data\n";
+        let disks = parse_disks(df);
+        assert_eq!(disks.len(), 2);
+        assert_eq!(disks[0].mount, "/");
+        assert_eq!(disks[0].fs_type, "ext4");
+        assert_eq!(disks[0].used_pct, 73);
+        assert_eq!(disks[0].inode_pct, Some(12));
+        assert_eq!(disks[1].mount, "/data");
+        assert_eq!(disks[1].inode_pct, Some(5));
+        // Legacy root summary remains intact.
         assert_eq!(parse_disk(df).0, 73);
     }
 
@@ -466,6 +1118,36 @@ mod tests {
         let (pct, total, _) = parse_disk(df);
         assert_eq!(pct, 0);
         assert_eq!(total, "0 B");
+    }
+
+    #[test]
+    fn disk_io_uses_separate_read_and_write_sector_deltas() {
+        let prev = "8 0 sda 1 0 1000 0 1 0 2000 0 0 0 0\n8 1 sda1 1 0 900 0 1 0 1800 0 0 0 0\n";
+        let now = "8 0 sda 1 0 5096 0 1 0 4048 0 0 0 0\n8 1 sda1 1 0 5000 0 1 0 4000 0 0 0 0\n";
+        let io = parse_disk_io(prev, now, 2.0);
+        // Whole disk only: 4096 sectors read = 2 MiB over 2s, 2048 written = 1 MiB over 2s.
+        assert_eq!(io.read_mbps, 1.0);
+        assert_eq!(io.write_mbps, 0.5);
+    }
+
+    #[test]
+    fn host_info_parses_os_topology_load_frequency_and_temperature() {
+        let raw = "__CATIO_OS__\nPRETTY_NAME=\"Ubuntu 24.04 LTS\"\n__CATIO_KERNEL__\n6.8.0\n__CATIO_UPTIME__\n90061.4 0\n__CATIO_LOAD__\n1.20 0.80 0.40 1/100 1\n__CATIO_LSCPU__\nCPU(s): 32\nModel name: AMD EPYC 7543P\nSocket(s): 1\nCore(s) per socket: 16\nL3 cache: 256 MiB\n__CATIO_FREQ__\n2800000\n__CATIO_CPU_FALLBACK__\nmodel name : fallback\n__CATIO_TEMP__\n53000\n";
+        let (system, cpu) = parse_host_info(raw, 32, 248);
+        assert_eq!(system.os, "Ubuntu 24.04 LTS");
+        assert_eq!(system.kernel, "6.8.0");
+        assert_eq!(system.uptime_seconds, 90061);
+        assert_eq!(system.process_count, 248);
+        assert_eq!(cpu.model, "AMD EPYC 7543P");
+        assert_eq!(cpu.sockets, 1);
+        assert_eq!(cpu.physical_cores, 16);
+        assert_eq!(cpu.threads, 32);
+        assert_eq!(cpu.frequency_mhz, Some(2800.0));
+        assert_eq!(cpu.l3_cache, "256 MiB");
+        assert_eq!(cpu.temperature_c, Some(53.0));
+        assert_eq!(cpu.load1, 1.2);
+        assert_eq!(cpu.load5, 0.8);
+        assert_eq!(cpu.load15, 0.4);
     }
 
     // ── parse_procs ───────────────────────────────
@@ -520,6 +1202,7 @@ mod tests {
         assert_eq!(g.power_cap, 450);
         assert_eq!(g.fan, 55);
         assert_eq!(g.procs, "");
+        assert_eq!(g.driver, "");
     }
 
     #[test]
@@ -545,5 +1228,11 @@ mod tests {
         let csv = "0, Tesla T4, 33, 2048, 16384, 50, 55.0, 70.0, 0\n";
         let gpus = parse_gpus(csv);
         assert_eq!(gpus[0].util, vec![gpus[0].util_now]);
+    }
+
+    #[test]
+    fn gpu_parses_optional_driver_version() {
+        let csv = "0, NVIDIA RTX 3090, 18, 4096, 24576, 48, 90.0, 350.0, 30, 550.54.15\n";
+        assert_eq!(parse_gpus(csv)[0].driver, "550.54.15");
     }
 }

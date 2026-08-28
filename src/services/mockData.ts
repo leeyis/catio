@@ -415,14 +415,34 @@ const monitor = {
   cpu: series(34, 16, 40),
   mem: series(61, 8, 40),
   net: series(48, 30, 40),
+  netRx: series(31, 20, 40),
+  netTx: series(17, 12, 40),
   disk: 72,
   diskTotal: '500 GB', diskUsed: '360 GB',
   cores: 16, memTotal: '16 GB', memUsed: '9.6 GB',
+  system: { os: 'Ubuntu 24.04.1 LTS', kernel: '6.8.0-51-generic', uptimeSeconds: 12_398_400, processCount: 286 },
+  cpuInfo: {
+    model: 'AMD EPYC 7543P 32-Core Processor', sockets: 1, physicalCores: 16, threads: 32,
+    frequencyMhz: 2800, l3Cache: '256 MiB', temperatureC: 52,
+    load1: 5.21, load5: 4.86, load15: 4.32, userPct: 27.8, systemPct: 4.9, iowaitPct: 1.3,
+  },
+  memoryInfo: { total: '16 GB', used: '9.6 GB', available: '6.4 GB', cache: '3.1 GB', swapTotal: '8 GB', swapUsed: '512 MB' },
+  networkInfo: {
+    interface: 'eth0', interfaceCount: 2, rxMbps: 31.2, txMbps: 16.8,
+    linkSpeedMbps: 1000, duplex: 'full', ipv4: '10.0.1.21/24', packetsPerSecond: 18_420,
+    tcpConnections: 186, drops: 0, errors: 0,
+  },
+  disks: [
+    { device: '/dev/nvme0n1p2', fsType: 'ext4', mount: '/', total: '500 GB', used: '360 GB', available: '140 GB', usedPct: 72, inodePct: 18 },
+    { device: '/dev/nvme1n1p1', fsType: 'xfs', mount: '/data', total: '1.8 TB', used: '1.2 TB', available: '614 GB', usedPct: 67, inodePct: 9 },
+    { device: '/dev/sda1', fsType: 'ext4', mount: '/backup', total: '3.6 TB', used: '2.1 TB', available: '1.5 TB', usedPct: 58, inodePct: 4 },
+  ],
+  diskIo: { readMbps: 84.6, writeMbps: 31.2 },
   // multi-GPU telemetry
   gpus: [
-    { idx: 0, name: 'NVIDIA A100 80GB', util: series(78, 18, 40), utilNow: 86, memUsed: 71.4, memTotal: 80, temp: 67, power: 312, powerCap: 400, fan: 48, procs: 'python train.py' },
-    { idx: 1, name: 'NVIDIA A100 80GB', util: series(64, 22, 40), utilNow: 73, memUsed: 58.2, memTotal: 80, temp: 61, power: 268, powerCap: 400, fan: 42, procs: 'python train.py' },
-    { idx: 2, name: 'NVIDIA A100 80GB', util: series(12, 10, 40), utilNow: 9, memUsed: 4.1, memTotal: 80, temp: 38, power: 74, powerCap: 400, fan: 30, procs: 'idle' },
+    { idx: 0, name: 'NVIDIA A100 80GB', util: series(78, 18, 40), utilNow: 86, memUsed: 71.4, memTotal: 80, temp: 67, power: 312, powerCap: 400, fan: 48, procs: 'python train.py', driver: '550.54.15' },
+    { idx: 1, name: 'NVIDIA A100 80GB', util: series(64, 22, 40), utilNow: 73, memUsed: 58.2, memTotal: 80, temp: 61, power: 268, powerCap: 400, fan: 42, procs: 'python train.py', driver: '550.54.15' },
+    { idx: 2, name: 'NVIDIA A100 80GB', util: series(12, 10, 40), utilNow: 9, memUsed: 4.1, memTotal: 80, temp: 38, power: 74, powerCap: 400, fan: 30, procs: 'idle', driver: '550.54.15' },
   ],
   procs: [
     { pid: 2841, cmd: 'node /var/www/app', cpu: 18.4, mem: 6.2 },

@@ -1,0 +1,409 @@
+.monitor-scroll {
+  container-type: inline-size;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  color: var(--text-primary);
+}
+
+.monitor-card,
+.monitor-host-strip,
+.monitor-disk-row,
+.monitor-process-table {
+  background: var(--surface-subtle);
+  border: 1px solid var(--border-hairline);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--text-primary) 5%, transparent);
+}
+
+.monitor-card {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+  padding: 10px;
+  border-radius: 11px;
+}
+
+.monitor-host-strip {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border-radius: 10px;
+}
+
+.monitor-host-strip .monitor-metric {
+  padding: 8px 9px;
+  background: var(--surface-subtle);
+}
+
+.monitor-host-strip .monitor-metric:nth-child(odd) {
+  border-right: 1px solid var(--border-hairline);
+}
+
+.monitor-host-strip .monitor-metric:nth-child(-n + 2) {
+  border-bottom: 1px solid var(--border-hairline);
+}
+
+.monitor-card-heading,
+.monitor-gpu-heading,
+.monitor-section-title,
+.monitor-disk-main,
+.monitor-throughput-heading,
+.monitor-gpu-memory > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.monitor-card-heading-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.monitor-card-kicker,
+.monitor-section-title {
+  color: var(--text-tertiary);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: .35px;
+}
+
+.monitor-card-model {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-primary-value {
+  flex: none;
+  color: var(--text-primary);
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -.5px;
+}
+
+.monitor-primary-value small {
+  margin-left: 1px;
+  color: var(--text-faint);
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.monitor-spark {
+  display: block;
+  width: 100%;
+  overflow: visible;
+}
+
+.monitor-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border-hairline);
+}
+
+.monitor-detail-grid-cpu {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.monitor-metric {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.monitor-metric-label {
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: 9px;
+  letter-spacing: .15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-metric-value {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 10.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-inline-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 10px;
+  color: var(--text-faint);
+  font-size: 9px;
+}
+
+.monitor-inline-stats b {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.monitor-progress {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-inset);
+}
+
+.monitor-progress-fill {
+  height: 100%;
+  min-width: 0;
+  border-radius: inherit;
+  transition: width 220ms ease-out, background-color 160ms ease-out;
+}
+
+.monitor-chip {
+  max-width: 48%;
+  height: 19px;
+  padding: 2px 7px;
+  overflow: hidden;
+  border: 1px solid var(--border-hairline);
+  border-radius: 999px;
+  background: var(--surface-inset);
+  color: var(--text-tertiary);
+  font-size: 9px;
+  line-height: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-throughput-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.monitor-throughput {
+  min-width: 0;
+  padding: 7px 7px 2px;
+  border-radius: 8px;
+  background: var(--surface-inset);
+}
+
+.monitor-throughput-heading {
+  justify-content: flex-start;
+  color: var(--text-tertiary);
+  font-size: 9.5px;
+}
+
+.monitor-throughput-heading b {
+  margin-left: auto;
+  color: var(--text-primary);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.monitor-direction {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.monitor-direction-down { color: var(--signal-green); }
+.monitor-direction-up { color: var(--signal-blue); }
+
+.monitor-section-title {
+  min-height: 25px;
+  padding: 3px 2px 4px;
+}
+
+.monitor-io-summary {
+  display: flex;
+  gap: 8px;
+  color: var(--text-faint);
+  font-size: 9px;
+  font-weight: 500;
+}
+
+.monitor-disk-list,
+.monitor-gpu-grid {
+  display: grid;
+  gap: 6px;
+}
+
+.monitor-disk-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px 9px;
+  border-radius: 9px;
+}
+
+.monitor-disk-path,
+.monitor-disk-usage {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.monitor-disk-path strong {
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-disk-path span,
+.monitor-disk-usage span,
+.monitor-disk-meta {
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: 8.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-disk-usage {
+  flex: none;
+  align-items: flex-end;
+}
+
+.monitor-disk-usage strong {
+  font-size: 12px;
+}
+
+.monitor-disk-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.monitor-gpu-identity {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 7px;
+}
+
+.monitor-gpu-index {
+  flex: none;
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--signal-green) 14%, transparent);
+  color: var(--signal-green);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.monitor-gpu-identity > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.monitor-gpu-identity strong,
+.monitor-gpu-identity span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-gpu-identity strong { font-size: 11.5px; }
+.monitor-gpu-identity span:last-child { color: var(--text-faint); font-size: 8.5px; }
+
+.monitor-gpu-memory {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.monitor-gpu-memory span { color: var(--text-faint); font-size: 9px; }
+.monitor-gpu-memory b { color: var(--text-tertiary); font-size: 10px; font-weight: 500; }
+
+.monitor-gpu-details {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.monitor-empty-inline {
+  padding: 13px;
+  border: 1px dashed var(--border-hairline);
+  border-radius: 9px;
+  color: var(--text-faint);
+  font-size: 10px;
+  text-align: center;
+}
+
+.monitor-process-table {
+  overflow: hidden;
+  border-radius: 9px;
+}
+
+.monitor-process-row {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) 38px 38px;
+  gap: 7px;
+  align-items: center;
+  min-height: 25px;
+  padding: 4px 7px;
+  color: var(--text-secondary);
+  font-size: 9.5px;
+}
+
+.monitor-process-row + .monitor-process-row {
+  border-top: 1px solid var(--border-hairline);
+}
+
+.monitor-process-row span:nth-child(2) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-process-row span:nth-child(n + 3) { text-align: right; }
+
+.monitor-process-head {
+  min-height: 22px;
+  background: var(--surface-inset);
+  color: var(--text-faint);
+  font-size: 8.5px;
+}
+
+.monitor-skeleton-card > div:first-child {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+@container (min-width: 460px) {
+  .monitor-host-strip {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .monitor-host-strip .monitor-metric {
+    border-right: 1px solid var(--border-hairline);
+    border-bottom: 0;
+  }
+
+  .monitor-host-strip .monitor-metric:last-child { border-right: 0; }
+
+  .monitor-gpu-grid {
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .monitor-progress-fill { transition: none; }
+}

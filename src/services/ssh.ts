@@ -419,6 +419,8 @@ const EMPTY_MONITOR: Monitor = {
   cpu: [],
   mem: [],
   net: [],
+  netRx: [],
+  netTx: [],
   disk: 0,
   diskTotal: '',
   diskUsed: '',
@@ -427,6 +429,19 @@ const EMPTY_MONITOR: Monitor = {
   memUsed: '',
   gpus: [],
   procs: [],
+  system: { os: '', kernel: '', uptimeSeconds: 0, processCount: 0 },
+  cpuInfo: {
+    model: '', sockets: 0, physicalCores: 0, threads: 0, frequencyMhz: null,
+    l3Cache: '', temperatureC: null, load1: 0, load5: 0, load15: 0,
+    userPct: 0, systemPct: 0, iowaitPct: 0,
+  },
+  memoryInfo: { total: '', used: '', available: '', cache: '', swapTotal: '', swapUsed: '' },
+  networkInfo: {
+    interface: '', interfaceCount: 0, rxMbps: 0, txMbps: 0, linkSpeedMbps: null,
+    duplex: '', ipv4: '', packetsPerSecond: 0, tcpConnections: 0, drops: 0, errors: 0,
+  },
+  disks: [],
+  diskIo: { readMbps: 0, writeMbps: 0 },
 }
 
 export async function getMonitor(sessionId?: string): Promise<Monitor> {
