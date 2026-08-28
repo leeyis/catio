@@ -24,6 +24,7 @@
 pub mod core;
 pub mod http;
 
+use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -136,6 +137,24 @@ struct ServerCtx {
     whitelist: Arc<StdMutex<Vec<WhitelistRule>>>,
     /// Shared with McpState; gates whether live-log events are emitted.
     live_log: Arc<AtomicBool>,
+    /// JSON-RPC request id → cooperative cancellation flag. A cancellation notification or
+    /// vanished HTTP client sets the same flag consumed by SSH exec/SFTP cleanup paths.
+    inflight: Arc<StdMutex<HashMap<String, Arc<AtomicBool>>>>,
+}
+
+fn request_key(id: &Value) -> Option<String> {
+    if id.is_null() {
+        None
+    } else {
+        serde_json::to_string(id).ok()
+    }
+}
+
+fn cancel_request(ctx: &ServerCtx, id: &Value) {
+    let Some(key) = request_key(id) else { return };
+    if let Some(flag) = ctx.inflight.lock().unwrap().get(&key) {
+        flag.store(true, Ordering::Relaxed);
+    }
 }
 
 fn gen_token() -> String {
@@ -397,7 +416,32 @@ async fn handle_streamable(
         }
     };
 
-    match dispatch(ctx, &req, client_ip).await {
+    // 同时观察客户端是否在长操作期间消失。连接断开不是“操作超时”，但继续留下无主
+    // 的 SSH channel 会占用 MaxSessions 并反压同一物理连接，因此要协作取消并给清理路径
+    // 足够时间发送 CHANNEL_CLOSE/删除半成品。
+    let mut dispatch_future = Box::pin(dispatch(ctx, &req, client_ip));
+    let mut disconnect_probe = [0u8; 1];
+    let response = tokio::select! {
+        biased;
+        // 先 poll dispatch 一次，让 tools/call 在检查 socket 前完成 inflight 注册。
+        response = &mut dispatch_future => response,
+        read = stream.read(&mut disconnect_probe) => {
+            match read {
+                Ok(0) | Err(_) => {
+                    if let Some(id) = req.get("id") {
+                        cancel_request(ctx, id);
+                    }
+                    // 客户端已经离开，无需再返回响应；但必须等协作取消把 SSH channel
+                    // 和传输半成品真正收好。这里也不设置总时限，避免再次制造孤儿任务。
+                    let _ = dispatch_future.await;
+                    return;
+                }
+                Ok(_) => dispatch_future.await,
+            }
+        }
+    };
+
+    match response {
         Some(resp) => {
             let body = serde_json::to_string(&resp).unwrap_or_default();
             let _ = write_json(stream, 200, "OK", &body).await;
@@ -442,7 +486,13 @@ async fn dispatch(ctx: &ServerCtx, req: &Value, client_ip: &str) -> Option<Value
                 }
             })
         }),
-        "notifications/initialized" | "notifications/cancelled" => None,
+        "notifications/initialized" => None,
+        "notifications/cancelled" => {
+            if let Some(request_id) = params.get("requestId") {
+                cancel_request(ctx, request_id);
+            }
+            None
+        }
         "ping" => id.map(|id| json!({ "jsonrpc": "2.0", "id": id, "result": {} })),
         "tools/list" => {
             log_event("tools/list", client_ip, &json!({}));
@@ -451,12 +501,27 @@ async fn dispatch(ctx: &ServerCtx, req: &Value, client_ip: &str) -> Option<Value
         }
         "tools/call" => {
             let id = id?;
+            let inflight_key = request_key(&id);
+            let cancel = Arc::new(AtomicBool::new(false));
+            if let Some(key) = inflight_key.as_ref() {
+                ctx.inflight.lock().unwrap().insert(key.clone(), cancel.clone());
+            }
             let name = params.get("name").and_then(Value::as_str).unwrap_or("").to_string();
             let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
             log_event("tools/call", client_ip, &json!({ "tool": name, "arguments": args }));
             // Event payload uses `args` (per contract); the file log keeps `arguments`.
             emit_log(ctx, "tools/call", client_ip, json!({ "tool": name, "args": args }));
-            let (text, is_error) = match call_tool(ctx, &name, &args).await {
+            let result = call_tool(ctx, &name, &args, cancel.clone()).await;
+            if let Some(key) = inflight_key.as_ref() {
+                let mut inflight = ctx.inflight.lock().unwrap();
+                if inflight
+                    .get(key)
+                    .is_some_and(|current| Arc::ptr_eq(current, &cancel))
+                {
+                    inflight.remove(key);
+                }
+            }
+            let (text, is_error) = match result {
                 Ok(t) => (t, false),
                 Err(t) => (t, true),
             };
@@ -525,15 +590,27 @@ impl core::McpTargets for DesktopTargets {
 }
 
 /// Desktop tool entry: assemble the live managers + a Tauri progress sink over this server's
-/// frontend-synced visible set, then hand off to the shared `core::call_tool`. Behavior is
-/// byte-identical to the pre-core desktop path — the SFTP id stays "mcp" → `transfer-progress-mcp`
-/// (verified UNCONSUMED by the frontend, which only listens on the returned xfer-N id).
-async fn call_tool(ctx: &ServerCtx, name: &str, args: &Value) -> Result<String, String> {
+/// frontend-synced visible set, then hand off to the shared cancellable core.
+async fn call_tool(
+    ctx: &ServerCtx,
+    name: &str,
+    args: &Value,
+    cancel: Arc<AtomicBool>,
+) -> Result<String, String> {
     let cm = ctx.app.state::<crate::db::manager::ConnManager>();
     let sm = ctx.app.state::<crate::ssh::manager::SessionManager>();
     let targets = DesktopTargets { conns: ctx.conns.clone(), hosts: ctx.hosts.clone() };
     let sink: Arc<dyn crate::events::EventSink> = Arc::new(crate::events::TauriSink(ctx.app.clone()));
-    core::call_tool(&targets, cm.inner(), sm.inner(), &sink, name, args).await
+    core::call_tool_cancellable(
+        &targets,
+        cm.inner(),
+        sm.inner(),
+        &sink,
+        name,
+        args,
+        Some(cancel),
+    )
+    .await
 }
 
 // ---- logging (UTC, per-day file, ≤2MB rolling, 7-day retention) ----
@@ -778,6 +855,7 @@ pub async fn mcp_start(app: AppHandle, state: State<'_, McpState>) -> Result<Mcp
         token: token.clone(),
         whitelist: state.whitelist.clone(),
         live_log: state.live_log_enabled.clone(),
+        inflight: Arc::new(StdMutex::new(HashMap::new())),
     };
     let task = tokio::spawn(serve(listener, ctx, sh_rx));
 

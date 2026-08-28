@@ -1,7 +1,7 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tokio::task::AbortHandle;
 
 use crate::ssh::conn::{ClientHandler, ForwardedRoutes};
@@ -47,6 +47,54 @@ impl Session {
     }
 }
 
+const RECONNECT_CONNECTED: u8 = 0;
+const RECONNECTING: u8 = 1;
+const RECONNECT_STOPPED: u8 = 2;
+
+/// 一条逻辑 SSH 会话的物理连接状态。逻辑会话只在用户主动断开时停止；
+/// 网络抖动只会把状态切到 reconnecting，并唤醒等待中的操作在原 session id 上续用。
+pub(crate) struct ReconnectControl {
+    phase: AtomicU8,
+    changed: Notify,
+}
+
+impl ReconnectControl {
+    pub(crate) fn connected() -> Self {
+        Self {
+            phase: AtomicU8::new(RECONNECT_CONNECTED),
+            changed: Notify::new(),
+        }
+    }
+
+    pub(crate) fn mark_reconnecting(&self) {
+        self.phase.store(RECONNECTING, Ordering::Release);
+        self.changed.notify_waiters();
+    }
+
+    pub(crate) fn mark_connected(&self) {
+        self.phase.store(RECONNECT_CONNECTED, Ordering::Release);
+        self.changed.notify_waiters();
+    }
+
+    pub(crate) fn stop(&self) {
+        self.phase.store(RECONNECT_STOPPED, Ordering::Release);
+        self.changed.notify_waiters();
+    }
+
+    pub(crate) fn is_connected(&self) -> bool {
+        self.phase.load(Ordering::Acquire) == RECONNECT_CONNECTED
+    }
+
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.phase.load(Ordering::Acquire) == RECONNECT_STOPPED
+    }
+}
+
+struct ReconnectEntry {
+    control: Arc<ReconnectControl>,
+    abort: AbortHandle,
+}
+
 /// 一条活动隧道的注册项。不与单个会话生命周期绑定——以隧道 id 为键挂在
 /// manager 上。`abort`/`emitter_abort` 分别中止接受循环与周期性字节计数发射器。
 pub struct TunnelEntry {
@@ -77,6 +125,8 @@ pub struct TunnelStatus {
 #[derive(Default)]
 pub struct SessionManager {
     sessions: Mutex<HashMap<String, Arc<Mutex<Session>>>>,
+    /// 逻辑会话 id → 自动重连监督任务。仅主动 remove 才停止任务并删除逻辑会话。
+    reconnects: Mutex<HashMap<String, ReconnectEntry>>,
     tunnels: Mutex<HashMap<String, TunnelEntry>>,
     /// 周期监控任务注册表：会话 id → 任务 AbortHandle。
     monitors: Mutex<HashMap<String, AbortHandle>>,
@@ -85,18 +135,101 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
-    pub async fn insert(&self, id: String, sess: Session) {
-        self.sessions
-            .lock()
-            .await
-            .insert(id, Arc::new(Mutex::new(sess)));
+    pub async fn insert(&self, id: String, sess: Session) -> Arc<Mutex<Session>> {
+        let sess = Arc::new(Mutex::new(sess));
+        self.sessions.lock().await.insert(id, sess.clone());
+        sess
     }
 
     pub async fn get(&self, id: &str) -> Option<Arc<Mutex<Session>>> {
-        self.sessions.lock().await.get(id).cloned()
+        self.get_cancellable(id, None).await
+    }
+
+    /// 取得当前可用的物理连接。自动重连中的逻辑会话会在这里等待且没有总时限；
+    /// 传入取消标志后，MCP/传输请求仍可由用户或客户端主动取消。
+    pub async fn get_cancellable(
+        &self,
+        id: &str,
+        cancel: Option<&AtomicBool>,
+    ) -> Option<Arc<Mutex<Session>>> {
+        loop {
+            if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+                return None;
+            }
+
+            let sess = self.sessions.lock().await.get(id).cloned()?;
+            let control = self
+                .reconnects
+                .lock()
+                .await
+                .get(id)
+                .map(|entry| entry.control.clone());
+
+            let Some(control) = control else {
+                // 测试/内部临时会话不注册重连任务，保持原有直接取会话语义。
+                return Some(sess);
+            };
+            if control.is_stopped() {
+                return None;
+            }
+
+            let physical_open = {
+                let guard = sess.lock().await;
+                !guard.handle.is_closed()
+            };
+            if control.is_connected() && physical_open {
+                return Some(sess);
+            }
+
+            // Notify 负责低延迟唤醒；短轮询同时覆盖“handle 已关闭、监督任务尚未来得及
+            // 切 phase”的极小窗口，并让 AtomicBool 取消无需额外通知通道。
+            tokio::select! {
+                _ = control.changed.notified() => {}
+                _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {}
+            }
+        }
+    }
+
+    /// 错误发生后判断逻辑会话是否仍存在、且物理连接正在恢复或已经关闭。
+    pub async fn is_reconnecting_or_closed(&self, id: &str) -> bool {
+        let Some(sess) = self.sessions.lock().await.get(id).cloned() else {
+            return false;
+        };
+        let reconnecting = self
+            .reconnects
+            .lock()
+            .await
+            .get(id)
+            .is_some_and(|entry| !entry.control.is_connected() && !entry.control.is_stopped());
+        if reconnecting {
+            return true;
+        }
+        let closed = sess.lock().await.handle.is_closed();
+        closed
+    }
+
+    pub(crate) async fn register_reconnect(
+        &self,
+        id: String,
+        control: Arc<ReconnectControl>,
+        abort: AbortHandle,
+    ) {
+        let old = self
+            .reconnects
+            .lock()
+            .await
+            .insert(id, ReconnectEntry { control, abort });
+        if let Some(old) = old {
+            old.control.stop();
+            old.abort.abort();
+        }
     }
 
     pub async fn remove(&self, id: &str) -> Option<Arc<Mutex<Session>>> {
+        if let Some(entry) = self.reconnects.lock().await.remove(id) {
+            entry.control.stop();
+            entry.abort.abort();
+        }
         self.sessions.lock().await.remove(id)
     }
 

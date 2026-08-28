@@ -25,6 +25,10 @@ pub const MIN_SEG_SIZE: u64 = 1 * 1024 * 1024;
 pub const CHUNK: usize = 32 * 1024;
 /// 进度回调节流阈值：累计该字节数才回调一次（设计文档 §6）。
 pub const PROGRESS_STEP: u64 = 256 * 1024;
+/// 单个 SFTP 请求的“完全无响应”检测窗口。它不是文件传输总时限；命中后上层会在
+/// 同一逻辑会话重连/重试且不限制总次数。提高到 5 分钟，避免慢链路被 crate 默认的
+/// 10 秒 request timeout 误判为断线。
+pub const REQUEST_STALL_SECS: u64 = 5 * 60;
 
 /// 把 `total` 字节切成若干 `(offset, len)` 段。
 ///
@@ -63,10 +67,24 @@ pub fn plan_segments(total: u64) -> Vec<(u64, u64)> {
 ///
 /// 任一步失败返回 `Err`，供上层回退到 exec + base64（ESXi ash 等无 sftp 子系统的环境）。
 pub async fn open_sftp(mgr: &SessionManager, session_id: &str) -> Result<SftpSession, SshError> {
+    open_sftp_cancellable(mgr, session_id, None).await
+}
+
+pub async fn open_sftp_cancellable(
+    mgr: &SessionManager,
+    session_id: &str,
+    cancel: Option<&AtomicBool>,
+) -> Result<SftpSession, SshError> {
     let sess = mgr
-        .get(session_id)
+        .get_cancellable(session_id, cancel)
         .await
-        .ok_or_else(|| SshError::NotFound(session_id.to_string()))?;
+        .ok_or_else(|| {
+            if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+                SshError::Cancelled
+            } else {
+                SshError::NotFound(session_id.to_string())
+            }
+        })?;
     let channel = {
         let guard = sess.lock().await;
         guard
@@ -79,7 +97,11 @@ pub async fn open_sftp(mgr: &SessionManager, session_id: &str) -> Result<SftpSes
         .request_subsystem(true, "sftp")
         .await
         .map_err(|e| SshError::Sftp(e.to_string()))?;
-    SftpSession::new(channel.into_stream())
+    let config = russh_sftp::client::Config {
+        request_timeout_secs: REQUEST_STALL_SECS,
+        ..Default::default()
+    };
+    SftpSession::new_with_config(channel.into_stream(), config)
         .await
         .map_err(|e| SshError::Sftp(e.to_string()))
 }

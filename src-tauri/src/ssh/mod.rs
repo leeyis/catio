@@ -42,6 +42,8 @@ pub enum SshError {
     /// 才超时的场景里，这段输出往往正是要看的，故随错误一起带出而非丢弃。
     #[error("operation timed out")]
     TimedOut { partial: String },
+    #[error("operation cancelled")]
+    Cancelled,
 }
 
 impl Serialize for SshError {
@@ -58,6 +60,7 @@ impl Serialize for SshError {
             SshError::Io(_) => ("Io", self.to_string()),
             SshError::Conflict => ("Conflict", self.to_string()),
             SshError::TimedOut { .. } => ("TimedOut", self.to_string()),
+            SshError::Cancelled => ("Cancelled", self.to_string()),
         };
         let mut st = s.serialize_struct("SshError", 2)?;
         st.serialize_field("kind", kind)?;

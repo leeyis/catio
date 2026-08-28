@@ -11,8 +11,9 @@
 //!   * `handle.disconnect(Disconnect::ByApplication, "", "en") -> Result<(), russh::Error>`。
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -21,7 +22,7 @@ use russh::keys::ssh_key;
 use russh::keys::PrivateKeyWithHashAlg;
 
 use crate::ssh::ids::IdGen;
-use crate::ssh::manager::{Session, SessionManager};
+use crate::ssh::manager::{ReconnectControl, Session, SessionManager};
 use crate::ssh::SshError;
 
 static SESS_IDS: IdGen = IdGen::new("sess");
@@ -138,6 +139,15 @@ pub type ForwardedRoutes = Arc<
 pub struct ClientHandler {
     pub fingerprint: Arc<std::sync::Mutex<Option<String>>>,
     pub forwarded: ForwardedRoutes,
+}
+
+impl ClientHandler {
+    fn with_forwarded(forwarded: ForwardedRoutes) -> Self {
+        Self {
+            fingerprint: Arc::new(std::sync::Mutex::new(None)),
+            forwarded,
+        }
+    }
 }
 
 impl client::Handler for ClientHandler {
@@ -294,8 +304,9 @@ async fn authenticate(
 /// - `args.jump = Some(j)` → 先连+认证跳板，再经其 direct-tcpip channel
 ///   `connect_stream` 到目标并认证。返回的 jump handle 必须由调用方存活——
 ///   它一旦 drop，direct-tcpip channel/stream（即目标会话的传输）随之断开。
-async fn connect_core(
+async fn connect_core_with_forwarded(
     args: &ConnectArgs,
+    target_forwarded: Option<ForwardedRoutes>,
 ) -> Result<
     (
         Handle<ClientHandler>,
@@ -305,13 +316,12 @@ async fn connect_core(
     ),
     SshError,
 > {
-    // 启用 SSH keepalive:russh 默认 keepalive_interval=None、inactivity_timeout=None,
-    // 即空闲时不发任何保活包,服务端的 SSH 空闲断开策略一触发连接就掉线(用户停下查看
-    // 命令候选时尤为明显)。每 30s 发一次 keepalive 维持空闲连接;keepalive_max 用默认值
-    // (连续多次无响应才判定断开)。注:这维持的是 SSH 传输层活跃,不影响远端 shell 的
-    // TMOUT(那是终端输入空闲计时,需服务端配置)。
+    // 逻辑会话不设空闲/业务超时；keepalive 仅用于识别已经失效的物理 socket，连续
+    // 3 次无响应后让监督任务进入自动重连，而不是删除逻辑 session id。
     let mut config = client::Config::default();
+    config.inactivity_timeout = None;
     config.keepalive_interval = Some(std::time::Duration::from_secs(30));
+    config.keepalive_max = 3;
     // 见 KEX_ORDER 说明:优化密钥交换算法偏好,修复禁用 curve25519 的服务端(如 ESXi)
     // 落到慢速大群 DH 导致的十余秒 KEX 卡顿。直连与 jump 路径共用此 config。
     config.preferred = russh::Preferred {
@@ -323,7 +333,10 @@ async fn connect_core(
     match &args.jump {
         // ── 直连路径（与历史行为等价）─────────────────────────────────────
         None => {
-            let handler = ClientHandler::default();
+            let handler = target_forwarded
+                .clone()
+                .map(ClientHandler::with_forwarded)
+                .unwrap_or_default();
             let fp_slot = handler.fingerprint.clone();
             let forwarded = handler.forwarded.clone();
 
@@ -370,7 +383,10 @@ async fn connect_core(
             let stream = ch.into_stream();
 
             // 3. 在该流上对目标运行一条全新的 SSH 客户端会话并认证。
-            let target_handler = ClientHandler::default();
+            let target_handler = target_forwarded
+                .clone()
+                .map(ClientHandler::with_forwarded)
+                .unwrap_or_default();
             let fp_slot = target_handler.fingerprint.clone();
             let forwarded = target_handler.forwarded.clone();
 
@@ -438,7 +454,25 @@ pub async fn connect_checked(
     ),
     SshError,
 > {
-    let (handle, fingerprint, forwarded, jump) = connect_core(args).await?;
+    connect_checked_with_forwarded(args, known_hosts_dir, None).await
+}
+
+async fn connect_checked_with_forwarded(
+    args: &ConnectArgs,
+    known_hosts_dir: Option<&std::path::Path>,
+    forwarded: Option<ForwardedRoutes>,
+) -> Result<
+    (
+        Handle<ClientHandler>,
+        String,
+        ForwardedRoutes,
+        Option<Handle<ClientHandler>>,
+        bool,
+    ),
+    SshError,
+> {
+    let (handle, fingerprint, forwarded, jump) =
+        connect_core_with_forwarded(args, forwarded).await?;
 
     // TOFU 针对的是**目标**主机指纹，键为 target_host:target_port（行为不变）。
     // 跳板主机密钥的 TOFU 在 v1 暂接受任意 key（见 connect_core），后续再补。
@@ -466,6 +500,77 @@ pub async fn connect_checked(
     };
 
     Ok((handle, fingerprint, forwarded, jump, trusted))
+}
+
+/// 第一次失败后等待 1 秒，随后 2/4/8/16 秒，30 秒封顶；无限重试直到用户断开。
+fn reconnect_backoff(attempt: u32) -> Duration {
+    Duration::from_secs((1u64 << attempt.min(5)).min(30))
+}
+
+const RECONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
+
+async fn supervise_reconnect(
+    session: Arc<tokio::sync::Mutex<Session>>,
+    args: ConnectArgs,
+    known_hosts_dir: PathBuf,
+    control: Arc<ReconnectControl>,
+) {
+    loop {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if control.is_stopped() {
+            return;
+        }
+
+        let physical_closed = {
+            let guard = session.lock().await;
+            guard.handle.is_closed()
+        };
+        if !physical_closed {
+            continue;
+        }
+
+        control.mark_reconnecting();
+        let mut attempt = 0u32;
+        loop {
+            if control.is_stopped() {
+                return;
+            }
+            // 复用同一 R 转发路由表，避免重连后 handler 与现有 tunnel 路由脱节。
+            let forwarded = { session.lock().await.forwarded.clone() };
+            let reconnect = tokio::time::timeout(
+                RECONNECT_ATTEMPT_TIMEOUT,
+                connect_checked_with_forwarded(
+                    &args,
+                    Some(known_hosts_dir.as_path()),
+                    Some(forwarded),
+                ),
+            )
+            .await;
+            match reconnect {
+                Ok(Ok((handle, _fingerprint, forwarded, jump, _trusted))) => {
+                    if control.is_stopped() {
+                        let _ = handle
+                            .disconnect(russh::Disconnect::ByApplication, "", "en")
+                            .await;
+                        return;
+                    }
+                    {
+                        let mut guard = session.lock().await;
+                        guard.handle = handle;
+                        guard.forwarded = forwarded;
+                        guard._jump = jump;
+                    }
+                    control.mark_connected();
+                    break;
+                }
+                Ok(Err(_)) | Err(_) => {
+                    let delay = reconnect_backoff(attempt);
+                    attempt = attempt.saturating_add(1);
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+    }
 }
 
 // ─── 连接测试 ───────────────────────────────────────────────────────────────
@@ -531,7 +636,7 @@ pub async fn ssh_connect(
         connect_checked(&args, Some(dir.as_path())).await?;
 
     let session_id = SESS_IDS.next();
-    mgr.insert(
+    let session = mgr.insert(
         session_id.clone(),
         Session {
             handle,
@@ -544,6 +649,18 @@ pub async fn ssh_connect(
         },
     )
     .await;
+
+    // secret 只由监督任务保留在进程内存中，不持久化、不记录；用户主动 ssh_disconnect
+    // 时 manager 会 stop + abort 此任务，逻辑会话才真正结束。
+    let reconnect = Arc::new(ReconnectControl::connected());
+    let task = tokio::spawn(supervise_reconnect(
+        session,
+        args,
+        dir,
+        reconnect.clone(),
+    ));
+    mgr.register_reconnect(session_id.clone(), reconnect, task.abort_handle())
+        .await;
 
     Ok(ConnectResult {
         session_id,
@@ -607,7 +724,7 @@ pub async fn ssh_trust_host(
 
 #[cfg(test)]
 mod tests {
-    use super::KEX_ORDER;
+    use super::{reconnect_backoff, KEX_ORDER};
 
     fn pos(name: russh::kex::Name) -> usize {
         KEX_ORDER
@@ -631,5 +748,13 @@ mod tests {
         let g14 = pos(russh::kex::DH_G14_SHA256);
         assert!(g14 < pos(russh::kex::DH_GEX_SHA256), "group14 应先于 DH_GEX");
         assert!(g14 < pos(russh::kex::DH_G18_SHA512), "group14 应先于 group18");
+    }
+
+    #[test]
+    fn reconnect_backoff_is_exponential_and_capped() {
+        let seconds = (0..8)
+            .map(|attempt| reconnect_backoff(attempt).as_secs())
+            .collect::<Vec<_>>();
+        assert_eq!(seconds, vec![1, 2, 4, 8, 16, 30, 30, 30]);
     }
 }

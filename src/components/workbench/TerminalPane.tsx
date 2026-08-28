@@ -244,6 +244,7 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
   const [broadcast, setBroadcast] = useState(false)
   const [mxOpen, setMxOpen] = useState(false)
   const [sessionClosed, setSessionClosed] = useState(false)
+  const [channelGeneration, setChannelGeneration] = useState(0)
   const selfId = conn ? conn.id : 'h-bastion'
   const selfProto = conn ? (conn.proto || 'ssh') : 'ssh'
   // Broadcast targets must match the ACTIVE tab: same kind (host) AND same protocol —
@@ -335,15 +336,22 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
   const closedNotifiedRef = useRef(false)
   const reconnectingRef = useRef(false)
 
-  const notifySshSessionLost = (lostSessionId: string) => {
+  const notifySshSessionLost = (lostSessionId: string): boolean => {
     const currentSession = sessionIdRef.current === lostSessionId
     if (currentSession) {
+      if (closedNotifiedRef.current) return false
+      closedNotifiedRef.current = true
       setSessionClosed(true)
       onChannelRef.current?.(lostSessionId, null)
-      if (closedNotifiedRef.current) return
-      closedNotifiedRef.current = true
     }
     onSessionClosedRef.current?.(lostSessionId)
+    return currentSession
+  }
+
+  const reopenSshTerminal = (lostSessionId: string) => {
+    if (notifySshSessionLost(lostSessionId)) {
+      setChannelGeneration(generation => generation + 1)
+    }
   }
 
   useEffect(() => {
@@ -753,7 +761,7 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
         chanIdRef.current = null
         Promise.resolve(termClose(sid, deadChan)).catch(() => { /* best-effort cleanup */ })
       }
-      notifySshSessionLost(sid)
+      reopenSshTerminal(sid)
     }
 
     const handleTermWriteFailure = (error: unknown) => {
@@ -884,6 +892,9 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
         .then(ok => {
           if (ok) {
             try { term.clear() } catch { /* best-effort */ }
+            setSessionClosed(false)
+            closedNotifiedRef.current = false
+            setChannelGeneration(generation => generation + 1)
           }
         })
         .catch(() => { /* App surfaces connect errors through the existing modal path. */ })
@@ -1023,6 +1034,8 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
         const openedChanId = await termOpen(sessionId, term.cols, term.rows)
         chanIdRef.current = openedChanId
         if (disposed) { termClose(sessionId, openedChanId); chanIdRef.current = null; return }
+        setSessionClosed(false)
+        closedNotifiedRef.current = false
         onChannelRef.current?.(sessionId, openedChanId)
         // 连接建立后立即激活终端焦点,免去用户手动点一下终端才能输入(仅当本 pane 是当前
         // 显示的 tab 时,避免在后台打开时抢焦点)。
@@ -1074,7 +1087,9 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
           })
           ro.observe(hostEl)
         }
-      })()
+      })().catch(error => {
+        if (!disposed && isSshSessionLostError(error)) notifySshSessionLost(sessionId)
+      })
     } else if (isTauri() || isServer()) {
       // Restored tab whose session ended / wasn't reconnected. Show a clear notice rather
       // than misleading mock data (the dev/non-Tauri path below keeps the read-only mock).
@@ -1121,7 +1136,7 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
       fitAddonRef.current = null
     }
     // re-init when the session/chan identity changes
-  }, [sessionId, live, conn])
+  }, [sessionId, live, conn, channelGeneration])
 
   // Live-apply terminal font prefs WITHOUT recreating the terminal (which would
   // drop the scrollback). Update xterm options, refit, and push the new size to
@@ -1134,7 +1149,7 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
     try { fitAddonRef.current?.fit() } catch { /* no layout */ }
     if (live && sessionId && chanIdRef.current) {
       Promise.resolve(termResize(sessionId, chanIdRef.current, term.cols, term.rows)).catch(error => {
-        if (isSshSessionLostError(error)) notifySshSessionLost(sessionId)
+        if (isSshSessionLostError(error)) reopenSshTerminal(sessionId)
       })
     }
   }, [prefs.termFontPx, prefs.monoFont, live, sessionId])
@@ -1153,7 +1168,7 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
       const chanId = chanIdRef.current
       if (!chanId) return false
       Promise.resolve(termWrite(sessionId, chanId, bytesToBase64(text))).catch(error => {
-        if (isSshSessionLostError(error)) notifySshSessionLost(sessionId)
+        if (isSshSessionLostError(error)) reopenSshTerminal(sessionId)
       })
       try { termRef.current?.focus() } catch { /* best-effort */ }
       return true

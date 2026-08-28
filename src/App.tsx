@@ -1053,47 +1053,22 @@ export default function App() {
   }
 
   function markSshSessionClosed(sessionId: string) {
-    sshDisconnect(sessionId).catch(() => { /* best-effort stale backend cleanup */ })
+    // PTY channel 结束不等于逻辑 SSH 主机断开。后端会在网络波动时保留 sessionId 并
+    // 自动重连；这里只清掉失效的 channel 映射，避免误删 MCP host/sessionMap。
     const closedTabIds = tabsRef.current.filter(tb => tb.sessionId === sessionId).map(tb => tb.id)
-    const closedConnIds = new Set<string>([
-      ...Object.entries(sessionMap).filter(([, sid]) => sid === sessionId).map(([connId]) => connId),
-      ...tabsRef.current.filter(tb => tb.sessionId === sessionId).map(tb => tb.connId),
-    ])
-    const unlisten = historyUnlisteners.current[sessionId]
-    if (unlisten) {
-      unlisten()
-      delete historyUnlisteners.current[sessionId]
-    }
-    setSessionMap(prev => {
-      const next = { ...prev }
-      for (const [connId, sid] of Object.entries(prev)) {
-        if (sid === sessionId) delete next[connId]
-      }
-      return next
-    })
-    setTabs(prev => prev.map(tb => tb.sessionId === sessionId ? { ...tb, sessionId: undefined } : tb))
     setChanMap(prev => {
       const next = { ...prev }
       closedTabIds.forEach(id => { delete next[id] })
       return next
     })
-    setLiveConns(prev => {
-      let changed = false
-      const next = { ...prev }
-      closedConnIds.forEach(connId => {
-        if (next[connId]) {
-          next[connId] = { ...next[connId], status: 'down' }
-          changed = true
-        }
-      })
-      return changed ? next : prev
-    })
-    setDetailConn(prev => prev && closedConnIds.has(prev.id) ? { ...prev, status: 'idle' } : prev)
   }
 
   async function reconnectTerminalTab(tabId: string): Promise<boolean> {
     const tab = tabsRef.current.find(tb => tb.id === tabId)
     if (!tab || tab.kind !== 'terminal') return false
+    // 逻辑会话仍在时由 TerminalPane 在同一 sessionId 上重开 PTY；termOpen 会等待
+    // 后端指数退避重连完成。只有恢复出来且没有 sessionId 的旧标签才重新认证建会话。
+    if (tab.sessionId) return true
     const conn = liveConns[tab.connId] ?? vaultConns.find(c => c.id === tab.connId) ?? D.byId[tab.connId] ?? null
     const profile = profileForTerminalTab(tab, conn)
     if (!profile) {

@@ -224,23 +224,45 @@ pub async fn realpath(
 /// 在会话上跑一条命令。锁只覆盖开 channel，exec/收流在锁外（run_on_session）——
 /// 大目录 `ls -lA`、大树 `rm -rf` 这类耗时命令不会堵住同会话的 term/tunnel。
 async fn exec(mgr: &SessionManager, session_id: &str, cmd: &str) -> Result<String, SshError> {
-    let sess = mgr
-        .get(session_id)
-        .await
-        .ok_or_else(|| SshError::NotFound(session_id.to_string()))?;
-    crate::ssh::exec::run_on_session(&sess, cmd, None).await
+    exec_cancellable(mgr, session_id, cmd, None).await
 }
 
-/// 短暂持锁打开一个 exec channel（流式传输用，随后释放锁，channel 独立运行）。
-async fn open_exec_channel(
+async fn exec_cancellable(
     mgr: &SessionManager,
     session_id: &str,
     cmd: &str,
+    cancel: Option<&AtomicBool>,
+) -> Result<String, SshError> {
+    let sess = mgr
+        .get_cancellable(session_id, cancel)
+        .await
+        .ok_or_else(|| {
+            if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+                SshError::Cancelled
+            } else {
+                SshError::NotFound(session_id.to_string())
+            }
+        })?;
+    crate::ssh::exec::run_on_session_cancellable(&sess, cmd, None, cancel).await
+}
+
+/// 短暂持锁打开一个 exec channel（流式传输用，随后释放锁，channel 独立运行）。
+async fn open_exec_channel_cancellable(
+    mgr: &SessionManager,
+    session_id: &str,
+    cmd: &str,
+    cancel: Option<&AtomicBool>,
 ) -> Result<Channel<Msg>, SshError> {
     let sess = mgr
-        .get(session_id)
+        .get_cancellable(session_id, cancel)
         .await
-        .ok_or_else(|| SshError::NotFound(session_id.to_string()))?;
+        .ok_or_else(|| {
+            if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+                SshError::Cancelled
+            } else {
+                SshError::NotFound(session_id.to_string())
+            }
+        })?;
     let channel = {
         let guard = sess.lock().await;
         guard
@@ -437,7 +459,7 @@ where
 /// → 回退到现有 exec + base64 单流（`upload_stream`）。语义保持一致：
 /// `Ok(false)` 完成、`Ok(true)` 取消、`Err` 出错。
 #[allow(clippy::too_many_arguments)]
-async fn upload_dispatch_or_fallback(
+async fn upload_once(
     mgr: &SessionManager,
     sink: &Arc<dyn EventSink>,
     session_id: &str,
@@ -448,7 +470,13 @@ async fn upload_dispatch_or_fallback(
     transfer_id: &str,
     cancel: Arc<AtomicBool>,
 ) -> Result<bool, SshError> {
-    match crate::ssh::sftp_transfer::open_sftp(mgr, session_id).await {
+    match crate::ssh::sftp_transfer::open_sftp_cancellable(
+        mgr,
+        session_id,
+        Some(cancel.as_ref()),
+    )
+    .await
+    {
         Ok(sftp) => {
             let on_progress = progress_sink_emitter(sink, transfer_id, filename, total_bytes);
             crate::ssh::sftp_transfer::upload_dispatch(
@@ -464,7 +492,13 @@ async fn upload_dispatch_or_fallback(
         // 子系统不可用：回退到 exec + base64。
         Err(_) => {
             let cmd = format!("base64 -d > {}", shell_escape(remote_path));
-            let channel = open_exec_channel(mgr, session_id, &cmd).await?;
+            let channel = open_exec_channel_cancellable(
+                mgr,
+                session_id,
+                &cmd,
+                Some(cancel.as_ref()),
+            )
+            .await?;
             let on_progress = progress_sink_emitter(sink, transfer_id, filename, total_bytes);
             upload_stream(channel, local_path, total_bytes, cancel, on_progress).await
         }
@@ -474,7 +508,7 @@ async fn upload_dispatch_or_fallback(
 /// 下载分发：对称于 [`upload_dispatch_or_fallback`]。先 `open_sftp`，成功走
 /// `download_dispatch`，失败回退 exec + base64（`download_stream`）。
 #[allow(clippy::too_many_arguments)]
-async fn download_dispatch_or_fallback(
+async fn download_once(
     mgr: &SessionManager,
     sink: &Arc<dyn EventSink>,
     session_id: &str,
@@ -485,7 +519,13 @@ async fn download_dispatch_or_fallback(
     transfer_id: &str,
     cancel: Arc<AtomicBool>,
 ) -> Result<bool, SshError> {
-    match crate::ssh::sftp_transfer::open_sftp(mgr, session_id).await {
+    match crate::ssh::sftp_transfer::open_sftp_cancellable(
+        mgr,
+        session_id,
+        Some(cancel.as_ref()),
+    )
+    .await
+    {
         Ok(sftp) => {
             let on_progress = progress_sink_emitter(sink, transfer_id, filename, total_bytes);
             crate::ssh::sftp_transfer::download_dispatch(
@@ -500,9 +540,183 @@ async fn download_dispatch_or_fallback(
         }
         Err(_) => {
             let cmd = format!("base64 {}", shell_escape(remote_path));
-            let channel = open_exec_channel(mgr, session_id, &cmd).await?;
+            let channel = open_exec_channel_cancellable(
+                mgr,
+                session_id,
+                &cmd,
+                Some(cancel.as_ref()),
+            )
+            .await?;
             let on_progress = progress_sink_emitter(sink, transfer_id, filename, total_bytes);
             download_stream(channel, local_path, cancel, on_progress).await
+        }
+    }
+}
+
+fn transfer_retry_backoff(attempt: u32) -> std::time::Duration {
+    std::time::Duration::from_secs((1u64 << attempt.min(5)).min(30))
+}
+
+fn retryable_transfer_error(error: &SshError) -> bool {
+    match error {
+        SshError::HostUnreachable(_) | SshError::ChannelClosed | SshError::TimedOut { .. } => true,
+        SshError::Io(message) | SshError::Sftp(message) => {
+            let message = message.to_ascii_lowercase();
+            [
+                "timeout",
+                "timed out",
+                "channel closed",
+                "connection closed",
+                "connection reset",
+                "connection aborted",
+                "not connected",
+                "broken pipe",
+                "unexpected eof",
+                "early eof",
+                "channel eof",
+                "elapsed",
+                "disconnected",
+                "disconnect",
+                "send failed",
+                "senderror",
+            ]
+            .iter()
+            .any(|needle| message.contains(needle))
+        }
+        _ => false,
+    }
+}
+
+async fn wait_cancel(cancel: &AtomicBool) {
+    while !cancel.load(Ordering::Relaxed) {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+async fn retry_delay_or_cancel(delay: std::time::Duration, cancel: &AtomicBool) -> bool {
+    tokio::select! {
+        _ = tokio::time::sleep(delay) => false,
+        _ = wait_cancel(cancel) => true,
+    }
+}
+
+async fn mirror_cancel(source: Arc<AtomicBool>, target: Arc<AtomicBool>) {
+    wait_cancel(source.as_ref()).await;
+    target.store(true, Ordering::Relaxed);
+}
+
+/// 一次物理传输失败时从头安全重试；没有总时长上限。SFTP 自身的单请求超时仅作为
+/// “本次物理通道已卡住”的检测器，不再成为整次文件传输的终止条件。
+#[allow(clippy::too_many_arguments)]
+async fn upload_dispatch_or_fallback(
+    mgr: &SessionManager,
+    sink: &Arc<dyn EventSink>,
+    session_id: &str,
+    local_path: &str,
+    remote_path: &str,
+    total_bytes: u64,
+    filename: &str,
+    transfer_id: &str,
+    cancel: Arc<AtomicBool>,
+) -> Result<bool, SshError> {
+    let mut attempt = 0u32;
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(true);
+        }
+        // 分段引擎会用 cancel 停掉兄弟 task；每次尝试单独使用一个标志，避免一次
+        // transport error 永久污染用户的取消标志，从而阻断后续重试。
+        let attempt_cancel = Arc::new(AtomicBool::new(false));
+        let mirror = tokio::spawn(mirror_cancel(cancel.clone(), attempt_cancel.clone()));
+        let result = upload_once(
+            mgr,
+            sink,
+            session_id,
+            local_path,
+            remote_path,
+            total_bytes,
+            filename,
+            transfer_id,
+            attempt_cancel,
+        )
+        .await;
+        mirror.abort();
+
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(true);
+        }
+        match result {
+            Ok(false) => return Ok(false),
+            Ok(true) => {}
+            Err(error) => {
+                let retry = retryable_transfer_error(&error)
+                    || mgr.is_reconnecting_or_closed(session_id).await;
+                if !retry {
+                    return Err(error);
+                }
+            }
+        }
+
+        let delay = transfer_retry_backoff(attempt);
+        attempt = attempt.saturating_add(1);
+        if retry_delay_or_cancel(delay, cancel.as_ref()).await {
+            return Ok(true);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn download_dispatch_or_fallback(
+    mgr: &SessionManager,
+    sink: &Arc<dyn EventSink>,
+    session_id: &str,
+    remote_path: &str,
+    local_path: &str,
+    total_bytes: u64,
+    filename: &str,
+    transfer_id: &str,
+    cancel: Arc<AtomicBool>,
+) -> Result<bool, SshError> {
+    let mut attempt = 0u32;
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(true);
+        }
+        let attempt_cancel = Arc::new(AtomicBool::new(false));
+        let mirror = tokio::spawn(mirror_cancel(cancel.clone(), attempt_cancel.clone()));
+        let result = download_once(
+            mgr,
+            sink,
+            session_id,
+            remote_path,
+            local_path,
+            total_bytes,
+            filename,
+            transfer_id,
+            attempt_cancel,
+        )
+        .await;
+        mirror.abort();
+
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(true);
+        }
+        match result {
+            Ok(false) => return Ok(false),
+            Ok(true) => {}
+            Err(error) => {
+                let retry = retryable_transfer_error(&error)
+                    || mgr.is_reconnecting_or_closed(session_id).await;
+                if !retry {
+                    return Err(error);
+                }
+            }
+        }
+
+        let delay = transfer_retry_backoff(attempt);
+        attempt = attempt.saturating_add(1);
+        if retry_delay_or_cancel(delay, cancel.as_ref()).await {
+            return Ok(true);
         }
     }
 }
@@ -550,33 +764,51 @@ pub async fn upload_blocking(
     remote_path: &str,
     sink: &Arc<dyn EventSink>,
 ) -> Result<u64, SshError> {
-    let total_bytes = tokio::fs::metadata(local_path)
-        .await
-        .map_err(|e| SshError::Io(e.to_string()))?
-        .len();
-    if total_bytes == 0 {
-        let cmd = format!(": > {}", shell_escape(remote_path));
-        exec(mgr, session_id, &cmd).await?;
-        return Ok(0);
-    }
-    let filename = basename(local_path);
     let cancel = Arc::new(AtomicBool::new(false));
-    let cancelled = upload_dispatch_or_fallback(
-        mgr,
-        sink,
-        session_id,
-        local_path,
-        remote_path,
-        total_bytes,
-        &filename,
-        "mcp",
-        cancel,
-    )
-    .await?;
-    if cancelled {
-        return Err(SshError::Sftp("cancelled".into()));
+    upload_blocking_cancellable(mgr, session_id, local_path, remote_path, sink, cancel).await
+}
+
+pub async fn upload_blocking_cancellable(
+    mgr: &SessionManager,
+    session_id: &str,
+    local_path: &str,
+    remote_path: &str,
+    sink: &Arc<dyn EventSink>,
+    cancel: Arc<AtomicBool>,
+) -> Result<u64, SshError> {
+    let transfer_id = next_transfer_id();
+    mgr.register_transfer(transfer_id.clone(), cancel.clone()).await;
+    let result = async {
+        let total_bytes = tokio::fs::metadata(local_path)
+            .await
+            .map_err(|e| SshError::Io(e.to_string()))?
+            .len();
+        if total_bytes == 0 {
+            let cmd = format!(": > {}", shell_escape(remote_path));
+            exec_cancellable(mgr, session_id, &cmd, Some(cancel.as_ref())).await?;
+            return Ok(0);
+        }
+        let filename = basename(local_path);
+        let cancelled = upload_dispatch_or_fallback(
+            mgr,
+            sink,
+            session_id,
+            local_path,
+            remote_path,
+            total_bytes,
+            &filename,
+            &transfer_id,
+            cancel.clone(),
+        )
+        .await?;
+        if cancelled {
+            return Err(SshError::Cancelled);
+        }
+        Ok(total_bytes)
     }
-    Ok(total_bytes)
+    .await;
+    mgr.unregister_transfer(&transfer_id).await;
+    result
 }
 
 /// 下载远端文件到本地，等待完成后返回字节数。复用流式下载核心。
@@ -587,36 +819,54 @@ pub async fn download_blocking(
     local_path: &str,
     sink: &Arc<dyn EventSink>,
 ) -> Result<u64, SshError> {
-    let stat_cmd = format!(
-        "stat -c%s {p} 2>/dev/null || stat -f%z {p} 2>/dev/null",
-        p = shell_escape(remote_path)
-    );
-    let size_out = exec(mgr, session_id, &stat_cmd).await?;
-    let total_bytes: u64 = size_out.trim().parse().unwrap_or(0);
-    if total_bytes == 0 {
-        tokio::fs::write(local_path, b"")
-            .await
-            .map_err(|e| SshError::Io(e.to_string()))?;
-        return Ok(0);
-    }
-    let filename = basename(remote_path);
     let cancel = Arc::new(AtomicBool::new(false));
-    let cancelled = download_dispatch_or_fallback(
-        mgr,
-        sink,
-        session_id,
-        remote_path,
-        local_path,
-        total_bytes,
-        &filename,
-        "mcp",
-        cancel,
-    )
-    .await?;
-    if cancelled {
-        return Err(SshError::Sftp("cancelled".into()));
+    download_blocking_cancellable(mgr, session_id, remote_path, local_path, sink, cancel).await
+}
+
+pub async fn download_blocking_cancellable(
+    mgr: &SessionManager,
+    session_id: &str,
+    remote_path: &str,
+    local_path: &str,
+    sink: &Arc<dyn EventSink>,
+    cancel: Arc<AtomicBool>,
+) -> Result<u64, SshError> {
+    let transfer_id = next_transfer_id();
+    mgr.register_transfer(transfer_id.clone(), cancel.clone()).await;
+    let result = async {
+        let stat_cmd = format!(
+            "stat -c%s {p} 2>/dev/null || stat -f%z {p} 2>/dev/null",
+            p = shell_escape(remote_path)
+        );
+        let size_out = exec_cancellable(mgr, session_id, &stat_cmd, Some(cancel.as_ref())).await?;
+        let total_bytes: u64 = size_out.trim().parse().unwrap_or(0);
+        if total_bytes == 0 {
+            tokio::fs::write(local_path, b"")
+                .await
+                .map_err(|e| SshError::Io(e.to_string()))?;
+            return Ok(0);
+        }
+        let filename = basename(remote_path);
+        let cancelled = download_dispatch_or_fallback(
+            mgr,
+            sink,
+            session_id,
+            remote_path,
+            local_path,
+            total_bytes,
+            &filename,
+            &transfer_id,
+            cancel.clone(),
+        )
+        .await?;
+        if cancelled {
+            return Err(SshError::Cancelled);
+        }
+        Ok(total_bytes)
     }
-    Ok(total_bytes)
+    .await;
+    mgr.unregister_transfer(&transfer_id).await;
+    result
 }
 
 /// 等待远端命令结束并校验退出码（上传用）。
@@ -1174,6 +1424,22 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transfer_retry_backoff_is_exponential_and_capped() {
+        let seconds = (0..8)
+            .map(|attempt| transfer_retry_backoff(attempt).as_secs())
+            .collect::<Vec<_>>();
+        assert_eq!(seconds, vec![1, 2, 4, 8, 16, 30, 30, 30]);
+    }
+
+    #[test]
+    fn retries_transport_stalls_but_not_permanent_remote_errors() {
+        assert!(retryable_transfer_error(&SshError::Sftp("Elapsed(())".into())));
+        assert!(retryable_transfer_error(&SshError::Io("connection reset by peer".into())));
+        assert!(!retryable_transfer_error(&SshError::Sftp("permission denied".into())));
+        assert!(!retryable_transfer_error(&SshError::NotFound("sess-1".into())));
+    }
 
     #[test]
     fn dangerous_delete_paths_are_rejected() {

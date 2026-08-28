@@ -11,6 +11,7 @@
 //! Desktop's visible set = the frontend-synced registry (single user); server's = the
 //! calling user's OWNED resources.
 
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -189,7 +190,7 @@ pub fn tools_list() -> Value {
                     "cmdString": { "type": "string", "description": "Command to execute" },
                     "directory": { "type": "string", "description": "Working directory for command execution" },
                     "connectionName": { "type": "string", "description": "SSH connection name (optional; defaults to the only active host)" },
-                    "timeout": { "type": "number", "description": "Command timeout in milliseconds (optional, default 30000)" }
+                    "timeout": { "type": "number", "description": "Positive command timeout in milliseconds (optional; no timeout by default)" }
                 },
                 "required": ["cmdString"]
             }
@@ -235,6 +236,18 @@ pub async fn call_tool(
     name: &str,
     args: &Value,
 ) -> Result<String, String> {
+    call_tool_cancellable(targets, conns, sessions, progress, name, args, None).await
+}
+
+pub async fn call_tool_cancellable(
+    targets: &dyn McpTargets,
+    conns: &ConnManager,
+    sessions: &SessionManager,
+    progress: &Arc<dyn EventSink>,
+    name: &str,
+    args: &Value,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<String, String> {
     match name {
         // ---- database ----
         "list_connections" => Ok(tool_list_connections(targets)),
@@ -248,9 +261,9 @@ pub async fn call_tool(
         "delete_sql" => tool_write_sql(targets, conns, args, "DELETE").await,
         // ---- host ----
         "list_hosts" => Ok(tool_list_hosts(targets)),
-        "execute_command" => tool_execute_command(targets, sessions, args).await,
-        "upload_file" => tool_upload_file(targets, sessions, progress, args).await,
-        "download_file" => tool_download_file(targets, sessions, progress, args).await,
+        "execute_command" => tool_execute_command(targets, sessions, args, cancel).await,
+        "upload_file" => tool_upload_file(targets, sessions, progress, args, cancel).await,
+        "download_file" => tool_download_file(targets, sessions, progress, args, cancel).await,
         other => Err(format!("unknown tool: {other}")),
     }
 }
@@ -578,51 +591,99 @@ fn tool_list_hosts(targets: &dyn McpTargets) -> String {
 }
 
 // → ssh::exec::run_on_session; optional `directory` runs as `cd <dir> && <cmd>`;
-//   `timeout` default 30000ms; host picked via `connectionName` (defaults to sole active host).
-async fn tool_execute_command(targets: &dyn McpTargets, sessions: &SessionManager, args: &Value) -> Result<String, String> {
+//   `timeout` omitted means unlimited; host picked via `connectionName` (defaults to sole active host).
+async fn tool_execute_command(
+    targets: &dyn McpTargets,
+    sessions: &SessionManager,
+    args: &Value,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<String, String> {
     let cmd = args.get("cmdString").and_then(Value::as_str).ok_or("missing 'cmdString'")?;
     let conn = args.get("connectionName").and_then(Value::as_str);
     let directory = args.get("directory").and_then(Value::as_str);
-    let timeout_ms = args.get("timeout").and_then(Value::as_u64).unwrap_or(30_000);
+    let timeout_ms = args.get("timeout").and_then(Value::as_u64).filter(|ms| *ms > 0);
     let sid = targets.resolve_host(conn)?;
-    let sess = sessions.get(&sid).await.ok_or_else(|| format!("session not found: {sid}"))?;
+    let sess = sessions
+        .get_cancellable(&sid, cancel.as_deref())
+        .await
+        .ok_or_else(|| {
+            if cancel.as_ref().is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
+                "operation cancelled".to_string()
+            } else {
+                format!("session not found: {sid}")
+            }
+        })?;
     let full = match directory {
         Some(d) if !d.is_empty() => format!("cd {} && {}", shell_quote(d), cmd),
         _ => cmd.to_string(),
     };
     // run_on_session：会话锁只覆盖 channel_open_session，命令执行/收流在锁外——
     // 长命令（sleep 420）不再把同会话的 term/sftp/tunnel/其它 exec 堵在锁上。
-    match crate::ssh::exec::run_on_session(&sess, &full, Some(Duration::from_millis(timeout_ms))).await {
+    match crate::ssh::exec::run_on_session_cancellable(
+        &sess,
+        &full,
+        timeout_ms.map(Duration::from_millis),
+        cancel.as_deref(),
+    )
+    .await
+    {
         Ok(out) => Ok(out),
         // 超时：把超时前的 stdout 一并回给 agent（附一行说明），比只给 "timed out" 有用。
         Err(crate::ssh::SshError::TimedOut { partial }) => Err(if partial.is_empty() {
-            format!("command timed out after {timeout_ms}ms (no output before timeout)")
+            format!("command timed out after {}ms (no output before timeout)", timeout_ms.unwrap_or_default())
         } else {
-            format!("command timed out after {timeout_ms}ms; partial output before timeout:\n{partial}")
+            format!("command timed out after {}ms; partial output before timeout:\n{partial}", timeout_ms.unwrap_or_default())
         }),
+        Err(crate::ssh::SshError::Cancelled) => Err("operation cancelled".into()),
         Err(e) => Err(e.to_string()),
     }
 }
 
 // → ssh::sftp::upload_blocking. Host picked via `connectionName` (defaults to sole active host).
-async fn tool_upload_file(targets: &dyn McpTargets, sessions: &SessionManager, progress: &Arc<dyn EventSink>, args: &Value) -> Result<String, String> {
+async fn tool_upload_file(
+    targets: &dyn McpTargets,
+    sessions: &SessionManager,
+    progress: &Arc<dyn EventSink>,
+    args: &Value,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<String, String> {
     let local = args.get("localPath").and_then(Value::as_str).ok_or("missing 'localPath'")?;
     let remote = args.get("remotePath").and_then(Value::as_str).ok_or("missing 'remotePath'")?;
     let conn = args.get("connectionName").and_then(Value::as_str);
     let sid = targets.resolve_host(conn)?;
-    let n = crate::ssh::sftp::upload_blocking(sessions, &sid, local, remote, progress)
+    let n = crate::ssh::sftp::upload_blocking_cancellable(
+        sessions,
+        &sid,
+        local,
+        remote,
+        progress,
+        cancel.unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
+    )
         .await
         .map_err(|e| e.to_string())?;
     Ok(format!("Uploaded {n} bytes to {remote}"))
 }
 
 // → ssh::sftp::download_blocking. Host picked via `connectionName` (defaults to sole active host).
-async fn tool_download_file(targets: &dyn McpTargets, sessions: &SessionManager, progress: &Arc<dyn EventSink>, args: &Value) -> Result<String, String> {
+async fn tool_download_file(
+    targets: &dyn McpTargets,
+    sessions: &SessionManager,
+    progress: &Arc<dyn EventSink>,
+    args: &Value,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<String, String> {
     let remote = args.get("remotePath").and_then(Value::as_str).ok_or("missing 'remotePath'")?;
     let local = args.get("localPath").and_then(Value::as_str).ok_or("missing 'localPath'")?;
     let conn = args.get("connectionName").and_then(Value::as_str);
     let sid = targets.resolve_host(conn)?;
-    let n = crate::ssh::sftp::download_blocking(sessions, &sid, remote, local, progress)
+    let n = crate::ssh::sftp::download_blocking_cancellable(
+        sessions,
+        &sid,
+        remote,
+        local,
+        progress,
+        cancel.unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
+    )
         .await
         .map_err(|e| e.to_string())?;
     Ok(format!("Downloaded {n} bytes to {local}"))
@@ -643,6 +704,21 @@ mod tests {
             .filter_map(|tool| tool.get("name").and_then(Value::as_str))
             .collect::<Vec<_>>();
         assert!(names.contains(&"insert_rows"));
+    }
+
+    #[test]
+    fn execute_command_has_no_default_timeout() {
+        let tools = tools_list();
+        let execute = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("execute_command"))
+            .expect("execute_command tool");
+        let description = execute["inputSchema"]["properties"]["timeout"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(description.contains("no timeout by default"), "{description}");
     }
 
     #[test]

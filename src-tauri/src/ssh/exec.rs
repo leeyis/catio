@@ -16,6 +16,7 @@
 //! [`ExecChannel`] / [`ChannelOpener`] 两个 trait 只为把上述时序做成可单测的：
 //! 生产实现是 russh 的 `Channel<Msg>` / [`Session`]，测试注入假实现。
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -99,6 +100,19 @@ async fn drain<C: ExecChannel + ?Sized>(ch: &mut C, out: &mut Vec<u8>) {
     }
 }
 
+async fn wait_cancel(cancel: &AtomicBool) {
+    while !cancel.load(Ordering::Relaxed) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[derive(Clone, Copy)]
+enum StopReason {
+    Completed,
+    TimedOut,
+    Cancelled,
+}
+
 /// 在**已打开**的 channel 上跑命令并收流；`timeout = None` 表示不限时。
 ///
 /// 超时路径：`close_channel()` + 有界善后 drain（[`CLOSE_DRAIN`]），然后返回
@@ -109,21 +123,51 @@ pub async fn exec_on_channel<C: ExecChannel + ?Sized>(
     cmd: &str,
     timeout: Option<Duration>,
 ) -> Result<String, SshError> {
+    exec_on_channel_cancellable(ch, cmd, timeout, None).await
+}
+
+/// 与 [`exec_on_channel`] 相同，但允许 MCP 客户端断开/取消时显式关闭 channel。
+/// `timeout = None` 仍表示没有业务时长上限；取消是调用方主动行为，不是超时。
+pub async fn exec_on_channel_cancellable<C: ExecChannel + ?Sized>(
+    ch: &mut C,
+    cmd: &str,
+    timeout: Option<Duration>,
+    cancel: Option<&AtomicBool>,
+) -> Result<String, SshError> {
     ch.exec_cmd(cmd).await?;
     let mut out: Vec<u8> = Vec::new();
-    match timeout {
-        None => {
+    let stopped = match (timeout, cancel) {
+        (None, None) => {
             drain(ch, &mut out).await;
-            Ok(lossy(out))
+            StopReason::Completed
         }
-        Some(d) => {
-            if tokio::time::timeout(d, drain(ch, &mut out)).await.is_ok() {
-                return Ok(lossy(out));
-            }
+        (Some(d), None) => tokio::select! {
+            _ = drain(ch, &mut out) => StopReason::Completed,
+            _ = tokio::time::sleep(d) => StopReason::TimedOut,
+        },
+        (None, Some(cancel)) => tokio::select! {
+            _ = drain(ch, &mut out) => StopReason::Completed,
+            _ = wait_cancel(cancel) => StopReason::Cancelled,
+        },
+        (Some(d), Some(cancel)) => tokio::select! {
+            _ = drain(ch, &mut out) => StopReason::Completed,
+            _ = tokio::time::sleep(d) => StopReason::TimedOut,
+            _ = wait_cancel(cancel) => StopReason::Cancelled,
+        },
+    };
+
+    match stopped {
+        StopReason::Completed => Ok(lossy(out)),
+        StopReason::TimedOut | StopReason::Cancelled => {
             let _ = ch.close_channel().await;
-            // 善后 drain 仍写入同一缓冲：close 与远端结束之间到达的尾巴也一并带回。
+            // 善后 drain 仍写入同一缓冲：close 与远端结束之间到达的尾巴也一并消费，
+            // 防止遗留 channel 占用 sshd MaxSessions 或反压整条 SSH 连接。
             let _ = tokio::time::timeout(CLOSE_DRAIN, drain(ch, &mut out)).await;
-            Err(SshError::TimedOut { partial: lossy(out) })
+            match stopped {
+                StopReason::TimedOut => Err(SshError::TimedOut { partial: lossy(out) }),
+                StopReason::Cancelled => Err(SshError::Cancelled),
+                StopReason::Completed => unreachable!(),
+            }
         }
     }
 }
@@ -143,11 +187,20 @@ pub async fn run_on_session<O: ChannelOpener>(
     cmd: &str,
     timeout: Option<Duration>,
 ) -> Result<String, SshError> {
+    run_on_session_cancellable(session, cmd, timeout, None).await
+}
+
+pub async fn run_on_session_cancellable<O: ChannelOpener>(
+    session: &Mutex<O>,
+    cmd: &str,
+    timeout: Option<Duration>,
+    cancel: Option<&AtomicBool>,
+) -> Result<String, SshError> {
     let mut ch = {
         let mut guard = session.lock().await;
         guard.open_exec().await?
     }; // ← 锁在此释放，下面全在锁外
-    exec_on_channel(&mut ch, cmd, timeout).await
+    exec_on_channel_cancellable(&mut ch, cmd, timeout, cancel).await
 }
 
 /// 已持有 `Handle`（无会话锁）时的入口：扫描期的临时连接、以及 `monitor::sample`。
@@ -277,6 +330,18 @@ mod tests {
         ]);
         let out = exec_on_channel(&mut ch, "false", None).await.unwrap();
         assert_eq!(out, "part1 part2", "非零退出码不报错、ExitStatus 不终止收流");
+    }
+
+    #[tokio::test]
+    async fn cancellation_closes_and_drains_the_channel() {
+        let mut ch = FakeChan::hanging();
+        let closed = ch.closed.clone();
+        let cancel = AtomicBool::new(true);
+        let err = exec_on_channel_cancellable(&mut ch, "sleep 999", None, Some(&cancel))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SshError::Cancelled));
+        assert_eq!(closed.load(Ordering::SeqCst), 1);
     }
 
     // ── 超时收尾 ──────────────────────────────────────────────────────────

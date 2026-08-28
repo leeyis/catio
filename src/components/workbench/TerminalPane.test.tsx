@@ -131,7 +131,7 @@ describe('TerminalPane (xterm wiring)', () => {
     expect(termWrite).toHaveBeenCalledWith('sess-1', 'chan-1', btoa('a'))
   })
 
-  it('marks the SSH session closed when PTY writes hit a dead channel', async () => {
+  it('reopens a PTY on the same logical SSH session when a channel dies', async () => {
     const onSessionClosed = vi.fn()
     termWrite.mockRejectedValueOnce(new Error('channel closed'))
     wrap(<TerminalPane conn={DATA.byId['h-bastion']} sessionId="sess-1" onSessionClosed={onSessionClosed} />)
@@ -144,6 +144,8 @@ describe('TerminalPane (xterm wiring)', () => {
 
     await waitFor(() => expect(onSessionClosed).toHaveBeenCalledWith('sess-1'))
     expect(termClose).toHaveBeenCalledWith('sess-1', 'chan-1')
+    await waitFor(() => expect(termOpen).toHaveBeenCalledTimes(2))
+    expect(termOpen).toHaveBeenLastCalledWith('sess-1', expect.any(Number), expect.any(Number))
   })
 
   it('pastes clipboard text into the live PTY in desktop mode', async () => {
