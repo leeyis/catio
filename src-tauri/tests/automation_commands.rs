@@ -44,7 +44,7 @@ fn parse_task_input_rejects_invalid_task() {
 fn skill_from_import_parses_and_scopes() {
     let body = r#"{ "name": "巡检", "promptTemplate": "检查 {{host}}" }"#.to_string();
     let skill =
-        skill_from_import("local", body, SkillScope::Target, Some("web-01".into())).unwrap();
+        skill_from_import("local", body, SkillScope::Target, Some("web-01".into()), None).unwrap();
     assert_eq!(skill.name, "巡检");
     assert_eq!(skill.scope, SkillScope::Target);
     assert_eq!(skill.target_ref.as_deref(), Some("web-01"));
@@ -54,7 +54,7 @@ fn skill_from_import_parses_and_scopes() {
 
 #[test]
 fn skill_from_import_rejects_bad_body() {
-    assert!(skill_from_import("local", "<html>".into(), SkillScope::Global, None).is_err());
+    assert!(skill_from_import("local", "<html>".into(), SkillScope::Global, None, None).is_err());
 }
 
 #[test]
