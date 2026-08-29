@@ -27,7 +27,6 @@ diff.png
 docs/*
 !docs/screenshots/
 !docs/screenshots/**
-AGENTS.md
 CLAUDE.md
 
 # local agent configuration
