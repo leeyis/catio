@@ -28,12 +28,16 @@ export function fallbackCopyText(text: string): boolean {
   return ok
 }
 
-export function copyTextToClipboard(text: string): boolean {
+export async function copyTextToClipboard(text: string): Promise<boolean> {
   const clip = typeof navigator !== 'undefined' ? navigator.clipboard : undefined
   const secure = typeof window !== 'undefined' && window.isSecureContext
   if (secure && clip && typeof clip.writeText === 'function') {
-    clip.writeText(text).catch(() => { fallbackCopyText(text) })
-    return true
+    try {
+      await clip.writeText(text)
+      return true
+    } catch {
+      try { return fallbackCopyText(text) } catch { return false }
+    }
   }
-  return fallbackCopyText(text)
+  try { return fallbackCopyText(text) } catch { return false }
 }

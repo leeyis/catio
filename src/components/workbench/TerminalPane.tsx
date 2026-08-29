@@ -1221,7 +1221,7 @@ export function TerminalPane({ conn, sessionId, active, connected, resolveSessio
   }, [active, isFocused, live, sessionId])
 
   function copySel() {
-    if (selBar) copyTextToClipboard(selBar.text)
+    if (selBar) void copyTextToClipboard(selBar.text)
     setSelBar(null)
   }
   function askSelAI() {

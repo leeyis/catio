@@ -1,4 +1,4 @@
-/* ported from ref-ui/_extract/blob9.txt — verbatim per plan T1-T7 */
+/* Based on ref-ui/_extract/blob9.txt; evolved with live tunnel behavior. */
 import React, { useState, useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
@@ -8,6 +8,7 @@ import type { Tunnel } from '../../services/types'
 import { PanelShell } from './PanelShell'
 import { PanelEmpty } from './PanelEmpty'
 import { getTunnels, tunnelOpen, tunnelClose, listen } from '../../services/ssh'
+import { copyTextToClipboard } from '../../services/clipboard'
 import type { ConnectionProfile } from '../../state/connections'
 
 export interface JumpChainItem {
@@ -24,41 +25,65 @@ export interface TunnelsPanelProps {
   /** All saved profiles — used to derive the real jump chain. */
   profiles?: ConnectionProfile[]
   /** Persist this forward as a reusable connection (C2). Absent → no save UI. */
-  onSaveProfile?: (kind: 'L' | 'R' | 'D', bind: string, target: string, name: string) => void
+  onSaveProfile?: (kind: 'L' | 'R' | 'D', bind: string, target: string, name: string) => void | Promise<void>
 }
 
 // ---- New-forward overlay form ----
 interface NewForwardFormProps {
   onSubmit: (kind: 'L' | 'R' | 'D', bind: string, target: string) => void
   onCancel: () => void
-  onSaveProfile?: (kind: 'L' | 'R' | 'D', bind: string, target: string, name: string) => void
+  onSaveProfile?: (kind: 'L' | 'R' | 'D', bind: string, target: string, name: string) => void | Promise<void>
+  busy: boolean
   /** Backend failure to surface inside the form (e.g. bind in use, no SSH session). */
   error?: string | null
 }
 
-function NewForwardForm({ onSubmit, onCancel, onSaveProfile, error }: NewForwardFormProps) {
+const MAX_PORT = 65_535
+const COPY_FEEDBACK_DURATION_MS = 1_600
+
+function isValidPort(value: string, allowZero: boolean): boolean {
+  if (!/^\d+$/.test(value.trim())) return false
+  const port = Number(value)
+  return Number.isInteger(port) && port >= (allowZero ? 0 : 1) && port <= MAX_PORT
+}
+
+function NewForwardForm({ onSubmit, onCancel, onSaveProfile, busy, error }: NewForwardFormProps) {
   const { t } = useTranslation()
   const [kind, setKind] = useState<'L' | 'R' | 'D'>('L')
   const [bind, setBind] = useState('')
   const [target, setTarget] = useState('')
   const [name, setName] = useState('')
 
+  const localMode = kind === 'L'
+  const canSubmit = localMode
+    ? isValidPort(bind, true) && isValidPort(target, false)
+    : bind.trim().length > 0 && (kind === 'D' || target.trim().length > 0)
+
   const handleSubmit = (e?: React.FormEvent) => {
     e?.preventDefault()
-    if (!bind.trim()) return
+    if (!canSubmit || busy) return
     onSubmit(kind, bind.trim(), target.trim())
+  }
+
+  const handleKindChange = (value: string) => {
+    if (busy) return
+    setKind(value as 'L' | 'R' | 'D')
+    setBind('')
+    setTarget('')
   }
 
   const inputStyle: React.CSSProperties = {
     height: 30, padding: '0 10px', borderRadius: 8, fontSize: 12,
     border: '1px solid var(--border-default)', background: 'var(--surface-sunken)',
-    color: 'var(--text-primary)', outline: 'none', width: '100%', boxSizing: 'border-box',
+    color: 'var(--text-primary)', width: '100%', boxSizing: 'border-box',
   }
   const hintStyle: React.CSSProperties = { fontSize: 10.5, color: 'var(--text-faint)', lineHeight: 1.4 }
 
   // Per-mode copy + example placeholders so first-time users know what each field expects.
-  const bindPlaceholder = kind === 'D' ? 'localhost:1080' : kind === 'R' ? '0.0.0.0:9000' : 'localhost:8080'
-  const targetPlaceholder = kind === 'R' ? 'localhost:3000' : '10.0.4.2:5432'
+  const bindPlaceholder = kind === 'D' ? 'localhost:1080' : kind === 'R' ? '0.0.0.0:9000' : '9999'
+  const targetPlaceholder = kind === 'R' ? 'localhost:3000' : '8000'
+  const bindLabel = localMode ? t('panels.fwdLocalPort') : t('panels.fwdBind')
+  const targetLabel = localMode ? t('panels.fwdRemotePort') : t('panels.fwdTarget')
 
   return (
     <form onSubmit={handleSubmit}
@@ -75,44 +100,56 @@ function NewForwardForm({ onSubmit, onCancel, onSaveProfile, error }: NewForward
       <Segmented
         size="sm"
         options={[
-          { value: 'L', label: t('panels.fwdLocal') },
-          { value: 'R', label: t('panels.fwdRemote') },
-          { value: 'D', label: t('panels.fwdDynamic') },
+          { value: 'L', label: t('panels.fwdLocal'), disabled: busy },
+          { value: 'R', label: t('panels.fwdRemote'), disabled: busy },
+          { value: 'D', label: t('panels.fwdDynamic'), disabled: busy },
         ]}
         value={kind}
-        onChange={v => setKind(v as 'L' | 'R' | 'D')}
+        onChange={handleKindChange}
       />
       {/* Mode explainer — switches with the selected tab so users know what they're building. */}
       <div style={{ ...hintStyle, padding: '7px 9px', borderRadius: 8, background: 'var(--surface-sunken)', border: '1px solid var(--border-hairline, var(--border-default))' }}>
         {t(`panels.fwdHelp${kind}`)}
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-        <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>{t('panels.fwdBind')}</span>
+        <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>{bindLabel}</span>
         <input
           style={inputStyle}
+          type={localMode ? 'number' : 'text'}
+          inputMode={localMode ? 'numeric' : undefined}
+          min={localMode ? 0 : undefined}
+          max={localMode ? MAX_PORT : undefined}
+          aria-label={bindLabel}
           placeholder={bindPlaceholder}
           value={bind}
           onChange={e => setBind(e.target.value)}
+          disabled={busy}
           autoFocus
         />
-        <span style={hintStyle}>{t(`panels.fwdBindHint${kind}`)}</span>
+        <span style={hintStyle}>{localMode ? t('panels.fwdLocalPortHint') : t(`panels.fwdBindHint${kind}`)}</span>
       </div>
       {kind !== 'D' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>{t('panels.fwdTarget')}</span>
+          <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>{targetLabel}</span>
           <input
             style={inputStyle}
+            type={localMode ? 'number' : 'text'}
+            inputMode={localMode ? 'numeric' : undefined}
+            min={localMode ? 1 : undefined}
+            max={localMode ? MAX_PORT : undefined}
+            aria-label={targetLabel}
             placeholder={targetPlaceholder}
             value={target}
             onChange={e => setTarget(e.target.value)}
+            disabled={busy}
           />
-          <span style={hintStyle}>{t(`panels.fwdTargetHint${kind}`)}</span>
+          <span style={hintStyle}>{localMode ? t('panels.fwdRemotePortHint') : t(`panels.fwdTargetHint${kind}`)}</span>
         </div>
       )}
       {onSaveProfile && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
           <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>{t('panels.fwdSaveName')}</span>
-          <input style={inputStyle} placeholder={t('panels.fwdSaveNamePlaceholder')} value={name} onChange={e => setName(e.target.value)} />
+          <input style={inputStyle} placeholder={t('panels.fwdSaveNamePlaceholder')} value={name} onChange={e => setName(e.target.value)} disabled={busy} />
         </div>
       )}
       {error && (
@@ -121,11 +158,11 @@ function NewForwardForm({ onSubmit, onCancel, onSaveProfile, error }: NewForward
         </span>
       )}
       <div className="row gap6" style={{ justifyContent: 'flex-end' }}>
-        <Btn variant="ghost" size="sm" onClick={onCancel}>{t('panels.cancel')}</Btn>
+        <Btn type="button" variant="ghost" size="sm" onClick={onCancel} disabled={busy}>{t('panels.cancel')}</Btn>
         {onSaveProfile && (
-          <Btn variant="ghost" size="sm" onClick={() => { if (bind.trim() && name.trim()) onSaveProfile(kind, bind.trim(), target.trim(), name.trim()) }} disabled={!bind.trim() || !name.trim()}>{t('panels.fwdSave')}</Btn>
+          <Btn type="button" variant="ghost" size="sm" onClick={() => { if (canSubmit && !busy && name.trim()) void onSaveProfile(kind, bind.trim(), target.trim(), name.trim()) }} disabled={busy || !canSubmit || !name.trim()}>{t('panels.fwdSave')}</Btn>
         )}
-        <Btn variant="primary" size="sm" onClick={() => handleSubmit()} disabled={!bind.trim()}>{t('panels.fwdAdd')}</Btn>
+        <Btn type="submit" variant="primary" size="sm" disabled={busy || !canSubmit}>{t('panels.fwdAdd')}</Btn>
       </div>
     </form>
   )
@@ -164,20 +201,34 @@ export function TunnelsPanel({ onClose, sessionId, activeConnId, profiles, onSav
   const [tunnels, setTunnels] = useState<Tunnel[]>([])
   const [showForm, setShowForm] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
+  const [saveNotice, setSaveNotice] = useState<string | null>(null)
+  const [copyError, setCopyError] = useState<string | null>(null)
+  const [copiedTunnelId, setCopiedTunnelId] = useState<string | null>(null)
+  const [submitting, setSubmitting] = useState(false)
   const overlayRef = useRef<HTMLDivElement>(null)
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const operationRef = useRef<symbol | null>(null)
+  const copyRequestRef = useRef<symbol | null>(null)
+  const sessionIdRef = useRef(sessionId)
+  const contextKey = `${sessionId ?? ''}\u0000${activeConnId ?? ''}`
+  const contextKeyRef = useRef(contextKey)
+  sessionIdRef.current = sessionId
+  contextKeyRef.current = contextKey
 
-  const load = () => {
-    getTunnels(sessionId).then(list => setTunnels(list)).catch(() => {
+  const load = (requestedSessionId = sessionId) => {
+    getTunnels(requestedSessionId).then(list => {
+      if (sessionIdRef.current === requestedSessionId) setTunnels(list)
+    }).catch(() => {
       // keep current state on error
     })
   }
 
   // Load on mount and sessionId change
   useEffect(() => {
+    // Never leave the previous host's rows interactive while the next host is loading.
+    setTunnels([])
     if (sessionId) {
       load()
-    } else {
-      setTunnels([])
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId])
@@ -186,8 +237,10 @@ export function TunnelsPanel({ onClose, sessionId, activeConnId, profiles, onSav
   useEffect(() => {
     if (!sessionId) return
     const unlisteners: Array<() => void> = []
+    let disposed = false
     tunnels.forEach(t2 => {
       listen<{ bytesUp: number; bytesDown: number }>(`tunnel://${t2.id}`, payload => {
+        if (sessionIdRef.current !== sessionId) return
         setTunnels(prev =>
           prev.map(row =>
             row.id === t2.id
@@ -195,9 +248,17 @@ export function TunnelsPanel({ onClose, sessionId, activeConnId, profiles, onSav
               : row,
           ),
         )
-      }).then(unlisten => unlisteners.push(unlisten))
+      }).then(unlisten => {
+        if (disposed) unlisten()
+        else unlisteners.push(unlisten)
+      }).catch(() => {
+        // A failed event subscription must not create an unhandled rejection.
+      })
     })
-    return () => { unlisteners.forEach(fn => fn()) }
+    return () => {
+      disposed = true
+      unlisteners.forEach(fn => fn())
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, tunnels.map(t2 => t2.id).join(',')])
 
@@ -205,6 +266,7 @@ export function TunnelsPanel({ onClose, sessionId, activeConnId, profiles, onSav
   useEffect(() => {
     if (!showForm) return
     const handler = (e: MouseEvent) => {
+      if (operationRef.current) return
       if (overlayRef.current && !overlayRef.current.contains(e.target as Node)) {
         setShowForm(false)
       }
@@ -216,6 +278,27 @@ export function TunnelsPanel({ onClose, sessionId, activeConnId, profiles, onSav
   // A closed form starts clean next time it opens — don't carry a stale error across opens.
   useEffect(() => { if (!showForm) setFormError(null) }, [showForm])
 
+  // A host-tab switch invalidates transient form/feedback state so values from one SSH session
+  // can never be submitted against another session after React reuses this panel instance.
+  useEffect(() => {
+    operationRef.current = null
+    copyRequestRef.current = null
+    setSubmitting(false)
+    setShowForm(false)
+    setFormError(null)
+    setSaveNotice(null)
+    setCopyError(null)
+    setCopiedTunnelId(null)
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
+    copyTimerRef.current = null
+  }, [sessionId, activeConnId])
+
+  useEffect(() => () => {
+    operationRef.current = null
+    copyRequestRef.current = null
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
+  }, [])
+
   const handleToggle = (t2: Tunnel, nowOn: boolean) => {
     if (!sessionId) return
     if (!nowOn && t2.status === 'up') {
@@ -225,15 +308,87 @@ export function TunnelsPanel({ onClose, sessionId, activeConnId, profiles, onSav
     // ON → reopening a closed tunnel needs original spec; not wired (deferred)
   }
 
-  const handleCreate = (kind: 'L' | 'R' | 'D', bind: string, target: string) => {
+  const handleCreate = async (kind: 'L' | 'R' | 'D', bind: string, target: string) => {
+    if (operationRef.current) return
     // No active SSH session → no transport to build a tunnel over. Tell the user instead of
     // doing nothing (the original silent `return` looked like a dead button).
     if (!sessionId) { setFormError(t('panels.noSessionHint')); return }
+    const token = Symbol('create-tunnel')
+    const submittedContext = contextKey
+    const submittedSessionId = sessionId
+    operationRef.current = token
+    setSubmitting(true)
     setFormError(null)
-    tunnelOpen(sessionId, { kind, bind, target: kind === 'D' ? null : target || null })
-      .then(() => { setShowForm(false); load() })
+    try {
+      await tunnelOpen(submittedSessionId, { kind, bind, target: kind === 'D' ? null : target || null })
+      load(submittedSessionId)
+      if (operationRef.current === token && contextKeyRef.current === submittedContext) setShowForm(false)
+    } catch (e: unknown) {
+      load(submittedSessionId)
       // Surface the backend error (bind in use, target unreachable, …) rather than swallowing it.
-      .catch((e: unknown) => { setFormError(e instanceof Error ? e.message : String(e)); load() })
+      if (operationRef.current === token && contextKeyRef.current === submittedContext) {
+        setFormError(e instanceof Error ? e.message : String(e))
+      }
+    } finally {
+      if (operationRef.current === token) {
+        operationRef.current = null
+        if (contextKeyRef.current === submittedContext) setSubmitting(false)
+      }
+    }
+  }
+
+  const handleSaveProfile = async (kind: 'L' | 'R' | 'D', bind: string, target: string, name: string) => {
+    if (!onSaveProfile || operationRef.current) return
+    const token = Symbol('save-tunnel-profile')
+    const submittedContext = contextKey
+    operationRef.current = token
+    setSubmitting(true)
+    setFormError(null)
+    try {
+      await onSaveProfile(kind, bind, target, name)
+      if (operationRef.current === token && contextKeyRef.current === submittedContext) {
+        setShowForm(false)
+        setSaveNotice(t('panels.fwdSaved', { name }))
+      }
+    } catch (e: unknown) {
+      if (operationRef.current === token && contextKeyRef.current === submittedContext) {
+        setFormError(e instanceof Error ? e.message : String(e))
+      }
+    } finally {
+      if (operationRef.current === token) {
+        operationRef.current = null
+        if (contextKeyRef.current === submittedContext) setSubmitting(false)
+      }
+    }
+  }
+
+  const handleCopyLocal = async (tunnel: Tunnel) => {
+    const token = Symbol('copy-tunnel-address')
+    const copiedContext = contextKey
+    copyRequestRef.current = token
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
+    copyTimerRef.current = null
+    setCopiedTunnelId(null)
+    setCopyError(null)
+    let copied = false
+    try {
+      copied = await copyTextToClipboard(tunnel.local)
+    } catch {
+      copied = false
+    }
+    if (copyRequestRef.current !== token || contextKeyRef.current !== copiedContext) return
+    if (!copied) {
+      copyRequestRef.current = null
+      setCopyError(t('panels.copyFailed'))
+      return
+    }
+    copyRequestRef.current = null
+    setCopyError(null)
+    setCopiedTunnelId(tunnel.id)
+    copyTimerRef.current = setTimeout(() => {
+      setCopiedTunnelId(null)
+      copyTimerRef.current = null
+    }, COPY_FEEDBACK_DURATION_MS)
   }
 
   return (
@@ -249,15 +404,20 @@ export function TunnelsPanel({ onClose, sessionId, activeConnId, profiles, onSav
             size={15}
             variant="bare"
             title={t('panels.newForward')}
-            onClick={() => setShowForm(v => !v)}
+            onClick={() => {
+              if (operationRef.current) return
+              setSaveNotice(null)
+              setShowForm(v => !v)
+            }}
             active={showForm}
           />
           {showForm && (
             <NewForwardForm
               error={formError}
+              busy={submitting}
               onSubmit={handleCreate}
               onCancel={() => setShowForm(false)}
-              onSaveProfile={onSaveProfile ? (kind, bind, target, name) => { setShowForm(false); onSaveProfile(kind, bind, target, name) } : undefined}
+              onSaveProfile={onSaveProfile ? handleSaveProfile : undefined}
             />
           )}
         </div>
@@ -283,6 +443,16 @@ export function TunnelsPanel({ onClose, sessionId, activeConnId, profiles, onSav
                   </React.Fragment>
                 ))}
               </div>
+            </div>
+          )}
+          {saveNotice && (
+            <div role="status" style={{ margin: '10px 10px 0', padding: '8px 10px', borderRadius: 8, color: 'var(--signal-green)', background: 'var(--signal-green-soft, var(--surface-sunken))', fontSize: 11 }}>
+              {saveNotice}
+            </div>
+          )}
+          {copyError && (
+            <div role="alert" style={{ margin: '10px 10px 0', padding: '8px 10px', borderRadius: 8, color: 'var(--danger-fg)', background: 'var(--danger-soft)', fontSize: 11 }}>
+              {copyError}
             </div>
           )}
           <div className="grow" style={{ overflowY: 'auto', padding: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -318,7 +488,16 @@ export function TunnelsPanel({ onClose, sessionId, activeConnId, profiles, onSav
                   <Toggle on={t2.status === 'up'} size="sm" onChange={nowOn => handleToggle(t2, nowOn)} />
                 </div>
                 <div className="row mono gap6" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
-                  <span style={{ color: 'var(--signal-green)' }}>{t2.local}</span>
+                  <button
+                    type="button"
+                    className="tunnel-local-copy"
+                    onClick={() => handleCopyLocal(t2)}
+                    title={copiedTunnelId === t2.id ? t('panels.copied') : t('panels.copy')}
+                    aria-label={`${copiedTunnelId === t2.id ? t('panels.copied') : t('panels.copy')} ${t2.local}`}
+                  >
+                    <span>{t2.local}</span>
+                    <Icon name={copiedTunnelId === t2.id ? 'check' : 'copy'} size={10} />
+                  </button>
                   <Icon name="arrow-right" size={11} />
                   <span>{t2.remote}</span>
                   <span className="grow" />

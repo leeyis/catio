@@ -403,6 +403,10 @@ export async function getTunnels(sessionId?: string): Promise<Tunnel[]> {
   return []
 }
 
+/**
+ * Opens a tunnel. Local forwarding accepts either port-only bind/target values
+ * or legacy host:port values; Remote keeps host:port values and Dynamic ignores target.
+ */
 export async function tunnelOpen(
   sessionId: string,
   spec: { kind: 'L' | 'R' | 'D'; bind: string; target?: string | null },

@@ -561,7 +561,7 @@ export function LocalTerminalPane({ conn, active, onHistory, onChannel, split }:
   // 清屏(纯 xterm,无后端耦合)。
   const clearTerm = () => { try { termRef.current?.clear() } catch { /* disposed */ } }
   // 复制选中文本。
-  const copySel = () => { if (selBar) { copyTextToClipboard(selBar.text); setSelBar(null) } }
+  const copySel = () => { if (selBar) { void copyTextToClipboard(selBar.text); setSelBar(null) } }
   // 选中文本问 AI:走与 SSH 终端同款事件总线,detail 只用连接名(不依赖 sessionId)。
   const askSelAI = () => {
     if (selBar) {

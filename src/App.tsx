@@ -1420,7 +1420,7 @@ export default function App() {
         if (p) { try { saveProfile({ ...p, group: groupId || undefined }) } catch { /* localStorage 不可用 */ } }
       } else if (c.kind === 'tunnel') {
         const p = tunnelProfiles.find(x => x.id === c.id)
-        if (p) saveTunnelConnection({ ...p, group: groupId || undefined }) // 内部 notify()
+        if (p) void saveTunnelConnection({ ...p, group: groupId || undefined }).catch(e => console.warn('[tunnels] 更新分组失败:', e)) // 内部 notify()
       } else if (c.kind === 'rdp') {
         const p = rdpProfiles.find(x => x.id === c.id)
         if (p) saveRdpConnection({ ...p, group: groupId || undefined })
@@ -2253,7 +2253,7 @@ export default function App() {
               {activePanel === 'sftp' && <SftpPanel onClose={() => setPanelOpen(false)} conn={curConn ?? undefined} sessionId={cur?.sessionId} onSessionClosed={markSshSessionClosed} onEditFile={p => { if (cur) openRemoteFile(cur.connId, cur.sessionId, p) }} />}
               {activePanel === 'monitor' && <MonitorPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} />}
               {activePanel === 'tunnels' && <TunnelsPanel onClose={() => setPanelOpen(false)} sessionId={cur?.sessionId} activeConnId={cur?.connId} profiles={profiles}
-                onSaveProfile={cur ? (kind, bind, target, name) => {
+                onSaveProfile={cur ? async (kind, bind, target, name) => {
                   // Resolve the active tab's (live) connId back to a STABLE saved profile id,
                   // so the forward can re-establish its host session after restart. Falls back
                   // to the live connId (works while the host stays connected) if unresolved.
@@ -2270,7 +2270,7 @@ export default function App() {
                     const match = loadProfiles().find(p => p.host === host && p.port === port && p.user === user)
                     if (match) hostProfileId = match.id
                   }
-                  saveTunnelConnection({ id: generateTunnelId(), name, kind, bind, target: target || undefined, hostProfileId })
+                  await saveTunnelConnection({ id: generateTunnelId(), name, kind, bind, target: target || undefined, hostProfileId })
                 } : undefined} />}
               {activePanel === 'snippets' && <SnippetsPanel onClose={() => setPanelOpen(false)} snippets={snippets} onChange={() => setSnippets(loadSnippets())} onInsert={insertToTerminal} canInsert={canInsert} canInsertEditor={canInsertEditor} />}
               {activePanel === 'history' && <HistoryPanel onClose={() => setPanelOpen(false)} onAddSnippet={addSnippet} items={mergedHistory} onClear={() => { clearHistory(); setHistory([]); setDbHistory([]); void clearDbHistory() }}

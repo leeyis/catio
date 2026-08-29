@@ -835,7 +835,7 @@ function ConfigSyncBlock() {
     catch (e) { setStatus({ kind: 'error', text: String((e as { message?: string } | null)?.message ?? e) }) }
     finally { setBusy(false) }
   }
-  function copyBundle() { if (bundle) copyTextToClipboard(bundle) }
+  function copyBundle() { if (bundle) void copyTextToClipboard(bundle) }
   async function doImport() {
     if (!impPass || !impText.trim() || busy) return
     setBusy(true); setStatus(null)
@@ -1239,8 +1239,8 @@ function ServerMcpSettings() {
     }
   }
 
-  function copy(text: string) {
-    const ok = copyTextToClipboard(text)
+  async function copy(text: string) {
+    const ok = await copyTextToClipboard(text)
     if (ok) {
       setCopied(true)
       setTimeout(() => setCopied(false), 1500)
@@ -1445,8 +1445,8 @@ function DesktopMcpSettings() {
   }
 }`
 
-  function copy(text: string) {
-    const ok = copyTextToClipboard(text)
+  async function copy(text: string) {
+    const ok = await copyTextToClipboard(text)
     if (ok) {
       setCopied(true)
       setTimeout(() => setCopied(false), 1500)

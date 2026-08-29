@@ -66,6 +66,23 @@ export function storeUpsert<T extends StoreItem>(store: string, lsKey: string, i
   }
 }
 
+/** Insert/replace one item and resolve only after persistence succeeds. Unlike the legacy
+ * synchronous write-through API above, server mode does not expose the item in the cache until
+ * `store_set` succeeds, so callers can show trustworthy saved/error feedback. */
+export async function storeUpsertPersisted<T extends StoreItem>(store: string, lsKey: string, item: T): Promise<void> {
+  if (!isServer()) {
+    storeUpsert(store, lsKey, item)
+    return
+  }
+
+  const prev = cachedOwner(store, item.id)
+  const ownerId = item.__ownerId ?? prev.id
+  const ownerName = item.__ownerName ?? prev.name
+  const cached = { ...item, ...(ownerId !== undefined ? { __ownerId: ownerId } : {}), ...(ownerName ? { __ownerName: ownerName } : {}) }
+  await rpc('store_set', { store, itemId: item.id, payload: item, ...(ownerId !== undefined ? { ownerId } : {}) })
+  mem[store] = [...((mem[store] as T[] | undefined) ?? []).filter(x => x.id !== item.id), cached as unknown as StoreItem]
+}
+
 /** Remove one item by id. The owner is taken from `ownerId` or the cached item, so an admin can
  *  delete another user's item and a normal user only ever deletes their own. */
 export function storeRemove<T extends StoreItem>(store: string, lsKey: string, id: string, ownerId?: number): void {

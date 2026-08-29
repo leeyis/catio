@@ -860,6 +860,15 @@ select option { background: var(--surface-elevated); color: var(--text-primary);
 .icon-btn.bare:hover { background: var(--surface-sunken); }
 .icon-btn.danger:hover { background: var(--danger-soft); color: var(--danger-fg); }
 
+.tunnel-local-copy {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 3px; border-radius: 4px;
+  color: var(--signal-green); font: inherit;
+  transition: background .14s, text-decoration-color .14s;
+}
+.tunnel-local-copy:hover { background: var(--surface-sunken); text-decoration: underline; text-underline-offset: 2px; }
+.tunnel-local-copy:focus-visible { outline: 2px solid var(--accent-primary); outline-offset: 2px; }
+
 /* Structure tab: per-column edit/drop actions reveal on row hover */
 .structrow-actions { opacity: 0; transition: opacity .12s; }
 .structrow:hover .structrow-actions,

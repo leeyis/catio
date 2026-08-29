@@ -10,6 +10,7 @@ const h = vi.hoisted(() => ({
   tunnelClose: vi.fn(),
   tunnelOpen: vi.fn(),
   listen: vi.fn().mockResolvedValue(() => {}),
+  copyTextToClipboard: vi.fn().mockResolvedValue(true),
 }))
 
 vi.mock('../../services/ssh', () => ({
@@ -17,6 +18,10 @@ vi.mock('../../services/ssh', () => ({
   tunnelClose: h.tunnelClose,
   tunnelOpen: h.tunnelOpen,
   listen: h.listen,
+}))
+
+vi.mock('../../services/clipboard', () => ({
+  copyTextToClipboard: h.copyTextToClipboard,
 }))
 
 import { TunnelsPanel } from './TunnelsPanel'
@@ -86,6 +91,7 @@ describe('TunnelsPanel (tunnel wiring)', () => {
     h.tunnelClose.mockResolvedValue(undefined)
     h.tunnelOpen.mockResolvedValue('new-tun-id')
     h.listen.mockResolvedValue(() => {})
+    h.copyTextToClipboard.mockResolvedValue(true)
     ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
   })
 
@@ -95,6 +101,7 @@ describe('TunnelsPanel (tunnel wiring)', () => {
     h.tunnelClose.mockClear()
     h.tunnelOpen.mockClear()
     h.listen.mockClear()
+    h.copyTextToClipboard.mockClear()
   })
 
   it('renders tunnels returned by getTunnels', async () => {
@@ -113,14 +120,249 @@ describe('TunnelsPanel (tunnel wiring)', () => {
 
     // Open the new-forward overlay (the "+" action carries the localized "新建转发" title).
     fireEvent.click(screen.getByTitle('新建转发'))
-    // Fill bind + target, then submit.
-    fireEvent.change(screen.getByPlaceholderText('localhost:8080'), { target: { value: '127.0.0.1:8080' } })
-    fireEvent.change(screen.getByPlaceholderText('10.0.4.2:5432'), { target: { value: '10.0.4.2:5432' } })
+    // Local forwarding only asks for the two ports; the backend supplies both addresses.
+    fireEvent.change(screen.getByLabelText('本地映射端口'), { target: { value: '8080' } })
+    fireEvent.change(screen.getByLabelText('远程服务端口'), { target: { value: '5432' } })
     fireEvent.click(screen.getByText('添加'))
 
     // The backend error must be shown to the user (the original bug swallowed it).
     await waitFor(() => expect(screen.getByText(/address already in use/)).toBeTruthy())
     expect(h.tunnelOpen).toHaveBeenCalled()
+  })
+
+  it('opens exactly one tunnel for one add click', async () => {
+    wrap(<TunnelsPanel onClose={() => {}} sessionId="sess-1" />)
+    await waitFor(() => expect(screen.getByText('prod-orders')).toBeTruthy())
+
+    fireEvent.click(screen.getByTitle('新建转发'))
+    expect(screen.queryByPlaceholderText('localhost:8080')).toBeNull()
+    fireEvent.change(screen.getByLabelText('本地映射端口'), { target: { value: '9999' } })
+    fireEvent.change(screen.getByLabelText('远程服务端口'), { target: { value: '8000' } })
+    fireEvent.click(screen.getByText('添加'))
+
+    await waitFor(() => expect(h.tunnelOpen).toHaveBeenCalled())
+    expect(h.tunnelOpen).toHaveBeenCalledTimes(1)
+    expect(h.tunnelOpen).toHaveBeenCalledWith('sess-1', { kind: 'L', bind: '9999', target: '8000' })
+  })
+
+  it('blocks repeated submissions while tunnelOpen is pending and allows retry after failure', async () => {
+    let rejectOpen: (reason?: unknown) => void = () => {}
+    h.tunnelOpen
+      .mockReturnValueOnce(new Promise<string>((_, reject) => { rejectOpen = reject }))
+      .mockResolvedValueOnce('retry-tunnel-id')
+    wrap(<TunnelsPanel onClose={() => {}} sessionId="sess-1" />)
+    await waitFor(() => expect(screen.getByText('prod-orders')).toBeTruthy())
+
+    fireEvent.click(screen.getByTitle('新建转发'))
+    fireEvent.change(screen.getByLabelText('本地映射端口'), { target: { value: '0' } })
+    fireEvent.change(screen.getByLabelText('远程服务端口'), { target: { value: '8000' } })
+    const add = screen.getByText('添加')
+    const form = add.closest('form')
+    expect(form).toBeTruthy()
+
+    fireEvent.submit(form!)
+    fireEvent.submit(form!)
+    expect(h.tunnelOpen).toHaveBeenCalledTimes(1)
+    expect(add).toBeDisabled()
+
+    rejectOpen(new Error('temporary bind failure'))
+    expect(await screen.findByRole('alert')).toHaveTextContent('temporary bind failure')
+    await waitFor(() => expect(add).toBeEnabled())
+    fireEvent.click(add)
+    await waitFor(() => expect(h.tunnelOpen).toHaveBeenCalledTimes(2))
+  })
+
+  it('validates Local port boundaries before enabling Add', async () => {
+    wrap(<TunnelsPanel onClose={() => {}} sessionId="sess-1" />)
+    await waitFor(() => expect(screen.getByText('prod-orders')).toBeTruthy())
+
+    fireEvent.click(screen.getByTitle('新建转发'))
+    const add = screen.getByText('添加')
+    const localPort = screen.getByLabelText('本地映射端口')
+    const remotePort = screen.getByLabelText('远程服务端口')
+
+    expect(add).toBeDisabled()
+    fireEvent.change(localPort, { target: { value: '65536' } })
+    fireEvent.change(remotePort, { target: { value: '8000' } })
+    expect(add).toBeDisabled()
+
+    fireEvent.change(localPort, { target: { value: '0' } })
+    fireEvent.change(remotePort, { target: { value: '0' } })
+    expect(add).toBeDisabled()
+
+    fireEvent.change(remotePort, { target: { value: '65535' } })
+    expect(add).toBeEnabled()
+  })
+
+  it('clears Local ports when switching modes and still submits a Remote forward', async () => {
+    wrap(<TunnelsPanel onClose={() => {}} sessionId="sess-1" />)
+    await waitFor(() => expect(screen.getByText('prod-orders')).toBeTruthy())
+
+    fireEvent.click(screen.getByTitle('新建转发'))
+    fireEvent.change(screen.getByLabelText('本地映射端口'), { target: { value: '9999' } })
+    fireEvent.change(screen.getByLabelText('远程服务端口'), { target: { value: '8000' } })
+    fireEvent.click(screen.getByRole('button', { name: '远程' }))
+
+    const bind = screen.getByLabelText('绑定地址')
+    const target = screen.getByLabelText('目标')
+    expect(bind).toHaveValue('')
+    expect(target).toHaveValue('')
+    expect(h.tunnelOpen).not.toHaveBeenCalled()
+
+    fireEvent.change(bind, { target: { value: '0.0.0.0:9000' } })
+    fireEvent.change(target, { target: { value: 'localhost:3000' } })
+    fireEvent.click(screen.getByText('添加'))
+
+    await waitFor(() => expect(h.tunnelOpen).toHaveBeenCalledWith('sess-1', {
+      kind: 'R',
+      bind: '0.0.0.0:9000',
+      target: 'localhost:3000',
+    }))
+  })
+
+  it('submits a Dynamic forward without a target', async () => {
+    wrap(<TunnelsPanel onClose={() => {}} sessionId="sess-1" />)
+    await waitFor(() => expect(screen.getByText('prod-orders')).toBeTruthy())
+
+    fireEvent.click(screen.getByTitle('新建转发'))
+    fireEvent.click(screen.getByRole('button', { name: '动态' }))
+    expect(screen.queryByLabelText('目标')).toBeNull()
+    fireEvent.change(screen.getByLabelText('绑定地址'), { target: { value: 'localhost:1080' } })
+    fireEvent.click(screen.getByText('添加'))
+
+    await waitFor(() => expect(h.tunnelOpen).toHaveBeenCalledWith('sess-1', {
+      kind: 'D',
+      bind: 'localhost:1080',
+      target: null,
+    }))
+  })
+
+  it('saves a reusable connection without opening a tunnel and shows feedback', async () => {
+    const onSaveProfile = vi.fn().mockResolvedValue(undefined)
+    wrap(<TunnelsPanel onClose={() => {}} sessionId="sess-1" onSaveProfile={onSaveProfile} />)
+    await waitFor(() => expect(screen.getByText('prod-orders')).toBeTruthy())
+
+    fireEvent.click(screen.getByTitle('新建转发'))
+    fireEvent.change(screen.getByLabelText('本地映射端口'), { target: { value: '9999' } })
+    fireEvent.change(screen.getByLabelText('远程服务端口'), { target: { value: '8000' } })
+    fireEvent.change(screen.getByPlaceholderText('例如 内网 PG'), { target: { value: 'API' } })
+    fireEvent.click(screen.getByText('保存为连接'))
+
+    expect(onSaveProfile).toHaveBeenCalledTimes(1)
+    expect(onSaveProfile).toHaveBeenCalledWith('L', '9999', '8000', 'API')
+    expect(h.tunnelOpen).not.toHaveBeenCalled()
+    expect(await screen.findByRole('status')).toHaveTextContent('API')
+  })
+
+  it('keeps the form open and shows an error when saving the connection fails', async () => {
+    const onSaveProfile = vi.fn().mockRejectedValue(new Error('storage unavailable'))
+    wrap(<TunnelsPanel onClose={() => {}} sessionId="sess-1" onSaveProfile={onSaveProfile} />)
+    await waitFor(() => expect(screen.getByText('prod-orders')).toBeTruthy())
+
+    fireEvent.click(screen.getByTitle('新建转发'))
+    fireEvent.change(screen.getByLabelText('本地映射端口'), { target: { value: '9999' } })
+    fireEvent.change(screen.getByLabelText('远程服务端口'), { target: { value: '8000' } })
+    fireEvent.change(screen.getByPlaceholderText('例如 内网 PG'), { target: { value: 'API' } })
+    fireEvent.click(screen.getByText('保存为连接'))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('storage unavailable')
+    expect(screen.getByText('保存为连接')).toBeTruthy()
+    expect(screen.queryByRole('status')).toBeNull()
+    expect(h.tunnelOpen).not.toHaveBeenCalled()
+  })
+
+  it('clears the forward form and feedback when the active host changes', async () => {
+    const panel = (sessionId: string, activeConnId: string) => (
+      <LanguageProvider>
+        <DataProvider>
+          <TunnelsPanel onClose={() => {}} sessionId={sessionId} activeConnId={activeConnId} />
+        </DataProvider>
+      </LanguageProvider>
+    )
+    const { rerender } = render(panel('sess-a', 'conn-a'))
+    await waitFor(() => expect(screen.getByText('prod-orders')).toBeTruthy())
+
+    fireEvent.click(screen.getByTitle('新建转发'))
+    fireEvent.change(screen.getByLabelText('本地映射端口'), { target: { value: '9999' } })
+    fireEvent.change(screen.getByLabelText('远程服务端口'), { target: { value: '8000' } })
+
+    rerender(panel('sess-b', 'conn-b'))
+    await waitFor(() => expect(screen.queryByLabelText('本地映射端口')).toBeNull())
+
+    fireEvent.click(screen.getByTitle('新建转发'))
+    expect(screen.getByLabelText('本地映射端口')).toHaveValue(null)
+    expect(screen.getByLabelText('远程服务端口')).toHaveValue(null)
+    fireEvent.change(screen.getByLabelText('本地映射端口'), { target: { value: '7777' } })
+    fireEvent.change(screen.getByLabelText('远程服务端口'), { target: { value: '9000' } })
+    fireEvent.click(screen.getByText('添加'))
+
+    await waitFor(() => expect(h.tunnelOpen).toHaveBeenCalledWith('sess-b', {
+      kind: 'L',
+      bind: '7777',
+      target: '9000',
+    }))
+  })
+
+  it('hides the previous host tunnels immediately while the next host is loading', async () => {
+    let resolveNextLoad: (tunnels: typeof MOCK_TUNNELS) => void = () => {}
+    h.getTunnels
+      .mockResolvedValueOnce(MOCK_TUNNELS)
+      .mockReturnValueOnce(new Promise<typeof MOCK_TUNNELS>(resolve => { resolveNextLoad = resolve }))
+    const panel = (sessionId: string) => (
+      <LanguageProvider>
+        <DataProvider><TunnelsPanel onClose={() => {}} sessionId={sessionId} /></DataProvider>
+      </LanguageProvider>
+    )
+    const { rerender } = render(panel('sess-a'))
+    await waitFor(() => expect(screen.getByText('prod-orders')).toBeTruthy())
+
+    rerender(panel('sess-b'))
+    await waitFor(() => expect(screen.queryByText('prod-orders')).toBeNull())
+    expect(screen.queryByRole('switch')).toBeNull()
+
+    resolveNextLoad([])
+    await waitFor(() => expect(h.getTunnels).toHaveBeenCalledWith('sess-b'))
+  })
+
+  it('unsubscribes an event listener that resolves after a host switch', async () => {
+    const unlisten = vi.fn()
+    let resolveListen: (unlisten: () => void) => void = () => {}
+    h.getTunnels.mockResolvedValueOnce([MOCK_TUNNELS[0]]).mockResolvedValueOnce([])
+    h.listen.mockReturnValueOnce(new Promise(resolve => { resolveListen = resolve }))
+    const panel = (sessionId: string) => (
+      <LanguageProvider>
+        <DataProvider><TunnelsPanel onClose={() => {}} sessionId={sessionId} /></DataProvider>
+      </LanguageProvider>
+    )
+    const { rerender } = render(panel('sess-a'))
+    await waitFor(() => expect(h.listen).toHaveBeenCalledWith('tunnel://tun-1', expect.any(Function)))
+
+    rerender(panel('sess-b'))
+    resolveListen(unlisten)
+    await waitFor(() => expect(unlisten).toHaveBeenCalledTimes(1))
+  })
+
+  it('copies the local mapped address when it is clicked', async () => {
+    wrap(<TunnelsPanel onClose={() => {}} sessionId="sess-1" />)
+    await waitFor(() => expect(screen.getByText('prod-orders')).toBeTruthy())
+
+    fireEvent.click(screen.getByRole('button', { name: '复制 localhost:5432' }))
+
+    expect(h.copyTextToClipboard).toHaveBeenCalledWith('localhost:5432')
+    await waitFor(() => expect(screen.getByRole('button', { name: '已复制 localhost:5432' })).toHaveAttribute('title', '已复制'))
+  })
+
+  it('does not show copied feedback when copying the local address fails', async () => {
+    h.copyTextToClipboard.mockResolvedValue(false)
+    wrap(<TunnelsPanel onClose={() => {}} sessionId="sess-1" />)
+    await waitFor(() => expect(screen.getByText('prod-orders')).toBeTruthy())
+
+    const copy = screen.getByRole('button', { name: '复制 localhost:5432' })
+    fireEvent.click(copy)
+
+    expect(h.copyTextToClipboard).toHaveBeenCalledWith('localhost:5432')
+    expect(copy).toHaveAttribute('title', '复制')
+    expect(await screen.findByRole('alert')).toHaveTextContent('复制失败')
   })
 
   it('calls tunnelClose with the tunnel id when toggled OFF', async () => {

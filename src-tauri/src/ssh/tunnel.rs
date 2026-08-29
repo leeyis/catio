@@ -53,11 +53,11 @@ static TUN_IDS: IdGen = IdGen::new("tun");
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TunnelSpec {
-    /// "L" | "R" | "D"（本任务只支持 L）。
+    /// "L" | "R" | "D"。
     pub kind: char,
-    /// 本地绑定地址，如 "127.0.0.1:8080" 或 "127.0.0.1:0"（OS 选端口）。
+    /// 绑定地址；L 转发也接受单独端口，由后端绑定到 127.0.0.1。
     pub bind: String,
-    /// 远端目标 "host:port"（L 转发必填）。
+    /// L/R 的目标；L 转发也接受单独端口，由后端补上当前 SSH 主机地址，D 忽略此字段。
     pub target: Option<String>,
 }
 
@@ -79,6 +79,41 @@ fn parse_target(target: &str) -> Result<(String, u16), SshError> {
         .parse()
         .map_err(|_| SshError::Tunnel(format!("invalid target port: {target}")))?;
     Ok((host.to_string(), port))
+}
+
+/// L 转发的便捷输入允许前端只传两个端口；已有 host:port 配置保持兼容。
+fn normalize_local_spec(
+    session_host: &str,
+    bind: &str,
+    target: &str,
+) -> Result<(String, String), SshError> {
+    let bind = bind.trim();
+    let target = target.trim();
+
+    let bind = if bind.contains(':') {
+        bind.to_string()
+    } else {
+        let port: u16 = bind
+            .parse()
+            .map_err(|_| SshError::Tunnel(format!("invalid local port: {bind}")))?;
+        format!("127.0.0.1:{port}")
+    };
+
+    let target = if target.contains(':') {
+        target.to_string()
+    } else {
+        let port: u16 = target
+            .parse()
+            .map_err(|_| SshError::Tunnel(format!("invalid remote service port: {target}")))?;
+        if port == 0 {
+            return Err(SshError::Tunnel(
+                "remote service port must be between 1 and 65535".into(),
+            ));
+        }
+        format!("{session_host}:{port}")
+    };
+
+    Ok((bind, target))
 }
 
 /// 单向复制并计数：从 `r` 读、累加到 `counter`、写到 `w`，直到 EOF/出错。
@@ -536,15 +571,17 @@ pub async fn tunnel_open_core(
 
     match spec.kind {
         'L' => {
-            let target = spec
-                .target
-                .clone()
-                .ok_or_else(|| SshError::Tunnel("L forward requires target host:port".into()))?;
+            let raw_target = spec.target.clone().ok_or_else(|| {
+                SshError::Tunnel(
+                    "L forward requires a remote service port or target host:port".into(),
+                )
+            })?;
+            let session_host = { session.lock().await.host.clone() };
+            let (bind, target) = normalize_local_spec(&session_host, &spec.bind, &raw_target)?;
 
-            let fwd = open_local_forward(session, &spec.bind, &target).await?;
+            let fwd = open_local_forward(session, &bind, &target).await?;
             let id = fwd.id.clone();
-            let emitter_abort =
-                spawn_byte_emitter(sink, &id, fwd.up.clone(), fwd.down.clone());
+            let emitter_abort = spawn_byte_emitter(sink, &id, fwd.up.clone(), fwd.down.clone());
 
             mgr.insert_tunnel(
                 id.clone(),
@@ -648,4 +685,58 @@ pub async fn tunnel_list(
     mgr: tauri::State<'_, SessionManager>,
 ) -> Result<Vec<crate::ssh::manager::TunnelStatus>, SshError> {
     Ok(mgr.tunnel_status_list().await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_local_spec;
+
+    #[test]
+    fn local_port_only_spec_is_expanded_from_the_ssh_session() {
+        let (bind, target) = normalize_local_spec("198.51.100.10", "9999", "8000").unwrap();
+        assert_eq!(bind, "127.0.0.1:9999");
+        assert_eq!(target, "198.51.100.10:8000");
+    }
+
+    #[test]
+    fn local_full_addresses_remain_backward_compatible() {
+        let (bind, target) =
+            normalize_local_spec("ignored.example", "0.0.0.0:9999", "10.0.4.2:5432").unwrap();
+        assert_eq!(bind, "0.0.0.0:9999");
+        assert_eq!(target, "10.0.4.2:5432");
+    }
+
+    #[test]
+    fn local_port_only_spec_rejects_remote_port_zero() {
+        let error = normalize_local_spec("server.example", "9999", "0").unwrap_err();
+        assert!(error.to_string().contains("remote service port"));
+    }
+
+    #[test]
+    fn local_port_only_spec_accepts_bind_zero_and_max_remote_port() {
+        let (bind, target) = normalize_local_spec("server.example", " 0 ", " 65535 ").unwrap();
+        assert_eq!(bind, "127.0.0.1:0");
+        assert_eq!(target, "server.example:65535");
+    }
+
+    #[test]
+    fn local_port_only_spec_rejects_invalid_or_overflowing_ports() {
+        for (bind, target) in [
+            ("", "8000"),
+            ("not-a-port", "8000"),
+            ("65536", "8000"),
+            ("9999", "not-a-port"),
+            ("9999", "65536"),
+        ] {
+            assert!(normalize_local_spec("server.example", bind, target).is_err());
+        }
+    }
+
+    #[test]
+    fn local_full_ipv6_addresses_remain_backward_compatible() {
+        let (bind, target) =
+            normalize_local_spec("ignored.example", "[::1]:9999", "2001:db8::2:8000").unwrap();
+        assert_eq!(bind, "[::1]:9999");
+        assert_eq!(target, "2001:db8::2:8000");
+    }
 }

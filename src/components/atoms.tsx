@@ -26,6 +26,7 @@ import type { Connection } from '../services/types'
 export interface BtnProps {
   variant?: 'primary' | 'secondary' | 'danger' | 'ghost' | 'cta'
   size?: 'sm' | 'md' | 'lg'
+  type?: 'button' | 'submit' | 'reset'
   icon?: string
   iconR?: string
   children?: React.ReactNode
@@ -109,9 +110,9 @@ export interface SectionHeadProps {
 
 // ---- Components ----
 
-export function Btn({ variant = 'secondary', size = 'md', icon, iconR, children, onClick, style, title, disabled, testId }: BtnProps) {
+export function Btn({ variant = 'secondary', size = 'md', type, icon, iconR, children, onClick, style, title, disabled, testId }: BtnProps) {
   return (
-    <button className={`btn btn-${variant} ${size === 'sm' ? 'sm' : size === 'lg' ? 'lg' : ''}`}
+    <button type={type} className={`btn btn-${variant} ${size === 'sm' ? 'sm' : size === 'lg' ? 'lg' : ''}`}
       onClick={onClick} style={style} title={title} disabled={disabled} data-testid={testId}>
       {icon && <Icon name={icon} size={size === 'sm' ? 14 : 15} />}
       {children}
@@ -221,7 +222,7 @@ export function Segmented({ options, value, onChange, size = 'md' }: SegmentedPr
       {options.map(o => {
         const active = o.value === value
         return (
-          <button key={o.value} onClick={() => !o.disabled && onChange(o.value)} title={o.label}
+          <button type="button" key={o.value} onClick={() => !o.disabled && onChange(o.value)} title={o.label}
             disabled={o.disabled} data-testid={o.testId}
             style={{
               display: 'inline-flex', alignItems: 'center', gap: 6,
