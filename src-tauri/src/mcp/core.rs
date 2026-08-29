@@ -63,7 +63,7 @@ pub fn tools_list() -> Value {
     json!([
         {
             "name": "list_connections",
-            "description": "List the database connections currently active in Catio (name, engine, id).",
+            "description": "List only the database connections currently active in Catio (name, engine, id). For SSH hosts, call list_hosts instead.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -178,7 +178,7 @@ pub fn tools_list() -> Value {
         },
         {
             "name": "list_hosts",
-            "description": "List the SSH host connections currently active in Catio (name, host, session id).",
+            "description": "List the SSH host connections currently active in Catio (name, host, session id). Call again before a host operation to see connections opened or closed since the previous call.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -704,6 +704,24 @@ mod tests {
             .filter_map(|tool| tool.get("name").and_then(Value::as_str))
             .collect::<Vec<_>>();
         assert!(names.contains(&"insert_rows"));
+    }
+
+    #[test]
+    fn connection_discovery_descriptions_distinguish_databases_from_ssh_hosts() {
+        fn description<'a>(tools: &'a Value, name: &str) -> &'a str {
+            tools
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
+                .and_then(|tool| tool.get("description"))
+                .and_then(Value::as_str)
+                .unwrap()
+        }
+        let tools = tools_list();
+        assert!(description(&tools, "list_connections").contains("only the database"));
+        assert!(description(&tools, "list_connections").contains("list_hosts"));
+        assert!(description(&tools, "list_hosts").contains("opened or closed"));
     }
 
     #[test]

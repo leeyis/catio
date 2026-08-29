@@ -1,6 +1,7 @@
 import { render, screen, waitFor, act } from '@testing-library/react'
 import { describe, it, expect } from 'vitest'
 import { McpLogPanel } from './SettingsView'
+import { mergeMcpLogReplay } from '../../services/mcp'
 import type { McpLogEntry } from '../../services/mcp'
 
 /// 受测面板由 `subscribe` 驱动。这个假订阅把 emit 函数交回给测试，从而可以精确控制
@@ -26,6 +27,21 @@ const fullscreenBtn = () => screen.getByRole('button', { name: '全屏' })
 const restoreBtn = () => screen.getByRole('button', { name: '还原' })
 
 describe('McpLogPanel', () => {
+  it('merges file replay with events buffered during listener startup', () => {
+    const call = entry({ ts: '2026-08-29T10:00:00Z', kind: 'tools/call', tool: 'execute_command', args: { command: 'pwd' } })
+    const result = entry({ ts: '2026-08-29T10:00:01Z', kind: 'tools/result', tool: 'execute_command', output: '/workspace' })
+    const next = entry({ ts: '2026-08-29T10:00:02Z', kind: 'tools/call', tool: 'list_files' })
+
+    expect(mergeMcpLogReplay([call, result], [result, next])).toEqual([call, result, next])
+  })
+
+  it('keeps buffered events when the replay has no overlap', () => {
+    const prior = entry({ ts: '2026-08-29T10:00:00Z', kind: 'tools/list' })
+    const live = entry({ ts: '2026-08-29T10:00:01Z', kind: 'tools/call', tool: 'execute_command' })
+
+    expect(mergeMcpLogReplay([prior], [live])).toEqual([prior, live])
+  })
+
   it('renders tool output with ANSI colors applied and escapes stripped', async () => {
     const h = harness()
     render(<McpLogPanel subscribe={h.subscribe} />)

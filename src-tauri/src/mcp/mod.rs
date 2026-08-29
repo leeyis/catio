@@ -27,7 +27,7 @@ pub mod http;
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
@@ -41,6 +41,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 const PREFERRED_PORT: u16 = 8765;
 const MAX_LOG_BYTES: usize = 2 * 1024 * 1024;
 const LOG_RETENTION_DAYS: i64 = 7;
+const LIVE_LOG_HISTORY_LIMIT: usize = 200;
 
 // ---- IP whitelist (network-layer gate, additive to the token) ----
 // The matcher itself lives in `crate::netmatch` so the server-mode MCP head shares ONE impl;
@@ -80,8 +81,9 @@ pub struct McpState {
     /// Allowed non-loopback sources. Shared (Arc) so running ServerCtx tasks gate
     /// new connections against the latest list without a restart.
     whitelist: Arc<StdMutex<Vec<WhitelistRule>>>,
-    /// Whether to emit the `mcp://log` live-log event. File logging is unaffected.
-    live_log_enabled: Arc<AtomicBool>,
+    /// Number of active desktop live-log listeners. A reference count prevents an older async
+    /// subscription cleanup from disabling events for a newer listener.
+    live_log_subscribers: Arc<AtomicUsize>,
     /// Persisted token: stable across restarts unless the user explicitly refreshes it.
     /// Protected by a mutex so `mcp_start` can read and `mcp_token_refresh` can write atomically.
     persisted_token: StdMutex<Option<String>>,
@@ -94,7 +96,7 @@ impl Default for McpState {
             conns: Arc::new(StdMutex::new(Vec::new())),
             hosts: Arc::new(StdMutex::new(Vec::new())),
             whitelist: Arc::new(StdMutex::new(Vec::new())),
-            live_log_enabled: Arc::new(AtomicBool::new(false)),
+            live_log_subscribers: Arc::new(AtomicUsize::new(0)),
             persisted_token: StdMutex::new(load_persisted_token()),
         }
     }
@@ -135,8 +137,8 @@ struct ServerCtx {
     token: String,
     /// Shared with McpState; gates each new connection's source IP in real time.
     whitelist: Arc<StdMutex<Vec<WhitelistRule>>>,
-    /// Shared with McpState; gates whether live-log events are emitted.
-    live_log: Arc<AtomicBool>,
+    /// Shared with McpState; events are serialized only while at least one listener exists.
+    live_log_subscribers: Arc<AtomicUsize>,
     /// JSON-RPC request id → cooperative cancellation flag. A cancellation notification or
     /// vanished HTTP client sets the same flag consumed by SSH exec/SFTP cleanup paths.
     inflight: Arc<StdMutex<HashMap<String, Arc<AtomicBool>>>>,
@@ -689,7 +691,7 @@ fn log_guard() -> &'static StdMutex<String> {
 /// Optional fields are omitted when absent so each kind only carries what applies.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct McpLogEntry {
+pub struct McpLogEntry {
     ts: String,
     kind: String,
     ip: String,
@@ -705,22 +707,35 @@ struct McpLogEntry {
     path: Option<String>,
 }
 
-/// Emit one structured live-log entry to the frontend — gated on live_log.
-/// File logging is separate and unconditional (done by log_event).
+impl McpLogEntry {
+    fn from_detail(ts: String, kind: &str, ip: &str, detail: &Value) -> Self {
+        Self {
+            ts,
+            kind: kind.to_string(),
+            ip: ip.to_string(),
+            tool: detail.get("tool").and_then(Value::as_str).map(String::from),
+            // Older file-log entries used `arguments`; accept both shapes during replay.
+            args: detail
+                .get("args")
+                .or_else(|| detail.get("arguments"))
+                .cloned(),
+            output: detail
+                .get("output")
+                .and_then(Value::as_str)
+                .map(String::from),
+            is_error: detail.get("isError").and_then(Value::as_bool),
+            path: detail.get("path").and_then(Value::as_str).map(String::from),
+        }
+    }
+}
+
+/// Emit one structured live-log entry while at least one desktop listener owns a subscription.
+/// File logging remains separate and unconditional (done by log_event), which also backs replay.
 fn emit_log(ctx: &ServerCtx, kind: &str, ip: &str, detail: Value) {
-    if !ctx.live_log.load(Ordering::Relaxed) {
+    if ctx.live_log_subscribers.load(Ordering::Relaxed) == 0 {
         return;
     }
-    let entry = McpLogEntry {
-        ts: fmt_datetime(now_epoch()),
-        kind: kind.to_string(),
-        ip: ip.to_string(),
-        tool: detail.get("tool").and_then(Value::as_str).map(String::from),
-        args: detail.get("args").cloned(),
-        output: detail.get("output").and_then(Value::as_str).map(String::from),
-        is_error: detail.get("isError").and_then(Value::as_bool),
-        path: detail.get("path").and_then(Value::as_str).map(String::from),
-    };
+    let entry = McpLogEntry::from_detail(fmt_datetime(now_epoch()), kind, ip, &detail);
     let _ = ctx.app.emit("mcp://log", entry);
 }
 
@@ -745,6 +760,37 @@ fn log_event(kind: &str, client_ip: &str, detail: &Value) {
         *last = date;
     }
     append_capped(&file, line.as_bytes());
+}
+
+fn parse_log_line(line: &str) -> Option<McpLogEntry> {
+    let (ts, rest) = line.split_once(" [")?;
+    let (kind, rest) = rest.split_once("] ip=")?;
+    let (ip, detail_json) = rest.split_once(' ')?;
+    let detail: Value = serde_json::from_str(detail_json).ok()?;
+    Some(McpLogEntry::from_detail(ts.to_string(), kind, ip, &detail))
+}
+
+fn recent_log_entries(limit: usize) -> Vec<McpLogEntry> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let file = log_dir().join(format!("mcp-{}.log", fmt_date(now_epoch())));
+    let content = {
+        // Serialize with same-process writers so a replay never observes a partial appended line.
+        let _guard = match log_guard().lock() {
+            Ok(guard) => guard,
+            Err(_) => return Vec::new(),
+        };
+        std::fs::read_to_string(file).unwrap_or_default()
+    };
+    let mut entries: Vec<McpLogEntry> = content
+        .lines()
+        .rev()
+        .filter_map(parse_log_line)
+        .take(limit)
+        .collect();
+    entries.reverse();
+    entries
 }
 
 fn append_capped(path: &std::path::Path, line: &[u8]) {
@@ -854,7 +900,7 @@ pub async fn mcp_start(app: AppHandle, state: State<'_, McpState>) -> Result<Mcp
         hosts: state.hosts.clone(),
         token: token.clone(),
         whitelist: state.whitelist.clone(),
-        live_log: state.live_log_enabled.clone(),
+        live_log_subscribers: state.live_log_subscribers.clone(),
         inflight: Arc::new(StdMutex::new(HashMap::new())),
     };
     let task = tokio::spawn(serve(listener, ctx, sh_rx));
@@ -912,11 +958,31 @@ pub fn mcp_set_whitelist(state: State<'_, McpState>, entries: Vec<String>) {
     *state.whitelist.lock().unwrap() = rules;
 }
 
-/// Toggle whether `mcp://log` live-log events are emitted. File logging is
-/// unconditional and unaffected; takes effect on the next emit, no restart.
+/// Return the newest real MCP file-log entries so a newly opened panel can show work that started
+/// before its Tauri event listener was attached. The server-side cap matches the UI ring size.
 #[tauri::command]
-pub fn mcp_set_live_log(state: State<'_, McpState>, enabled: bool) {
-    state.live_log_enabled.store(enabled, Ordering::Relaxed);
+pub fn mcp_recent_logs(limit: Option<usize>) -> Vec<McpLogEntry> {
+    recent_log_entries(
+        limit
+            .unwrap_or(LIVE_LOG_HISTORY_LIMIT)
+            .min(LIVE_LOG_HISTORY_LIMIT),
+    )
+}
+
+#[tauri::command]
+pub fn mcp_live_log_subscribe(state: State<'_, McpState>) {
+    state.live_log_subscribers.fetch_add(1, Ordering::Relaxed);
+}
+
+fn release_live_log_subscriber(subscribers: &AtomicUsize) {
+    let _ = subscribers.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+        Some(count.saturating_sub(1))
+    });
+}
+
+#[tauri::command]
+pub fn mcp_live_log_unsubscribe(state: State<'_, McpState>) {
+    release_live_log_subscriber(&state.live_log_subscribers);
 }
 
 /// Generate a fresh token and persist it. If the server is running, the new token takes effect
@@ -934,6 +1000,43 @@ pub fn mcp_token_refresh(state: State<'_, McpState>) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_live_log_replay_entry() {
+        let line = r#"2026-08-29T08:19:52Z [tools/result] ip=127.0.0.1 {"tool":"execute_command","isError":false,"output":"done"}"#;
+        let entry = parse_log_line(line).expect("valid MCP log line");
+        assert_eq!(entry.ts, "2026-08-29T08:19:52Z");
+        assert_eq!(entry.kind, "tools/result");
+        assert_eq!(entry.ip, "127.0.0.1");
+        assert_eq!(entry.tool.as_deref(), Some("execute_command"));
+        assert_eq!(entry.output.as_deref(), Some("done"));
+        assert_eq!(entry.is_error, Some(false));
+    }
+
+    #[test]
+    fn parses_legacy_tool_arguments_for_live_log_replay() {
+        let line = r#"2026-08-29T08:19:52Z [tools/call] ip=127.0.0.1 {"tool":"execute_command","arguments":{"command":"pwd"}}"#;
+        let entry = parse_log_line(line).expect("valid legacy MCP log line");
+        assert_eq!(entry.args, Some(json!({ "command": "pwd" })));
+    }
+
+    #[test]
+    fn rejects_malformed_live_log_replay_lines() {
+        assert!(parse_log_line("not a structured MCP log line").is_none());
+        assert!(
+            parse_log_line("2026-08-29T08:19:52Z [tools/call] ip=127.0.0.1 not-json").is_none()
+        );
+    }
+
+    #[test]
+    fn live_log_subscriber_release_is_reference_counted_and_saturating() {
+        let subscribers = AtomicUsize::new(2);
+        release_live_log_subscriber(&subscribers);
+        assert_eq!(subscribers.load(Ordering::Relaxed), 1);
+        release_live_log_subscriber(&subscribers);
+        release_live_log_subscriber(&subscribers);
+        assert_eq!(subscribers.load(Ordering::Relaxed), 0);
+    }
 
     // Transfer-Encoding: chunked —— Node/undici 等流式发送 body 时不带 Content-Length。
     // 不解码就会把带长度前缀的原始分块喂给 serde，JSON 解析必失败（表现为无故 400）。

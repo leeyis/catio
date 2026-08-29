@@ -23,7 +23,7 @@ import type { UiFontKey, MonoFontKey, Density } from '../../state/preferences'
 import { fetchModels, testModel } from '../../services'
 import type { ModelTestResult } from '../../services'
 import { isTauri } from '../../services/ssh'
-import { mcpStart, mcpStop, mcpStatus, mcpSetWhitelist, mcpSetLiveLog, mcpRefreshToken, onMcpLog, onMcpServerLog, mcpTokenGet, mcpTokenRegenerate, mcpTokenSetEnabled } from '../../services/mcp'
+import { mcpStart, mcpStop, mcpStatus, mcpSetWhitelist, mcpRefreshToken, onMcpLog, onMcpServerLog, mcpTokenGet, mcpTokenRegenerate, mcpTokenSetEnabled } from '../../services/mcp'
 import type { McpInfo, McpLogEntry } from '../../services/mcp'
 import { exportConfig, importConfig } from '../../services/configSync'
 import { ServerAccountBlock } from '../auth/ServerAccountBlock'
@@ -957,6 +957,7 @@ export function McpLogPanel({ subscribe, showUser }: { subscribe: (cb: (e: McpLo
     let active = true
     let un: (() => void) | undefined
     void subscribe(e => {
+      if (!active) return
       setLog(prev => {
         const row: LogRow = { ...e, _id: idRef.current++ }
         const next = [...prev, row]
@@ -1355,14 +1356,9 @@ function DesktopMcpSettings() {
   const whitelist = prefs.mcpWhitelist
   const hasNonLoopback = whitelist.some(e => !isLoopbackEntry(e))
 
-  // Live log: the shared McpLogPanel owns the ring buffer / pause / expand / prune. Desktop drives
-  // it with onMcpLog and toggles the backend emit gate (mcpSetLiveLog) for the panel's lifetime —
-  // on when it mounts (subscribe), off on cleanup (toggle-off OR unmount) — so the backend never
-  // serializes events to a panel that isn't listening. showUser stays false (desktop is single-user).
-  const liveLogSubscribe = useCallback((cb: (e: McpLogEntry) => void) => {
-    void mcpSetLiveLog(true)
-    return onMcpLog(cb).then(un => () => { un(); void mcpSetLiveLog(false) })
-  }, [])
+  // Live log: onMcpLog attaches the listener before replaying recent real file entries, while the
+  // shared panel owns the ring buffer / pause / expand / prune. showUser stays false on desktop.
+  const liveLogSubscribe = useCallback((cb: (e: McpLogEntry) => void) => onMcpLog(cb), [])
 
   // On mount: read status and push the persisted whitelist to the backend.
   useEffect(() => {

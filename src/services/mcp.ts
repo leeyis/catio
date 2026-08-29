@@ -2,6 +2,8 @@
 import { isTauri } from './ssh'
 import { rpc, isServer, subscribe } from './transport'
 
+const MCP_LOG_REPLAY_LIMIT = 200
+
 async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const { invoke } = await import('@tauri-apps/api/core')
   return invoke<T>(cmd, args)
@@ -65,10 +67,35 @@ export async function mcpStatus(): Promise<McpInfo> {
   return tauriInvoke<McpInfo>('mcp_status')
 }
 
+/**
+ * Serialize full-registry replacements in call order. React can publish several target snapshots
+ * while a connection is being saved and opened; allowing those IPC calls to overlap lets an older
+ * snapshot finish last and hide a newly connected host from list_hosts.
+ */
+export function createMcpTargetSyncQueue(
+  sync: (databases: McpConnMeta[], hosts: McpHostMeta[]) => Promise<void>,
+): (databases: McpConnMeta[], hosts: McpHostMeta[]) => Promise<void> {
+  let tail: Promise<void> = Promise.resolve()
+  return (databases, hosts) => {
+    // Capture immutable snapshots now, rather than when the queued task eventually starts.
+    const databaseSnapshot = databases.map(database => ({ ...database }))
+    const hostSnapshot = hosts.map(host => ({ ...host }))
+    const next = tail
+      .catch(() => undefined)
+      .then(() => sync(databaseSnapshot, hostSnapshot))
+    tail = next
+    return next
+  }
+}
+
+const enqueueMcpTargetSync = createMcpTargetSyncQueue((databases, hosts) =>
+  tauriInvoke<void>('mcp_sync_targets', { databases, hosts }),
+)
+
 // Push the active DB + SSH connections so the server's tools resolve them by name.
 export async function mcpSyncTargets(databases: McpConnMeta[], hosts: McpHostMeta[]): Promise<void> {
   if (!isTauri()) return
-  return tauriInvoke('mcp_sync_targets', { databases, hosts })
+  return enqueueMcpTargetSync(databases, hosts)
 }
 
 // Replace the backend IP allowlist wholesale. Entries are single IPv4 (/32) or CIDR;
@@ -79,11 +106,19 @@ export async function mcpSetWhitelist(entries: string[]): Promise<void> {
   return tauriInvoke('mcp_set_whitelist', { entries })
 }
 
-// Toggle live-log emission. File logging is unconditional; this only gates the
-// `mcp://log` Tauri events used for the on-screen stream. Desktop-only.
-export async function mcpSetLiveLog(enabled: boolean): Promise<void> {
-  if (!isTauri()) return
-  return tauriInvoke('mcp_set_live_log', { enabled })
+// Load the newest real file-log entries so the desktop panel includes calls that started before
+// its event listener mounted. The backend enforces the same upper bound.
+export async function mcpRecentLogs(limit = MCP_LOG_REPLAY_LIMIT): Promise<McpLogEntry[]> {
+  if (!isTauri()) return []
+  return tauriInvoke<McpLogEntry[]>('mcp_recent_logs', { limit })
+}
+
+async function mcpLiveLogSubscribe(): Promise<void> {
+  return tauriInvoke('mcp_live_log_subscribe')
+}
+
+async function mcpLiveLogUnsubscribe(): Promise<void> {
+  return tauriInvoke('mcp_live_log_unsubscribe')
 }
 
 /** Desktop-only: generate a fresh token and persist it. Returns (newToken, isRunning). */
@@ -121,12 +156,70 @@ export async function mcpTokenSetEnabled(enabled: boolean): Promise<{ enabled: b
   return rpc<{ enabled: boolean }>('mcp_token_set_enabled', { enabled })
 }
 
-// Subscribe to live-log entries. Returns an unsubscribe fn; no-op outside Tauri.
+function mcpLogReplayKey(entry: McpLogEntry): string {
+  return JSON.stringify([
+    entry.ts,
+    entry.kind,
+    entry.ip,
+    entry.tool,
+    entry.args,
+    entry.output,
+    entry.isError,
+    entry.path,
+  ])
+}
+
+/**
+ * Merge a file replay with events buffered while that replay was loading. Because the backend
+ * writes each file line before emitting its Tauri event, duplicated buffered events form an exact
+ * overlap between the replay suffix and buffered prefix.
+ */
+export function mergeMcpLogReplay(recent: McpLogEntry[], pending: McpLogEntry[]): McpLogEntry[] {
+  const maxOverlap = Math.min(recent.length, pending.length)
+  for (let overlap = maxOverlap; overlap > 0; overlap--) {
+    let matches = true
+    for (let i = 0; i < overlap; i++) {
+      if (mcpLogReplayKey(recent[recent.length - overlap + i]) !== mcpLogReplayKey(pending[i])) {
+        matches = false
+        break
+      }
+    }
+    if (matches) return [...recent, ...pending.slice(overlap)]
+  }
+  return [...recent, ...pending]
+}
+
+// Attach the listener first, then replay the newest file entries. Events arriving during replay
+// are buffered and merged, closing both the listener-registration gap and the long-task gap.
 export async function onMcpLog(cb: (e: McpLogEntry) => void): Promise<() => void> {
   if (!isTauri()) return () => {}
   const { listen } = await import('@tauri-apps/api/event')
-  const un = await listen<McpLogEntry>('mcp://log', (ev) => cb(ev.payload))
-  return un
+  const pending: McpLogEntry[] = []
+  let replaying = true
+  const un = await listen<McpLogEntry>('mcp://log', (ev) => {
+    if (replaying) pending.push(ev.payload)
+    else cb(ev.payload)
+  })
+  let backendSubscribed = false
+  try {
+    await mcpLiveLogSubscribe()
+    backendSubscribed = true
+    const recent = await mcpRecentLogs().catch(() => [])
+    for (const entry of mergeMcpLogReplay(recent, pending)) cb(entry)
+    replaying = false
+    let closed = false
+    return () => {
+      if (closed) return
+      closed = true
+      un()
+      void mcpLiveLogUnsubscribe()
+    }
+  } catch (error) {
+    replaying = false
+    un()
+    if (backendSubscribed) void mcpLiveLogUnsubscribe()
+    throw error
+  }
 }
 
 // Server-mode live-log stream over the shared WebSocket. `scope` is either the caller's own user

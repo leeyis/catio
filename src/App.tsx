@@ -479,19 +479,16 @@ export default function App() {
     return () => window.removeEventListener('catio-ask-ai', handler)
   }, [])
 
-  // ---- MCP server: mirror active DB + SSH connections to the backend registry
-  // so its tools can resolve targets by name. ----
-  function syncMcpTargets() {
-    const databases = listActiveDbConnections().map(a => ({ connId: a.connId, name: a.name, dbType: a.dbType }))
+  // ---- MCP server: mirror the authoritative active DB + SSH state to the backend registry.
+  // mcpSyncTargets serializes full replacements, so an older render can never overwrite a newer
+  // connection snapshot after its IPC call completes. ----
+  useEffect(() => {
+    const databases = activeDbConns.map(a => ({ connId: a.connId, name: a.name, dbType: a.dbType }))
     const hosts = Object.entries(sessionMap)
       .map(([connId, sessionId]) => ({ sessionId, name: liveConns[connId]?.name ?? connId, host: liveConns[connId]?.sub ?? '' }))
       .filter(h => h.sessionId)
-    void mcpSyncTargets(databases, hosts)
-  }
-  useEffect(() => {
-    syncMcpTargets()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dbProfiles, sessionMap, liveConns, activeDbConns])
+    void mcpSyncTargets(databases, hosts).catch(() => { /* MCP may be unavailable during shutdown */ })
+  }, [activeDbConns, sessionMap, liveConns])
 
   const theme_ = tweaks.theme
   const aiForm = tweaks.aiForm
@@ -1107,7 +1104,6 @@ export default function App() {
             removeActiveDbConnection(a.connId)
           })
           bumpDbActive()
-          syncMcpTargets()
         }
       }
     }
@@ -1216,7 +1212,6 @@ export default function App() {
     // Drop this profile's persisted query history too (req: 删连接同步删历史).
     void deleteDbHistoryForProfile(profile.id)
     setDbHistory(prev => prev.filter(h => h.profileId !== profile.id))
-    syncMcpTargets()
     // The reactive store updates the list; close the details panel.
     setPanelOpen(false)
     setDetailConn(null)
@@ -1243,7 +1238,6 @@ export default function App() {
     // 扫描导入的「需要认证」草稿：首次成功登录后清除标记（不再显示徽标）。
     if (profile.needsAuth) saveDbConnection({ ...profile, needsAuth: false })
     bumpDbActive()
-    syncMcpTargets()
     void openConn(dbProfileToConnection(profile, true))
     setView('workbench')
     // Success → auto-hide the connection details panel.
@@ -1272,7 +1266,6 @@ export default function App() {
     const closing = tabs.filter(tb => tb.connId === profile.id).map(tb => tb.id)
     closing.forEach(id => closeTab(id))
     bumpDbActive()
-    syncMcpTargets()
     // Reflect the new (disconnected) status in the open details panel.
     setDetailConn(prev => (prev && prev.id === profile.id ? { ...prev, status: 'idle' } : prev))
   }
@@ -2377,7 +2370,6 @@ export default function App() {
           onConnected={(profile, secret) => {
             if (secret) rememberConnSecret(profile.id, secret)
             bumpDbActive()
-            syncMcpTargets()
             void openConn(dbProfileToConnection(profile, true))
           }}
         />
