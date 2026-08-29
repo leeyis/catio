@@ -578,11 +578,12 @@ export function MonitorDashboard({ mon }: { mon: Monitor }) {
 
 export function MonitorPanel({ onClose, conn: _conn, sessionId }: MonitorPanelProps) {
   const { t } = useTranslation()
-  const [mon, setMon] = useState<Monitor>(EMPTY_MONITOR)
+  const [snapshot, setSnapshot] = useState<{ sessionId: string; monitor: Monitor } | null>(null)
+  const mon = snapshot && snapshot.sessionId === sessionId ? snapshot.monitor : EMPTY_MONITOR
 
   useEffect(() => {
     if (!sessionId || (!isTauriEnv() && !isServerEnv())) {
-      setMon(EMPTY_MONITOR)
+      setSnapshot(null)
       return
     }
 
@@ -591,7 +592,7 @@ export function MonitorPanel({ onClose, conn: _conn, sessionId }: MonitorPanelPr
 
     monitorStart(sessionId, 2000).catch(() => { /* already running or disconnected */ })
     listen<Monitor>(`monitor://${sessionId}`, payload => {
-      if (active) setMon(normalizeMonitor(payload))
+      if (active) setSnapshot({ sessionId, monitor: normalizeMonitor(payload) })
     }).then(fn => {
       if (!active) {
         fn()
@@ -617,7 +618,7 @@ export function MonitorPanel({ onClose, conn: _conn, sessionId }: MonitorPanelPr
     <PanelShell
       icon="gauge"
       title={t('panels.monitorTitle')}
-      sub={sessionId ? `${mon.host} · ${t('panels.monitorRealtime')}` : undefined}
+      sub={sessionId ? [mon.host, t('panels.monitorRealtime')].filter(Boolean).join(' · ') : undefined}
       onClose={onClose}
       actions={<IconBtn name="refresh-cw" size={15} variant="bare" onClick={handleRefresh} />}
     >

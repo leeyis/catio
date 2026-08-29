@@ -118,6 +118,33 @@ describe('MonitorPanel (monitor wiring)', () => {
     expect(container.querySelectorAll('.skel').length).toBe(0)
   })
 
+  it('immediately returns to the loading skeleton when the active session changes', async () => {
+    const renderPanel = (sessionId: string) => (
+      <LanguageProvider>
+        <DataProvider>
+          <MonitorPanel onClose={() => {}} sessionId={sessionId} />
+        </DataProvider>
+      </LanguageProvider>
+    )
+    const { container, rerender } = render(renderPanel('sess-1'))
+
+    await waitFor(() => expect(h.listenCb).not.toBeNull())
+    await act(async () => { h.listenCb!(CUSTOM_MONITOR) })
+    await waitFor(() => expect(container.querySelectorAll('.skel').length).toBe(0))
+
+    rerender(renderPanel('sess-2'))
+
+    expect(container.querySelectorAll('.skel').length).toBeGreaterThan(0)
+    expect(screen.queryByText('AMD EPYC 7543P')).toBeNull()
+
+    await waitFor(() => expect(h.listen).toHaveBeenCalledWith('monitor://sess-2', expect.any(Function)))
+    await act(async () => {
+      h.listenCb!({ ...CUSTOM_MONITOR, host: 'next-server' })
+    })
+    await waitFor(() => expect(screen.getByText(/next-server/)).toBeTruthy())
+    expect(container.querySelectorAll('.skel').length).toBe(0)
+  })
+
   it('reflects live monitor data pushed via listen callback', async () => {
     wrap(<MonitorPanel onClose={() => {}} sessionId="sess-1" />)
     await waitFor(() => expect(h.listenCb).not.toBeNull())
