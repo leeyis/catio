@@ -119,6 +119,13 @@ pub struct MemoryInfo {
     pub cache: String,
     pub swap_total: String,
     pub swap_used: String,
+    pub active: String,
+    pub inactive: String,
+    pub slab: String,
+    pub dirty: String,
+    pub writeback: String,
+    pub pressure_some_pct: Option<f64>,
+    pub pressure_full_pct: Option<f64>,
 }
 
 /// Latest aggregate network telemetry plus metadata for the busiest non-loopback interface.
@@ -265,8 +272,24 @@ fn meminfo_kb(meminfo: &str, key: &str) -> u64 {
         .unwrap_or(0)
 }
 
+fn memory_pressure_avg10(input: &str, kind: &str) -> Option<f64> {
+    input
+        .lines()
+        .map(str::trim)
+        .find(|line| line.split_whitespace().next() == Some(kind))
+        .and_then(|line| {
+            line.split_whitespace()
+                .find_map(|field| field.strip_prefix("avg10="))
+        })
+        .and_then(|value| value.parse().ok())
+}
+
 /// Parse the full memory/swap detail used by the dense monitor card.
 pub fn parse_memory_info(meminfo: &str) -> MemoryInfo {
+    let pressure = meminfo
+        .split_once("__CATIO_MEMORY_PSI__")
+        .map(|(_, pressure)| pressure)
+        .unwrap_or("");
     let total_kb = meminfo_kb(meminfo, "MemTotal:");
     let available_kb = meminfo_kb(meminfo, "MemAvailable:");
     let used_kb = total_kb.saturating_sub(available_kb);
@@ -283,6 +306,13 @@ pub fn parse_memory_info(meminfo: &str) -> MemoryInfo {
         cache: human_size(cache_kb * 1024),
         swap_total: human_size(swap_total_kb * 1024),
         swap_used: human_size(swap_used_kb * 1024),
+        active: human_size(meminfo_kb(meminfo, "Active:") * 1024),
+        inactive: human_size(meminfo_kb(meminfo, "Inactive:") * 1024),
+        slab: human_size(meminfo_kb(meminfo, "Slab:") * 1024),
+        dirty: human_size(meminfo_kb(meminfo, "Dirty:") * 1024),
+        writeback: human_size(meminfo_kb(meminfo, "Writeback:") * 1024),
+        pressure_some_pct: memory_pressure_avg10(pressure, "some"),
+        pressure_full_pct: memory_pressure_avg10(pressure, "full"),
     }
 }
 
@@ -1010,8 +1040,8 @@ mod tests {
     }
 
     #[test]
-    fn memory_info_includes_available_cache_and_swap() {
-        let meminfo = "MemTotal: 8192000 kB\nMemAvailable: 4096000 kB\nBuffers: 1000 kB\nCached: 2000 kB\nSReclaimable: 500 kB\nSwapTotal: 2048000 kB\nSwapFree: 1536000 kB\n";
+    fn memory_info_includes_operational_details_and_pressure() {
+        let meminfo = "MemTotal: 8192000 kB\nMemAvailable: 4096000 kB\nBuffers: 1000 kB\nCached: 2000 kB\nSReclaimable: 500 kB\nSwapTotal: 2048000 kB\nSwapFree: 1536000 kB\nActive: 3072000 kB\nInactive: 1024000 kB\nSlab: 256000 kB\nDirty: 2048 kB\nWriteback: 512 kB\n__CATIO_MEMORY_PSI__\nsome avg10=0.18 avg60=0.12 avg300=0.08 total=1234\nfull avg10=0.03 avg60=0.01 avg300=0.00 total=456\n";
         let info = parse_memory_info(meminfo);
         assert_eq!(info.total, human_size(8192000 * 1024));
         assert_eq!(info.used, human_size(4096000 * 1024));
@@ -1019,6 +1049,20 @@ mod tests {
         assert_eq!(info.cache, human_size(3500 * 1024));
         assert_eq!(info.swap_used, human_size(512000 * 1024));
         assert_eq!(info.swap_total, human_size(2048000 * 1024));
+        assert_eq!(info.active, human_size(3072000 * 1024));
+        assert_eq!(info.inactive, human_size(1024000 * 1024));
+        assert_eq!(info.slab, human_size(256000 * 1024));
+        assert_eq!(info.dirty, human_size(2048 * 1024));
+        assert_eq!(info.writeback, human_size(512 * 1024));
+        assert_eq!(info.pressure_some_pct, Some(0.18));
+        assert_eq!(info.pressure_full_pct, Some(0.03));
+    }
+
+    #[test]
+    fn memory_info_tolerates_unavailable_pressure_metrics() {
+        let info = parse_memory_info("MemTotal: 1024 kB\nMemAvailable: 512 kB\n");
+        assert_eq!(info.pressure_some_pct, None);
+        assert_eq!(info.pressure_full_pct, None);
     }
 
     // ── parse_net_mbps ────────────────────────────

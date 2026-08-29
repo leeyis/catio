@@ -164,7 +164,11 @@ pub fn assemble_monitor_detailed(
 const CMD_STAT: &str = "cat /proc/stat";
 const CMD_NETDEV: &str = "cat /proc/net/dev";
 const CMD_DISKSTATS: &str = "cat /proc/diskstats";
-const CMD_MEMINFO: &str = "cat /proc/meminfo";
+const CMD_MEMINFO: &str = concat!(
+    "cat /proc/meminfo 2>/dev/null; ",
+    "printf '__CATIO_MEMORY_PSI__\\n'; ",
+    "cat /proc/pressure/memory 2>/dev/null || true"
+);
 const CMD_DF: &str = concat!(
     "{ df -PT -x tmpfs -x devtmpfs -x squashfs 2>/dev/null || df -P 2>/dev/null; ",
     "printf '__CATIO_INODES__\\n'; ",

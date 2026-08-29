@@ -5,132 +5,292 @@
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 10px;
+  padding: 8px 11px 11px;
   color: var(--text-primary);
 }
 
 .monitor-card,
 .monitor-host-strip,
-.monitor-disk-row,
+.monitor-disk-list,
 .monitor-process-table {
-  background: var(--surface-subtle);
   border: 1px solid var(--border-hairline);
-  box-shadow: 0 1px 2px color-mix(in srgb, var(--text-primary) 5%, transparent);
-}
-
-.monitor-card {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-  min-width: 0;
-  padding: 10px;
-  border-radius: 11px;
+  background: var(--surface-subtle);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--text-primary) 4%, transparent);
 }
 
 .monitor-host-strip {
+  flex: none;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 1px;
   overflow: hidden;
   border-radius: 10px;
 }
 
-.monitor-host-strip .monitor-metric {
-  padding: 8px 9px;
-  background: var(--surface-subtle);
+.monitor-host-metric {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 8px;
 }
 
-.monitor-host-strip .monitor-metric:nth-child(odd) {
+.monitor-host-metric:nth-child(odd) {
   border-right: 1px solid var(--border-hairline);
 }
 
-.monitor-host-strip .monitor-metric:nth-child(-n + 2) {
+.monitor-host-metric:nth-child(-n + 2) {
   border-bottom: 1px solid var(--border-hairline);
 }
 
-.monitor-card-heading,
-.monitor-gpu-heading,
-.monitor-section-title,
-.monitor-disk-main,
-.monitor-throughput-heading,
-.monitor-gpu-memory > div {
+.monitor-host-icon,
+.monitor-icon-badge {
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 7px;
+}
+
+.monitor-host-icon {
+  width: 21px;
+  height: 21px;
+}
+
+.monitor-icon-badge {
+  width: 27px;
+  height: 27px;
+}
+
+.monitor-tone-blue {
+  color: var(--signal-blue);
+  background: color-mix(in srgb, var(--signal-blue) 12%, transparent);
+}
+
+.monitor-tone-cyan {
+  color: var(--signal-cyan, var(--signal-blue));
+  background: color-mix(in srgb, var(--signal-cyan, var(--signal-blue)) 12%, transparent);
+}
+
+.monitor-tone-violet {
+  color: var(--signal-violet);
+  background: color-mix(in srgb, var(--signal-violet) 12%, transparent);
+}
+
+.monitor-tone-amber {
+  color: var(--signal-amber);
+  background: color-mix(in srgb, var(--signal-amber) 12%, transparent);
+}
+
+.monitor-host-metric > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.monitor-host-metric > div > span {
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: 8px;
+  letter-spacing: .18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-host-metric strong {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 8.5px;
+  font-weight: 650;
+  letter-spacing: -.08px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-section {
+  flex: none;
+  min-width: 0;
+  padding: 8px 0 9px;
+  border-top: 1px solid var(--border-hairline);
+}
+
+.monitor-host-strip + .monitor-section {
+  margin-top: 8px;
+}
+
+.monitor-section-heading {
+  min-width: 0;
+  min-height: 30px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  min-width: 0;
+  padding: 0 1px 6px;
 }
 
-.monitor-card-heading-main {
+.monitor-section-identity {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.monitor-section-identity > div {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
 }
 
-.monitor-card-kicker,
-.monitor-section-title {
-  color: var(--text-tertiary);
-  font-size: 10.5px;
-  font-weight: 700;
-  letter-spacing: .35px;
+.monitor-section-identity strong {
+  color: var(--text-primary);
+  font-size: 11.5px;
+  font-weight: 720;
+  letter-spacing: .1px;
 }
 
-.monitor-card-model {
-  max-width: 100%;
+.monitor-section-identity > div > span {
+  max-width: 235px;
   overflow: hidden;
-  color: var(--text-secondary);
-  font-size: 10.5px;
+  color: var(--text-faint);
+  font-size: 8.5px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.monitor-section-aside {
+  flex: none;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.monitor-window-label {
+  color: var(--text-faint);
+  font-size: 8.5px;
+  white-space: nowrap;
+}
+
+.monitor-resource-grid {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+  align-items: stretch;
+}
+
+.monitor-card {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 9px;
+  border-radius: 10px;
+}
+
+.monitor-cpu-card {
+  background: color-mix(in srgb, var(--signal-blue) 3%, var(--surface-subtle));
+}
+
+.monitor-memory-card {
+  background: color-mix(in srgb, var(--signal-green) 3%, var(--surface-subtle));
+}
+
+.monitor-card-heading,
+.monitor-gpu-heading,
+.monitor-disk-main,
+.monitor-throughput-heading,
+.monitor-gpu-memory > div {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.monitor-card-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-tertiary);
+  font-size: 9.5px;
+  font-weight: 750;
+  letter-spacing: .5px;
+  text-transform: uppercase;
+}
+
+.monitor-kicker-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+}
+
+.monitor-dot-blue { background: var(--signal-blue); }
+.monitor-dot-green { background: var(--signal-green); }
 
 .monitor-primary-value {
   flex: none;
   color: var(--text-primary);
   font-size: 18px;
-  font-weight: 700;
-  letter-spacing: -.5px;
+  font-weight: 750;
+  letter-spacing: -.6px;
 }
 
 .monitor-primary-value small {
   margin-left: 1px;
   color: var(--text-faint);
+  font-size: 8px;
+  font-weight: 650;
+}
+
+.monitor-card-context {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-faint);
+  font-size: 8.5px;
+}
+
+.monitor-card-context b {
+  overflow: hidden;
+  color: var(--text-secondary);
   font-size: 9px;
-  font-weight: 600;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .monitor-spark {
   display: block;
   width: 100%;
   overflow: visible;
+  background-image: linear-gradient(to bottom, transparent 48%, color-mix(in srgb, var(--border-hairline) 55%, transparent) 50%, transparent 52%);
+}
+
+.monitor-network-spark {
+  height: 34px;
 }
 
 .monitor-detail-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 7px 8px;
+  gap: 6px 7px;
   padding-top: 6px;
   border-top: 1px solid var(--border-hairline);
-}
-
-.monitor-detail-grid-cpu {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .monitor-metric {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
 }
 
 .monitor-metric-label {
   overflow: hidden;
   color: var(--text-faint);
-  font-size: 9px;
-  letter-spacing: .15px;
+  font-size: 8px;
+  letter-spacing: .12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -138,27 +298,44 @@
 .monitor-metric-value {
   overflow: hidden;
   color: var(--text-secondary);
-  font-size: 10.5px;
-  font-weight: 600;
+  font-size: 9.5px;
+  font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.monitor-inline-stats {
+.monitor-inline-stats,
+.monitor-memory-health {
   display: flex;
   flex-wrap: wrap;
-  gap: 3px 10px;
+  gap: 3px 9px;
   color: var(--text-faint);
-  font-size: 9px;
+  font-size: 8px;
 }
 
-.monitor-inline-stats b {
+.monitor-inline-stats {
+  margin-top: auto;
+}
+
+.monitor-inline-stats span:last-child,
+.monitor-memory-health span:first-child {
+  flex-basis: 100%;
+}
+
+.monitor-inline-stats b,
+.monitor-memory-health b {
   color: var(--text-secondary);
-  font-weight: 600;
+  font-weight: 650;
+}
+
+.monitor-memory-health {
+  margin-top: auto;
+  padding-top: 5px;
+  border-top: 1px solid var(--border-hairline);
 }
 
 .monitor-progress {
-  height: 5px;
+  height: 4px;
   overflow: hidden;
   border-radius: 999px;
   background: var(--surface-inset);
@@ -172,18 +349,34 @@
 }
 
 .monitor-chip {
-  max-width: 48%;
-  height: 19px;
+  max-width: 170px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   padding: 2px 7px;
   overflow: hidden;
   border: 1px solid var(--border-hairline);
   border-radius: 999px;
   background: var(--surface-inset);
   color: var(--text-tertiary);
-  font-size: 9px;
-  line-height: 13px;
+  font-size: 8.5px;
+  line-height: 14px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.monitor-chip > i {
+  flex: none;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--signal-green);
+}
+
+.monitor-network-card {
+  gap: 7px;
+  padding-top: 7px;
 }
 
 .monitor-throughput-grid {
@@ -192,72 +385,73 @@
   gap: 6px;
 }
 
-.monitor-throughput {
-  min-width: 0;
-  padding: 7px 7px 2px;
-  border-radius: 8px;
-  background: var(--surface-inset);
-}
-
 .monitor-throughput-heading {
   justify-content: flex-start;
+  padding: 6px 7px;
+  border-radius: 7px;
+  background: var(--surface-inset);
   color: var(--text-tertiary);
-  font-size: 9.5px;
+  font-size: 8.5px;
+}
+
+.monitor-throughput-heading:first-child {
+  background: color-mix(in srgb, var(--signal-green) 6%, var(--surface-inset));
+}
+
+.monitor-throughput-heading:last-child {
+  background: color-mix(in srgb, var(--signal-blue) 6%, var(--surface-inset));
 }
 
 .monitor-throughput-heading b {
   margin-left: auto;
   color: var(--text-primary);
-  font-size: 10px;
+  font-size: 9.5px;
   white-space: nowrap;
-}
-
-.monitor-direction {
-  font-size: 12px;
-  font-weight: 700;
 }
 
 .monitor-direction-down { color: var(--signal-green); }
 .monitor-direction-up { color: var(--signal-blue); }
 
-.monitor-section-title {
-  min-height: 25px;
-  padding: 3px 2px 4px;
-}
-
 .monitor-io-summary {
   display: flex;
   gap: 8px;
   color: var(--text-faint);
-  font-size: 9px;
-  font-weight: 500;
+  font-size: 8.5px;
+  font-weight: 550;
 }
 
 .monitor-disk-list,
 .monitor-gpu-grid {
   display: grid;
-  gap: 6px;
+}
+
+.monitor-disk-list {
+  overflow: hidden;
+  border-radius: 10px;
 }
 
 .monitor-disk-row {
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  min-width: 0;
-  padding: 8px 9px;
-  border-radius: 9px;
+  gap: 5px;
+  padding: 7px 9px;
+}
+
+.monitor-disk-row + .monitor-disk-row {
+  border-top: 1px solid var(--border-hairline);
 }
 
 .monitor-disk-path,
 .monitor-disk-usage {
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  min-width: 0;
 }
 
 .monitor-disk-path strong {
   overflow: hidden;
-  font-size: 11px;
+  font-size: 10.5px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -267,7 +461,7 @@
 .monitor-disk-meta {
   overflow: hidden;
   color: var(--text-faint);
-  font-size: 8.5px;
+  font-size: 8px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -278,7 +472,7 @@
 }
 
 .monitor-disk-usage strong {
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .monitor-disk-meta {
@@ -287,10 +481,14 @@
   gap: 8px;
 }
 
+.monitor-gpu-grid {
+  gap: 6px;
+}
+
 .monitor-gpu-identity {
+  min-width: 0;
   display: flex;
   align-items: center;
-  min-width: 0;
   gap: 7px;
 }
 
@@ -301,10 +499,10 @@
   height: 22px;
   place-items: center;
   border-radius: 6px;
-  background: color-mix(in srgb, var(--signal-green) 14%, transparent);
-  color: var(--signal-green);
-  font-size: 10px;
-  font-weight: 700;
+  background: color-mix(in srgb, var(--signal-violet) 12%, transparent);
+  color: var(--signal-violet);
+  font-size: 9px;
+  font-weight: 750;
 }
 
 .monitor-gpu-identity > div {
@@ -321,8 +519,8 @@
   white-space: nowrap;
 }
 
-.monitor-gpu-identity strong { font-size: 11.5px; }
-.monitor-gpu-identity span:last-child { color: var(--text-faint); font-size: 8.5px; }
+.monitor-gpu-identity strong { font-size: 10.5px; }
+.monitor-gpu-identity span:last-child { color: var(--text-faint); font-size: 8px; }
 
 .monitor-gpu-memory {
   display: flex;
@@ -330,36 +528,36 @@
   gap: 4px;
 }
 
-.monitor-gpu-memory span { color: var(--text-faint); font-size: 9px; }
-.monitor-gpu-memory b { color: var(--text-tertiary); font-size: 10px; font-weight: 500; }
+.monitor-gpu-memory span { color: var(--text-faint); font-size: 8px; }
+.monitor-gpu-memory b { color: var(--text-tertiary); font-size: 9px; font-weight: 550; }
 
 .monitor-gpu-details {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .monitor-empty-inline {
-  padding: 13px;
+  padding: 11px;
   border: 1px dashed var(--border-hairline);
   border-radius: 9px;
   color: var(--text-faint);
-  font-size: 10px;
+  font-size: 9px;
   text-align: center;
 }
 
 .monitor-process-table {
   overflow: hidden;
-  border-radius: 9px;
+  border-radius: 10px;
 }
 
 .monitor-process-row {
   display: grid;
-  grid-template-columns: 48px minmax(0, 1fr) 38px 38px;
-  gap: 7px;
+  grid-template-columns: 42px minmax(0, 1fr) 35px 35px;
+  gap: 6px;
   align-items: center;
-  min-height: 25px;
-  padding: 4px 7px;
+  min-height: 23px;
+  padding: 3px 7px;
   color: var(--text-secondary);
-  font-size: 9.5px;
+  font-size: 9px;
 }
 
 .monitor-process-row + .monitor-process-row {
@@ -375,10 +573,10 @@
 .monitor-process-row span:nth-child(n + 3) { text-align: right; }
 
 .monitor-process-head {
-  min-height: 22px;
+  min-height: 21px;
   background: var(--surface-inset);
   color: var(--text-faint);
-  font-size: 8.5px;
+  font-size: 8px;
 }
 
 .monitor-skeleton-card > div:first-child {
@@ -387,20 +585,35 @@
   gap: 5px;
 }
 
-@container (min-width: 460px) {
+@container (min-width: 430px) {
   .monitor-host-strip {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 
-  .monitor-host-strip .monitor-metric {
+  .monitor-host-metric {
     border-right: 1px solid var(--border-hairline);
     border-bottom: 0;
   }
 
-  .monitor-host-strip .monitor-metric:last-child { border-right: 0; }
+  .monitor-host-metric:nth-child(-n + 2) { border-bottom: 0; }
+  .monitor-host-metric:last-child { border-right: 0; }
+
+  .monitor-resource-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 
   .monitor-gpu-grid {
-    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(245px, 1fr));
+  }
+}
+
+@container (max-width: 300px) {
+  .monitor-throughput-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .monitor-section-identity > div > span {
+    max-width: 145px;
   }
 }
 

@@ -394,6 +394,13 @@ export interface MonitorMemoryInfo {
   cache: string
   swapTotal: string
   swapUsed: string
+  active?: string
+  inactive?: string
+  slab?: string
+  dirty?: string
+  writeback?: string
+  pressureSomePct?: number | null
+  pressureFullPct?: number | null
 }
 
 export interface MonitorNetworkInfo {

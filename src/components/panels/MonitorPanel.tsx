@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { IconBtn } from '../atoms'
+import { Icon } from '../Icon'
 import type { Connection, Gpu, Monitor, MonitorDiskUsage } from '../../services/types'
 import { PanelShell } from './PanelShell'
 import { PanelEmpty } from './PanelEmpty'
@@ -44,7 +45,11 @@ const EMPTY_MONITOR: Monitor = {
     l3Cache: '', temperatureC: null, load1: 0, load5: 0, load15: 0,
     userPct: 0, systemPct: 0, iowaitPct: 0,
   },
-  memoryInfo: { total: '', used: '', available: '', cache: '', swapTotal: '', swapUsed: '' },
+  memoryInfo: {
+    total: '', used: '', available: '', cache: '', swapTotal: '', swapUsed: '',
+    active: '', inactive: '', slab: '', dirty: '', writeback: '',
+    pressureSomePct: null, pressureFullPct: null,
+  },
   networkInfo: {
     interface: '', interfaceCount: 0, rxMbps: 0, txMbps: 0, linkSpeedMbps: null,
     duplex: '', ipv4: '', packetsPerSecond: 0, tcpConnections: 0, drops: 0, errors: 0,
@@ -99,6 +104,10 @@ function formatRate(value: number): string {
   return `${value.toFixed(2)} MB/s`
 }
 
+function formatPressure(value: number | null | undefined): string {
+  return value == null || !Number.isFinite(value) ? '—' : `${value.toFixed(2)}%`
+}
+
 function formatFrequency(mhz: number | null): string {
   if (!mhz || mhz <= 0) return '—'
   return mhz >= 1000 ? `${(mhz / 1000).toFixed(2)} GHz` : `${mhz.toFixed(0)} MHz`
@@ -146,6 +155,27 @@ function Spark({ data, color, ceiling, height = 34 }: SparkProps) {
   )
 }
 
+function DualSpark({ first, second }: { first: number[]; second: number[] }) {
+  const width = 100
+  const chartHeight = 30
+  const sanitize = (values: number[]) => values.map(value => Number.isFinite(value) ? Math.max(0, value) : 0)
+  const safeFirst = first.length > 0 ? sanitize(first) : [0]
+  const safeSecond = second.length > 0 ? sanitize(second) : [0]
+  const max = Math.max(...safeFirst, ...safeSecond, 1)
+  const points = (values: number[]) => {
+    const denominator = values.length > 1 ? values.length - 1 : 1
+    return values
+      .map((value, index) => `${(index / denominator) * width},${chartHeight - (value / max) * chartHeight}`)
+      .join(' ')
+  }
+  return (
+    <svg aria-hidden="true" viewBox={`0 0 ${width} ${chartHeight}`} preserveAspectRatio="none" className="monitor-spark monitor-network-spark">
+      <polyline points={points(safeFirst)} fill="none" stroke="var(--signal-green)" strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
+      <polyline points={points(safeSecond)} fill="none" stroke="var(--signal-blue)" strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
+    </svg>
+  )
+}
+
 function Metric({ label, value, tone, title }: { label: string; value: string; tone?: string; title?: string }) {
   return (
     <div className="monitor-metric" title={title}>
@@ -163,11 +193,49 @@ function Progress({ value, tone }: { value: number; tone: string }) {
   )
 }
 
-function SectionTitle({ title, aside }: { title: string; aside?: React.ReactNode }) {
+type MonitorTone = 'blue' | 'cyan' | 'violet' | 'amber'
+
+function SectionTitle({
+  icon,
+  tone,
+  title,
+  subtitle,
+  aside,
+}: {
+  icon: string
+  tone: MonitorTone
+  title: string
+  subtitle?: string
+  aside?: React.ReactNode
+}) {
   return (
-    <div className="monitor-section-title">
-      <span>{title}</span>
-      {aside}
+    <div className="monitor-section-heading">
+      <div className="monitor-section-identity">
+        <span className={`monitor-icon-badge monitor-tone-${tone}`}><Icon name={icon} size={14} /></span>
+        <div>
+          <strong>{title}</strong>
+          {subtitle && <span className="mono" title={subtitle}>{subtitle}</span>}
+        </div>
+      </div>
+      {aside && <div className="monitor-section-aside">{aside}</div>}
+    </div>
+  )
+}
+
+function HostMetric({ icon, tone, label, value, title }: {
+  icon: string
+  tone: MonitorTone
+  label: string
+  value: string
+  title?: string
+}) {
+  return (
+    <div className="monitor-host-metric" title={title}>
+      <span className={`monitor-host-icon monitor-tone-${tone}`}><Icon name={icon} size={11} /></span>
+      <div>
+        <span>{label}</span>
+        <strong className="mono">{value || '—'}</strong>
+      </div>
     </div>
   )
 }
@@ -176,10 +244,10 @@ function HostStrip({ mon }: { mon: Monitor }) {
   const { t, i18n } = useTranslation()
   return (
     <div className="monitor-host-strip">
-      <Metric label={t('panels.monitorOs')} value={mon.system.os} title={mon.system.os} />
-      <Metric label={t('panels.monitorKernel')} value={mon.system.kernel} title={mon.system.kernel} />
-      <Metric label={t('panels.monitorUptime')} value={formatUptime(mon.system.uptimeSeconds, i18n.language)} />
-      <Metric label={t('panels.monitorProcesses')} value={mon.system.processCount ? String(mon.system.processCount) : '—'} />
+      <HostMetric icon="server" tone="blue" label={t('panels.monitorOs')} value={mon.system.os} title={mon.system.os} />
+      <HostMetric icon="code" tone="cyan" label={t('panels.monitorKernel')} value={mon.system.kernel} title={mon.system.kernel} />
+      <HostMetric icon="clock" tone="amber" label={t('panels.monitorUptime')} value={formatUptime(mon.system.uptimeSeconds, i18n.language)} />
+      <HostMetric icon="list" tone="violet" label={t('panels.monitorProcesses')} value={mon.system.processCount ? String(mon.system.processCount) : '—'} />
     </div>
   )
 }
@@ -192,15 +260,16 @@ function CpuCard({ mon }: { mon: Monitor }) {
     ? 'var(--danger-fg)'
     : (cpu.temperatureC ?? 0) >= 65 ? 'var(--signal-amber)' : 'var(--signal-green)'
   return (
-    <section className="monitor-card">
+    <section className="monitor-card monitor-resource-card monitor-cpu-card">
       <div className="monitor-card-heading">
-        <div className="monitor-card-heading-main">
-          <span className="monitor-card-kicker">{t('panels.cpu')}</span>
-          <span className="monitor-card-model" title={cpu.model}>{cpu.model || t('panels.monitorUnavailable')}</span>
-        </div>
+        <span className="monitor-card-kicker"><i className="monitor-kicker-dot monitor-dot-blue" />{t('panels.cpu')}</span>
         <span className="monitor-primary-value mono">{formatDecimal(cpuNow)}<small>%</small></span>
       </div>
-      <Spark data={mon.cpu} color="var(--signal-blue)" ceiling={100} height={42} />
+      <div className="monitor-card-context">
+        <span>{t('panels.cpuFrequency')}</span>
+        <b className="mono">{formatFrequency(cpu.frequencyMhz)}</b>
+      </div>
+      <Spark data={mon.cpu} color="var(--signal-blue)" ceiling={100} height={32} />
       <div className="monitor-detail-grid monitor-detail-grid-cpu">
         <Metric label={t('panels.cpuPhysicalCores')} value={cpu.physicalCores ? String(cpu.physicalCores) : '—'} />
         <Metric label={t('panels.cpuThreads')} value={cpu.threads ? String(cpu.threads) : String(mon.cores || '—')} />
@@ -225,21 +294,35 @@ function MemoryCard({ mon }: { mon: Monitor }) {
   const info = mon.memoryInfo
   const used = info.used || mon.memUsed
   const total = info.total || mon.memTotal
+  const pressureTone = (info.pressureFullPct ?? 0) >= 1 || (info.pressureSomePct ?? 0) >= 10
+    ? 'var(--danger-fg)'
+    : (info.pressureFullPct ?? 0) >= 0.1 || (info.pressureSomePct ?? 0) >= 1
+      ? 'var(--signal-amber)'
+      : 'var(--signal-green)'
   return (
-    <section className="monitor-card">
+    <section className="monitor-card monitor-resource-card monitor-memory-card">
       <div className="monitor-card-heading">
-        <div className="monitor-card-heading-main">
-          <span className="monitor-card-kicker">{t('panels.mem')}</span>
-          <span className="monitor-card-model mono">{used && total ? `${used} / ${total}` : t('panels.monitorUnavailable')}</span>
-        </div>
+        <span className="monitor-card-kicker"><i className="monitor-kicker-dot monitor-dot-green" />{t('panels.mem')}</span>
         <span className="monitor-primary-value mono">{formatDecimal(memoryNow)}<small>%</small></span>
       </div>
-      <Spark data={mon.mem} color="var(--signal-violet)" ceiling={100} height={36} />
-      <Progress value={memoryNow} tone={memoryNow > 85 ? 'var(--danger-fg)' : 'var(--signal-violet)'} />
+      <div className="monitor-card-context">
+        <span>{t('panels.memUsedTotal')}</span>
+        <b className="mono">{used && total ? `${used} / ${total}` : t('panels.monitorUnavailable')}</b>
+      </div>
+      <Spark data={mon.mem} color="var(--signal-green)" ceiling={100} height={32} />
+      <Progress value={memoryNow} tone={memoryNow > 85 ? 'var(--danger-fg)' : 'var(--signal-green)'} />
       <div className="monitor-detail-grid">
         <Metric label={t('panels.memAvailable')} value={info.available} />
         <Metric label={t('panels.memCache')} value={info.cache} />
         <Metric label={t('panels.memSwap')} value={info.swapUsed && info.swapTotal ? `${info.swapUsed} / ${info.swapTotal}` : '—'} />
+        <Metric label={t('panels.memActive')} value={info.active ?? ''} />
+        <Metric label={t('panels.memInactive')} value={info.inactive ?? ''} />
+        <Metric label={t('panels.memSlab')} value={info.slab ?? ''} />
+      </div>
+      <div className="monitor-memory-health mono">
+        <span>{t('panels.memPressure')} <b style={{ color: pressureTone }}>some {formatPressure(info.pressureSomePct)} / full {formatPressure(info.pressureFullPct)}</b></span>
+        <span>{t('panels.memDirty')} <b>{info.dirty || '—'}</b></span>
+        <span>{t('panels.memWriteback')} <b>{info.writeback || '—'}</b></span>
       </div>
     </section>
   )
@@ -257,39 +340,36 @@ function NetworkCard({ mon }: { mon: Monitor }) {
     ? `${network.interface}${network.interfaceCount > 1 ? ` +${network.interfaceCount - 1}` : ''}`
     : '—'
   return (
-    <section className="monitor-card">
-      <div className="monitor-card-heading">
-        <div className="monitor-card-heading-main">
-          <span className="monitor-card-kicker">{t('panels.netIO')}</span>
-          <span className="monitor-card-model mono">{interfaceLabel}</span>
-        </div>
-        <span className="monitor-chip mono">{network.ipv4 || t('panels.monitorUnavailable')}</span>
-      </div>
-      <div className="monitor-throughput-grid">
-        <div className="monitor-throughput">
+    <section className="monitor-section">
+      <SectionTitle
+        icon="network"
+        tone="cyan"
+        title={t('panels.netIO')}
+        subtitle={interfaceLabel}
+        aside={<span className="monitor-chip mono"><i />{network.ipv4 || t('panels.monitorUnavailable')}</span>}
+      />
+      <div className="monitor-card monitor-network-card">
+        <div className="monitor-throughput-grid">
           <div className="monitor-throughput-heading">
-            <span className="monitor-direction monitor-direction-down">↓</span>
+            <Icon name="download" size={13} className="monitor-direction-down" />
             <span>{t('panels.netDownload')}</span>
             <b className="mono">{formatRate(rx)}</b>
           </div>
-          <Spark data={mon.netRx} color="var(--signal-green)" height={34} />
-        </div>
-        <div className="monitor-throughput">
           <div className="monitor-throughput-heading">
-            <span className="monitor-direction monitor-direction-up">↑</span>
+            <Icon name="upload" size={13} className="monitor-direction-up" />
             <span>{t('panels.netUpload')}</span>
             <b className="mono">{formatRate(tx)}</b>
           </div>
-          <Spark data={mon.netTx} color="var(--signal-blue)" height={34} />
         </div>
-      </div>
-      <div className="monitor-detail-grid">
-        <Metric label={t('panels.netLink')} value={network.linkSpeedMbps ? `${network.linkSpeedMbps} Mbps` : '—'} />
-        <Metric label={t('panels.netDuplex')} value={duplex} />
-        <Metric label={t('panels.netPackets')} value={`${formatDecimal(network.packetsPerSecond, 0)} pps`} />
-        <Metric label={t('panels.netTcp')} value={String(network.tcpConnections)} />
-        <Metric label={t('panels.netDrops')} value={String(network.drops)} tone={network.drops ? 'var(--signal-amber)' : undefined} />
-        <Metric label={t('panels.netErrors')} value={String(network.errors)} tone={network.errors ? 'var(--danger-fg)' : undefined} />
+        <DualSpark first={mon.netRx} second={mon.netTx} />
+        <div className="monitor-detail-grid">
+          <Metric label={t('panels.netLink')} value={network.linkSpeedMbps ? `${network.linkSpeedMbps} Mbps` : '—'} />
+          <Metric label={t('panels.netDuplex')} value={duplex} />
+          <Metric label={t('panels.netPackets')} value={`${formatDecimal(network.packetsPerSecond, 0)} pps`} />
+          <Metric label={t('panels.netTcp')} value={String(network.tcpConnections)} />
+          <Metric label={t('panels.netDrops')} value={String(network.drops)} tone={network.drops ? 'var(--signal-amber)' : undefined} />
+          <Metric label={t('panels.netErrors')} value={String(network.errors)} tone={network.errors ? 'var(--danger-fg)' : undefined} />
+        </div>
       </div>
     </section>
   )
@@ -327,14 +407,13 @@ function DiskRow({ disk }: { disk: MonitorDiskUsage }) {
 
 function DiskSection({ mon }: { mon: Monitor }) {
   const { t } = useTranslation()
-  const legacyDisk: MonitorDiskUsage = {
-    device: '', fsType: '', mount: '/', total: mon.diskTotal, used: mon.diskUsed,
-    available: '', usedPct: mon.disk, inodePct: null,
-  }
-  const disks = mon.disks.length > 0 ? mon.disks : [legacyDisk]
+  const disks = mon.disks
+  const hasLegacyAggregate = Boolean(mon.diskTotal || mon.diskUsed)
   return (
-    <section>
+    <section className="monitor-section">
       <SectionTitle
+        icon="hard-drive"
+        tone="amber"
         title={t('panels.diskSection', { count: disks.length })}
         aside={(
           <div className="monitor-io-summary mono">
@@ -343,7 +422,27 @@ function DiskSection({ mon }: { mon: Monitor }) {
           </div>
         )}
       />
-      <div className="monitor-disk-list">{disks.map(disk => <DiskRow key={`${disk.device}:${disk.mount}`} disk={disk} />)}</div>
+      {disks.length > 0 ? (
+        <div className="monitor-disk-list">{disks.map(disk => <DiskRow key={`${disk.device}:${disk.mount}`} disk={disk} />)}</div>
+      ) : hasLegacyAggregate ? (
+        <div className="monitor-disk-list">
+          <div className="monitor-disk-row">
+            <div className="monitor-disk-main">
+              <div className="monitor-disk-path">
+                <strong>{t('panels.diskAggregate')}</strong>
+                <span>{t('panels.diskMountUnavailable')}</span>
+              </div>
+              <div className="monitor-disk-usage mono">
+                <strong style={{ color: diskTone(mon.disk) }}>{mon.disk}%</strong>
+                <span>{mon.diskUsed || '—'} / {mon.diskTotal || '—'}</span>
+              </div>
+            </div>
+            <Progress value={mon.disk} tone={diskTone(mon.disk)} />
+          </div>
+        </div>
+      ) : (
+        <div className="monitor-empty-inline">{t('panels.diskUnavailable')}</div>
+      )}
     </section>
   )
 }
@@ -390,8 +489,10 @@ function GpuSection({ mon }: { mon: Monitor }) {
   const { t } = useTranslation()
   const driver = mon.gpus.find(gpu => gpu.driver)?.driver
   return (
-    <section>
+    <section className="monitor-section">
       <SectionTitle
+        icon="zap"
+        tone="violet"
         title={t('panels.gpuSection', { count: mon.gpus.length })}
         aside={<span className="monitor-chip mono">{driver ? `${t('panels.gpuDriver')} ${driver}` : 'nvidia-smi'}</span>}
       />
@@ -405,8 +506,8 @@ function GpuSection({ mon }: { mon: Monitor }) {
 function ProcessSection({ mon }: { mon: Monitor }) {
   const { t } = useTranslation()
   return (
-    <section>
-      <SectionTitle title={t('panels.topProcs')} />
+    <section className="monitor-section">
+      <SectionTitle icon="list" tone="blue" title={t('panels.topProcs')} />
       <div className="monitor-process-table">
         <div className="monitor-process-row monitor-process-head mono">
           <span>{t('panels.procPid')}</span><span>{t('panels.procCmd')}</span><span>{t('panels.procCpu')}</span><span>{t('panels.procMem')}</span>
@@ -432,14 +533,45 @@ function MonitorSkeleton() {
   return (
     <div className="monitor-scroll">
       <div className="monitor-host-strip">{[0, 1, 2, 3].map(index => <SkeletonBlock key={index} width="70%" height={28} />)}</div>
-      {[0, 1, 2].map(index => (
-        <div className="monitor-card monitor-skeleton-card" key={index}>
-          <div><SkeletonBlock width={58} /><SkeletonBlock width={index === 0 ? '78%' : '46%'} /></div>
-          <SkeletonBlock width="100%" height={42} />
-          <div className="monitor-detail-grid"><SkeletonBlock width="70%" /><SkeletonBlock width="70%" /><SkeletonBlock width="70%" /></div>
+      <section className="monitor-section">
+        <SkeletonBlock width={132} height={24} />
+        <div className="monitor-resource-grid">
+          {[0, 1].map(index => (
+            <div className="monitor-card monitor-skeleton-card" key={index}>
+              <div><SkeletonBlock width={58} /><SkeletonBlock width={index === 0 ? '78%' : '46%'} /></div>
+              <SkeletonBlock width="100%" height={34} />
+              <div className="monitor-detail-grid"><SkeletonBlock width="70%" /><SkeletonBlock width="70%" /><SkeletonBlock width="70%" /></div>
+            </div>
+          ))}
         </div>
-      ))}
+      </section>
       <div className="monitor-card"><SkeletonBlock width="100%" height={54} /></div>
+    </div>
+  )
+}
+
+export function MonitorDashboard({ mon }: { mon: Monitor }) {
+  const { t } = useTranslation()
+  return (
+    <div className="monitor-scroll">
+      <HostStrip mon={mon} />
+      <section className="monitor-section">
+        <SectionTitle
+          icon="cpu"
+          tone="blue"
+          title={t('panels.monitorCoreResources')}
+          subtitle={mon.cpuInfo.model || t('panels.monitorUnavailable')}
+          aside={<span className="monitor-window-label">{t('panels.monitorSampleWindow')}</span>}
+        />
+        <div className="monitor-resource-grid">
+          <CpuCard mon={mon} />
+          <MemoryCard mon={mon} />
+        </div>
+      </section>
+      <NetworkCard mon={mon} />
+      <DiskSection mon={mon} />
+      <GpuSection mon={mon} />
+      <ProcessSection mon={mon} />
     </div>
   )
 }
@@ -494,15 +626,7 @@ export function MonitorPanel({ onClose, conn: _conn, sessionId }: MonitorPanelPr
       ) : mon.cpu.length === 0 ? (
         <MonitorSkeleton />
       ) : (
-        <div className="monitor-scroll">
-          <HostStrip mon={mon} />
-          <CpuCard mon={mon} />
-          <MemoryCard mon={mon} />
-          <NetworkCard mon={mon} />
-          <DiskSection mon={mon} />
-          <GpuSection mon={mon} />
-          <ProcessSection mon={mon} />
-        </div>
+        <MonitorDashboard mon={mon} />
       )}
     </PanelShell>
   )

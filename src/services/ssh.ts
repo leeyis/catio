@@ -435,7 +435,11 @@ const EMPTY_MONITOR: Monitor = {
     l3Cache: '', temperatureC: null, load1: 0, load5: 0, load15: 0,
     userPct: 0, systemPct: 0, iowaitPct: 0,
   },
-  memoryInfo: { total: '', used: '', available: '', cache: '', swapTotal: '', swapUsed: '' },
+  memoryInfo: {
+    total: '', used: '', available: '', cache: '', swapTotal: '', swapUsed: '',
+    active: '', inactive: '', slab: '', dirty: '', writeback: '',
+    pressureSomePct: null, pressureFullPct: null,
+  },
   networkInfo: {
     interface: '', interfaceCount: 0, rxMbps: 0, txMbps: 0, linkSpeedMbps: null,
     duplex: '', ipv4: '', packetsPerSecond: 0, tcpConnections: 0, drops: 0, errors: 0,

@@ -44,7 +44,12 @@ const CUSTOM_MONITOR: Monitor = {
     frequencyMhz: 2800, l3Cache: '256 MiB', temperatureC: 53,
     load1: 1.2, load5: 0.8, load15: 0.4, userPct: 48.2, systemPct: 12.1, iowaitPct: 4.7,
   },
-  memoryInfo: { total: '32 GB', used: '14 GB', available: '18 GB', cache: '6 GB', swapTotal: '8 GB', swapUsed: '1 GB' },
+  memoryInfo: {
+    total: '32 GB', used: '14 GB', available: '18 GB', cache: '6 GB',
+    swapTotal: '8 GB', swapUsed: '1 GB', active: '11 GB', inactive: '5 GB',
+    slab: '768 MB', dirty: '24 MB', writeback: '3 MB',
+    pressureSomePct: 0.12, pressureFullPct: 0.01,
+  },
   networkInfo: {
     interface: 'eth0', interfaceCount: 2, rxMbps: 9.25, txMbps: 4.75,
     linkSpeedMbps: 1000, duplex: 'full', ipv4: '10.0.0.8/24', packetsPerSecond: 2048,
@@ -105,6 +110,8 @@ describe('MonitorPanel (monitor wiring)', () => {
     expect(screen.getByText('AMD EPYC 7543P')).toBeTruthy()
     expect(screen.getByText('9.25 MB/s')).toBeTruthy()
     expect(screen.getByText('4.75 MB/s')).toBeTruthy()
+    expect(screen.getByText('11 GB')).toBeTruthy()
+    expect(screen.getByText(/some 0\.12% \/ full 0\.01%/)).toBeTruthy()
     expect(screen.getByText('/data')).toBeTruthy()
     expect(screen.getByText('NVIDIA RTX 3090')).toBeTruthy()
     expect(screen.getByText('21 / 24 GB')).toBeTruthy()
@@ -133,7 +140,7 @@ describe('MonitorPanel (monitor wiring)', () => {
   })
 
   it('keeps rendering legacy monitor payloads while the server is being upgraded', async () => {
-    wrap(<MonitorPanel onClose={() => {}} sessionId="sess-1" />)
+    const { container } = wrap(<MonitorPanel onClose={() => {}} sessionId="sess-1" />)
     await waitFor(() => expect(h.listenCb).not.toBeNull())
     const legacy = {
       host: 'legacy-server', cpu: [35], mem: [45], net: [14], disk: 61,
@@ -146,6 +153,9 @@ describe('MonitorPanel (monitor wiring)', () => {
     await waitFor(() => expect(screen.getByText('14.0 MB/s')).toBeTruthy())
     expect(screen.getByText('0.00 MB/s')).toBeTruthy()
     expect(screen.getByText('305 GB / 500 GB')).toBeTruthy()
+    expect(screen.getByText('后端未返回挂载点')).toBeTruthy()
+    expect(container.querySelector('.monitor-disk-path strong')?.textContent).toBe('磁盘汇总')
+    expect(screen.queryByTitle('/')).toBeNull()
   })
 
   it('calls monitorStop on unmount', async () => {
