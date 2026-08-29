@@ -539,6 +539,14 @@ fn is_pseudo_filesystem(fs_type: &str) -> bool {
     )
 }
 
+/// Docker/Podman overlay layers repeat backing-disk capacity for every container. Keep `/` when
+/// the SSH target itself is a container, but hide its internal non-root layer mounts.
+fn is_container_overlay_mount(device: &str, fs_type: &str, mount: &str) -> bool {
+    mount != "/"
+        && (matches!(fs_type, "overlay" | "fuse.overlayfs" | "fuse-overlayfs")
+            || (fs_type.is_empty() && matches!(device, "overlay" | "fuse-overlayfs")))
+}
+
 fn parse_inode_usage(inode_output: &str) -> BTreeMap<String, u8> {
     let mut usages = BTreeMap::new();
     for line in inode_output.lines() {
@@ -582,12 +590,12 @@ pub fn parse_disks(df_out: &str) -> Vec<DiskUsage> {
         } else {
             ("", 1, 2, 3, 4, 5)
         };
-        if is_pseudo_filesystem(fs_type) {
-            continue;
-        }
-
         let mount = fields[mount_idx..].join(" ");
-        if mount.is_empty() || !seen_mounts.insert(mount.clone()) {
+        if is_pseudo_filesystem(fs_type)
+            || is_container_overlay_mount(fields[0], fs_type, &mount)
+            || mount.is_empty()
+            || !seen_mounts.insert(mount.clone())
+        {
             continue;
         }
         let total_kb: u64 = fields[total_idx].parse().unwrap_or(0);
@@ -1153,6 +1161,34 @@ mod tests {
         assert_eq!(disks[1].inode_pct, Some(5));
         // Legacy root summary remains intact.
         assert_eq!(parse_disk(df).0, 73);
+    }
+
+    #[test]
+    fn disks_exclude_container_overlay_mounts_but_keep_real_docker_storage() {
+        let df = "Filesystem Type 1024-blocks Used Available Capacity Mounted on\n\
+                  /dev/sda1 ext4 102400 75000 27000 73% /\n\
+                  /dev/sdb1 xfs 204800 51200 153600 25% /var/lib/docker\n\
+                  overlay overlay 102400 75000 27000 73% /var/lib/docker/overlay2/abc/merged\n\
+                  overlay 102400 75000 27000 73% /var/lib/docker/overlay2/def/merged\n\
+                  __CATIO_INODES__\n";
+
+        let disks = parse_disks(df);
+        let mounts: Vec<&str> = disks.iter().map(|disk| disk.mount.as_str()).collect();
+
+        assert_eq!(mounts, vec!["/", "/var/lib/docker"]);
+    }
+
+    #[test]
+    fn disks_keep_overlay_when_it_is_the_root_filesystem() {
+        let df = "Filesystem Type 1024-blocks Used Available Capacity Mounted on\n\
+                  overlay overlay 102400 75000 27000 73% /\n\
+                  __CATIO_INODES__\n";
+
+        let disks = parse_disks(df);
+
+        assert_eq!(disks.len(), 1);
+        assert_eq!(disks[0].mount, "/");
+        assert_eq!(disks[0].fs_type, "overlay");
     }
 
     #[test]
