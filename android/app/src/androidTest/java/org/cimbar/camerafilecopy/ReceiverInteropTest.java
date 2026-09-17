@@ -122,6 +122,21 @@ public class ReceiverInteropTest {
         assertRoundTrip(68,false,"Catio-互通验证-🐈 (1).bin");
         assertEquals(2,directory.listFiles().length);
     }
+    @Test public void resetDuringPartialReceptionClearsWorkersAndAllowsAFreshTransfer() throws Exception {
+        ScanSnapshot partial=submit(0,68);
+        assertTrue(partial.streams>0); assertEquals(0,partial.completed);
+        Bitmap bitmap;
+        try(InputStream in=fixtureContext.getAssets().open("interop/frame-00.png")) { bitmap=BitmapFactory.decodeStream(in); }
+        Mat frame=new Mat(); Utils.bitmapToMat(bitmap,frame); bitmap.recycle();
+        try { for(int n=0;n<40;n++) NativeReceiver.submit(frame.getNativeObjAddr(),directory.getAbsolutePath(),68); }
+        finally { frame.release(); }
+        NativeReceiver.reset(); NativeReceiver.reset();
+        SystemClock.sleep(200);
+        ScanSnapshot cleared=new ScanSnapshot(NativeReceiver.snapshot());
+        assertEquals(0,cleared.uniqueBytes); assertEquals(0,cleared.streams); assertEquals(0,cleared.completed);
+        assertEquals(0,NativeReceiver.pollFile().length); assertEquals(0,directory.listFiles().length);
+        assertRoundTrip(0,false);
+    }
     @Test public void perspectiveFramesRecoverTheExactFile() throws Exception { perspective=true; assertRoundTrip(0,false); }
     @Test public void automaticModeFindsCatioAndPreservesUnicodeName() throws Exception { assertRoundTrip(0,false); }
 }

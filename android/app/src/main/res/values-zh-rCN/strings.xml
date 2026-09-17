@@ -41,9 +41,10 @@
     <string name="mode_auto_detected">自动 · %1$s</string>
     <string name="mode_label">编码模式</string>
     <string name="mode_help">建议使用自动识别。仅在发送端明确指定时选择固定模式。切换模式会重新开始未完成的接收。</string>
-    <string name="reset_title">重新开始接收？</string>
-    <string name="reset_body">未完成的接收进度将清空，已接收的文件会继续保留。</string>
-    <string name="reset">重新接收</string>
+    <string name="reset_title">重置接收？</string>
+    <string name="reset_body">清空当前接收进度并继续接收，已保存的文件会保留。同名文件自动加上括号和序号。</string>
+    <string name="reset">重置接收</string>
+    <string name="reset_done">已重置，可接收新文件或再次接收相同文件</string>
     <string name="cancel">取消</string>
     <string name="done">完成</string>
     <string name="guide_search">请对准另一块屏幕上正在播放的动态码。</string>

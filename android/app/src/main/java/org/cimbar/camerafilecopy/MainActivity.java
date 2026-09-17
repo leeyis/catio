@@ -52,7 +52,7 @@ public class MainActivity extends ComponentActivity implements CameraBridgeViewB
     private FrameLayout preview;
     private TextView statusText, hintText, speedText, qualityText, progressText, etaText, latestText;
     private ProgressBar progress;
-    private Button pauseButton, permissionButton;
+    private Button pauseButton, resetButton, permissionButton;
     private LinearLayout navigation;
     private SeekBar zoomControl;
     private TextView zoomLabel;
@@ -161,8 +161,12 @@ public class MainActivity extends ComponentActivity implements CameraBridgeViewB
         etaText=text(this,getString(R.string.estimate_wait),11,R.color.text_secondary,false); etaText.setPadding(0,dp(this,5),0,dp(this,10)); dashboard.addView(etaText);
         LinearLayout controls=row(this); pauseButton=button(this,getString(paused?R.string.resume:R.string.pause),true); pauseButton.setId(R.id.pause_receive);
         pauseButton.setOnClickListener(v->{ paused=!paused; stats.clear(); pauseButton.setText(paused?R.string.resume:R.string.pause); }); controls.addView(pauseButton,weight());
+        resetButton=button(this,getString(R.string.reset),false); resetButton.setId(R.id.reset_receive);
+        resetButton.setContentDescription(getString(R.string.reset)+"。"+getString(R.string.reset_body));
+        resetButton.setOnClickListener(v->resetReception());
+        LinearLayout.LayoutParams resetParams=weight(); resetParams.leftMargin=dp(this,10); controls.addView(resetButton,resetParams);
         dashboard.addView(controls);
-        latestText=text(this,"",12,R.color.success,true); latestText.setPadding(0,dp(this,10),0,0); latestText.setVisibility(View.GONE); latestText.setMaxLines(2); latestText.setOnClickListener(v->showFiles(true)); dashboard.addView(latestText);
+        latestText=text(this,"",12,R.color.success,true); latestText.setId(R.id.latest_received); latestText.setPadding(0,dp(this,10),0,0); latestText.setVisibility(View.GONE); latestText.setMaxLines(2); latestText.setOnClickListener(v->showFiles(true)); dashboard.addView(latestText);
         library=column(this); library.setId(R.id.received_files); library.setPadding(dp(this,20),0,dp(this,20),0); root.addView(library,new LinearLayout.LayoutParams(-1,0,1));
         navigation=navigation(this,filesVisible?2:0,this::selectTab); root.addView(navigation);
         setContentView(root); applySystemBars(this,root); ViewCompat.requestApplyInsets(root);
@@ -172,6 +176,7 @@ public class MainActivity extends ComponentActivity implements CameraBridgeViewB
     private void updatePermissionUi() {
         boolean allowed=hasCameraPermission();
         pauseButton.setEnabled(initialized && allowed);
+        resetButton.setEnabled(initialized);
         if(initialized && allowed && cameraReady) { permissionCard.setVisibility(View.GONE); permissionUiState=-1; return; }
         permissionCard.setVisibility(View.VISIBLE);
         int title=!initialized?R.string.camera_error:!allowed?R.string.permission_title:cameraStartedAt>0&&SystemClock.elapsedRealtime()-cameraStartedAt>5000?R.string.camera_error:R.string.camera_starting;
@@ -281,10 +286,24 @@ public class MainActivity extends ComponentActivity implements CameraBridgeViewB
         new AlertDialog.Builder(this).setTitle(R.string.options).setItems(new String[]{getString(R.string.mode_label),getString(R.string.reset),getString(R.string.about)},(d,which)->{
             if(which==0) showModeDialog();
             else if(which==1) new AlertDialog.Builder(this).setTitle(R.string.reset_title).setMessage(R.string.reset_body).setNegativeButton(R.string.cancel,null).setPositiveButton(R.string.reset,(a,b)->{
-                if(!initialized) return; camera.disableView(); NativeReceiver.reset(); stats.clear(); snapshot=new ScanSnapshot(null); lastErrorCount=0; startCamera();
+                resetReception();
             }).show();
             else new AlertDialog.Builder(this).setTitle(R.string.about_title).setMessage(getString(R.string.help_body)+"\n\nCatio Receiver "+BuildConfig.VERSION_NAME+" · CameraFileCopy / libcimbar 0.6.8").setPositiveButton(R.string.done,null).setNeutralButton(R.string.licenses,(a,b)->showLicenses()).show();
         }).show();
+    }
+    private void resetReception() {
+        if(!initialized) return;
+        // Stop camera submissions and join native workers before discarding the session.
+        // Keep saved files, but forget completed streams so they can be received again.
+        paused=true;
+        float zoom=camera.getZoomRatio();
+        camera.disableView(); cameraReady=false; NativeReceiver.reset();
+        stats.clear(); snapshot=new ScanSnapshot(null); lastErrorCount=0;
+        shownHint=pendingHint=ScanGuidance.Hint.SEARCH; hintSince=SystemClock.elapsedRealtime();
+        latestName=null; latestText.setText(""); latestText.setVisibility(View.GONE);
+        paused=false; pauseButton.setText(R.string.pause); renderStats();
+        startCamera(); camera.setZoomRatio(zoom); syncZoom(); updatePermissionUi();
+        Toast.makeText(this,R.string.reset_done,Toast.LENGTH_SHORT).show();
     }
     private void showLicenses() {
         try(InputStream in=getAssets().open("catio_notices.txt")) {

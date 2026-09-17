@@ -41,9 +41,10 @@
     <string name="mode_auto_detected">Auto · %1$s</string>
     <string name="mode_label">Code mode</string>
     <string name="mode_help">Automatic works with Catio. Choose a fixed mode only when the sender uses it. Changing mode restarts unfinished transfers.</string>
-    <string name="reset_title">Restart reception?</string>
-    <string name="reset_body">Unfinished progress will be cleared. Received files will stay in Files.</string>
-    <string name="reset">Restart reception</string>
+    <string name="reset_title">Reset reception?</string>
+    <string name="reset_body">Clear current progress and resume receiving. Saved files are kept. Duplicate names receive a numbered suffix in parentheses.</string>
+    <string name="reset">Reset</string>
+    <string name="reset_done">Ready to receive a new file or the same file again</string>
     <string name="cancel">Cancel</string>
     <string name="done">Done</string>
     <string name="guide_search">Point the camera at the animated code on the other screen.</string>

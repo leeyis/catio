@@ -22,6 +22,13 @@ int main() {
     };
     assert(save("Catio-奶油猫-🐈.txt", "hello") == "Catio-奶油猫-🐈.txt");
     assert(save("Catio-奶油猫-🐈.txt", "second") == "Catio-奶油猫-🐈 (1).txt");
+    assert(save("Catio-奶油猫-🐈.txt", "hello") == "Catio-奶油猫-🐈 (2).txt");
+    assert(read(fs::path(dir) / "Catio-奶油猫-🐈.txt") == "hello");
+    assert(read(fs::path(dir) / "Catio-奶油猫-🐈 (1).txt") == "second");
+    assert(save("README", "first") == "README");
+    assert(save("README", "second") == "README (1)");
+    assert(save("README", "second") == "README (2)");
+    assert(save("next-file.txt", "a different file") == "next-file.txt");
     assert(save("../../escape.txt", "inside") == "escape.txt");
     assert(save("..\\..\\escape.txt", "inside") == "escape (1).txt");
     assert(save(".hidden", "visible") == "_.hidden");
