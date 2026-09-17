@@ -1160,6 +1160,13 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
         //    hub 以 `tunnel://{id}` 广播给订阅者。owner 隔离:tunnel_open 记录 owner、
         //    tunnel_list 按 owner 过滤、tunnel_close 校验 owner。tunnel_open 的 sessionId 已被
         //    顶部 owner 门控覆盖。 ──
+        "tunnel_defaults" => {
+            let session_id = require(&args, "sessionId")?.to_string();
+            let defaults = crate::ssh::tunnel::tunnel_defaults_core(session_id, &st.ssh)
+                .await
+                .map_err(estr)?;
+            serde_json::to_value(defaults).map_err(estr)
+        }
         "tunnel_open" => {
             let session_id = require(&args, "sessionId")?.to_string();
             let spec: crate::ssh::tunnel::TunnelSpec = from_arg(&args, "spec")?;

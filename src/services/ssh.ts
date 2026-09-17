@@ -403,9 +403,19 @@ export async function getTunnels(sessionId?: string): Promise<Tunnel[]> {
   return []
 }
 
+export interface TunnelDefaults {
+  remoteHost: string
+  localPort: number
+}
+
+/** Suggested values for a new local forward: a server-side private IPv4 and a free local port. */
+export async function getTunnelDefaults(sessionId: string): Promise<TunnelDefaults> {
+  return rpc<TunnelDefaults>('tunnel_defaults', { sessionId })
+}
+
 /**
- * Opens a tunnel. Local forwarding accepts either port-only bind/target values
- * or legacy host:port values; Remote keeps host:port values and Dynamic ignores target.
+ * Opens a tunnel. Local forwarding accepts a port-only bind and an explicit target host:port;
+ * legacy port-only targets safely fall back to the remote loopback address.
  */
 export async function tunnelOpen(
   sessionId: string,

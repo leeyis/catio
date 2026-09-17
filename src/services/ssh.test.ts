@@ -103,6 +103,17 @@ describe('services/ssh — tunnels route over HTTP in server mode', () => {
     })
   })
 
+  it('getTunnelDefaults obtains the private-host and free-port defaults through HTTP', async () => {
+    fetchMock.mockResolvedValue(okJson({ remoteHost: '10.0.4.2', localPort: 49152 }))
+    const { getTunnelDefaults } = await import('./ssh')
+    const defaults = await getTunnelDefaults('sess-1')
+
+    expect(defaults).toEqual({ remoteHost: '10.0.4.2', localPort: 49152 })
+    expect(invokeMock).not.toHaveBeenCalled()
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body)
+    expect(body).toEqual({ cmd: 'tunnel_defaults', args: { sessionId: 'sess-1' } })
+  })
+
   it('getTunnels lists tunnel_list and maps the wire shape', async () => {
     fetchMock.mockResolvedValue(okJson([
       { id: 'tun-1', kind: 'L', bind: '127.0.0.1:8080', target: '10.0.4.2:5432', bytesUp: 1024, bytesDown: 0, status: 'up' },

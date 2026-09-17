@@ -31,7 +31,7 @@
 //!   * R：本地目标→channel（→远端）记 up；channel（远端→）→本地目标 记 down。
 
 use std::io;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -40,7 +40,7 @@ use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio::task::AbortHandle;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::events::EventSink;
 use crate::ssh::ids::IdGen;
@@ -57,8 +57,86 @@ pub struct TunnelSpec {
     pub kind: char,
     /// 绑定地址；L 转发也接受单独端口，由后端绑定到 127.0.0.1。
     pub bind: String,
-    /// L/R 的目标；L 转发也接受单独端口，由后端补上当前 SSH 主机地址，D 忽略此字段。
+    /// L/R 的目标；L 转发也接受单独端口，由后端安全回退到远端回环地址，D 忽略此字段。
     pub target: Option<String>,
+}
+
+/// 新建本地转发时的建议默认值。最终提交仍由用户在前端确认或修改。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TunnelDefaults {
+    /// SSH 服务器默认路由对应的私网 IPv4；无法识别时使用远端回环地址。
+    pub remote_host: String,
+    /// 本机当前可绑定的随机端口。它只是表单默认值，建立隧道时仍会再次校验。
+    pub local_port: u16,
+}
+
+const CMD_REMOTE_IPV4_CANDIDATES: &str = concat!(
+    "ip -o -4 route get 1.1.1.1 2>/dev/null; ",
+    "ip -o -4 addr show scope global 2>/dev/null; ",
+    "hostname -I 2>/dev/null"
+);
+
+fn parse_ipv4_token(token: &str) -> Option<Ipv4Addr> {
+    token
+        .trim_matches(|ch: char| !ch.is_ascii_digit() && ch != '.' && ch != '/')
+        .split('/')
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// 优先选择默认路由的 `src` 地址，其次选择接口/hostname 输出中的首个私网 IPv4。
+/// 不接受公网地址，避免再次把 SSH 登录公网地址误用作远端服务目标。
+fn pick_private_ipv4(output: &str) -> Option<Ipv4Addr> {
+    for line in output.lines() {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        for pair in fields.windows(2) {
+            if pair[0] == "src" {
+                if let Some(ip) = parse_ipv4_token(pair[1]).filter(Ipv4Addr::is_private) {
+                    return Some(ip);
+                }
+            }
+        }
+    }
+
+    for line in output.lines() {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        for pair in fields.windows(2) {
+            if pair[0] == "inet" {
+                if let Some(ip) = parse_ipv4_token(pair[1]).filter(Ipv4Addr::is_private) {
+                    return Some(ip);
+                }
+            }
+        }
+    }
+
+    // `hostname -I` produces an address-only line. Restrict this fallback to such lines so a
+    // private default-route gateway is never mistaken for the server's own address.
+    for line in output.lines() {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        let addresses: Vec<_> = fields
+            .iter()
+            .filter_map(|field| parse_ipv4_token(field))
+            .collect();
+        if !fields.is_empty() && addresses.len() == fields.len() {
+            if let Some(ip) = addresses.into_iter().find(Ipv4Addr::is_private) {
+                return Some(ip);
+            }
+        }
+    }
+
+    None
+}
+
+async fn available_local_port() -> Result<u16, SshError> {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .map_err(|e| SshError::Tunnel(format!("select local port: {e}")))?;
+    listener
+        .local_addr()
+        .map(|addr| addr.port())
+        .map_err(|e| SshError::Tunnel(format!("read selected local port: {e}")))
 }
 
 /// 一条隧道的核心句柄：id、实际绑定地址、字节计数、accept 循环中止句柄。
@@ -81,12 +159,9 @@ fn parse_target(target: &str) -> Result<(String, u16), SshError> {
     Ok((host.to_string(), port))
 }
 
-/// L 转发的便捷输入允许前端只传两个端口；已有 host:port 配置保持兼容。
-fn normalize_local_spec(
-    session_host: &str,
-    bind: &str,
-    target: &str,
-) -> Result<(String, String), SshError> {
+/// L 转发的便捷输入允许旧配置只传两个端口；已有 host:port 配置保持兼容。
+/// 旧的端口-only 目标回退到远端 127.0.0.1，绝不再借用 SSH 登录地址（可能是公网 IP）。
+fn normalize_local_spec(bind: &str, target: &str) -> Result<(String, String), SshError> {
     let bind = bind.trim();
     let target = target.trim();
 
@@ -110,7 +185,7 @@ fn normalize_local_spec(
                 "remote service port must be between 1 and 65535".into(),
             ));
         }
-        format!("{session_host}:{port}")
+        format!("127.0.0.1:{port}")
     };
 
     Ok((bind, target))
@@ -539,6 +614,39 @@ fn spawn_byte_emitter(
     emitter.abort_handle()
 }
 
+/// 读取新建本地转发的建议默认值（Tauri 命令薄封装）。
+#[tauri::command]
+pub async fn tunnel_defaults(
+    session_id: String,
+    mgr: tauri::State<'_, SessionManager>,
+) -> Result<TunnelDefaults, SshError> {
+    tunnel_defaults_core(session_id, &mgr).await
+}
+
+/// 通过现有 SSH 会话获取服务器私网 IPv4，并由本机 OS 选择一个当前空闲端口。
+pub async fn tunnel_defaults_core(
+    session_id: String,
+    mgr: &SessionManager,
+) -> Result<TunnelDefaults, SshError> {
+    let session = mgr
+        .get(&session_id)
+        .await
+        .ok_or_else(|| SshError::NotFound(session_id))?;
+
+    let candidates = crate::ssh::exec::run_on_session(&session, CMD_REMOTE_IPV4_CANDIDATES, None)
+        .await
+        .unwrap_or_default();
+    let remote_host = pick_private_ipv4(&candidates)
+        .unwrap_or(Ipv4Addr::LOCALHOST)
+        .to_string();
+    let local_port = available_local_port().await?;
+
+    Ok(TunnelDefaults {
+        remote_host,
+        local_port,
+    })
+}
+
 /// 打开一条隧道（Tauri 命令薄封装）。L → 本地转发；R → 远程/反向转发；D → 动态 SOCKS5。
 ///
 /// 实际逻辑在 transport-agnostic 的 [`tunnel_open_core`] 中，桌面端用 `TauriSink`、
@@ -576,8 +684,7 @@ pub async fn tunnel_open_core(
                     "L forward requires a remote service port or target host:port".into(),
                 )
             })?;
-            let session_host = { session.lock().await.host.clone() };
-            let (bind, target) = normalize_local_spec(&session_host, &spec.bind, &raw_target)?;
+            let (bind, target) = normalize_local_spec(&spec.bind, &raw_target)?;
 
             let fwd = open_local_forward(session, &bind, &target).await?;
             let id = fwd.id.clone();
@@ -689,34 +796,34 @@ pub async fn tunnel_list(
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_local_spec;
+    use super::{available_local_port, normalize_local_spec, pick_private_ipv4};
+    use std::net::Ipv4Addr;
 
     #[test]
-    fn local_port_only_spec_is_expanded_from_the_ssh_session() {
-        let (bind, target) = normalize_local_spec("198.51.100.10", "9999", "8000").unwrap();
+    fn local_port_only_spec_uses_remote_loopback_instead_of_the_ssh_login_host() {
+        let (bind, target) = normalize_local_spec("9999", "8000").unwrap();
         assert_eq!(bind, "127.0.0.1:9999");
-        assert_eq!(target, "198.51.100.10:8000");
+        assert_eq!(target, "127.0.0.1:8000");
     }
 
     #[test]
     fn local_full_addresses_remain_backward_compatible() {
-        let (bind, target) =
-            normalize_local_spec("ignored.example", "0.0.0.0:9999", "10.0.4.2:5432").unwrap();
+        let (bind, target) = normalize_local_spec("0.0.0.0:9999", "10.0.4.2:5432").unwrap();
         assert_eq!(bind, "0.0.0.0:9999");
         assert_eq!(target, "10.0.4.2:5432");
     }
 
     #[test]
     fn local_port_only_spec_rejects_remote_port_zero() {
-        let error = normalize_local_spec("server.example", "9999", "0").unwrap_err();
+        let error = normalize_local_spec("9999", "0").unwrap_err();
         assert!(error.to_string().contains("remote service port"));
     }
 
     #[test]
     fn local_port_only_spec_accepts_bind_zero_and_max_remote_port() {
-        let (bind, target) = normalize_local_spec("server.example", " 0 ", " 65535 ").unwrap();
+        let (bind, target) = normalize_local_spec(" 0 ", " 65535 ").unwrap();
         assert_eq!(bind, "127.0.0.1:0");
-        assert_eq!(target, "server.example:65535");
+        assert_eq!(target, "127.0.0.1:65535");
     }
 
     #[test]
@@ -728,15 +835,48 @@ mod tests {
             ("9999", "not-a-port"),
             ("9999", "65536"),
         ] {
-            assert!(normalize_local_spec("server.example", bind, target).is_err());
+            assert!(normalize_local_spec(bind, target).is_err());
         }
     }
 
     #[test]
     fn local_full_ipv6_addresses_remain_backward_compatible() {
-        let (bind, target) =
-            normalize_local_spec("ignored.example", "[::1]:9999", "2001:db8::2:8000").unwrap();
+        let (bind, target) = normalize_local_spec("[::1]:9999", "2001:db8::2:8000").unwrap();
         assert_eq!(bind, "[::1]:9999");
         assert_eq!(target, "2001:db8::2:8000");
+    }
+
+    #[test]
+    fn private_ipv4_prefers_the_default_route_source() {
+        let output = concat!(
+            "1.1.1.1 via 10.0.0.1 dev eth0 src 10.0.4.2 uid 1000\n",
+            "2: eth0 inet 10.0.4.2/24 brd 10.0.4.255 scope global eth0\n",
+            "3: docker0 inet 172.17.0.1/16 scope global docker0\n",
+        );
+        assert_eq!(pick_private_ipv4(output), Some(Ipv4Addr::new(10, 0, 4, 2)));
+    }
+
+    #[test]
+    fn private_ipv4_ignores_public_addresses_and_falls_back_to_a_private_interface() {
+        let output = concat!(
+            "1.1.1.1 via 10.0.0.1 dev eth0 src 203.0.113.8\n",
+            "2: eth0 inet 203.0.113.8/24 scope global eth0\n",
+            "3: ens5 inet 172.20.3.9/16 scope global ens5\n",
+        );
+        assert_eq!(
+            pick_private_ipv4(output),
+            Some(Ipv4Addr::new(172, 20, 3, 9))
+        );
+    }
+
+    #[test]
+    fn private_ipv4_does_not_return_a_public_login_address() {
+        assert_eq!(pick_private_ipv4("203.0.113.8 198.51.100.4"), None);
+    }
+
+    #[tokio::test]
+    async fn suggested_local_port_is_nonzero() {
+        let port = available_local_port().await.unwrap();
+        assert_ne!(port, 0);
     }
 }

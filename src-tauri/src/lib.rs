@@ -142,6 +142,7 @@ pub fn run() {
             vncconn::vnc_key,
             vncconn::vnc_close,
             rdp::rdp_launch,
+            ssh::tunnel::tunnel_defaults,
             ssh::tunnel::tunnel_open,
             ssh::tunnel::tunnel_close,
             ssh::tunnel::tunnel_list,

@@ -105,6 +105,32 @@ async fn tunnel_open_list_close_is_per_user_isolated() {
 
     let sid = ssh_connect(&admin, &base, &ssh).await;
 
+    // The defaults endpoint is session-scoped, returns a safe loopback fallback when the test SSH
+    // host has no discoverable private address, and still suggests a concrete available port.
+    let (st, defaults) = invoke(
+        &admin,
+        &base,
+        "tunnel_defaults",
+        json!({ "sessionId": sid.clone() }),
+    )
+    .await;
+    assert_eq!(st, 200, "tunnel_defaults should succeed: {defaults}");
+    assert_eq!(defaults["remoteHost"], "127.0.0.1");
+    let local_port = defaults["localPort"].as_u64().expect("localPort");
+    assert!((1..=65535).contains(&local_port));
+
+    let (st, _) = invoke(
+        &bob,
+        &base,
+        "tunnel_defaults",
+        json!({ "sessionId": sid.clone() }),
+    )
+    .await;
+    assert_eq!(
+        st, 400,
+        "another user must not read session-scoped defaults"
+    );
+
     // admin 开一条 L 转发(target 任意,测试 server 一律 echo)。
     let (st, body) = invoke(
         &admin,

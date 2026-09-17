@@ -7,7 +7,7 @@ import { useData } from '../../state/DataContext'
 import type { Tunnel } from '../../services/types'
 import { PanelShell } from './PanelShell'
 import { PanelEmpty } from './PanelEmpty'
-import { getTunnels, tunnelOpen, tunnelClose, listen } from '../../services/ssh'
+import { getTunnels, getTunnelDefaults, tunnelOpen, tunnelClose, listen } from '../../services/ssh'
 import { copyTextToClipboard } from '../../services/clipboard'
 import type { ConnectionProfile } from '../../state/connections'
 
@@ -34,12 +34,16 @@ interface NewForwardFormProps {
   onCancel: () => void
   onSaveProfile?: (kind: 'L' | 'R' | 'D', bind: string, target: string, name: string) => void | Promise<void>
   busy: boolean
+  defaultRemoteHost: string
+  defaultLocalPort: string
   /** Backend failure to surface inside the form (e.g. bind in use, no SSH session). */
   error?: string | null
 }
 
 const MAX_PORT = 65_535
 const COPY_FEEDBACK_DURATION_MS = 1_600
+const FALLBACK_REMOTE_HOST = '127.0.0.1'
+const FALLBACK_LOCAL_PORT = '0'
 
 function isValidPort(value: string, allowZero: boolean): boolean {
   if (!/^\d+$/.test(value.trim())) return false
@@ -47,28 +51,60 @@ function isValidPort(value: string, allowZero: boolean): boolean {
   return Number.isInteger(port) && port >= (allowZero ? 0 : 1) && port <= MAX_PORT
 }
 
-function NewForwardForm({ onSubmit, onCancel, onSaveProfile, busy, error }: NewForwardFormProps) {
+function formatTargetAddress(host: string, port: string): string {
+  const trimmedHost = host.trim()
+  if (trimmedHost.startsWith('[') && trimmedHost.endsWith(']')) return `${trimmedHost}:${port}`
+  return trimmedHost.includes(':') ? `[${trimmedHost}]:${port}` : `${trimmedHost}:${port}`
+}
+
+function NewForwardForm({
+  onSubmit,
+  onCancel,
+  onSaveProfile,
+  busy,
+  defaultRemoteHost,
+  defaultLocalPort,
+  error,
+}: NewForwardFormProps) {
   const { t } = useTranslation()
   const [kind, setKind] = useState<'L' | 'R' | 'D'>('L')
-  const [bind, setBind] = useState('')
+  const [bind, setBind] = useState(defaultLocalPort)
+  const [remoteHost, setRemoteHost] = useState(defaultRemoteHost)
   const [target, setTarget] = useState('')
   const [name, setName] = useState('')
+  const bindEditedRef = useRef(false)
+  const remoteHostEditedRef = useRef(false)
 
   const localMode = kind === 'L'
+  const submittedTarget = localMode
+    ? formatTargetAddress(remoteHost, target.trim())
+    : target.trim()
   const canSubmit = localMode
-    ? isValidPort(bind, true) && isValidPort(target, false)
+    ? isValidPort(bind, true) && remoteHost.trim().length > 0 && isValidPort(target, false)
     : bind.trim().length > 0 && (kind === 'D' || target.trim().length > 0)
+
+  useEffect(() => {
+    if (localMode && !bindEditedRef.current) setBind(defaultLocalPort)
+  }, [defaultLocalPort, localMode])
+
+  useEffect(() => {
+    if (localMode && !remoteHostEditedRef.current) setRemoteHost(defaultRemoteHost)
+  }, [defaultRemoteHost, localMode])
 
   const handleSubmit = (e?: React.FormEvent) => {
     e?.preventDefault()
     if (!canSubmit || busy) return
-    onSubmit(kind, bind.trim(), target.trim())
+    onSubmit(kind, bind.trim(), submittedTarget)
   }
 
   const handleKindChange = (value: string) => {
     if (busy) return
-    setKind(value as 'L' | 'R' | 'D')
-    setBind('')
+    const nextKind = value as 'L' | 'R' | 'D'
+    setKind(nextKind)
+    bindEditedRef.current = false
+    remoteHostEditedRef.current = false
+    setBind(nextKind === 'L' ? defaultLocalPort : '')
+    setRemoteHost(defaultRemoteHost)
     setTarget('')
   }
 
@@ -122,12 +158,33 @@ function NewForwardForm({ onSubmit, onCancel, onSaveProfile, busy, error }: NewF
           aria-label={bindLabel}
           placeholder={bindPlaceholder}
           value={bind}
-          onChange={e => setBind(e.target.value)}
+          onChange={e => {
+            if (localMode) bindEditedRef.current = true
+            setBind(e.target.value)
+          }}
           disabled={busy}
           autoFocus
         />
         <span style={hintStyle}>{localMode ? t('panels.fwdLocalPortHint') : t(`panels.fwdBindHint${kind}`)}</span>
       </div>
+      {localMode && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>{t('panels.fwdRemoteHost')}</span>
+          <input
+            style={inputStyle}
+            type="text"
+            aria-label={t('panels.fwdRemoteHost')}
+            placeholder="10.0.4.2"
+            value={remoteHost}
+            onChange={e => {
+              remoteHostEditedRef.current = true
+              setRemoteHost(e.target.value)
+            }}
+            disabled={busy}
+          />
+          <span style={hintStyle}>{t('panels.fwdRemoteHostHint')}</span>
+        </div>
+      )}
       {kind !== 'D' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
           <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>{targetLabel}</span>
@@ -160,7 +217,7 @@ function NewForwardForm({ onSubmit, onCancel, onSaveProfile, busy, error }: NewF
       <div className="row gap6" style={{ justifyContent: 'flex-end' }}>
         <Btn type="button" variant="ghost" size="sm" onClick={onCancel} disabled={busy}>{t('panels.cancel')}</Btn>
         {onSaveProfile && (
-          <Btn type="button" variant="ghost" size="sm" onClick={() => { if (canSubmit && !busy && name.trim()) void onSaveProfile(kind, bind.trim(), target.trim(), name.trim()) }} disabled={busy || !canSubmit || !name.trim()}>{t('panels.fwdSave')}</Btn>
+          <Btn type="button" variant="ghost" size="sm" onClick={() => { if (canSubmit && !busy && name.trim()) void onSaveProfile(kind, bind.trim(), submittedTarget, name.trim()) }} disabled={busy || !canSubmit || !name.trim()}>{t('panels.fwdSave')}</Btn>
         )}
         <Btn type="submit" variant="primary" size="sm" disabled={busy || !canSubmit}>{t('panels.fwdAdd')}</Btn>
       </div>
@@ -205,6 +262,10 @@ export function TunnelsPanel({ onClose, sessionId, activeConnId, profiles, onSav
   const [copyError, setCopyError] = useState<string | null>(null)
   const [copiedTunnelId, setCopiedTunnelId] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  const [forwardDefaults, setForwardDefaults] = useState({
+    remoteHost: FALLBACK_REMOTE_HOST,
+    localPort: FALLBACK_LOCAL_PORT,
+  })
   const overlayRef = useRef<HTMLDivElement>(null)
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const operationRef = useRef<symbol | null>(null)
@@ -231,6 +292,31 @@ export function TunnelsPanel({ onClose, sessionId, activeConnId, profiles, onSav
       load()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId])
+
+  // Preload form defaults for this SSH session. The remote host is discovered from the server's
+  // default route and the local port is selected by the local OS; stale responses are discarded.
+  useEffect(() => {
+    let disposed = false
+    setForwardDefaults({ remoteHost: FALLBACK_REMOTE_HOST, localPort: FALLBACK_LOCAL_PORT })
+    if (!sessionId) return () => { disposed = true }
+
+    void getTunnelDefaults(sessionId).then(defaults => {
+      if (disposed || sessionIdRef.current !== sessionId) return
+      const localPort = Number.isInteger(defaults.localPort)
+        && defaults.localPort > 0
+        && defaults.localPort <= MAX_PORT
+        ? String(defaults.localPort)
+        : FALLBACK_LOCAL_PORT
+      setForwardDefaults({
+        remoteHost: defaults.remoteHost.trim() || FALLBACK_REMOTE_HOST,
+        localPort,
+      })
+    }).catch(() => {
+      // 远端缺少 ip/hostname 命令或默认值探测失败时，保留回环地址 + 端口 0 的安全回退。
+    })
+
+    return () => { disposed = true }
   }, [sessionId])
 
   // Subscribe to per-tunnel live byte-count events
@@ -415,6 +501,8 @@ export function TunnelsPanel({ onClose, sessionId, activeConnId, profiles, onSav
             <NewForwardForm
               error={formError}
               busy={submitting}
+              defaultRemoteHost={forwardDefaults.remoteHost}
+              defaultLocalPort={forwardDefaults.localPort}
               onSubmit={handleCreate}
               onCancel={() => setShowForm(false)}
               onSaveProfile={onSaveProfile ? handleSaveProfile : undefined}

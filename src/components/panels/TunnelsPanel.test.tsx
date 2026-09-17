@@ -1,4 +1,4 @@
-import { render, screen, waitFor, fireEvent } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent, act } from '@testing-library/react'
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { LanguageProvider } from '../../state/LanguageContext'
 import { DataProvider } from '../../state/DataContext'
@@ -7,6 +7,7 @@ import type { ConnectionProfile } from '../../state/connections'
 // ---- ssh service mock ----
 const h = vi.hoisted(() => ({
   getTunnels: vi.fn(),
+  getTunnelDefaults: vi.fn(),
   tunnelClose: vi.fn(),
   tunnelOpen: vi.fn(),
   listen: vi.fn().mockResolvedValue(() => {}),
@@ -15,6 +16,7 @@ const h = vi.hoisted(() => ({
 
 vi.mock('../../services/ssh', () => ({
   getTunnels: h.getTunnels,
+  getTunnelDefaults: h.getTunnelDefaults,
   tunnelClose: h.tunnelClose,
   tunnelOpen: h.tunnelOpen,
   listen: h.listen,
@@ -88,6 +90,7 @@ function wrap(ui: React.ReactNode) {
 describe('TunnelsPanel (tunnel wiring)', () => {
   beforeEach(() => {
     h.getTunnels.mockResolvedValue(MOCK_TUNNELS)
+    h.getTunnelDefaults.mockResolvedValue({ remoteHost: '10.0.0.12', localPort: 49152 })
     h.tunnelClose.mockResolvedValue(undefined)
     h.tunnelOpen.mockResolvedValue('new-tun-id')
     h.listen.mockResolvedValue(() => {})
@@ -98,6 +101,7 @@ describe('TunnelsPanel (tunnel wiring)', () => {
   afterEach(() => {
     delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
     h.getTunnels.mockClear()
+    h.getTunnelDefaults.mockClear()
     h.tunnelClose.mockClear()
     h.tunnelOpen.mockClear()
     h.listen.mockClear()
@@ -120,7 +124,7 @@ describe('TunnelsPanel (tunnel wiring)', () => {
 
     // Open the new-forward overlay (the "+" action carries the localized "新建转发" title).
     fireEvent.click(screen.getByTitle('新建转发'))
-    // Local forwarding only asks for the two ports; the backend supplies both addresses.
+    // Local forwarding exposes the discovered remote host and both ports for explicit control.
     fireEvent.change(screen.getByLabelText('本地映射端口'), { target: { value: '8080' } })
     fireEvent.change(screen.getByLabelText('远程服务端口'), { target: { value: '5432' } })
     fireEvent.click(screen.getByText('添加'))
@@ -136,13 +140,36 @@ describe('TunnelsPanel (tunnel wiring)', () => {
 
     fireEvent.click(screen.getByTitle('新建转发'))
     expect(screen.queryByPlaceholderText('localhost:8080')).toBeNull()
+    await waitFor(() => expect(screen.getByPlaceholderText('10.0.4.2')).toHaveValue('10.0.0.12'))
+    expect(screen.getByLabelText('本地映射端口')).toHaveValue(49152)
     fireEvent.change(screen.getByLabelText('本地映射端口'), { target: { value: '9999' } })
+    fireEvent.change(screen.getByPlaceholderText('10.0.4.2'), { target: { value: '127.0.0.1' } })
     fireEvent.change(screen.getByLabelText('远程服务端口'), { target: { value: '8000' } })
     fireEvent.click(screen.getByText('添加'))
 
     await waitFor(() => expect(h.tunnelOpen).toHaveBeenCalled())
     expect(h.tunnelOpen).toHaveBeenCalledTimes(1)
-    expect(h.tunnelOpen).toHaveBeenCalledWith('sess-1', { kind: 'L', bind: '9999', target: '8000' })
+    expect(h.tunnelOpen).toHaveBeenCalledWith('sess-1', { kind: 'L', bind: '9999', target: '127.0.0.1:8000' })
+  })
+
+  it('does not overwrite host or port edits when async defaults arrive later', async () => {
+    let resolveDefaults: (value: { remoteHost: string; localPort: number }) => void = () => {}
+    h.getTunnelDefaults.mockReturnValue(new Promise(resolve => { resolveDefaults = resolve }))
+    wrap(<TunnelsPanel onClose={() => {}} sessionId="sess-1" />)
+    await waitFor(() => expect(screen.getByText('prod-orders')).toBeTruthy())
+
+    fireEvent.click(screen.getByTitle('新建转发'))
+    const localPort = screen.getByLabelText('本地映射端口')
+    const remoteHost = screen.getByPlaceholderText('10.0.4.2')
+    fireEvent.change(localPort, { target: { value: '62000' } })
+    fireEvent.change(remoteHost, { target: { value: 'localhost' } })
+
+    await act(async () => {
+      resolveDefaults({ remoteHost: '10.0.0.12', localPort: 49152 })
+      await Promise.resolve()
+    })
+    expect(localPort).toHaveValue(62000)
+    expect(remoteHost).toHaveValue('localhost')
   })
 
   it('blocks repeated submissions while tunnelOpen is pending and allows retry after failure', async () => {
@@ -249,7 +276,7 @@ describe('TunnelsPanel (tunnel wiring)', () => {
     fireEvent.click(screen.getByText('保存为连接'))
 
     expect(onSaveProfile).toHaveBeenCalledTimes(1)
-    expect(onSaveProfile).toHaveBeenCalledWith('L', '9999', '8000', 'API')
+    expect(onSaveProfile).toHaveBeenCalledWith('L', '9999', '10.0.0.12:8000', 'API')
     expect(h.tunnelOpen).not.toHaveBeenCalled()
     expect(await screen.findByRole('status')).toHaveTextContent('API')
   })
@@ -290,7 +317,8 @@ describe('TunnelsPanel (tunnel wiring)', () => {
     await waitFor(() => expect(screen.queryByLabelText('本地映射端口')).toBeNull())
 
     fireEvent.click(screen.getByTitle('新建转发'))
-    expect(screen.getByLabelText('本地映射端口')).toHaveValue(null)
+    await waitFor(() => expect(screen.getByLabelText('本地映射端口')).toHaveValue(49152))
+    expect(screen.getByPlaceholderText('10.0.4.2')).toHaveValue('10.0.0.12')
     expect(screen.getByLabelText('远程服务端口')).toHaveValue(null)
     fireEvent.change(screen.getByLabelText('本地映射端口'), { target: { value: '7777' } })
     fireEvent.change(screen.getByLabelText('远程服务端口'), { target: { value: '9000' } })
@@ -299,7 +327,7 @@ describe('TunnelsPanel (tunnel wiring)', () => {
     await waitFor(() => expect(h.tunnelOpen).toHaveBeenCalledWith('sess-b', {
       kind: 'L',
       bind: '7777',
-      target: '9000',
+      target: '10.0.0.12:9000',
     }))
   })
 
@@ -401,6 +429,7 @@ describe('TunnelsPanel (tunnel wiring)', () => {
 describe('TunnelsPanel — jump chain', () => {
   beforeEach(() => {
     h.getTunnels.mockResolvedValue([])
+    h.getTunnelDefaults.mockResolvedValue({ remoteHost: '10.0.0.12', localPort: 49152 })
     h.listen.mockResolvedValue(() => {})
     ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
   })
@@ -408,6 +437,7 @@ describe('TunnelsPanel — jump chain', () => {
   afterEach(() => {
     delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
     h.getTunnels.mockClear()
+    h.getTunnelDefaults.mockClear()
     h.listen.mockClear()
   })
 
