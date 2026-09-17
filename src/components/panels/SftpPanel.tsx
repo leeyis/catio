@@ -9,6 +9,9 @@ import { sftpList, sftpRealpath, sftpMkdir, sftpTouch, sftpRename, sftpDelete, s
 import { useTransfers, startUpload, startDownload, startWebUpload, cancelTransfer, onTransferDone } from '../../state/transfers'
 import { getSftpNav, setSftpNav } from '../../state/sftpNav'
 import { FAVORITES_STORAGE_KEYS, loadFavorites, toggleFavorite, COMMON_DIRS } from '../../state/sftpFavorites'
+import { useOpticalToken } from '../../state/optical'
+import { canOpticalTransfer } from '../../services/optical'
+import { OpticalTransferModal } from '../modals/OpticalTransferModal'
 
 function isTauriEnv(): boolean {
   return (
@@ -79,6 +82,9 @@ export interface SftpPanelProps {
 export function SftpPanel({ onClose, conn, sessionId, onSessionClosed, onEditFile }: SftpPanelProps) {
   const { t } = useTranslation()
   const favoriteScope = conn?.id ?? null
+  const opticalToken = useOpticalToken()
+  const [opticalItem, setOpticalItem] = useState<{ item: SftpItem; sessionId: string } | null>(null)
+  useEffect(() => { setOpticalItem(null) }, [sessionId, opticalToken])
 
   // Seed from the per-session cache so reopening the panel restores the directory
   // the user was browsing (and its listing) instead of flashing back to home.
@@ -576,6 +582,8 @@ export function SftpPanel({ onClose, conn, sessionId, onSessionClosed, onEditFil
           )}
 
           {/* right-click context menu */}
+          {opticalItem && opticalToken && sessionId === opticalItem.sessionId && <OpticalTransferModal
+            item={opticalItem.item} sessionId={opticalItem.sessionId} onClose={() => setOpticalItem(null)} />}
           {ctxMenu && (
             <div
               onClick={e => e.stopPropagation()}
@@ -590,6 +598,11 @@ export function SftpPanel({ onClose, conn, sessionId, onSessionClosed, onEditFil
               )}
               {ctxMenu.item.type === 'file' && (
                 <CtxItem icon="download" label={t('panels.sftpDownload')} onClick={() => { const it = ctxMenu.item; setCtxMenu(null); downloadItem(it) }} />
+              )}
+              {opticalToken && sessionId && canOpticalTransfer(ctxMenu.item) && (
+                <CtxItem icon="wand" label={t('optical.title')} onClick={() => {
+                  setOpticalItem({ item: ctxMenu.item, sessionId }); setCtxMenu(null)
+                }} />
               )}
               <CtxItem icon="pencil" label={t('panels.sftpRename')} onClick={() => startRename(ctxMenu.item)} />
               <CtxItem icon="trash-2" label={t('panels.sftpDelete')} danger onClick={() => { const it = ctxMenu.item; setCtxMenu(null); setDeleteConfirm(it) }} />

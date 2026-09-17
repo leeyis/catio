@@ -58,6 +58,7 @@ static WEB_SSH_IDS: IdGen = IdGen::new("sess");
 
 #[derive(Clone)]
 pub struct AppState {
+    pub optical: crate::optical::OpticalState,
     // MULTI-USER extension point: one shared manager today. Swap for a session-keyed map.
     pub conns: Arc<ConnManager>,
     pub static_dir: Arc<PathBuf>,
@@ -146,6 +147,7 @@ impl AppState {
         let _ = std::fs::create_dir_all(&data_dir);
         let auth = AuthDb::open(&data_dir.join("catio.db"))?;
         Ok(AppState {
+            optical: crate::optical::OpticalState::new(data_dir.join("optical.hash")),
             conns: Arc::new(ConnManager::default()),
             static_dir: Arc::new(static_dir),
             data_dir: Arc::new(data_dir),
@@ -280,6 +282,14 @@ async fn invoke(State(st): State<AppState>, headers: HeaderMap, Json(req): Json<
         return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "未登录" }))).into_response();
     };
 
+    // Optical grants are bound to this authenticated login, never a caller-supplied user id.
+    if req.cmd.starts_with("optical_") {
+        let result = optical_invoke(&st, &user, token.as_deref().unwrap_or(""), &req.cmd, &req.args).await;
+        let mut response = json_or_err(result);
+        response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        return response;
+    }
+
     // User administration. Listing is allowed for any logged-in user; mutations are admin-only;
     // changing your OWN password is self-service (any role).
     match req.cmd.as_str() {
@@ -334,7 +344,7 @@ fn resolve_session(st: &AppState, token: &str) -> Option<User> {
     let mut map = st.sessions.lock().unwrap();
     match map.get(token) {
         Some(s) if s.expires_at > Instant::now() => Some(s.user.clone()),
-        Some(_) => { map.remove(token); None }
+        Some(_) => { map.remove(token); st.optical.lock_scope(token); None }
         None => None,
     }
 }
@@ -345,7 +355,9 @@ fn create_session(st: &AppState, user: User) -> String {
     let token = new_session_token();
     let now = Instant::now();
     let mut map = st.sessions.lock().unwrap();
-    map.retain(|_, s| s.expires_at > now);
+    map.retain(|scope, s| {
+        if s.expires_at > now { true } else { st.optical.lock_scope(scope); false }
+    });
     map.insert(token.clone(), Session { user, expires_at: now + SESSION_TTL });
     token
 }
@@ -353,7 +365,9 @@ fn create_session(st: &AppState, user: User) -> String {
 /// Invalidate every session belonging to `user_id` — used when a user is deleted so their live
 /// cookie stops working immediately (the session cached a clone of the user, incl. is_admin).
 fn purge_user_sessions(st: &AppState, user_id: i64) {
-    st.sessions.lock().unwrap().retain(|_, s| s.user.id != user_id);
+    st.sessions.lock().unwrap().retain(|scope, s| {
+        if s.user.id != user_id { true } else { st.optical.lock_scope(scope); false }
+    });
 }
 
 /// Build the session cookie. `Secure` is added when CATIO_COOKIE_SECURE is truthy — set it when a
@@ -414,6 +428,7 @@ async fn auth_register(st: &AppState, args: &Value) -> Response {
 
 fn auth_logout(st: &AppState, token: Option<String>) -> Response {
     if let Some(t) = token {
+        st.optical.lock_scope(&t);
         st.sessions.lock().unwrap().remove(&t);
     }
     let mut resp = Json(json!({ "ok": true })).into_response();
@@ -421,6 +436,36 @@ fn auth_logout(st: &AppState, token: Option<String>) -> Response {
         resp.headers_mut().insert(header::SET_COOKIE, v);
     }
     resp
+}
+
+async fn optical_invoke(st: &AppState, actor: &User, scope: &str, cmd: &str, args: &Value) -> Result<Value, String> {
+    match cmd {
+        "optical_status" => serde_json::to_value(st.optical.status(actor.is_admin)?).map_err(estr),
+        "optical_unlock" => {
+            let passphrase = require(args, "passphrase")?.to_owned();
+            let setup = args.get("setup").and_then(Value::as_bool).unwrap_or(false);
+            let grant = st.optical.unlock(scope.to_owned(), passphrase, setup, actor.is_admin).await?;
+            if resolve_session(st, scope).is_none() {
+                st.optical.lock(scope, &grant);
+                return Err("optical.locked".into());
+            }
+            Ok(Value::String(grant))
+        }
+        "optical_lock" => { st.optical.lock(scope, require(args, "token")?); Ok(Value::Null) }
+        "optical_check" => Ok(Value::Bool(st.optical.valid(scope, require(args, "token")?))),
+        "optical_cancel" => {
+            st.optical.cancel(scope, require(args, "token")?, require(args, "requestId")?); Ok(Value::Null)
+        }
+        "optical_read" => {
+            let session_id = require(args, "sessionId")?;
+            if !owns_resource(&st.ssh_owners, session_id, actor) { return Err("optical.readFailed".into()); }
+            let file = st.optical.read(&st.ssh, scope, require(args, "token")?, require(args, "requestId")?, session_id, require(args, "path")?).await?;
+            // The user may have logged out while the file was being read.
+            if resolve_session(st, scope).is_none() { return Err("optical.locked".into()); }
+            serde_json::to_value(file).map_err(estr)
+        }
+        _ => Err("optical.invalidRequest".into()),
+    }
 }
 
 /// First-run: atomically create the initial admin when no users exist, then auto-login.

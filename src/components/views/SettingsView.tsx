@@ -32,6 +32,7 @@ import { isServer } from '../../services/transport'
 import { copyTextToClipboard } from '../../services/clipboard'
 import { diagnosticLogDir } from '../../services/diagnostics'
 import { parseAnsi } from './ansiSpans'
+import { ExperimentalSettings } from './ExperimentalSettings'
 
 // ---- Prop types ----
 
@@ -118,6 +119,7 @@ const SETTINGS_NAV: NavItem[] = [
   { id: 'ai', icon: 'wand', labelKey: 'settings.navAi' },
   { id: 'connections', icon: 'plug', labelKey: 'settings.navConnections' },
   { id: 'mcp', icon: 'command', labelKey: 'settings.navMcp' },
+  { id: 'experimental', icon: 'wand', labelKey: 'optical.experimental' },
   { id: 'about', icon: 'info', labelKey: 'settings.navAbout' },
 ]
 
@@ -1674,6 +1676,7 @@ export function SettingsView({ theme, onTheme, onClose, authEnabled, users, curr
           {nav === 'ai' && <AISettings />}
           {nav === 'connections' && <><ConnDefaults onImportSshConfig={onImportSshConfig} /><ConfigSyncBlock /></>}
           {nav === 'mcp' && <MCPSettings />}
+          {nav === 'experimental' && <ExperimentalSettings />}
           {nav === 'about' && <AboutSettings />}
         </div>
       </div>

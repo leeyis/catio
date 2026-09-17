@@ -14,6 +14,7 @@ import { hydrateUserStores, clearUserStores, clearEphemeralServerState, USER_STO
 
 import { Icon } from '../Icon'
 import { BrandMark } from '../BrandMark'
+import { lockOptical } from '../../state/optical'
 
 // NOTE: server-mode connection secrets live on the SERVER (services/secrets.ts, encrypted with
 // CATIO_MASTER_KEY) — NOT in the browser WebCrypto vault, which is unavailable over plain-HTTP LAN
@@ -49,6 +50,7 @@ function ServerAuthGateImpl({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<ServerUser | null>(null)
 
   const refresh = async () => {
+    void lockOptical()
     try {
       const s = await authMe()
       if (s.user) {
@@ -72,6 +74,7 @@ function ServerAuthGateImpl({ children }: { children: React.ReactNode }) {
   useEffect(() => { void refresh() }, [])
 
   const logout = async () => {
+    void lockOptical()
     try { await authLogout() } finally {
       clearUserStores() // drop the previous user's data so the next login starts clean
       clearEphemeralServerState() // + open-tabs / recent-sessions

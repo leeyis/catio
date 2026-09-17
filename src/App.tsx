@@ -25,6 +25,7 @@ import { ConfirmModal } from './components/modals/ConfirmModal'
 import { AlertModal } from './components/modals/AlertModal'
 import { ConnectingOverlay } from './components/modals/ConnectingOverlay'
 import { AuthGate } from './components/auth/AuthGate'
+import { lockOptical } from './state/optical'
 import { Icon } from './components/Icon'
 import { Btn } from './components/atoms'
 import { useTweaks, TWEAK_DEFAULTS } from './state/useTweaks'
@@ -396,18 +397,21 @@ export default function App() {
   const currentName = authEnabled && sessionUser && sessionUser !== '__open' ? sessionUser : 'skyler'
 
   function enableAuth() {
+    void lockOptical()
     localStorage.setItem('catio-auth', '1')
     setAuthEnabled(true)
     setSessionUser(null)
     sessionStorage.removeItem('catio-session')
   }
   function disableAuth() {
+    void lockOptical()
     lockVault()
     localStorage.removeItem('catio-auth')
     setAuthEnabled(false)
     setSessionUser('__open')
   }
   function lockApp() {
+    void lockOptical()
     lockVault()
     setSessionUser(null)
     sessionStorage.removeItem('catio-session')

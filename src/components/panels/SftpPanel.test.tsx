@@ -1,4 +1,4 @@
-import { render, screen, waitFor, fireEvent } from '@testing-library/react'
+import { act, render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { LanguageProvider } from '../../state/LanguageContext'
 import { DataProvider } from '../../state/DataContext'
@@ -52,6 +52,7 @@ vi.mock('@tauri-apps/api/webview', () => ({
 
 import { SftpPanel } from './SftpPanel'
 import { clearSftpNav } from '../../state/sftpNav'
+import { setOpticalToken } from '../../state/optical'
 
 const mk = (o: Partial<SftpItem> & { name: string; path: string; type: SftpItem['type'] }): SftpItem => ({
   size: 0, modified: 1717801234, permissions: '-rw-r--r--', owner: 'root', group: 'root', ...o,
@@ -109,6 +110,7 @@ describe('SftpPanel (SFTP wiring)', () => {
   })
 
   afterEach(() => {
+    act(() => setOpticalToken(null))
     delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
     localStorage.clear()
     clearSftpNav()
@@ -123,6 +125,27 @@ describe('SftpPanel (SFTP wiring)', () => {
     })
     expect(h.sftpRealpath).toHaveBeenCalledWith('sess-1', '.')
     expect(h.sftpList).toHaveBeenCalledWith('sess-1', '/srv')
+  })
+
+  it('hides the optical action until unlocked, including oversize files and directories', async () => {
+    const { rerender } = wrap(<SftpPanel onClose={() => {}} sessionId="sess-1" />)
+    await screen.findByText('a.txt')
+    fireEvent.contextMenu(screen.getByText('a.txt'))
+    expect(screen.queryByText('隔空取物')).toBeNull()
+    act(() => setOpticalToken('test-grant'))
+    rerender(<LanguageProvider><DataProvider><SftpPanel onClose={() => {}} sessionId="sess-1" /></DataProvider></LanguageProvider>)
+    fireEvent.contextMenu(screen.getByText('a.txt'))
+    expect(screen.getByText('隔空取物')).toBeInTheDocument()
+    fireEvent.contextMenu(screen.getByText('logs'))
+    expect(screen.queryByText('隔空取物')).toBeNull()
+  })
+
+  it.each([5 * 1024 * 1024, 5 * 1024 * 1024 + 1])('enforces the optical menu boundary for %i bytes', async size => {
+    setOpticalToken('test-grant')
+    h.sftpList.mockResolvedValue([mk({ name: 'boundary.bin', path: '/srv/boundary.bin', type: 'file', size })])
+    wrap(<SftpPanel onClose={() => {}} sessionId="sess-1" />)
+    fireEvent.contextMenu(await screen.findByText('boundary.bin'))
+    expect(!!screen.queryByText('隔空取物')).toBe(size <= 5 * 1024 * 1024)
   })
 
   it('shows empty state when no sessionId provided', async () => {
