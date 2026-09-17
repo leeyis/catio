@@ -600,7 +600,7 @@ export function SftpPanel({ onClose, conn, sessionId, onSessionClosed, onEditFil
                 <CtxItem icon="download" label={t('panels.sftpDownload')} onClick={() => { const it = ctxMenu.item; setCtxMenu(null); downloadItem(it) }} />
               )}
               {opticalToken && sessionId && canOpticalTransfer(ctxMenu.item) && (
-                <CtxItem icon="wand" label={t('optical.title')} onClick={() => {
+                <CtxItem icon="wand" label={t('optical.open')} onClick={() => {
                   setOpticalItem({ item: ctxMenu.item, sessionId }); setCtxMenu(null)
                 }} />
               )}

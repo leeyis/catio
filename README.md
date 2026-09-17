@@ -306,3 +306,13 @@ Catio is released under the [MIT License](LICENSE).
 - Thanks to the [Linux.do](https://linux.do/) community for its discussions, feedback, and support.
 
 <div align="center"><sub>Built for people who live between the shell prompt and the query console.</sub></div>
+
+### Wormhole (experimental)
+
+Hidden by default. Copy `catio.conf.example` to `catio.conf` beside the Catio executable, set `Experiment_func=1`, then restart. Windows/Linux use the executable directory; AppImage uses the AppImage directory; macOS uses the directory containing `Catio.app` (outside the signed bundle). Missing, unreadable or invalid configuration keeps it disabled. A read-only installation requires an administrator to place the file.
+
+The server uses the same installation switch. For the official Docker image, mount the file read-only at `/usr/local/bin/catio.conf` and restart the container. Browser settings cannot enable a disabled server installation.
+
+Then open Settings → Experimental features, read the disclaimer, and unlock with a passphrase. In SFTP select **Open Wormhole** for a regular file up to 5 MiB. Scan with Catio on your phone. The server enforces the size limit; unlocks last only for the current session.
+
+The [Android companion](android/README.md), offline encoder resources and build instructions are included under `android/`; no extra repository or submodule initialization is required.

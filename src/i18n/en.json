@@ -2,7 +2,7 @@
   "optical": {
     "experimental": "Experimental features",
     "settingsHint": "Unlock when needed, for this session only.",
-    "enabledHint": "Unlocked. Screen Ferry is available in the SFTP file menu.",
+    "enabledHint": "Unlocked. Wormhole is available in the SFTP file menu.",
     "disabledHint": "Off by default. A passphrase is required to enable.",
     "unlockTitle": "Unlock experimental features",
     "setupTitle": "Set an experimental features passphrase",
@@ -11,11 +11,11 @@
     "confirmPassphrase": "Confirm passphrase",
     "enable": "Verify and enable",
     "unlocking": "Verifying…",
-    "title": "Screen Ferry",
+    "title": "Wormhole",
     "close": "Close",
     "canvas": "Animated barcode display",
-    "readyTitle": "Ready for Screen Ferry",
-    "instructions": "Open CameraFileCopy on your phone and point it at the animated barcode. Supports one file up to 5 MiB. Close this window after receiving.",
+    "readyTitle": "Ready for Wormhole",
+    "instructions": "Open Catio on your phone and point it at the animated code.",
     "flashWarning": "The display flashes rapidly. Do not look directly at it if you are sensitive to flashing light.",
     "start": "Start playback",
     "preparing": "Reading file and preparing the display…",
@@ -46,7 +46,12 @@
     "unavailable": "Use this feature in the Catio desktop app or deployed web app.",
     "passphraseMismatch": "The passphrases do not match.",
     "encoderFailed": "The encoder cannot run. Check that WebGL is supported.",
-    "encoderTimeout": "The encoder took too long to prepare. Close this window and try again."
+    "encoderTimeout": "The encoder took too long to prepare. Close this window and try again.",
+    "open": "Open Wormhole",
+    "disclaimerTitle": "Experimental research and disclaimer",
+    "disclaimer": "This feature is intended for experimental research. Before use, understand and comply with applicable laws and obtain lawful authorization for the devices and data involved. All consequences of unlawful or non-compliant use, including infringement damages, administrative penalties, criminal liability, data breaches and financial losses, are solely the responsibility of the user and are unrelated to the software developer.",
+    "acknowledge": "I have read the disclaimer, understand applicable laws and confirm that this use is lawfully authorized.",
+    "disabled": "Experimental features are not enabled in the configuration file."
   },
   "common": {
     "newConnection": "New connection"

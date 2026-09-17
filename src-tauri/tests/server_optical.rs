@@ -48,7 +48,9 @@ async fn optical_http_auth_isolation_and_real_sftp_roundtrip() {
     })
     .await
     .unwrap();
-    let state = AppState::new(tmp.path().into(), tmp.path().join("data")).unwrap();
+    let mut state = AppState::new(tmp.path().into(), tmp.path().join("data")).unwrap();
+    std::fs::write(tmp.path().join("catio.conf"), "Experiment_func=1\n").unwrap();
+    state.optical = catio_lib::optical::OpticalState::new(tmp.path().join("optical.hash"));
     state
         .ssh
         .insert(

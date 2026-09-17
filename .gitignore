@@ -48,3 +48,6 @@ catio-server.tar.gz
 
 # arm64 deb 构建产物
 dist-deb/
+
+# Installation-owned experimental switch
+catio.conf

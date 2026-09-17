@@ -2,7 +2,7 @@ import { rpc, isTauri, isServer } from './transport'
 import type { SftpItem } from './types'
 
 export const OPTICAL_MAX_BYTES = 5 * 1024 * 1024
-export interface OpticalStatus { configured: boolean; canConfigure: boolean }
+export interface OpticalStatus { visible: boolean; configured: boolean; canConfigure: boolean }
 export interface OpticalFile { name: string; data: string }
 export const opticalAvailable = () => isTauri() || isServer()
 export const opticalStatus = () => rpc<OpticalStatus>('optical_status')

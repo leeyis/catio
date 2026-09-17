@@ -306,3 +306,13 @@ Catio 基于 [MIT License](LICENSE) 开源发布。
 - 感谢 [Linux.do](https://linux.do/) 社区提供的讨论、反馈与支持。
 
 <div align="center"><sub>为常年在 shell prompt 与 query console 之间切换的人打造。</sub></div>
+
+### 虫洞（实验性功能）
+
+该菜单默认隐藏。将仓库中的 `catio.conf.example` 复制为 **Catio 可执行文件所在目录**下的 `catio.conf`，把 `Experiment_func=0` 改为 `Experiment_func=1` 后重启应用。Windows 在 `Catio.exe` 旁，Linux 在 `catio` / `catio-server` 旁，AppImage 在 AppImage 文件旁；macOS 在 `Catio.app` 同级目录（不要写入已签名的应用包内部）。安装目录不可写时需由管理员手动放置，读取失败、缺少开关或无效配置均保持关闭。
+
+服务器端遵循同一规则；官方 Docker 镜像中的路径为 `/usr/local/bin/catio.conf`，可只读挂载配置文件并重启容器。配置按进程启动时读取，修改需要重启。浏览器不能自行开启服务端开关。
+
+启用后进入“设置 → 实验性功能”，阅读免责声明并使用口令解锁，再在 SFTP 文件菜单选择“打开虫洞”。仅支持单个 ≤5 MiB 的普通文件；大小限制仍在后端执行。手机端打开 Catio 接收，完成后关闭播放窗口。口令解锁仍只在当前会话有效。
+
+[安卓客户端源码、构建与性能说明](android/README.md) 已包含在 `android/`，无需另外克隆或初始化子模块。安装后的光学收发不依赖互联网。

@@ -131,13 +131,13 @@ describe('SftpPanel (SFTP wiring)', () => {
     const { rerender } = wrap(<SftpPanel onClose={() => {}} sessionId="sess-1" />)
     await screen.findByText('a.txt')
     fireEvent.contextMenu(screen.getByText('a.txt'))
-    expect(screen.queryByText('隔空取物')).toBeNull()
+    expect(screen.queryByText('打开虫洞')).toBeNull()
     act(() => setOpticalToken('test-grant'))
     rerender(<LanguageProvider><DataProvider><SftpPanel onClose={() => {}} sessionId="sess-1" /></DataProvider></LanguageProvider>)
     fireEvent.contextMenu(screen.getByText('a.txt'))
-    expect(screen.getByText('隔空取物')).toBeInTheDocument()
+    expect(screen.getByText('打开虫洞')).toBeInTheDocument()
     fireEvent.contextMenu(screen.getByText('logs'))
-    expect(screen.queryByText('隔空取物')).toBeNull()
+    expect(screen.queryByText('打开虫洞')).toBeNull()
   })
 
   it.each([5 * 1024 * 1024, 5 * 1024 * 1024 + 1])('enforces the optical menu boundary for %i bytes', async size => {
@@ -145,7 +145,7 @@ describe('SftpPanel (SFTP wiring)', () => {
     h.sftpList.mockResolvedValue([mk({ name: 'boundary.bin', path: '/srv/boundary.bin', type: 'file', size })])
     wrap(<SftpPanel onClose={() => {}} sessionId="sess-1" />)
     fireEvent.contextMenu(await screen.findByText('boundary.bin'))
-    expect(!!screen.queryByText('隔空取物')).toBe(size <= 5 * 1024 * 1024)
+    expect(!!screen.queryByText('打开虫洞')).toBe(size <= 5 * 1024 * 1024)
   })
 
   it('shows empty state when no sessionId provided', async () => {

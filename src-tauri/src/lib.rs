@@ -223,7 +223,7 @@ pub fn run() {
         })
         .setup(|app| {
             use tauri::Manager;
-            app.manage(optical::OpticalState::new(app.path().app_data_dir()?.join("optical.hash")));
+            app.manage(optical::OpticalState::from_installation(app.path().app_data_dir()?.join("optical.hash")));
             // Default the JDBC sidecar's driver-JAR directory to
             // <app_data>/jdbc/drivers (created if missing) unless the user
             // overrode CATIO_JDBC_DRIVERS_DIR. JDBC engines load their

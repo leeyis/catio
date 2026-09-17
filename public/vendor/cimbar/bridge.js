@@ -28,9 +28,9 @@ function stop() { paused = true; cancelAnimationFrame(frameHandle); frameHandle 
 function renderFrame(timestamp) {
   if (paused) return;
   try {
-    if (timestamp - lastFrame >= 1000 / 15) {
+    if (timestamp + 0.5 >= lastFrame) {
       if (Module._cimbare_next_frame(0) < 0 || Module._cimbare_render() < 0) throw new Error();
-      lastFrame = timestamp;
+      lastFrame = Math.max(lastFrame + 1000 / 30, timestamp);
     }
     frameHandle = requestAnimationFrame(renderFrame);
   } catch (_) { stop(); report('error', 'optical.encoderFailed'); }

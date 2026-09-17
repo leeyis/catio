@@ -147,7 +147,7 @@ impl AppState {
         let _ = std::fs::create_dir_all(&data_dir);
         let auth = AuthDb::open(&data_dir.join("catio.db"))?;
         Ok(AppState {
-            optical: crate::optical::OpticalState::new(data_dir.join("optical.hash")),
+            optical: crate::optical::OpticalState::from_installation(data_dir.join("optical.hash")),
             conns: Arc::new(ConnManager::default()),
             static_dir: Arc::new(static_dir),
             data_dir: Arc::new(data_dir),

@@ -32,6 +32,7 @@ import { isServer } from '../../services/transport'
 import { copyTextToClipboard } from '../../services/clipboard'
 import { diagnosticLogDir } from '../../services/diagnostics'
 import { parseAnsi } from './ansiSpans'
+import { opticalAvailable, opticalStatus } from '../../services/optical'
 import { ExperimentalSettings } from './ExperimentalSettings'
 import { AgentWorkspaceSettings } from './AgentWorkspaceSettings'
 
@@ -1645,7 +1646,15 @@ export function SettingsView({ theme, onTheme, onClose, authEnabled, users, curr
   const [nav, setNav] = React.useState(initialSection === 'theme' ? 'appearance' : (initialSection || 'appearance'))
   // Server mode: connection-defaults stay admin-only, but MCP access is per-user — every logged-in
   // user gets their own token-bearing endpoint, so the `mcp` item is shown to all of them.
+  const [experimentalVisible, setExperimentalVisible] = React.useState(false)
+  React.useEffect(() => {
+    let disposed = false
+    if (opticalAvailable()) void opticalStatus().then(status => { if (!disposed) setExperimentalVisible(status.visible === true) }).catch(() => {})
+    return () => { disposed = true }
+  }, [])
+  const effectiveNav = nav === 'experimental' && !experimentalVisible ? 'appearance' : nav
   const navItems = SETTINGS_NAV.filter(n =>
+    (n.id !== 'experimental' || experimentalVisible) &&
     !(serverAuth.enabled && !serverAuth.user?.isAdmin && n.id === 'connections'),
   )
   return (
@@ -1658,7 +1667,7 @@ export function SettingsView({ theme, onTheme, onClose, authEnabled, users, curr
         </div>
         <div className="col" style={{ gap: 2 }}>
           {navItems.map(n => {
-            const active = nav === n.id
+            const active = effectiveNav === n.id
             return (
               <button key={n.id} onClick={() => setNav(n.id)}
                 style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '10px 14px', borderRadius: 10, color: active ? 'var(--accent-primary)' : 'var(--text-secondary)', background: active ? 'var(--accent-soft)' : 'transparent', fontWeight: active ? 600 : 500, fontSize: 13.5 }}>
@@ -1673,13 +1682,13 @@ export function SettingsView({ theme, onTheme, onClose, authEnabled, users, curr
       {/* main */}
       <div className="card-surface grow" style={{ overflowY: 'auto' }}>
         <div style={{ padding: '24px 40px 40px', maxWidth: 760 }}>
-          {nav === 'appearance' && <><ThemeSettings theme={theme} onTheme={onTheme} /><AppearanceSettings /></>}
-          {nav === 'security' && <SecuritySettings authEnabled={authEnabled} users={users} currentUser={currentUser} ownerUser={ownerUser} onEnableAuth={onEnableAuth} onDisableAuth={onDisableAuth} onLock={onLock} onRemoveUser={onRemoveUser} />}
-          {nav === 'ai' && <AISettings />}
-          {nav === 'connections' && <><ConnDefaults onImportSshConfig={onImportSshConfig} /><ConfigSyncBlock /></>}
-          {nav === 'mcp' && <MCPSettings />}
-          {nav === 'experimental' && <ExperimentalSettings />}
-          {nav === 'about' && <AboutSettings />}
+          {effectiveNav === 'appearance' && <><ThemeSettings theme={theme} onTheme={onTheme} /><AppearanceSettings /></>}
+          {effectiveNav === 'security' && <SecuritySettings authEnabled={authEnabled} users={users} currentUser={currentUser} ownerUser={ownerUser} onEnableAuth={onEnableAuth} onDisableAuth={onDisableAuth} onLock={onLock} onRemoveUser={onRemoveUser} />}
+          {effectiveNav === 'ai' && <AISettings />}
+          {effectiveNav === 'connections' && <><ConnDefaults onImportSshConfig={onImportSshConfig} /><ConfigSyncBlock /></>}
+          {effectiveNav === 'mcp' && <MCPSettings />}
+          {effectiveNav === 'experimental' && <ExperimentalSettings />}
+          {effectiveNav === 'about' && <AboutSettings />}
         </div>
       </div>
     </div>

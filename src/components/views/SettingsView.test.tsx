@@ -17,10 +17,15 @@ vi.mock('@tauri-apps/plugin-opener', () => ({
   openUrl: vi.fn(),
 }))
 
+const opticalMocks = vi.hoisted(() => ({ status: vi.fn() }))
+vi.mock('../../services/optical', async original => ({
+  ...await original<typeof import('../../services/optical')>(), opticalAvailable: () => true, opticalStatus: opticalMocks.status,
+}))
 import { SettingsView } from './SettingsView'
 
 describe('SettingsView Agent model', () => {
   beforeEach(() => {
+    opticalMocks.status.mockResolvedValue({ visible: false, configured: false, canConfigure: false })
     localStorage.clear()
     setAgentConfig(DEFAULT_AGENT_CONFIG)
     diagnosticMocks.logDir.mockReset()
@@ -33,6 +38,18 @@ describe('SettingsView Agent model', () => {
     vi.restoreAllMocks()
   })
 
+  it('hides experimental navigation and refuses the direct section when disabled', async () => {
+    render(<LanguageProvider><SettingsView theme="dawn" onTheme={vi.fn()} onClose={vi.fn()} initialSection="experimental" /></LanguageProvider>)
+    await act(async () => {})
+    expect(screen.queryByRole('button', { name: '实验性功能' })).toBeNull()
+    expect(screen.queryByRole('switch', { name: '实验性功能' })).toBeNull()
+  })
+  it('shows experimental navigation only after explicit backend opt-in', async () => {
+    opticalMocks.status.mockResolvedValue({ visible: true, configured: true, canConfigure: true })
+    render(<LanguageProvider><SettingsView theme="dawn" onTheme={vi.fn()} onClose={vi.fn()} /></LanguageProvider>)
+    fireEvent.click(await screen.findByRole('button', { name: '实验性功能' }))
+    expect(await screen.findByRole('switch', { name: '实验性功能' })).toBeTruthy()
+  })
   it('opens the persistent diagnostic log directory from About', async () => {
     ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
     diagnosticMocks.logDir.mockResolvedValue('C:\\logs\\catio')

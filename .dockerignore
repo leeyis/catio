@@ -9,3 +9,7 @@ src-tauri/target
 # Desktop bundles / local data
 src-tauri/gen
 *.tmp
+
+# Android is built separately; exclude local build output and assets from server context.
+android/
+catio.conf

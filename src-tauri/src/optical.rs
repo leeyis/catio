@@ -21,6 +21,7 @@ const GRANT_TTL: Duration = Duration::from_secs(8 * 60 * 60);
 #[derive(Clone)]
 pub struct OpticalState {
     path: PathBuf,
+    enabled: bool,
     inner: Arc<Mutex<Inner>>,
 }
 #[derive(Default)]
@@ -42,6 +43,7 @@ struct Grant {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpticalStatus {
+    pub visible: bool,
     pub configured: bool,
     pub can_configure: bool,
 }
@@ -51,8 +53,52 @@ pub struct OpticalFile {
     pub data: String,
 }
 
+/// Installation-owned switch, read once at startup. Missing/invalid/duplicate keys stay off.
+fn experimental_enabled(config: &str) -> bool {
+    if config.len() > 65536 { return false; }
+    let mut value = None;
+    for line in config.lines() {
+        let line = line.trim().trim_start_matches('\u{feff}');
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') { continue; }
+        let Some((key, setting)) = line.split_once('=') else { return false; };
+        if key.trim() == "Experiment_func" {
+            if value.is_some() { return false; }
+            value = Some(setting.trim() == "1");
+        }
+    }
+    value == Some(true)
+}
+fn installation_config_path() -> PathBuf {
+    // AppImage's executable lives in a temporary read-only mount; use its persistent location.
+    #[cfg(target_os = "linux")]
+    if let Some(image) = std::env::var_os("APPIMAGE") { return PathBuf::from(image).with_file_name("catio.conf"); }
+    std::env::current_exe().map(config_for_executable).unwrap_or_default()
+}
+fn config_for_executable(executable: PathBuf) -> PathBuf {
+    // Do not write inside a signed macOS bundle: adding files invalidates its seal.
+    #[cfg(target_os = "macos")]
+    if let Some(bundle) = executable.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")) {
+        return bundle.with_file_name("catio.conf");
+    }
+    executable.with_file_name("catio.conf")
+}
+
 impl OpticalState {
     pub fn new(path: PathBuf) -> Self {
+        let config = path.with_file_name("catio.conf");
+        Self::with_config(path, config)
+    }
+    pub fn from_installation(path: PathBuf) -> Self {
+        let config = installation_config_path();
+        // Never overwrite an operator's configuration. Read-only installs fail closed.
+        if let Ok(mut file) = std::fs::OpenOptions::new().write(true).create_new(true).open(&config) {
+            use std::io::Write;
+            let _ = file.write_all(b"# Restart Catio after editing.\nExperiment_func=0\n");
+        }
+        Self::with_config(path, config)
+    }
+    pub fn with_config(path: PathBuf, config: PathBuf) -> Self {
+        let enabled = std::fs::read_to_string(config).ok().is_some_and(|s| experimental_enabled(&s));
         // A broken optional feature must not prevent SSH or the application from starting.
         // Keep the feature locked; never treat an unreadable existing hash as first-run setup.
         let (hash, config_error) = match std::fs::read_to_string(&path) {
@@ -62,6 +108,7 @@ impl OpticalState {
         };
         Self {
             path,
+            enabled,
             inner: Arc::new(Mutex::new(Inner {
                 hash,
                 config_error,
@@ -71,12 +118,13 @@ impl OpticalState {
     }
     pub fn status(&self, can_configure: bool) -> Result<OpticalStatus, String> {
         let inner = self.inner.lock().unwrap();
-        if inner.config_error {
+        if self.enabled && inner.config_error {
             return Err("optical.configError".into());
         }
         Ok(OpticalStatus {
-            configured: inner.hash.is_some(),
-            can_configure,
+            visible: self.enabled,
+            configured: self.enabled && inner.hash.is_some(),
+            can_configure: self.enabled && can_configure,
         })
     }
     /// Hashing happens off the async executor; the lock also serializes first-run setup.
@@ -101,6 +149,7 @@ impl OpticalState {
         setup: bool,
         can_configure: bool,
     ) -> Result<String, String> {
+        if !self.enabled { return Err("optical.disabled".into()); }
         if passphrase.len() > 1024 || passphrase.chars().count() < 8 {
             return Err("optical.passphraseLength".into());
         }
@@ -210,7 +259,7 @@ impl OpticalState {
         });
     }
     pub fn valid(&self, scope: &str, token: &str) -> bool {
-        self.inner
+        self.enabled && self.inner
             .lock()
             .unwrap()
             .grants
@@ -236,6 +285,7 @@ impl OpticalState {
         }
     }
     fn begin_read(&self, scope: &str, token: &str, request_id: &str) -> Result<ReadLease, String> {
+        if !self.enabled { return Err("optical.disabled".into()); }
         let mut inner = self.inner.lock().unwrap();
         let g = inner
             .grants
@@ -408,8 +458,24 @@ mod tests {
     use super::*;
     const PASSWORD: &str = "test-only-passphrase";
     #[tokio::test]
+    async fn installation_switch_fails_closed_and_cannot_be_bypassed() {
+        for text in [None, Some("Experiment_func=0"), Some("Experiment_func=true"), Some("Experiment_func=1\nExperiment_func=0")] {
+            let tmp = tempfile::tempdir().unwrap();
+            if let Some(text) = text { std::fs::write(tmp.path().join("catio.conf"), text).unwrap(); }
+            let state = OpticalState::new(tmp.path().join("hash"));
+            assert!(!state.status(true).unwrap().visible);
+            assert_eq!(state.unlock("a".into(), PASSWORD.into(), true, true).await.unwrap_err(), "optical.disabled");
+            assert!(!state.valid("a", "forged"));
+            assert!(state.begin_read("a", "forged", "id").is_err());
+            assert!(!tmp.path().join("hash").exists());
+        }
+        assert!(experimental_enabled("# optional\nExperiment_func = 1\n"));
+        assert!(!experimental_enabled("Experiment_func=1\nbroken"));
+    }
+    #[tokio::test]
     async fn grants_are_session_bound_revocable_and_not_persisted() {
         let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("catio.conf"), "Experiment_func=1\n").unwrap();
         let path = tmp.path().join("optical.hash");
         let state = OpticalState::new(path.clone());
         assert!(!state.status(true).unwrap().configured);
@@ -443,6 +509,7 @@ mod tests {
     #[tokio::test]
     async fn cancellation_before_read_and_concurrency_are_enforced() {
         let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("catio.conf"), "Experiment_func=1\n").unwrap();
         let state = OpticalState::new(tmp.path().join("hash"));
         let token = state
             .unlock("a".into(), PASSWORD.into(), true, true)
@@ -488,6 +555,7 @@ mod tests {
     #[tokio::test]
     async fn invalid_optional_config_fails_closed_without_blocking_startup() {
         let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("catio.conf"), "Experiment_func=1\n").unwrap();
         let path = tmp.path().join("hash");
         std::fs::write(&path, "broken-hash").unwrap();
         let state = OpticalState::new(path.clone());
@@ -501,6 +569,7 @@ mod tests {
     #[tokio::test]
     async fn repeated_reloads_replace_old_grants_and_cancel_their_reads() {
         let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("catio.conf"), "Experiment_func=1\n").unwrap();
         let state = OpticalState::new(tmp.path().join("hash"));
         let first = state
             .unlock("a".into(), PASSWORD.into(), true, true)
