@@ -1,0 +1,10 @@
+def local = new Properties()
+def localFile = file('local.properties')
+if (localFile.exists()) localFile.withInputStream { local.load(it) }
+gradle.ext.opencvsdk = providers.gradleProperty('opencvsdk').orNull ?: local.getProperty('opencvsdk') ?: System.getenv('OPENCV_ANDROID_SDK')
+if (!gradle.ext.opencvsdk) throw new GradleException('Set opencvsdk in local.properties or OPENCV_ANDROID_SDK to the OpenCV 4.12.0 Android SDK directory.')
+rootProject.name='CatioReceiver'
+include ':app'
+
+include ':opencv'
+project(':opencv').projectDir = new File(gradle.ext.opencvsdk + '/sdk')

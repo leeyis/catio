@@ -1,0 +1,19 @@
+<resources>
+    <color name="canvas">#F5F6F8</color>
+    <color name="surface">#FFFFFF</color>
+    <color name="sunken">#F1F5F9</color>
+    <color name="accent">#1B1BB9</color>
+    <color name="accent_soft">#ECECFC</color>
+    <color name="on_accent">#FFFFFF</color>
+    <color name="text_primary">#0F172A</color>
+    <color name="text_secondary">#64748B</color>
+    <color name="border">#E9EDF4</color>
+    <color name="success">#16A34A</color>
+    <color name="warning">#D97706</color>
+    <color name="danger">#DC2626</color>
+    <color name="camera">#0B1020</color>
+    <color name="brand">#4338CA</color>
+    <color name="colorPrimary">@color/accent</color>
+    <color name="colorPrimaryDark">@color/canvas</color>
+    <color name="colorAccent">@color/accent</color>
+</resources>

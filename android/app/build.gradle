@@ -1,0 +1,75 @@
+apply plugin: 'com.android.application'
+
+android {
+    namespace 'org.cimbar.camerafilecopy'
+    compileSdkVersion 36
+    ndkVersion "27.2.12479018"
+    defaultConfig {
+        applicationId "io.catio.receiver"
+        minSdkVersion 21
+        targetSdkVersion 36
+        versionCode 2
+        versionName "0.2.0"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        ndk {
+            abiFilters "arm64-v8a", "x86_64"
+        }
+        externalNativeBuild {
+            cmake {
+                arguments "-DCMAKE_BUILD_TYPE=Release"
+                cppFlags "-frtti -fexceptions -std=c++17"
+                arguments "-DANDROID_STL=c++_shared"
+                arguments "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
+                arguments "-DOpenCV_DIR=" + gradle.ext.opencvsdk + "/sdk/native"
+            }
+        }
+        setProperty("archivesBaseName", "CatioReceiver")
+    }
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+    externalNativeBuild {
+        cmake {
+            path "src/cpp/CMakeLists.txt"
+            version "3.22.1"
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    buildFeatures { buildConfig true }
+    sourceSets { main.assets.srcDirs += 'src/main/catioAssets' }
+    lint { abortOnError true; checkReleaseBuilds true }
+}
+
+dependencies {
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
+    implementation 'androidx.activity:activity:1.10.1'
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+    implementation 'androidx.webkit:webkit:1.12.1'
+    implementation project(path: ':opencv')
+    testImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test:runner:1.6.2'
+    androidTestImplementation 'androidx.test:rules:1.6.1'
+    androidTestImplementation 'androidx.test.ext:junit:1.2.1'
+}
+
+preBuild.doFirst {
+    def indexHtml = file("src/main/assets/index.html")
+    if (!indexHtml.exists()) {
+        throw new GradleException("Missing bundled cimbar-js-bits assets (index.html)")
+    }
+    def cimbarJs = fileTree("src/main/assets").include("cimbar_js.*.wasm").singleFile
+    def digest = java.security.MessageDigest.getInstance("SHA-256")
+    def actual = digest.digest(cimbarJs.bytes).collect { String.format("%02x", it) }.join("")
+	def expected = "019a0d79419bdee0b918f409cdcfff919c172b75131dac5a36a44385151ca5af" // v0.6.8
+    if (actual != expected) {
+        throw new GradleException("cimbar-js-bits SHA-256 mismatch :(\n  expected: ${expected}\n  actual:   ${actual}")
+    }
+}
