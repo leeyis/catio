@@ -53,6 +53,13 @@ beforeEach(() => {
 })
 
 describe('AIPanel controlled conversation view', () => {
+  it('renders report Markdown fences without terminal run or insert controls', () => {
+    wrap(<AIPanel onClose={() => {}} mode="shell" conn={hostConn} attachment={null} onClearAttachment={() => {}}
+      conversation={conv([{ role: 'assistant', content: '```markdown\n# Inspection report\nAll observed checks passed.\n```' }])} />)
+    expect(screen.queryByTitle('运行命令')).toBeNull()
+    expect(screen.queryByTitle('插入终端')).toBeNull()
+    expect(screen.getByRole('button', { name: '下载 Markdown' })).toBeTruthy()
+  })
   it.each([
     ['shell', hostConn],
     ['sql', dbConn],
@@ -137,9 +144,9 @@ describe('AIPanel controlled conversation view', () => {
     expect(menu.parentElement).toBe(document.body)
     expect(modeButton).toHaveAttribute('aria-expanded', 'true')
     expect(screen.queryByTitle('附加上下文')).toBeNull()
-    expect(screen.getByText('仅生成命令和解读，不自动执行')).toBeTruthy()
-    expect(screen.getByText(/仅删除、移动/)).toBeTruthy()
-    expect(screen.getByText(/根据每轮结果/)).toBeTruthy()
+    expect(screen.getByText('仅生成建议和报告内容，不自动执行工具')).toBeTruthy()
+    expect(screen.getByText(/替换本机文件及其他高风险操作/)).toBeTruthy()
+    expect(screen.getByText(/读写已设置工作目录内的文本文件/)).toBeTruthy()
     const modelLabel = screen.getByTitle('m')
     expect(modelLabel.style.maxWidth).toBe('')
     expect(modelLabel.style.flex).toBe('1 1 0%')

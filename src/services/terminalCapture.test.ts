@@ -31,6 +31,7 @@ import {
   isTerminalChannelBusy,
   markTerminalChannelExecution,
   runTerminalCommandAndCapture,
+  terminalResultToToolOutcome,
 } from './terminalCapture'
 
 function encoded(value: string): string {
@@ -49,6 +50,26 @@ beforeEach(() => {
 })
 
 describe('terminal command capture', () => {
+  it.each([
+    ['completed', 0, 'succeeded'], ['completed', 7, 'failed'],
+    ['completed', null, 'outcomeUnknown'], ['timeout', null, 'outcomeUnknown'],
+    ['streaming', null, 'outcomeUnknown'], ['closed', null, 'outcomeUnknown'],
+  ] as const)('preserves evidence quality for %s with exit code %s', (status, exitCode, expected) => {
+    const outcome = terminalResultToToolOutcome({ status, exitCode, output: 'partial evidence', truncated: true, capturedAt: '2026-09-16T12:00:00Z' })
+    expect(outcome.status).toBe(expected)
+    expect(JSON.parse(outcome.content)).toMatchObject({ captureStatus: status, exitCode, output: 'partial evidence', truncated: true, capturedAt: '2026-09-16T12:00:00Z' })
+  })
+  it('marks completed but truncated output so reports cannot treat it as complete evidence', async () => {
+    terminalMock.termWrite.mockImplementation(async () => {
+      terminalMock.listener?.({ execStart: true })
+      terminalMock.listener?.({ bytesBase64: encoded('x'.repeat(40_000)) })
+      terminalMock.listener?.({ execEnd: true, command: 'cat report', exitCode: 0 })
+    })
+    const result = await runTerminalCommandAndCapture({ kind: 'ssh', sessionId: 's1', chanId: 'large-report' }, 'cat report')
+    expect(result.truncated).toBe(true)
+    expect(result.output).toHaveLength(32_000)
+    expect(result.capturedAt).toEqual(expect.any(String))
+  })
   it('subscribes before writing and returns clean output at the matching execEnd', async () => {
     terminalMock.termWrite.mockImplementation(async () => {
       terminalMock.listener?.({ execStart: true })
@@ -61,7 +82,7 @@ describe('terminal command capture', () => {
       'uname -s',
     )
 
-    expect(result).toEqual({ status: 'completed', output: 'Linux', exitCode: 0 })
+    expect(result).toEqual({ status: 'completed', output: 'Linux', exitCode: 0, truncated: false, capturedAt: expect.any(String) })
     expect(terminalMock.termWrite).toHaveBeenCalledWith('s1', 'c1', encoded('uname -s\r'))
     expect(terminalMock.unlisten).toHaveBeenCalledOnce()
   })
@@ -79,7 +100,7 @@ describe('terminal command capture', () => {
       'echo ok',
     )
 
-    expect(result).toEqual({ status: 'completed', output: 'ok', exitCode: 7 })
+    expect(result).toEqual({ status: 'completed', output: 'ok', exitCode: 7, truncated: false, capturedAt: expect.any(String) })
     expect(terminalMock.termLocalWrite).toHaveBeenCalledWith('local-1', encoded('echo ok\r'))
   })
 
@@ -89,7 +110,7 @@ describe('terminal command capture', () => {
       { kind: 'local', chanId: 'plain-shell' },
       'echo ok',
       { startTimeoutMs: 1 },
-    )).resolves.toEqual({ status: 'unsupported', output: '', exitCode: null })
+    )).resolves.toEqual({ status: 'unsupported', output: '', exitCode: null, truncated: false, capturedAt: expect.any(String) })
   })
 
   it('removes terminal control sequences without removing normal text', () => {
@@ -245,7 +266,7 @@ describe('terminal command capture', () => {
       expect(settled).toBe(false)
       expect(isTerminalChannelBusy('finite-1')).toBe(true)
       terminalMock.listener?.({ execEnd: true, command: 'docker pull example/image', exitCode: 0 })
-      await expect(pending).resolves.toEqual({ status: 'completed', output: 'working', exitCode: 0 })
+      await expect(pending).resolves.toEqual({ status: 'completed', output: 'working', exitCode: 0, truncated: false, capturedAt: expect.any(String) })
     } finally {
       vi.useRealTimers()
     }
@@ -268,7 +289,7 @@ describe('terminal command capture', () => {
       await Promise.resolve()
       await vi.advanceTimersByTimeAsync(4_000)
 
-      await expect(pending).resolves.toEqual({ status: 'timeout', output: 'working', exitCode: null })
+      await expect(pending).resolves.toEqual({ status: 'timeout', output: 'working', exitCode: null, truncated: false, capturedAt: expect.any(String) })
       expect(isTerminalChannelBusy('slow-1')).toBe(true)
 
       terminalMock.listener?.({ execEnd: true, command: 'custom-task', exitCode: 0 })

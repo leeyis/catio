@@ -50,6 +50,7 @@ tauri-plugin-opener = "2"
 rand = "0.10.1"
 async-trait = "0.1.89"
 parking_lot = "0.12"
+cap-std = "4"
 regex = "1"
 tokio-postgres = { version = "0.7.17", features = ["with-chrono-0_4", "with-uuid-1", "with-serde_json-1"] }
 deadpool-postgres = { version = "0.14.1", features = ["rt_tokio_1"] }
@@ -80,6 +81,9 @@ argon2 = "0.5"
 # Server-side secret vault (web head): AES-256-GCM (+ SHA-256 key derivation) over CATIO_MASTER_KEY
 # to encrypt connection passwords at rest in SQLite. ring is already in the tree (russh/rustls).
 ring = "0.17"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [profile.release]
 panic = "abort"

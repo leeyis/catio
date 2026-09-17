@@ -16,6 +16,10 @@ import type { Connection } from '../../services/types'
 import type { Conversation } from '../../state/conversations'
 import { PanelShell } from './PanelShell'
 import { ConfirmModal } from '../modals/ConfirmModal'
+import { useAgentWorkspace } from '../../state/agentWorkspace'
+import { isTauri } from '../../services/transport'
+import type { ToolResultStatus } from '../../services/agentRuntime'
+import { saveMarkdownReport } from '../../services/markdownReport'
 
 export interface Attachment {
   kind: 'sql' | 'shell'
@@ -24,6 +28,7 @@ export interface Attachment {
 }
 
 export interface AIPanelProps {
+  fileActivity?: AgentFileActivity[]
   onClose: () => void
   mode?: 'sql' | 'shell'
   conn?: Connection
@@ -56,6 +61,13 @@ export interface AIPanelProps {
   onRestoreConversation?: (convId: string) => void
   /** Delete a past conversation by id. */
   onDeleteConversation?: (convId: string) => void
+}
+
+export interface AgentFileActivity {
+  id: string
+  action: 'read' | 'write'
+  path: string
+  status: ToolResultStatus | 'pending'
 }
 
 function shellHL(code: string): string {
@@ -228,6 +240,9 @@ function makeComponents(mode: 'sql' | 'shell', conn?: Connection, onInsert?: (co
         )
       }
       const code = String(children).replace(/\n$/, '')
+      if (['md', 'markdown', 'text', 'plaintext'].includes(lang.toLowerCase())) {
+        return <pre className="mono" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', padding: 10, background: 'var(--surface-subtle)', color: 'var(--text-secondary)', fontSize: 12 }}>{code}</pre>
+      }
       return <BlockCode lang={lang} code={code} mode={mode} conn={conn} onInsert={onInsert} canInsert={canInsert} />
     },
     // pre: let the code component handle block rendering; pre itself just renders children
@@ -390,6 +405,8 @@ function ThinkingBlock({ content, isThinking, components }: ThinkingBlockProps) 
 }
 
 function AssistantMessage({ text, mode, conn, onInsert, canInsert, isStreaming = false }: AssistantMessageProps) {
+  const { t } = useTranslation()
+  const [saveError, setSaveError] = useState(false)
   // Memoize components so react-markdown doesn't remount its subtree on every token update.
   // onInsert and canInsert are stable per conversation turn, so this is safe.
   const components = useMemo(
@@ -404,6 +421,12 @@ function AssistantMessage({ text, mode, conn, onInsert, canInsert, isStreaming =
         <ThinkingBlock content={parts.reasoning} isThinking={parts.isThinking} components={components} />
       )}
       {parts.answer && <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>{parts.answer}</ReactMarkdown>}
+      {parts.answer && !isStreaming && <button className="icon-btn bare" style={{ width: 26, height: 26 }}
+        title={t('panels.downloadMarkdown')} aria-label={t('panels.downloadMarkdown')}
+        onClick={() => { setSaveError(false); void saveMarkdownReport(parts.answer).catch(() => setSaveError(true)) }}>
+        <Icon name="download" size={13} />
+      </button>}
+      {saveError && <span role="alert" style={{ color: 'var(--signal-red)', fontSize: 12 }}>{t('panels.saveMarkdownFailed')}</span>}
     </div>
   )
 }
@@ -472,7 +495,8 @@ interface MentionTable {
   kind: 'table' | 'view'
 }
 
-export function AIPanel({ onClose, mode = 'sql', conn, connId, engine, attachment, onClearAttachment, onInsert, canInsert, onOpenSettings, conversation, busy = false, history = [], onSend, onAbort, onNewConversation, onRestoreConversation, onDeleteConversation }: AIPanelProps) {
+export function AIPanel({ onClose, mode = 'sql', conn, connId, engine, attachment, onClearAttachment, onInsert, canInsert, onOpenSettings, conversation, busy = false, history = [], onSend, onAbort, onNewConversation, onRestoreConversation, onDeleteConversation, fileActivity = [] }: AIPanelProps) {
+  const workspace = useAgentWorkspace()
   const { t } = useTranslation()
   const { config: cfg, update: updateAgentConfig } = useAgentConfig()
   const isSql = mode !== 'shell'
@@ -693,6 +717,17 @@ export function AIPanel({ onClose, mode = 'sql', conn, connId, engine, attachmen
         </span>
       </div>
       {/* message area */}
+      {isTauri() && <button className="row gap6" onClick={() => onOpenSettings?.()} title={workspace || t('settings.workspacePlaceholder')}
+        style={{ padding: '8px 12px', textAlign: 'left', background: 'var(--surface-subtle)', border: 'none', borderBottom: '1px solid var(--border-hairline)', color: 'var(--text-tertiary)', fontSize: 11.5 }}>
+        <Icon name="folder" size={13} />
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t('settings.workspaceTitle')}：{workspace || t('panels.workspaceNotSet')}</span>
+      </button>}
+      {fileActivity.length > 0 && <div aria-label={t('panels.fileActivity')} style={{ maxHeight: 140, overflowY: 'auto', padding: '8px 12px', borderBottom: '1px solid var(--border-hairline)' }}>
+        {fileActivity.map(file => <div key={file.id} className="col gap4" style={{ padding: '4px 0', fontSize: 11.5 }}>
+          <span style={{ color: file.status === 'succeeded' ? 'var(--signal-green)' : 'var(--text-secondary)' }}>{t(`panels.fileAction_${file.action}`)} · {t(`panels.fileStatus_${file.status}`)}</span>
+          <span className="mono" style={{ overflowWrap: 'anywhere', color: 'var(--text-tertiary)', userSelect: 'text' }}>{file.path}</span>
+        </div>)}
+      </div>}
       {!cfg.model ? (
         <div className="grow col" style={{ alignItems: 'center', justifyContent: 'center', gap: 14, padding: '24px 28px', textAlign: 'center' }}>
           <div className="icon-badge" style={{ width: 48, height: 48, borderRadius: 14, background: 'var(--surface-sunken)', color: 'var(--text-faint)' }}><Icon name="box" size={22} /></div>

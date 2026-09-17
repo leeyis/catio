@@ -41,6 +41,7 @@ struct ActiveTurn {
 /// Deep module holding the active Turn registry; desktop, server and tests
 /// share this one surface.
 pub struct AgentRuntime {
+    local_workspaces: Option<Arc<super::local_files::LocalWorkspaces>>,
     turns: Arc<Mutex<HashMap<String, ActiveTurn>>>,
     factory: Arc<dyn ProviderFactory>,
 }
@@ -48,9 +49,18 @@ pub struct AgentRuntime {
 impl AgentRuntime {
     pub fn new(factory: Arc<dyn ProviderFactory>) -> Self {
         Self {
+            local_workspaces: None,
             turns: Arc::new(Mutex::new(HashMap::new())),
             factory,
         }
+    }
+
+    pub fn with_local_workspaces(
+        mut self,
+        workspaces: Arc<super::local_files::LocalWorkspaces>,
+    ) -> Self {
+        self.local_workspaces = Some(workspaces);
+        self
     }
 
     /// Production runtime with the shared reqwest-backed provider factory.
@@ -69,6 +79,7 @@ impl AgentRuntime {
         events: Arc<dyn AgentEventSink>,
     ) -> Result<TurnHandle, AgentError> {
         request.validate()?;
+        let files = self.local_workspaces.as_ref().and_then(|w| w.snapshot());
         let provider = self.factory.create(&request.provider).await?;
         let turn_id = generate_turn_id();
         let cancel_token = CancellationToken::new();
@@ -81,7 +92,9 @@ impl AgentRuntime {
             request,
             provider,
             sink: events,
-            bridge: Arc::new(RuntimeBridge::new(receiver, cancel_token.clone())),
+            bridge: Arc::new(
+                RuntimeBridge::new(receiver, cancel_token.clone()).with_local_files(files),
+            ),
             cancel_token: cancel_token.clone(),
             expected: expected.clone(),
         };

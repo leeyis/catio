@@ -33,6 +33,7 @@ import { copyTextToClipboard } from '../../services/clipboard'
 import { diagnosticLogDir } from '../../services/diagnostics'
 import { parseAnsi } from './ansiSpans'
 import { ExperimentalSettings } from './ExperimentalSettings'
+import { AgentWorkspaceSettings } from './AgentWorkspaceSettings'
 
 // ---- Prop types ----
 
@@ -760,6 +761,7 @@ function AISettings() {
   return (
     <Block title={t('settings.aiSettingsTitle')} hint={t('settings.aiSettingsHint')}>
       <AgentConfigBlock />
+      <AgentWorkspaceSettings />
       <SettingRow icon="terminal" title={t('settings.aiTermBuffer')} desc={t('settings.aiTermBufferDesc', { count: prefs.termBufferLines })}
         control={
           <div className="row gap8" style={{ alignItems: 'center' }}>

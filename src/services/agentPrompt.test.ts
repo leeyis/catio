@@ -2,6 +2,14 @@ import { describe, it, expect } from 'vitest'
 import { buildAgentSystemPrompt } from './agentPrompt'
 
 describe('buildAgentSystemPrompt', () => {
+  it('native tools distinguish local reports from SSH commands and incomplete observations', () => {
+    const prompt = buildAgentSystemPrompt('shell', 'web-01', undefined, 'ask', true, true)
+    expect(prompt).toContain('local_write_file')
+    expect(prompt).toContain('different targets')
+    expect(prompt).toContain('captureStatus and exitCode')
+    expect(prompt).toContain('Never execute report Markdown in a terminal')
+    expect(prompt).not.toContain('exactly one single-line command in one fenced')
+  })
   it('shell mode → terminal/shell assistant naming the host', () => {
     const p = buildAgentSystemPrompt('shell', 'prod-web-01')
     expect(p).toContain('terminal/shell assistant')

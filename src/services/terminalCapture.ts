@@ -1,5 +1,6 @@
 import { listen, termLocalWrite, termWrite } from './ssh'
 import { diagnosticLog } from './diagnostics'
+import type { ToolExecutionOutcome } from './agentRuntime'
 
 export type CapturableTerminalTarget =
   | { kind: 'ssh'; chanId: string; sessionId: string }
@@ -9,6 +10,20 @@ export interface TerminalCommandResult {
   status: 'completed' | 'closed' | 'streaming' | 'timeout' | 'unsupported' | 'denied' | 'blocked'
   output: string
   exitCode: number | null
+  truncated?: boolean
+  capturedAt?: string
+}
+
+/** Preserve evidence quality separately from whether the remote command succeeded. */
+export function terminalResultToToolOutcome(result: TerminalCommandResult): ToolExecutionOutcome {
+  const status = result.status === 'completed'
+    ? (result.exitCode === 0 ? 'succeeded' : result.exitCode === null ? 'outcomeUnknown' : 'failed')
+    : result.status === 'timeout' || result.status === 'streaming' || result.status === 'closed'
+      ? 'outcomeUnknown' : result.status === 'unsupported' ? 'unsupported' : 'blocked'
+  return {
+    status,
+    content: JSON.stringify({ captureStatus: result.status, exitCode: result.exitCode, output: result.output, truncated: result.truncated ?? false, capturedAt: result.capturedAt ?? null }),
+  }
 }
 
 interface TermEvent {
@@ -250,7 +265,7 @@ export async function runTerminalCommandAndCapture(
       ? sampledOutput()
       : cleanTerminalOutput(rawOutput)
     release()
-    resolveResult({ status, exitCode, output })
+    resolveResult({ status, exitCode, output, truncated: totalOutputChars > MAX_OUTPUT_CHARS, capturedAt: new Date().toISOString() })
   }
   const snapshotAndMonitor = (status: 'streaming' | 'timeout') => {
     if (resultDelivered) return
@@ -258,7 +273,7 @@ export async function runTerminalCommandAndCapture(
     lingering = true
     flushDecoder()
     clearWaiters()
-    resolveResult({ status, exitCode: null, output: sampledOutput() })
+    resolveResult({ status, exitCode: null, output: sampledOutput(), truncated: totalOutputChars > SAMPLE_EDGE_CHARS || cleanTerminalOutput(headOutput).split('\n').length > SAMPLE_EDGE_LINES * 2, capturedAt: new Date().toISOString() })
   }
   const fail = (error: unknown) => {
     if (resultDelivered) return

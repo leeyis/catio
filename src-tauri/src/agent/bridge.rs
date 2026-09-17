@@ -16,6 +16,10 @@ use crate::agent::types::{
 /// Broker for human decisions and client `ToolHost` outcomes.
 #[async_trait]
 pub trait ClientBridge: Send + Sync {
+    /// Injected only by the desktop runtime; never read from model/client arguments.
+    fn local_files(&self) -> Option<Arc<super::local_files::FileSession>> {
+        None
+    }
     async fn request_approval(
         &self,
         tool_use_id: &str,
@@ -67,12 +71,17 @@ const DEFAULT_BRIDGE_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 /// - after dispatch (tool result): timeout is `ToolBridgeTimeout` — the
 ///   dispatch already happened, so the engine reports `OutcomeUnknown`.
 pub struct RuntimeBridge {
+    local_files: Option<Arc<super::local_files::FileSession>>,
     receiver: Arc<Mutex<mpsc::UnboundedReceiver<ClientTurnResponse>>>,
     cancel_token: CancellationToken,
     timeout: std::time::Duration,
 }
 
 impl RuntimeBridge {
+    pub fn with_local_files(mut self, files: Option<Arc<super::local_files::FileSession>>) -> Self {
+        self.local_files = files;
+        self
+    }
     pub fn new(
         receiver: mpsc::UnboundedReceiver<ClientTurnResponse>,
         cancel_token: CancellationToken,
@@ -88,6 +97,7 @@ impl RuntimeBridge {
         timeout: std::time::Duration,
     ) -> Self {
         Self {
+            local_files: None,
             receiver: Arc::new(Mutex::new(receiver)),
             cancel_token,
             timeout,
@@ -117,6 +127,9 @@ impl RuntimeBridge {
 
 #[async_trait]
 impl ClientBridge for RuntimeBridge {
+    fn local_files(&self) -> Option<Arc<super::local_files::FileSession>> {
+        self.local_files.clone()
+    }
     async fn request_approval(
         &self,
         tool_use_id: &str,

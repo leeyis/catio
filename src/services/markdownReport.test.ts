@@ -1,0 +1,31 @@
+import { afterEach, expect, it, vi } from 'vitest'
+import { saveMarkdownReport } from './markdownReport'
+const mocks = vi.hoisted(() => ({ invoke: vi.fn(), save: vi.fn() }))
+vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke }))
+vi.mock('@tauri-apps/plugin-dialog', () => ({ save: mocks.save }))
+afterEach(() => { delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__; vi.restoreAllMocks(); vi.clearAllMocks(); vi.useRealTimers() })
+it('downloads Markdown in the browser without a server filesystem RPC', async () => {
+  vi.useFakeTimers()
+  const create = vi.fn((_blob: Blob) => 'blob:report')
+  const revoke = vi.fn()
+  Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: create })
+  Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revoke })
+  const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+    expect(this.download).toMatch(/^catio-report-.*\.md$/)
+    expect(this.href).toBe('blob:report')
+  })
+  await saveMarkdownReport('# Report')
+  expect(click).toHaveBeenCalledOnce()
+  expect(create.mock.calls[0][0]).toBeInstanceOf(Blob)
+  expect(mocks.invoke).not.toHaveBeenCalled()
+  await vi.runAllTimersAsync()
+  expect(revoke).toHaveBeenCalledWith('blob:report')
+})
+it('only writes after a desktop user chooses a save destination', async () => {
+  Object.assign(window, { __TAURI_INTERNALS__: {} })
+  mocks.save.mockResolvedValueOnce(null).mockResolvedValueOnce('/reports/report.md')
+  await saveMarkdownReport('# Report')
+  expect(mocks.invoke).not.toHaveBeenCalled()
+  await saveMarkdownReport('# Report')
+  expect(mocks.invoke).toHaveBeenCalledWith('export_file', { path: '/reports/report.md', contents: '# Report' })
+})

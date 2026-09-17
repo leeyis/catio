@@ -30,7 +30,8 @@ vi.mock('../src/services/agentRuntime', async () => {
 })
 // PTY capture adapter: no real terminal in jsdom. The busy check stays false so
 // executeAgentCommand never asks for a split.
-vi.mock('../src/services/terminalCapture', () => ({
+vi.mock('../src/services/terminalCapture', async () => ({
+  ...await vi.importActual<typeof import('../src/services/terminalCapture')>('../src/services/terminalCapture'),
   isTerminalChannelBusy: () => false,
   runTerminalCommandAndCapture: vi.fn(async () => ({ status: 'completed', exitCode: 0, output: '/tmp' })),
   buildTerminalResultPrompt: () => '',
@@ -646,4 +647,61 @@ it('scopes tool inputs by turn: a later turn with the same toolUseId cannot corr
   // The approval modal for turn-1 must show turn-1's own command.
   await waitFor(() => expect(screen.getByText('允许 Agent 执行命令？')).toBeInTheDocument())
   expect(within(screen.getByRole('group', { name: /执行命令/ })).getByText('pwd')).toBeInTheDocument()
+})
+
+async function openAgentForFileTest() {
+  localStorage.setItem('catio-agent-config', JSON.stringify({ provider: 'ollama', baseUrl: 'http://localhost:11434', model: 'llama3' }))
+  wrap()
+  fireEvent.click(screen.getAllByText('新建连接')[0])
+  fireEvent.click(screen.getByText('主机 / 终端'))
+  const hostLabel = screen.getAllByText('主机').map(el => el.parentElement).find(parent => parent?.querySelector('input')) as HTMLElement
+  fireEvent.input(hostLabel.querySelector('input') as HTMLInputElement, { target: { value: 'report-host' } })
+  fireEvent.click(screen.getByText('保存并连接'))
+  fireEvent.click(screen.getByTitle('Catio Agent · 跨终端与数据库'))
+  fireEvent.change(screen.getByPlaceholderText(/生成 shell 命令/), { target: { value: '汇总并保存报告' } })
+  fireEvent.click(screen.getByTitle('发送'))
+  await waitFor(() => expect(agentRuntimeMock.startAgentTurn).toHaveBeenCalled())
+  emitAgent(1, { type: 'turnStarted' })
+  emitAgent(2, { type: 'assistantMessageStarted', messageId: 'm0', round: 0 })
+}
+
+it('shows actual saved file results and never dispatches file content to the terminal', async () => {
+  const capture = await import('../src/services/terminalCapture')
+  vi.mocked(capture.runTerminalCommandAndCapture).mockClear()
+  await openAgentForFileTest()
+  emitAgent(3, { type: 'toolProposed', toolUseId: 'file-1', name: 'local_write_file', input: { path: '今日.md', content: '# Audit' }, risk: [] })
+  emitAgent(4, { type: 'toolStarted', toolUseId: 'file-1' })
+  emitAgent(5, { type: 'toolFinished', toolUseId: 'file-1', result: { toolUseId: 'file-1', status: 'succeeded', content: JSON.stringify({ path: '/reports/今日.md', bytes: 7, action: 'created' }) } })
+  await waitFor(() => expect(screen.getByText('/reports/今日.md')).toBeTruthy())
+  expect(screen.getByText('保存文件 · 成功')).toBeTruthy()
+  expect(capture.runTerminalCommandAndCapture).not.toHaveBeenCalled()
+  expect(agentRuntimeMock.respondToAgentTurn).not.toHaveBeenCalled()
+
+  emitAgent(6, { type: 'toolProposed', toolUseId: 'file-2', name: 'local_read_file', input: { path: 'template.md' }, risk: [] })
+  emitAgent(7, { type: 'toolFinished', toolUseId: 'file-2', result: { toolUseId: 'file-2', status: 'succeeded', content: JSON.stringify({ path: '/reports/template.md', content: 'private-template-marker' }) } })
+  await waitFor(() => expect(screen.getByText('/reports/template.md')).toBeTruthy())
+  expect(screen.queryByText('private-template-marker')).toBeNull()
+  expect(localStorage.getItem('catio-conversations') ?? '').not.toContain('private-template-marker')
+})
+
+it('previews the local path and old/new contents before replacing a report', async () => {
+  await openAgentForFileTest()
+  emitAgent(3, { type: 'toolProposed', toolUseId: 'file-1', name: 'local_write_file', input: { path: 'report.md', resolvedPath: '/reports/report.md', mode: 'replace', content: 'new report', previousContent: 'previous report' }, risk: ['localFileReplace'] })
+  emitAgent(4, { type: 'approvalRequested', toolUseId: 'file-1', reason: 'localFileReplace' })
+  await screen.findByText('允许替换本机文件？')
+  expect(screen.getByRole('group', { name: '本机文件：' }).textContent).toContain('/reports/report.md')
+  expect(screen.getByText('previous report')).toBeTruthy()
+  expect(screen.getByText('new report')).toBeTruthy()
+  fireEvent.click(screen.getByText('允许执行'))
+  await waitFor(() => expect(agentRuntimeMock.respondToAgentTurn).toHaveBeenCalledWith('turn-1', { type: 'approvalDecision', toolUseId: 'file-1', decision: 'allow' }))
+})
+
+it('rejects a file tool wrongly sent to the client execution branch', async () => {
+  const capture = await import('../src/services/terminalCapture')
+  vi.mocked(capture.runTerminalCommandAndCapture).mockClear()
+  await openAgentForFileTest()
+  emitAgent(3, { type: 'toolProposed', toolUseId: 'file-1', name: 'local_write_file', input: { path: 'report.md', content: 'do not run' }, risk: [] })
+  emitAgent(4, { type: 'toolExecutionRequested', toolUseId: 'file-1', target: 'ssh', input: { command: 'do not run' } })
+  await waitFor(() => expect(agentRuntimeMock.respondToAgentTurn).toHaveBeenCalledWith('turn-1', expect.objectContaining({ outcome: expect.objectContaining({ status: 'unsupported' }) })))
+  expect(capture.runTerminalCommandAndCapture).not.toHaveBeenCalled()
 })

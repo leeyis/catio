@@ -1656,3 +1656,233 @@ async fn capability_error_after_fallback_does_not_reactivate() {
     assert_eq!(bridge.executions(), ["turn-1-0-0"]);
     assert_eq!(sink.terminal_count(), 1);
 }
+
+// Local file tools execute in the engine, never on the SSH/client bridge.
+struct FileBridge {
+    files: Arc<catio_lib::agent::local_files::FileSession>,
+    terminal: ScriptedBridge,
+}
+#[async_trait]
+impl ClientBridge for FileBridge {
+    fn local_files(&self) -> Option<Arc<catio_lib::agent::local_files::FileSession>> {
+        Some(self.files.clone())
+    }
+    async fn request_approval(
+        &self,
+        id: &str,
+        reason: &str,
+    ) -> Result<ApprovalDecision, AgentError> {
+        self.terminal.request_approval(id, reason).await
+    }
+    async fn execute_tool(
+        &self,
+        id: &str,
+        target: &str,
+        input: Value,
+    ) -> Result<ToolExecutionOutcome, AgentError> {
+        self.terminal.execute_tool(id, target, input).await
+    }
+}
+fn file_round(id: &str, name: &str, input: Value) -> ScriptedRound {
+    ScriptedRound {
+        round: ProviderRound {
+            message: AgentMessage {
+                role: AgentRole::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: id.into(),
+                    name: name.into(),
+                    input,
+                }],
+            },
+            stop: ProviderStop::ToolUse,
+            usage: None,
+        },
+        deltas: vec![],
+    }
+}
+async fn run_file_turn(
+    mode: ExecutionMode,
+    provider: Arc<ScriptedProvider>,
+    bridge: FileBridge,
+    sink: RecordingSink,
+    cap: u32,
+) -> Result<(), AgentError> {
+    let mut request = valid_request(mode);
+    request.round_cap = cap;
+    TurnEngine
+        .run(TurnContext {
+            owner_id: "local".into(),
+            turn_id: "file-turn".into(),
+            request,
+            provider,
+            sink: Arc::new(sink),
+            bridge: Arc::new(bridge),
+            cancel_token: CancellationToken::new(),
+            expected: Arc::new(Mutex::new(catio_lib::agent::ExpectedResponse::None)),
+        })
+        .await
+}
+
+#[tokio::test]
+async fn ssh_results_can_be_saved_locally_without_dispatching_file_content_to_terminal() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = catio_lib::agent::local_files::LocalWorkspaces::default();
+    workspace
+        .configure(Some(root.path().to_str().unwrap().into()))
+        .unwrap();
+    let provider = Arc::new(ScriptedProvider::tool_then_text("uptime", "saved"));
+    provider.rounds.lock().insert(
+        1,
+        file_round(
+            "file-1",
+            "local_write_file",
+            json!({"path":"巡检/web.md","content":"# 巡检\nCPU 正常"}),
+        ),
+    );
+    provider.rounds.lock().insert(
+        2,
+        file_round("file-2", "local_read_file", json!({"path":"巡检/web.md"})),
+    );
+    let terminal = ScriptedBridge::succeed("{\"exitCode\":0,\"output\":\"CPU 正常\"}");
+    let sink = RecordingSink::default();
+    run_file_turn(
+        ExecutionMode::Ask,
+        provider.clone(),
+        FileBridge {
+            files: workspace.snapshot().unwrap(),
+            terminal: terminal.clone(),
+        },
+        sink.clone(),
+        5,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("巡检/web.md")).unwrap(),
+        "# 巡检\nCPU 正常"
+    );
+    assert_eq!(terminal.executions(), ["tool-1"]);
+    assert!(terminal.approval_requests().is_empty());
+    assert_eq!(sink.count_type("toolExecutionRequested"), 1);
+    assert_eq!(
+        sink.tool_finished_statuses(),
+        vec![ToolResultStatus::Succeeded; 3]
+    );
+    let request = provider.request(3);
+    assert!(request.messages.iter().flat_map(|m| &m.content).any(|b| matches!(b, ContentBlock::ToolResult { content, .. } if content.contains("created") && content.contains("web.md"))));
+    assert!(provider
+        .request(0)
+        .tools
+        .iter()
+        .any(|t| t.name == "local_write_file"));
+}
+
+#[tokio::test]
+async fn local_replace_asks_in_ask_mode_and_denial_preserves_the_file() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("report.md"), "original").unwrap();
+    let workspace = catio_lib::agent::local_files::LocalWorkspaces::default();
+    workspace
+        .configure(Some(root.path().to_str().unwrap().into()))
+        .unwrap();
+    let files = workspace.snapshot().unwrap();
+    let read = files
+        .execute(
+            "r",
+            "local_read_file",
+            json!({"path":"report.md"}),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    let provider = Arc::new(ScriptedProvider::text(&["denied"]));
+    provider.rounds.lock().push_front(file_round("file-1", "local_write_file", json!({"path":"report.md","mode":"replace","expectedVersion":read["version"],"content":"updated"})));
+    let terminal = ScriptedBridge::deny();
+    let sink = RecordingSink::default();
+    run_file_turn(
+        ExecutionMode::Ask,
+        provider.clone(),
+        FileBridge {
+            files,
+            terminal: terminal.clone(),
+        },
+        sink.clone(),
+        3,
+    )
+    .await
+    .unwrap();
+    assert_eq!(terminal.approval_requests(), ["file-1"]);
+    assert!(terminal.executions().is_empty());
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("report.md")).unwrap(),
+        "original"
+    );
+    assert_eq!(sink.tool_finished_statuses(), [ToolResultStatus::Denied]);
+    assert!(provider.request(1).tools.is_empty());
+    assert!(sink.envelopes.lock().iter().any(|e| matches!(&e.event, AgentEvent::ToolProposed { input, .. } if input["previousContent"] == "original")));
+}
+
+#[tokio::test]
+async fn server_runtime_without_local_capability_never_advertises_or_executes_file_tools() {
+    let provider = Arc::new(ScriptedProvider::text(&["unavailable"]));
+    provider.rounds.lock().push_front(file_round(
+        "file-1",
+        "local_write_file",
+        json!({"path":"report.md","content":"not saved"}),
+    ));
+    let terminal = ScriptedBridge::succeed("unused");
+    let sink = RecordingSink::default();
+    run_tool_turn_with_provider(
+        ExecutionMode::Auto,
+        provider.clone(),
+        terminal.clone(),
+        sink.clone(),
+    )
+    .await
+    .unwrap();
+    assert!(provider
+        .request(0)
+        .tools
+        .iter()
+        .all(|t| t.name == "terminal_exec"));
+    assert_eq!(
+        sink.tool_finished_statuses(),
+        [ToolResultStatus::Unsupported]
+    );
+    assert!(terminal.executions().is_empty());
+}
+
+#[tokio::test]
+async fn final_action_round_can_save_report_and_final_synthesis_has_no_tools() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = catio_lib::agent::local_files::LocalWorkspaces::default();
+    workspace
+        .configure(Some(root.path().to_str().unwrap().into()))
+        .unwrap();
+    let provider = Arc::new(ScriptedProvider::tool_then_text("uptime", "saved"));
+    provider.rounds.lock().insert(
+        1,
+        file_round(
+            "file-1",
+            "local_write_file",
+            json!({"path":"report.md","content":"# Partial inspection"}),
+        ),
+    );
+    run_file_turn(
+        ExecutionMode::Auto,
+        provider.clone(),
+        FileBridge {
+            files: workspace.snapshot().unwrap(),
+            terminal: ScriptedBridge::succeed("ok"),
+        },
+        RecordingSink::default(),
+        2,
+    )
+    .await
+    .unwrap();
+    assert!(root.path().join("report.md").exists());
+    assert!(provider
+        .request(1)
+        .system_prompt
+        .contains("final action round"));
+    assert!(provider.request(2).tools.is_empty());
+}

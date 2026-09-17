@@ -86,19 +86,22 @@ pub fn run() {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     }
 
+    let local_workspaces = std::sync::Arc::new(agent::local_files::LocalWorkspaces::default());
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(SessionManager::default())
         .manage(ConnManager::default())
-        .manage(agent::AgentRuntime::production())
+        .manage(agent::AgentRuntime::production().with_local_workspaces(local_workspaces.clone()))
+        .manage(local_workspaces)
         .manage(mcp::McpState::default())
         .manage(scan::ScanState::default())
         .manage(db::SqlFileState::default())
         .manage(localterm::LocalTermManager::default())
         .manage(vncconn::VncManager::default())
         .invoke_handler(tauri::generate_handler![
+            agent::local_files::agent_set_workspace,
             optical::optical_status,
             optical::optical_unlock,
             optical::optical_lock,

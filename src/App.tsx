@@ -75,13 +75,12 @@ import {
   isAgentEventEnvelope,
   type AgentEventEnvelope,
   type AgentTurnRequest,
-  type ToolExecutionOutcome,
-  type ToolExecutionStatus,
 } from './services/agentRuntime'
 import { projectAgentEvent, initialProjectorState, type AgentProjectorState } from './services/agentProjector'
 import {
   isTerminalChannelBusy,
   runTerminalCommandAndCapture,
+  terminalResultToToolOutcome,
   type CapturableTerminalTarget,
   type TerminalCommandResult,
 } from './services/terminalCapture'
@@ -90,18 +89,22 @@ import { diagnosticLog } from './services/diagnostics'
 import type { ConnectionProfile } from './state/connections'
 import type { Tab, Connection, Snippet } from './services/types'
 import type { AuthUser } from './components/auth/AuthGate'
-import type { Attachment } from './components/panels/AIPanel'
+import type { Attachment, AgentFileActivity } from './components/panels/AIPanel'
+import { prepareAgentWorkspace, setAgentWorkspaceScope } from './state/agentWorkspace'
+import { setAgentConfig } from './state/agentConfig'
 
 type AgentRunTarget = CapturableTerminalTarget | { kind: 'uncaptured'; chanId: string }
 
 interface PendingAgentRun {
-  kind: 'command' | 'split'
+  kind: 'command' | 'split' | 'file'
   target: string
   command: string
+  previousContent?: string
   settle: (allowed: boolean | null) => void
 }
 
 export default function App() {
+  const [agentFileActivity, setAgentFileActivity] = useState<Record<string, AgentFileActivity[]>>({})
   const D = useData()
   const serverAuth = useServerAuth()
   const dbProfiles = useDbConnections()
@@ -191,7 +194,7 @@ export default function App() {
   // turnId -> projector state (sequence/effect dedupe per turn).
   const agentProjection = useRef<Record<string, AgentProjectorState>>({})
   // toolUseId -> tool input snapshot (approval modal shows the command text).
-  const agentToolInputs = useRef<Record<string, unknown>>({})
+  const agentToolInputs = useRef<Record<string, { name: string; input: unknown }>>({})
   // Envelopes that arrived before their turn was registered (start in flight).
   const pendingAgentEvents = useRef<Record<string, AgentEventEnvelope[]>>({})
   // Serializes agent event handling so ordered envelopes never interleave.
@@ -286,6 +289,10 @@ export default function App() {
   )
 
   const locked = authEnabled && !sessionUser
+  useEffect(() => {
+    // Also revoke a previous webview's grants on reload, before any new Turn.
+    setAgentWorkspaceScope(locked ? null : sessionUser ?? '__open', true)
+  }, [locked, sessionUser])
   // the first account created owns the seed vault; other users get an isolated (empty) vault
   const ownsVault = !authEnabled || sessionUser === ownerUser || sessionUser === '__open'
   // Silently reconnect restored tabs ONCE the vault is usable (auth users have no cached
@@ -397,6 +404,7 @@ export default function App() {
   const currentName = authEnabled && sessionUser && sessionUser !== '__open' ? sessionUser : 'skyler'
 
   function enableAuth() {
+    revokeAgentFiles()
     void lockOptical()
     localStorage.setItem('catio-auth', '1')
     setAuthEnabled(true)
@@ -404,6 +412,7 @@ export default function App() {
     sessionStorage.removeItem('catio-session')
   }
   function disableAuth() {
+    revokeAgentFiles()
     void lockOptical()
     lockVault()
     localStorage.removeItem('catio-auth')
@@ -411,10 +420,17 @@ export default function App() {
     setSessionUser('__open')
   }
   function lockApp() {
+    revokeAgentFiles()
     void lockOptical()
     lockVault()
     setSessionUser(null)
     sessionStorage.removeItem('catio-session')
+  }
+  function revokeAgentFiles() {
+    setAgentWorkspaceScope(null)
+    setAgentConfig({ executionMode: 'manual' })
+    for (const tabId of Object.keys(agentAborts.current)) abortAgentStream(tabId)
+    setAgentFileActivity({})
   }
   // Verify the password, unlock the encrypted secret vault, and start a session.
   // Legacy plaintext-password records are migrated to an encrypted credential
@@ -1721,6 +1737,7 @@ export default function App() {
     target: string,
     command: string,
     signal: AbortSignal,
+    file?: { previousContent: string },
   ): Promise<boolean | null> {
     if (pendingAgentRunRef.current || signal.aborted) return Promise.resolve(null)
     return new Promise(resolve => {
@@ -1737,7 +1754,7 @@ export default function App() {
         resolve(allowed)
       }
       const onAbort = () => settle(null)
-      pending = { kind: 'command', target, command, settle }
+      pending = { kind: file ? 'file' : 'command', target, command, settle, previousContent: file?.previousContent }
       pendingAgentRunRef.current = pending
       setPendingAgentRun(pending)
       signal.addEventListener('abort', onAbort, { once: true })
@@ -1840,21 +1857,6 @@ export default function App() {
     }
   }
 
-  /** Maps a client PTY result to the engine's `ToolExecutionOutcome`. The
-   *  client reports facts only; `denied` never crosses this boundary. */
-  function toToolExecutionResponse(result: TerminalCommandResult): ToolExecutionOutcome {
-    const status: ToolExecutionStatus =
-      result.status === 'completed' ? 'succeeded'
-      : result.status === 'timeout' ? 'failed'
-      : result.status === 'streaming' ? 'outcomeUnknown'
-      : result.status === 'unsupported' ? 'unsupported'
-      : 'blocked'
-    return {
-      status,
-      content: JSON.stringify({ exitCode: result.exitCode, output: result.output }),
-    }
-  }
-
   async function handleAgentEnvelope(envelope: AgentEventEnvelope): Promise<void> {
     const { turnId, conversationId, event } = envelope
     const entry = activeAgentTurn.current[turnId]
@@ -1901,7 +1903,25 @@ export default function App() {
       return
     }
     if (event.type === 'toolProposed') {
-      agentToolInputs.current[`${turnId}:${event.toolUseId}`] = event.input
+      const id = `${turnId}:${event.toolUseId}`
+      agentToolInputs.current[id] = { name: event.name, input: event.input }
+      if (event.name === 'local_read_file' || event.name === 'local_write_file') {
+        const input = event.input as { path?: string; resolvedPath?: string } | null
+        const activity: AgentFileActivity = { id, action: event.name === 'local_read_file' ? 'read' : 'write', path: input?.resolvedPath ?? input?.path ?? '', status: 'pending' }
+        setAgentFileActivity(prev => ({ ...prev, [conversationId]: [...(prev[conversationId] ?? []).filter(a => a.id !== id), activity].slice(-20) }))
+      }
+      return
+    }
+    if (event.type === 'toolFinished') {
+      const id = `${turnId}:${event.toolUseId}`
+      const tool = agentToolInputs.current[id]
+      if (tool?.name === 'local_read_file' || tool?.name === 'local_write_file') {
+        let savedPath: string | undefined
+        if (event.result.status === 'succeeded') {
+          try { const result = JSON.parse(event.result.content); if (typeof result.path === 'string') savedPath = result.path } catch { /* keep proposed path */ }
+        }
+        setAgentFileActivity(prev => ({ ...prev, [conversationId]: (prev[conversationId] ?? []).map(a => a.id === id ? { ...a, status: event.result.status, path: savedPath ?? a.path } : a) }))
+      }
       return
     }
 
@@ -1911,9 +1931,15 @@ export default function App() {
           void cancelAgentTurn(turnId).catch(() => {})
           continue
         }
-        const input = agentToolInputs.current[`${turnId}:${effect.toolUseId}`]
-        const command = (input as { command?: string } | undefined)?.command ?? ''
-        const allowed = await requestAgentRunPermission(entry.hostName, command, entry.controller.signal)
+        const tool = agentToolInputs.current[`${turnId}:${effect.toolUseId}`]
+        const input = tool?.input as { command?: string; content?: string; previousContent?: string; resolvedPath?: string; path?: string } | undefined
+        const isFile = tool?.name === 'local_write_file'
+        const allowed = await requestAgentRunPermission(
+          isFile ? input?.resolvedPath ?? input?.path ?? '' : entry.hostName,
+          isFile ? input?.content ?? '' : input?.command ?? '',
+          entry.controller.signal,
+          isFile ? { previousContent: input?.previousContent ?? '' } : undefined,
+        )
         if (entry.controller.signal.aborted) continue
         await respondToAgentTurn(turnId, {
           type: 'approvalDecision',
@@ -1921,6 +1947,11 @@ export default function App() {
           decision: allowed === true ? 'allow' : 'deny',
         })
       } else if (effect.type === 'executeTool') {
+        const tool = agentToolInputs.current[`${turnId}:${effect.toolUseId}`]
+        if (!entry.controller.signal.aborted && tool?.name !== 'terminal_exec') {
+          await respondToAgentTurn(turnId, { type: 'toolExecutionResult', toolUseId: effect.toolUseId, outcome: { status: 'unsupported', content: 'Only terminal_exec can be dispatched to the client terminal.' } })
+          continue
+        }
         if (entry.controller.signal.aborted) {
           // Dispatch may already have happened; never fake `cancelled`.
           appendAgentRunWarning(conversationId, t('panels.agentOutcomeUnknown'))
@@ -1955,7 +1986,7 @@ export default function App() {
         await respondToAgentTurn(turnId, {
           type: 'toolExecutionResult',
           toolUseId: effect.toolUseId,
-          outcome: toToolExecutionResponse(executed.result),
+          outcome: terminalResultToToolOutcome(executed.result),
         })
       } else if (effect.type === 'showWarning') {
         appendAgentRunWarning(conversationId, t(`panels.${effect.code}`))
@@ -1996,6 +2027,8 @@ export default function App() {
         ...c,
         messages: [...c.messages, { role: 'user', content: text }, { role: 'assistant', content: '' }],
       }))
+      if (executionMode !== 'manual') await prepareAgentWorkspace()
+      if (controller.signal.aborted) return
 
       // ---- P3 SEAM: enrich the system prompt with host sysinfo (OS/time/CPU/mem/disk/GPU).
       // Fetch once per session (cached); await before building outgoing payload so the
@@ -2025,7 +2058,7 @@ export default function App() {
       // Subscribe BEFORE start so the ordered stream is never lost.
       await ensureAgentSubscription()
 
-      const systemPrompt = `${buildAgentSystemPrompt(agentMode, hostName, tabEngine, executionMode, config.singleLineCommands)}${sysinfoBlock}${termBlock}`
+      const systemPrompt = `${buildAgentSystemPrompt(agentMode, hostName, tabEngine, executionMode, config.singleLineCommands, true)}${sysinfoBlock}${termBlock}`
       // P0: prior history enters as text snapshots; this Turn's tool blocks stay typed.
       const priorMessages: AgentTurnRequest['messages'] = prior.map(m => ({
         role: m.role === 'assistant' ? 'assistant' : 'user',
@@ -2249,6 +2282,7 @@ export default function App() {
             <div className="fade-in" style={{ display: 'flex' }}>
               {activePanel === 'ai' && <AIPanel onClose={() => setPanelOpen(false)} mode={aiMode} conn={curConn ?? undefined} connId={aiConnId} engine={curConn?.engine} attachment={aiAttachment} onClearAttachment={() => setAiAttachment(null)} onInsert={insertToTerminal} canInsert={canInsert} onOpenSettings={() => goSettings('ai')}
                 conversation={activeConversation} busy={activeConvBusy || activeTabBusy} history={agentHistory}
+                fileActivity={activeConversation ? agentFileActivity[activeConversation.id] : undefined}
                 onSend={cur ? ((text, opts) => void sendAgentMessage(cur.id, text, opts)) : undefined}
                 onAbort={cur ? (() => abortAgentStream(cur.id)) : undefined}
                 onNewConversation={cur ? (() => newAgentConversation(cur.id)) : undefined}
@@ -2381,7 +2415,7 @@ export default function App() {
 
       {pendingAgentRun && (
         <ConfirmModal
-          title={t(pendingAgentRun.kind === 'split' ? 'panels.agentRunSplitTitle' : 'panels.agentRunPermissionTitle')}
+          title={t(pendingAgentRun.kind === 'file' ? 'panels.fileReplaceTitle' : pendingAgentRun.kind === 'split' ? 'panels.agentRunSplitTitle' : 'panels.agentRunPermissionTitle')}
           message={
             <div className="col" style={{ gap: 12 }}>
               {pendingAgentRun.kind === 'split' && (
@@ -2389,21 +2423,26 @@ export default function App() {
                   {t('panels.agentRunSplitBody')}
                 </div>
               )}
-              <div role="group" aria-label={t('panels.agentRunTargetLabel')} className="row" style={{ alignItems: 'baseline', gap: 8, padding: '9px 10px', borderRadius: 10, background: 'var(--surface-sunken)', border: '1px solid var(--border-hairline)' }}>
-                <span style={{ flex: 'none', fontSize: 11.5, fontWeight: 700, color: 'var(--text-faint)' }}>{t('panels.agentRunTargetLabel')}</span>
+              <div role="group" aria-label={t(pendingAgentRun.kind === 'file' ? 'panels.fileTargetLabel' : 'panels.agentRunTargetLabel')} className="row" style={{ alignItems: 'baseline', gap: 8, padding: '9px 10px', borderRadius: 10, background: 'var(--surface-sunken)', border: '1px solid var(--border-hairline)' }}>
+                <span style={{ flex: 'none', fontSize: 11.5, fontWeight: 700, color: 'var(--text-faint)' }}>{t(pendingAgentRun.kind === 'file' ? 'panels.fileTargetLabel' : 'panels.agentRunTargetLabel')}</span>
                 <span style={{ minWidth: 0, fontWeight: 650, color: 'var(--text-primary)', overflowWrap: 'anywhere' }}>{pendingAgentRun.target}</span>
               </div>
-              <div role="group" aria-label={t('panels.agentRunCommandLabel')} className="col" style={{ gap: 6 }}>
-                <span style={{ fontSize: 11.5, fontWeight: 700, color: 'var(--text-faint)' }}>{t('panels.agentRunCommandLabel')}</span>
+              {pendingAgentRun.kind === 'file' && <div className="col gap6">
+                <span style={{ fontSize: 11.5, color: 'var(--text-tertiary)' }}>{t('panels.filePreviousContent')}</span>
+                <pre className="mono" style={{ maxHeight: 140, overflow: 'auto', whiteSpace: 'pre-wrap', fontSize: 12, margin: 0 }}>{pendingAgentRun.previousContent}</pre>
+                <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>{t('panels.filePreviewHint')}</span>
+              </div>}
+              <div role="group" aria-label={t(pendingAgentRun.kind === 'file' ? 'panels.fileNewContent' : 'panels.agentRunCommandLabel')} className="col" style={{ gap: 6 }}>
+                <span style={{ fontSize: 11.5, fontWeight: 700, color: 'var(--text-faint)' }}>{t(pendingAgentRun.kind === 'file' ? 'panels.fileNewContent' : 'panels.agentRunCommandLabel')}</span>
                 <code className="mono" style={{ display: 'block', width: '100%', maxHeight: 140, overflowY: 'auto', padding: '10px 12px', borderRadius: 10, background: 'var(--term-bg)', border: '1px solid var(--border-hairline-alt)', color: 'var(--term-fg)', fontSize: 12, lineHeight: 1.55, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
-                  {pendingAgentRun.command}
+                  {pendingAgentRun.kind === 'file' ? pendingAgentRun.command.slice(0, 16000) : pendingAgentRun.command}
                 </code>
               </div>
             </div>
           }
           confirmLabel={t(pendingAgentRun.kind === 'split' ? 'panels.agentRunSplitAllow' : 'panels.agentRunPermissionAllow')}
-          danger={pendingAgentRun.kind === 'command'}
-          confirmIcon={pendingAgentRun.kind === 'split' ? 'split-square' : 'terminal'}
+          danger={pendingAgentRun.kind !== 'split'}
+          confirmIcon={pendingAgentRun.kind === 'file' ? 'file-code' : pendingAgentRun.kind === 'split' ? 'split-square' : 'terminal'}
           onConfirm={() => pendingAgentRun.settle(true)}
           onCancel={() => pendingAgentRun.settle(false)}
         />

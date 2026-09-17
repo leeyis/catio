@@ -46,6 +46,24 @@ pub enum PolicyDecision {
 pub struct ToolPolicy;
 
 impl ToolPolicy {
+    pub fn authorize_file(mode: ExecutionMode, replacing: bool) -> PolicyDecision {
+        let risk = ToolRisk {
+            sensitive: replacing,
+            reasons: if replacing {
+                vec!["localFileReplace".into()]
+            } else {
+                vec![]
+            },
+        };
+        match mode {
+            ExecutionMode::Manual => PolicyDecision::Hidden,
+            ExecutionMode::Ask if replacing => PolicyDecision::ApprovalRequired {
+                risk,
+                reason: "localFileReplace".into(),
+            },
+            _ => PolicyDecision::Allowed { risk },
+        }
+    }
     /// Classifies a command against the 13 risk patterns (case-insensitive,
     /// whitespace-tolerant), returning deduplicated reasons.
     pub fn classify(command: &str) -> ToolRisk {

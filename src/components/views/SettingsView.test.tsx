@@ -70,6 +70,7 @@ describe('SettingsView Agent model', () => {
     )
 
     expect(screen.queryByRole('button', { name: '半自动' })).toBeNull()
+    expect(screen.getByLabelText('本机工作目录')).toBeTruthy()
     fireEvent.click(screen.getByRole('switch', { name: '单行命令限制' }))
     fireEvent.click(screen.getByRole('button', { name: '增加最大执行轮数' }))
     fireEvent.click(screen.getByRole('button', { name: '增加最大执行轮数' }))
