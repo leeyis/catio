@@ -58,8 +58,44 @@ describe('AIPanel controlled conversation view', () => {
       conversation={conv([{ role: 'assistant', content: '```markdown\n# Inspection report\nAll observed checks passed.\n```' }])} />)
     expect(screen.queryByTitle('运行命令')).toBeNull()
     expect(screen.queryByTitle('插入终端')).toBeNull()
-    expect(screen.getByRole('button', { name: '下载 Markdown' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '下载 Markdown' })).toBeNull()
   })
+
+  it.each([
+    ['shell', hostConn],
+    ['sql', dbConn],
+  ] as const)('does not add download actions to progress updates or answers in %s mode', (mode, conn) => {
+    const conversation = conv([
+      { role: 'user', content: '检查当前连接状态并汇总结果' },
+      { role: 'assistant', content: '正在检查连接状态。' },
+      { role: 'assistant', content: '## 检查结果\n\n连接正常。' },
+    ])
+    const panel = (busy: boolean) => <LanguageProvider>
+      <AIPanel onClose={() => {}} mode={mode} conn={conn} attachment={null} onClearAttachment={() => {}}
+        conversation={conversation} busy={busy} />
+    </LanguageProvider>
+    const { rerender } = render(panel(true))
+    expect(screen.getByText('正在检查连接状态。')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '下载 Markdown' })).toBeNull()
+
+    rerender(panel(false))
+    expect(screen.getByRole('heading', { name: '检查结果' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '下载 Markdown' })).toBeNull()
+    expect(screen.queryByLabelText('本机文件操作')).toBeNull()
+  })
+
+  it('keeps the saved file result visible without adding a message download action', () => {
+    wrap(<AIPanel onClose={() => {}} mode="shell" conn={hostConn} attachment={null} onClearAttachment={() => {}}
+      conversation={conv([
+        { role: 'user', content: '把检查结果保存为报告到工作目录' },
+        { role: 'assistant', content: '报告已保存到 reports/inspection.md。' },
+      ])}
+      fileActivity={[{ id: 'write-1', action: 'write', path: 'M:/catio-workspace/reports/inspection.md', status: 'succeeded' }]} />)
+    expect(screen.getByText('保存文件 · 成功')).toBeTruthy()
+    expect(screen.getByText('M:/catio-workspace/reports/inspection.md')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '下载 Markdown' })).toBeNull()
+  })
+
   it.each([
     ['shell', hostConn],
     ['sql', dbConn],

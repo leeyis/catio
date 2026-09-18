@@ -19,7 +19,6 @@ import { ConfirmModal } from '../modals/ConfirmModal'
 import { useAgentWorkspace } from '../../state/agentWorkspace'
 import { isTauri } from '../../services/transport'
 import type { ToolResultStatus } from '../../services/agentRuntime'
-import { saveMarkdownReport } from '../../services/markdownReport'
 
 export interface Attachment {
   kind: 'sql' | 'shell'
@@ -405,8 +404,6 @@ function ThinkingBlock({ content, isThinking, components }: ThinkingBlockProps) 
 }
 
 function AssistantMessage({ text, mode, conn, onInsert, canInsert, isStreaming = false }: AssistantMessageProps) {
-  const { t } = useTranslation()
-  const [saveError, setSaveError] = useState(false)
   // Memoize components so react-markdown doesn't remount its subtree on every token update.
   // onInsert and canInsert are stable per conversation turn, so this is safe.
   const components = useMemo(
@@ -421,12 +418,6 @@ function AssistantMessage({ text, mode, conn, onInsert, canInsert, isStreaming =
         <ThinkingBlock content={parts.reasoning} isThinking={parts.isThinking} components={components} />
       )}
       {parts.answer && <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>{parts.answer}</ReactMarkdown>}
-      {parts.answer && !isStreaming && <button className="icon-btn bare" style={{ width: 26, height: 26 }}
-        title={t('panels.downloadMarkdown')} aria-label={t('panels.downloadMarkdown')}
-        onClick={() => { setSaveError(false); void saveMarkdownReport(parts.answer).catch(() => setSaveError(true)) }}>
-        <Icon name="download" size={13} />
-      </button>}
-      {saveError && <span role="alert" style={{ color: 'var(--signal-red)', fontSize: 12 }}>{t('panels.saveMarkdownFailed')}</span>}
     </div>
   )
 }

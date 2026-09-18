@@ -1702,12 +1702,16 @@ fn file_round(id: &str, name: &str, input: Value) -> ScriptedRound {
 }
 async fn run_file_turn(
     mode: ExecutionMode,
+    user_message: &str,
     provider: Arc<ScriptedProvider>,
     bridge: FileBridge,
     sink: RecordingSink,
     cap: u32,
 ) -> Result<(), AgentError> {
     let mut request = valid_request(mode);
+    request.messages[0].content = vec![ContentBlock::Text {
+        text: user_message.into(),
+    }];
     request.round_cap = cap;
     TurnEngine
         .run(TurnContext {
@@ -1721,6 +1725,68 @@ async fn run_file_turn(
             expected: Arc::new(Mutex::new(catio_lib::agent::ExpectedResponse::None)),
         })
         .await
+}
+
+#[tokio::test]
+async fn ordinary_reports_stay_in_chat_and_workspace_instructions_require_explicit_file_requests() {
+    for mode in [ExecutionMode::Ask, ExecutionMode::Auto] {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = catio_lib::agent::local_files::LocalWorkspaces::default();
+        workspace
+            .configure(Some(root.path().to_str().unwrap().into()))
+            .unwrap();
+        let provider = Arc::new(ScriptedProvider::tool_then_text(
+            "uptime",
+            "# 状态报告\n服务正常。",
+        ));
+        let terminal = ScriptedBridge::succeed("ok");
+        let sink = RecordingSink::default();
+        run_file_turn(
+            mode,
+            "检查服务状态并汇总结果",
+            provider.clone(),
+            FileBridge {
+                files: workspace.snapshot().unwrap(),
+                terminal: terminal.clone(),
+            },
+            sink.clone(),
+            1,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+        assert_eq!(terminal.executions(), ["tool-1"]);
+        assert_eq!(sink.tool_finished_statuses(), [ToolResultStatus::Succeeded]);
+        for round in 0..=1 {
+            let prompt = provider.request(round).system_prompt;
+            assert!(prompt.contains("Only call local_write_file when the user explicitly requests"));
+            assert!(prompt.contains("Answer in chat by default"));
+            assert!(prompt.contains(
+                "A request for a summary or report alone is not permission to save a file"
+            ));
+            assert!(prompt.contains("write the final results, not intermediate progress messages"));
+            assert!(!prompt
+                .contains("If a report was requested, finish data collection early and save it"));
+        }
+        let request = provider.request(0);
+        let write_tool = request
+            .tools
+            .iter()
+            .find(|tool| tool.name == "local_write_file")
+            .unwrap();
+        assert!(write_tool
+            .description
+            .contains("Only use when the user explicitly requests"));
+        assert!(request
+            .system_prompt
+            .contains("If the user explicitly requested saving a file"));
+        let synthesis = provider.request(1);
+        assert!(synthesis.tools.is_empty());
+        assert!(synthesis.system_prompt.contains(
+            "If the user explicitly requested saving a file and no write succeeded"
+        ));
+    }
 }
 
 #[tokio::test]
@@ -1747,6 +1813,7 @@ async fn ssh_results_can_be_saved_locally_without_dispatching_file_content_to_te
     let sink = RecordingSink::default();
     run_file_turn(
         ExecutionMode::Ask,
+        "检查主机并将最终巡检报告保存到工作目录的巡检/web.md",
         provider.clone(),
         FileBridge {
             files: workspace.snapshot().unwrap(),
@@ -1800,6 +1867,7 @@ async fn local_replace_asks_in_ask_mode_and_denial_preserves_the_file() {
     let sink = RecordingSink::default();
     run_file_turn(
         ExecutionMode::Ask,
+        "将 report.md 更新为新的报告",
         provider.clone(),
         FileBridge {
             files,
@@ -1869,6 +1937,7 @@ async fn final_action_round_can_save_report_and_final_synthesis_has_no_tools() {
     );
     run_file_turn(
         ExecutionMode::Auto,
+        "检查主机并将结果保存为工作目录中的 report.md",
         provider.clone(),
         FileBridge {
             files: workspace.snapshot().unwrap(),
