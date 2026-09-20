@@ -18,6 +18,11 @@
     "dialog:allow-open",
     "dialog:allow-save",
     {
+      "identifier": "opener:allow-open-path",
+      "comment": "允许关于页使用系统文件管理器打开本机应用日志目录，与 app_log_dir() 一致。",
+      "allow": [{ "path": "$APPLOG" }]
+    },
+    {
       "identifier": "opener:allow-open-url",
       "comment": "只允许用系统默认浏览器打开 http/https 外链(如关于页的代码仓库),不放开任意 scheme/程序。",
       "allow": [{ "url": "https://*" }, { "url": "http://*" }]

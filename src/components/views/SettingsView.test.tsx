@@ -37,6 +37,7 @@ describe('SettingsView Agent model', () => {
 
   afterEach(() => {
     delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+    delete (window as unknown as Record<string, unknown>).__CATIO_SERVER__
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
   })
@@ -89,6 +90,15 @@ describe('SettingsView Agent model', () => {
     fireEvent.click(screen.getByRole('button', { name: '打开诊断日志目录' }))
 
     await waitFor(() => expect(diagnosticMocks.openPath).toHaveBeenCalledWith('C:\\logs\\catio'))
+  })
+
+  it.each([false, true])('hides the local log directory action outside desktop (server=%s)', async server => {
+    if (server) (window as unknown as Record<string, unknown>).__CATIO_SERVER__ = true
+    render(<LanguageProvider><SettingsView theme="dawn" onTheme={vi.fn()} onClose={vi.fn()} initialSection="about" /></LanguageProvider>)
+    await act(async () => {})
+    expect(screen.queryByRole('button', { name: '打开诊断日志目录' })).toBeNull()
+    expect(diagnosticMocks.logDir).not.toHaveBeenCalled()
+    expect(diagnosticMocks.openPath).not.toHaveBeenCalled()
   })
 
   it('accepts and persists a model name that is not returned by the provider', () => {
