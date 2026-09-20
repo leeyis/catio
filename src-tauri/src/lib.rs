@@ -16,6 +16,7 @@ pub mod vncconn;
 pub mod rdp;
 pub mod diagnostics;
 pub mod optical;
+pub mod installation;
 
 use ssh::manager::SessionManager;
 use db::manager::ConnManager;
@@ -103,6 +104,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             agent::local_files::agent_set_workspace,
             optical::optical_status,
+            installation::installation_settings,
             optical::optical_unlock,
             optical::optical_lock,
             optical::optical_check,
@@ -225,6 +227,7 @@ pub fn run() {
         .setup(|app| {
             use tauri::Manager;
             app.manage(optical::OpticalState::from_installation(app.path().app_data_dir()?.join("optical.hash")));
+            app.manage(installation::InstallationSettings::from_installation());
             // Default the JDBC sidecar's driver-JAR directory to
             // <app_data>/jdbc/drivers (created if missing) unless the user
             // overrode CATIO_JDBC_DRIVERS_DIR. JDBC engines load their

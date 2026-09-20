@@ -307,6 +307,12 @@ Catio is released under the [MIT License](LICENSE).
 
 <div align="center"><sub>Built for people who live between the shell prompt and the query console.</sub></div>
 
+### Repository link visibility
+
+The repository link in Settings > About is hidden by default. Set `Show_repository=1` in the installation's `catio.conf` and restart Catio to show it. Missing keys, `0`, or invalid/unreadable configuration keep the link hidden. Existing configuration files are preserved; add the key manually when needed. This controls UI visibility, not removal of the URL from the application binary.
+
+Use the same configuration location described below for desktop and server installations.
+
 ### Wormhole (experimental)
 
 Hidden by default. Copy `catio.conf.example` to `catio.conf` beside the Catio executable, set `Experiment_func=1`, then restart. Windows/Linux use the executable directory; AppImage uses the AppImage directory; macOS uses the directory containing `Catio.app` (outside the signed bundle). Missing, unreadable or invalid configuration keeps it disabled. A read-only installation requires an administrator to place the file.

@@ -18,6 +18,8 @@ vi.mock('@tauri-apps/plugin-opener', () => ({
 }))
 
 const opticalMocks = vi.hoisted(() => ({ status: vi.fn() }))
+const installationMocks = vi.hoisted(() => ({ settings: vi.fn() }))
+vi.mock('../../services/installation', () => ({ installationSettings: installationMocks.settings }))
 vi.mock('../../services/optical', async original => ({
   ...await original<typeof import('../../services/optical')>(), opticalAvailable: () => true, opticalStatus: opticalMocks.status,
 }))
@@ -25,6 +27,7 @@ import { SettingsView } from './SettingsView'
 
 describe('SettingsView Agent model', () => {
   beforeEach(() => {
+    installationMocks.settings.mockReset().mockResolvedValue({ showRepository: false })
     opticalMocks.status.mockResolvedValue({ visible: false, configured: false, canConfigure: false })
     localStorage.clear()
     setAgentConfig(DEFAULT_AGENT_CONFIG)
@@ -50,6 +53,29 @@ describe('SettingsView Agent model', () => {
     fireEvent.click(await screen.findByRole('button', { name: '实验性功能' }))
     expect(await screen.findByRole('switch', { name: '实验性功能' })).toBeTruthy()
   })
+  it.each([{}, { showRepository: false }])('hides the repository by default: %j', async settings => {
+    installationMocks.settings.mockResolvedValue(settings)
+    render(<LanguageProvider><SettingsView theme="dawn" onTheme={vi.fn()} onClose={vi.fn()} initialSection="about" /></LanguageProvider>)
+    await act(async () => {})
+    expect(screen.queryByRole('link', { name: '代码仓库' })).toBeNull()
+  })
+
+  it('shows the repository only after explicit installation opt-in', async () => {
+    let resolveSettings!: (value: { showRepository: boolean }) => void
+    installationMocks.settings.mockReturnValue(new Promise(resolve => { resolveSettings = resolve }))
+    render(<LanguageProvider><SettingsView theme="dawn" onTheme={vi.fn()} onClose={vi.fn()} initialSection="about" /></LanguageProvider>)
+    expect(screen.queryByRole('link', { name: '代码仓库' })).toBeNull()
+    await act(async () => { resolveSettings({ showRepository: true }) })
+    expect(screen.getByRole('link', { name: '代码仓库' })).toHaveAttribute('href', 'https://github.com/leeyis/catio')
+  })
+
+  it('keeps the repository hidden when configuration cannot be loaded', async () => {
+    installationMocks.settings.mockRejectedValue(new Error('unavailable'))
+    render(<LanguageProvider><SettingsView theme="dawn" onTheme={vi.fn()} onClose={vi.fn()} initialSection="about" /></LanguageProvider>)
+    await act(async () => {})
+    expect(screen.queryByRole('link', { name: '代码仓库' })).toBeNull()
+  })
+
   it('opens the persistent diagnostic log directory from About', async () => {
     ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {}
     diagnosticMocks.logDir.mockResolvedValue('C:\\logs\\catio')

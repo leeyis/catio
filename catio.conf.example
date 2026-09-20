@@ -1,3 +1,6 @@
 # Copy to catio.conf beside the executable (macOS: beside Catio.app). Restart after editing.
 # 0: hidden (default); 1: show Experimental features (passphrase still required).
 Experiment_func=0
+
+# 0: hidden (default); 1: show the repository link in Settings > About.
+Show_repository=0

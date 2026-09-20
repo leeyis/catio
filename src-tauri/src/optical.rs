@@ -1,5 +1,6 @@
 //! Session-only optical export grants. No file payload or plaintext passphrase is persisted.
 use crate::ssh::manager::SessionManager;
+use crate::installation::{config_flag, installation_config_path};
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
@@ -55,32 +56,7 @@ pub struct OpticalFile {
 
 /// Installation-owned switch, read once at startup. Missing/invalid/duplicate keys stay off.
 fn experimental_enabled(config: &str) -> bool {
-    if config.len() > 65536 { return false; }
-    let mut value = None;
-    for line in config.lines() {
-        let line = line.trim().trim_start_matches('\u{feff}');
-        if line.is_empty() || line.starts_with('#') || line.starts_with(';') { continue; }
-        let Some((key, setting)) = line.split_once('=') else { return false; };
-        if key.trim() == "Experiment_func" {
-            if value.is_some() { return false; }
-            value = Some(setting.trim() == "1");
-        }
-    }
-    value == Some(true)
-}
-fn installation_config_path() -> PathBuf {
-    // AppImage's executable lives in a temporary read-only mount; use its persistent location.
-    #[cfg(target_os = "linux")]
-    if let Some(image) = std::env::var_os("APPIMAGE") { return PathBuf::from(image).with_file_name("catio.conf"); }
-    std::env::current_exe().map(config_for_executable).unwrap_or_default()
-}
-fn config_for_executable(executable: PathBuf) -> PathBuf {
-    // Do not write inside a signed macOS bundle: adding files invalidates its seal.
-    #[cfg(target_os = "macos")]
-    if let Some(bundle) = executable.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")) {
-        return bundle.with_file_name("catio.conf");
-    }
-    executable.with_file_name("catio.conf")
+    config_flag(config, "Experiment_func")
 }
 
 impl OpticalState {
@@ -93,7 +69,7 @@ impl OpticalState {
         // Never overwrite an operator's configuration. Read-only installs fail closed.
         if let Ok(mut file) = std::fs::OpenOptions::new().write(true).create_new(true).open(&config) {
             use std::io::Write;
-            let _ = file.write_all(b"# Restart Catio after editing.\nExperiment_func=0\n");
+            let _ = file.write_all(b"# Restart Catio after editing.\nExperiment_func=0\nShow_repository=0\n");
         }
         Self::with_config(path, config)
     }

@@ -58,6 +58,7 @@ static WEB_SSH_IDS: IdGen = IdGen::new("sess");
 
 #[derive(Clone)]
 pub struct AppState {
+    pub installation: crate::installation::InstallationSettings,
     pub optical: crate::optical::OpticalState,
     // MULTI-USER extension point: one shared manager today. Swap for a session-keyed map.
     pub conns: Arc<ConnManager>,
@@ -148,6 +149,7 @@ impl AppState {
         let auth = AuthDb::open(&data_dir.join("catio.db"))?;
         Ok(AppState {
             optical: crate::optical::OpticalState::from_installation(data_dir.join("optical.hash")),
+            installation: crate::installation::InstallationSettings::from_installation(),
             conns: Arc::new(ConnManager::default()),
             static_dir: Arc::new(static_dir),
             data_dir: Arc::new(data_dir),
@@ -719,6 +721,7 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
         }
     }
     match cmd {
+        "installation_settings" => serde_json::to_value(&st.installation).map_err(estr),
         // ── Connection lifecycle ────────────────────────────────────────────────
         "db_connect" => {
             let a: ConnectArgs = from_arg(&args, "args")?;

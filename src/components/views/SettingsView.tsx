@@ -31,6 +31,7 @@ import { useServerAuth } from '../auth/ServerAuthGate'
 import { isServer } from '../../services/transport'
 import { copyTextToClipboard } from '../../services/clipboard'
 import { diagnosticLogDir } from '../../services/diagnostics'
+import { installationSettings } from '../../services/installation'
 import { parseAnsi } from './ansiSpans'
 import { opticalAvailable, opticalStatus } from '../../services/optical'
 import { ExperimentalSettings } from './ExperimentalSettings'
@@ -1584,6 +1585,14 @@ function DesktopMcpSettings() {
 
 function AboutSettings() {
   const { t } = useTranslation()
+  const [showRepository, setShowRepository] = React.useState(false)
+  React.useEffect(() => {
+    let disposed = false
+    void installationSettings().then(settings => {
+      if (!disposed) setShowRepository(settings.showRepository === true)
+    }).catch(() => {})
+    return () => { disposed = true }
+  }, [])
   return (
     <Block title={t('settings.aboutTitle')}>
       <div className="row gap16" style={{ padding: 20, border: '1px solid var(--border-hairline)', borderRadius: 16, background: 'var(--surface-subtle)' }}>
@@ -1596,7 +1605,7 @@ function AboutSettings() {
           <span style={{ fontSize: 12.5, color: 'var(--text-secondary)', lineHeight: 1.5, maxWidth: 420 }}><Trans i18nKey="settings.aboutDesc" components={{ b: <b /> }} /></span>
           {/* 外链:Tauri webview 里 window.open 打不开系统浏览器,须走 opener 插件;
               server/web 环境无该插件,回退到 window.open。 */}
-          <a
+          {showRepository && <a
             href="https://github.com/leeyis/catio"
             rel="noreferrer"
             onClick={e => {
@@ -1613,7 +1622,7 @@ function AboutSettings() {
           >
             <Icon name="external-link" size={13} />
             <span>{t('settings.aboutRepo')}</span>
-          </a>
+          </a>}
           {isTauri() && (
             <button
               type="button"
