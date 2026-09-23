@@ -1,7 +1,8 @@
 # Windows 离线诊断
 
 适用于“窗口消失但 catio.exe 仍在”、界面空白、无法打开界面或异常退出。
-仅凭托盘图标不能确定原因；先确认任务管理器中是否仍有 catio.exe。
+启动后界面自动消失、catio.exe 和托盘仍在，也可能是 WebView2 故障、原生窗口异常或
+事件循环失去响应，不能直接判定为用户关闭到托盘。需按下面步骤保留现场。
 
 ## 先收集现场（包括旧版 0.7.1）
 
@@ -31,6 +32,7 @@ ZIP 默认保存到桌面，也可通过 `-OutputDirectory C:\Support` 指定输
 
 - `catio-runtime.log`：启动版本/平台/PID、WebView2 版本、页面加载、React 就绪、异常分类、
   应用栈位置、失败的调用名称、窗口隐藏/恢复、WebView2 故障以及正常退出。
+  启动后第 1、3、10、20 秒记录原生窗口与 WebView2 状态，即使 React 已就绪仍会采样。
 - `catio-panic.log`：Rust panic 的代码位置和回溯；在 abort 之前同步写盘。
 - `catio-diagnostics.log`：原有 terminal/agent 状态日志。
 - 每份日志最大约 5 MiB，保留一份 `.log.1` 轮转备份。
@@ -43,9 +45,15 @@ ZIP 默认保存到桌面，也可通过 `-OutputDirectory C:\Support` 指定输
 - `window-close-to-tray` → `window-hide`：应用收到关闭请求后隐藏窗口。
 - `window-restore-complete`：查看 `visible`、`minimized`、`position`、`size`；失败的 show/focus 操作单独记录。
 - `window-missing`：托盘仍在但主窗口对象不存在。
+- `startup-window-state`：启动过程的窗口存在性、可见性、最小化状态、尺寸和位置；
+  `startup-webview-state` 记录 WebView2 控件可见性及浏览器进程 PID。
+- 有 `startup-probe` 却没有对应秒数的 `startup-window-state`，或 `elapsedMs` 明显滞后：
+  主线程可能阻塞；先结合后续记录确认是否只是启动缓慢。
+- `webview-close-requested`：WebView2 收到了页面的关闭请求，与原生窗口关闭事件分别记录。
+- `webview-navigation-completed`：页面导航是否成功及 WebView2 数值错误码，不记录 URL。
 - `webview-process-failed`：WebView2 原生故障，`kind` 为 WebView2 的 ProcessFailedKind 数值
   （0 浏览器进程退出，1 渲染进程退出，2 渲染无响应，3 子框架退出，6 GPU 进程退出）。
-- `frontend-ready-timeout`：20 秒内未收到 React 挂载就绪，结合 page-load、resource-error、javascript-error 排查。
+- `frontend-ready-timeout`：20 秒内未收到 React 挂载就绪，结合同一时间的窗口采样、page-load、resource-error、javascript-error 排查。
 - `react-error`：应用渲染失败；页面提供重新加载和日志入口。
 - `rust-panic`：原生 Rust panic，结合代码位置/回溯排查。
 

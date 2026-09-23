@@ -323,19 +323,7 @@ pub fn run() {
         match &_event {
             tauri::RunEvent::Ready => {
                 runtime_diagnostics::record("application-ready", serde_json::json!({}));
-                let handle = _app.clone();
-                tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(20)).await;
-                    if !runtime_diagnostics::frontend_ready() {
-                        use tauri::Manager;
-                        let window = handle.get_webview_window("main");
-                        runtime_diagnostics::record("frontend-ready-timeout", serde_json::json!({
-                            "windowExists": window.is_some(),
-                            "visible": window.as_ref().and_then(|w| w.is_visible().ok()),
-                            "minimized": window.as_ref().and_then(|w| w.is_minimized().ok())
-                        }));
-                    }
-                });
+                runtime_diagnostics::observe_startup(_app.clone());
             }
             tauri::RunEvent::ExitRequested { code, .. } => runtime_diagnostics::record("exit-requested", serde_json::json!({"code": code})),
             tauri::RunEvent::Exit => runtime_diagnostics::record("process-exit", serde_json::json!({})),

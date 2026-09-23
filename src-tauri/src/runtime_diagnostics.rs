@@ -248,12 +248,77 @@ pub fn frontend_ready() -> bool {
     FRONTEND_READY.load(Ordering::Relaxed)
 }
 
+/// Observe startup even after React mounts: the native window can disappear
+/// independently of frontend readiness. Never block this worker on the UI loop.
+pub fn observe_startup<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    tauri::async_runtime::spawn(async move {
+        let started = tokio::time::Instant::now();
+        for seconds in [1, 3, 10, 20] {
+            tokio::time::sleep_until(started + std::time::Duration::from_secs(seconds)).await;
+            record(
+                "startup-probe",
+                json!({"seconds": seconds, "frontendReady": frontend_ready()}),
+            );
+            if seconds == 20 && !frontend_ready() {
+                record("frontend-ready-timeout", json!({}));
+            }
+            let handle = app.clone();
+            let result = app.run_on_main_thread(move || {
+                use tauri::Manager;
+                let window = handle.get_webview_window("main");
+                record("startup-window-state", json!({
+                    "seconds": seconds,
+                    "elapsedMs": started.elapsed().as_millis() as u64,
+                    "windowExists": window.is_some(),
+                    "visible": window.as_ref().and_then(|w| w.is_visible().ok()),
+                    "minimized": window.as_ref().and_then(|w| w.is_minimized().ok()),
+                    "position": window.as_ref().and_then(|w| w.outer_position().ok()).map(|p| (p.x, p.y)),
+                    "size": window.as_ref().and_then(|w| w.outer_size().ok()).map(|s| (s.width, s.height))
+                }));
+                #[cfg(windows)]
+                if let Some(window) = window {
+                    let result = window.with_webview(move |webview| unsafe {
+                        let controller = webview.controller();
+                        let mut visible = Default::default();
+                        let visibility = controller.IsVisible(&mut visible);
+                        let browser_pid = controller.CoreWebView2().and_then(|core| {
+                            let mut pid = 0;
+                            core.BrowserProcessId(&mut pid)?;
+                            Ok(pid)
+                        });
+                        record("startup-webview-state", json!({
+                            "seconds": seconds,
+                            "visible": visibility.as_ref().ok().map(|_| visible.as_bool()),
+                            "browserPid": browser_pid.as_ref().ok()
+                        }));
+                        if visibility.is_err() {
+                            record_result("webview-visibility", &visibility);
+                        }
+                        if let Err(error) = browser_pid {
+                            record_result("webview-browser-pid", &Err::<(), _>(error));
+                        }
+                    });
+                    if result.is_err() {
+                        record_result("startup-webview-dispatch", &result);
+                    }
+                }
+            });
+            if result.is_err() {
+                record_result("startup-probe-dispatch", &result);
+            }
+        }
+    });
+}
+
 /// JS cannot report a crashed/unresponsive renderer. Observe it from the host.
 #[cfg(windows)]
 pub fn attach_webview_diagnostics(window: &tauri::WebviewWindow) {
     use webview2_com::{
-        Microsoft::Web::WebView2::Win32::COREWEBVIEW2_PROCESS_FAILED_KIND,
-        ProcessFailedEventHandler,
+        Microsoft::Web::WebView2::Win32::{
+            COREWEBVIEW2_PROCESS_FAILED_KIND, COREWEBVIEW2_WEB_ERROR_STATUS,
+        },
+        NavigationCompletedEventHandler, ProcessFailedEventHandler,
+        WindowCloseRequestedEventHandler,
     };
     let result = window.with_webview(|webview| unsafe {
         // Runs on the WebView UI thread. The WebView owns the handler and releases
@@ -276,6 +341,36 @@ pub fn attach_webview_diagnostics(window: &tauri::WebviewWindow) {
                     &mut token,
                 );
                 record_result("webview-process-hook", &result);
+                let result = core.add_NavigationCompleted(
+                    &NavigationCompletedEventHandler::create(Box::new(|_, args| {
+                        if let Some(args) = args {
+                            let mut success = Default::default();
+                            let mut status = COREWEBVIEW2_WEB_ERROR_STATUS::default();
+                            let success_result = args.IsSuccess(&mut success);
+                            let status_result = args.WebErrorStatus(&mut status);
+                            record(
+                                "webview-navigation-completed",
+                                json!({
+                                    "success": success_result.ok().map(|_| success.as_bool()),
+                                    "status": status_result.ok().map(|_| status.0)
+                                }),
+                            );
+                        }
+                        Ok(())
+                    })),
+                    &mut token,
+                );
+                record_result("webview-navigation-hook", &result);
+                // Wry handles JS window.close separately from Tauri's native
+                // CloseRequested. Observe this path without changing its behavior.
+                let result = core.add_WindowCloseRequested(
+                    &WindowCloseRequestedEventHandler::create(Box::new(|_, _| {
+                        record("webview-close-requested", json!({}));
+                        Ok(())
+                    })),
+                    &mut token,
+                );
+                record_result("webview-close-hook", &result);
             }
             Err(error) => record_result("webview-process-hook", &Err::<(), _>(error)),
         }
