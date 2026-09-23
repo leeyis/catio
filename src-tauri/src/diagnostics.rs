@@ -103,7 +103,7 @@ fn backup_path(path: &Path) -> PathBuf {
     path.with_extension("log.1")
 }
 
-fn append_rotating(path: &Path, line: &[u8], max_bytes: u64) -> std::io::Result<()> {
+pub(super) fn append_rotating(path: &Path, line: &[u8], max_bytes: u64) -> std::io::Result<()> {
     let current_bytes = fs::metadata(path)
         .map(|metadata| metadata.len())
         .unwrap_or(0);

@@ -1,4 +1,11 @@
 {
+  "runtimeError": {
+    "title": "The interface encountered an error",
+    "description": "Reload the interface. If it happens again, use the diagnostic logs or the tray log shortcut to help troubleshoot.",
+    "reload": "Reload interface",
+    "logs": "Open diagnostic logs",
+    "logError": "Cannot open the log folder. On Windows, check %LOCALAPPDATA%\\io.catio.app\\logs or %TEMP%\\io.catio.app\\logs."
+  },
   "optical": {
     "experimental": "Experimental features",
     "settingsHint": "Unlock when needed, for this session only.",

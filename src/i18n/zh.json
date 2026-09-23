@@ -1,4 +1,11 @@
 {
+  "runtimeError": {
+    "title": "界面遇到异常",
+    "description": "请重新加载界面。若再次出现，可通过诊断日志或托盘中的日志入口协助排查。",
+    "reload": "重新加载界面",
+    "logs": "打开诊断日志",
+    "logError": "无法打开日志目录。Windows 可在 %LOCALAPPDATA%\\io.catio.app\\logs 或 %TEMP%\\io.catio.app\\logs 查找。"
+  },
   "optical": {
     "experimental": "实验性功能",
     "settingsHint": "按需解锁，仅在本次使用中有效。",

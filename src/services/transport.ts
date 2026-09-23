@@ -12,6 +12,8 @@
 //! is identical to Tauri's `invoke(cmd, args)` — same `{cmd,args}`, same camelCase — so each
 //! command migrates independently and the multi-user evolution needs no UI change.
 
+import { reportRuntimeEvent } from './runtimeDiagnostics'
+
 /** Desktop runtime — the Tauri webview injects these globals. */
 export const isTauri = (): boolean =>
   typeof window !== 'undefined' &&
@@ -35,8 +37,14 @@ export const isServer = (): boolean =>
  */
 export async function rpc<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   if (isTauri()) {
-    const { invoke } = await import('@tauri-apps/api/core')
-    return invoke<T>(cmd, args)
+    try {
+      const { invoke } = await import('@tauri-apps/api/core')
+      return await invoke<T>(cmd, args)
+    } catch (error) {
+      // No args/results: they can contain credentials, SQL or terminal data.
+      reportRuntimeEvent('invoke-error', error, cmd)
+      throw error
+    }
   }
   if (isServer()) {
     const res = await fetch('/api/invoke', {

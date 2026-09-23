@@ -34,6 +34,22 @@ describe('services/transport', () => {
     expect(r).toEqual({ ok: 1 })
   })
 
+  it('reports failed desktop commands without forwarding their arguments and preserves the rejection', async () => {
+    setTauri(true)
+    const report = vi.fn()
+    ;(window as unknown as Win).__CATIO_DIAGNOSTICS__ = { report }
+    const failure = new Error('connection failed')
+    invokeMock.mockRejectedValue(failure)
+    try {
+      const { rpc } = await import('./transport')
+      await expect(rpc('ssh_connect', { password: 'not-for-logs', host: 'private-host' })).rejects.toBe(failure)
+      expect(report).toHaveBeenCalledWith('invoke-error', failure, 'ssh_connect')
+      expect(JSON.stringify(report.mock.calls)).not.toMatch(/not-for-logs|private-host/)
+    } finally {
+      delete (window as unknown as Win).__CATIO_DIAGNOSTICS__
+    }
+  })
+
   it('rpc POSTs to /api/invoke under server mode and returns parsed json', async () => {
     setServer(true)
     const fetchMock = vi.fn().mockResolvedValue({

@@ -69,3 +69,10 @@ export async function diagnosticLogDir(): Promise<string | null> {
   const { invoke } = await import('@tauri-apps/api/core')
   return invoke<string>('diagnostics_log_dir')
 }
+
+/** Native opener also works when the logger has fallen back to a temp folder. */
+export async function openDiagnosticLogDirectory(): Promise<void> {
+  if (!isTauriRuntime()) return
+  const { invoke } = await import('@tauri-apps/api/core')
+  await invoke('diagnostics_open_dir')
+}

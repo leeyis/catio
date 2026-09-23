@@ -1010,6 +1010,7 @@ dependencies = [
  "csv",
  "deadpool-postgres",
  "des 0.8.1",
+ "dirs",
  "duckdb",
  "futures-util",
  "ipnet",
@@ -1047,6 +1048,7 @@ dependencies = [
  "tokio-util",
  "tower-http",
  "webpki-roots",
+ "webview2-com",
  "zip 2.4.2",
 ]
 

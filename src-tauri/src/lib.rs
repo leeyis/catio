@@ -15,6 +15,7 @@ pub mod vnc;
 pub mod vncconn;
 pub mod rdp;
 pub mod diagnostics;
+pub mod runtime_diagnostics;
 pub mod optical;
 pub mod installation;
 
@@ -26,6 +27,10 @@ const TRAY_SHOW_WINDOW_ID: &str = "show-window";
 #[cfg(desktop)]
 const TRAY_QUIT_ID: &str = "quit";
 #[cfg(desktop)]
+const TRAY_LOGS_ID: &str = "diagnostic-logs";
+#[cfg(desktop)]
+const TRAY_RELOAD_ID: &str = "reload-window";
+#[cfg(desktop)]
 const MAIN_WINDOW_LABEL: &str = "main";
 
 #[cfg(desktop)]
@@ -33,9 +38,19 @@ fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     use tauri::Manager;
 
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_focus();
+        runtime_diagnostics::record("window-restore-request", serde_json::json!({
+            "visible": window.is_visible().ok(), "minimized": window.is_minimized().ok()
+        }));
+        runtime_diagnostics::record_result("window-show", &window.show());
+        runtime_diagnostics::record_result("window-unminimize", &window.unminimize());
+        runtime_diagnostics::record_result("window-focus", &window.set_focus());
+        runtime_diagnostics::record("window-restore-complete", serde_json::json!({
+            "visible": window.is_visible().ok(), "minimized": window.is_minimized().ok(),
+            "position": window.outer_position().ok().map(|p| (p.x, p.y)),
+            "size": window.outer_size().ok().map(|s| (s.width, s.height))
+        }));
+    } else {
+        runtime_diagnostics::record("window-missing", serde_json::json!({}));
     }
 }
 
@@ -48,7 +63,9 @@ fn setup_system_tray(app: &tauri::App) -> tauri::Result<()> {
 
     let show_window = MenuItem::with_id(app, TRAY_SHOW_WINDOW_ID, "显示窗口", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, TRAY_QUIT_ID, "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show_window, &quit])?;
+    let logs = MenuItem::with_id(app, TRAY_LOGS_ID, "打开诊断日志 / Diagnostic logs", true, None::<&str>)?;
+    let reload = MenuItem::with_id(app, TRAY_RELOAD_ID, "重新加载界面 / Reload UI", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show_window, &reload, &logs, &quit])?;
 
     let mut tray = TrayIconBuilder::with_id("main-tray")
         .menu(&menu)
@@ -56,16 +73,26 @@ fn setup_system_tray(app: &tauri::App) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             TRAY_SHOW_WINDOW_ID => show_main_window(app),
+            TRAY_LOGS_ID => {
+                let result = runtime_diagnostics::diagnostics_open_dir(app.clone());
+                runtime_diagnostics::record_result("open-diagnostic-directory", &result);
+            }
+            TRAY_RELOAD_ID => {
+                use tauri::Manager;
+                show_main_window(app);
+                if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+                    runtime_diagnostics::record_result("window-reload", &window.reload());
+                }
+            }
             TRAY_QUIT_ID => app.exit(0),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click {
+            if matches!(event, TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
                 ..
-            } = event
-            {
+            } | TrayIconEvent::DoubleClick { button: MouseButton::Left, .. }) {
                 show_main_window(tray.app_handle());
             }
         });
@@ -80,6 +107,12 @@ fn setup_system_tray(app: &tauri::App) -> tauri::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let context = tauri::generate_context!();
+    runtime_diagnostics::init(&context.config().identifier);
+    match tauri::webview_version() {
+        Ok(version) => runtime_diagnostics::record("webview-runtime", serde_json::json!({"version": version})),
+        Err(error) => runtime_diagnostics::record_result("webview-runtime", &Err::<(), _>(error)),
+    }
     // WebKitGTK's DMABUF renderer can produce a blank WebView on some Linux
     // setups, notably NVIDIA proprietary drivers and virtual displays.
     #[cfg(target_os = "linux")]
@@ -89,6 +122,11 @@ pub fn run() {
 
     let local_workspaces = std::sync::Arc::new(agent::local_files::LocalWorkspaces::default());
     let app = tauri::Builder::default()
+        .append_invoke_initialization_script(include_str!("diagnostics-bootstrap.js"))
+        .on_page_load(|_webview, payload| {
+            // Do not record URLs: navigation can contain credentials/query data.
+            runtime_diagnostics::record("page-load", serde_json::json!({"phase": format!("{:?}", payload.event())}));
+        })
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -211,6 +249,8 @@ pub fn run() {
             scan::commands::scan_read_text_file,
             diagnostics::diagnostics_log,
             diagnostics::diagnostics_log_dir,
+            runtime_diagnostics::diagnostics_runtime_log,
+            runtime_diagnostics::diagnostics_open_dir,
             agent::commands::agent_start_turn,
             agent::commands::agent_respond,
             agent::commands::agent_cancel
@@ -219,13 +259,21 @@ pub fn run() {
             #[cfg(desktop)]
             if window.label() == MAIN_WINDOW_LABEL {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    runtime_diagnostics::record("window-close-to-tray", serde_json::json!({}));
                     api.prevent_close();
-                    let _ = window.hide();
+                    runtime_diagnostics::record_result("window-hide", &window.hide());
+                } else if matches!(event, tauri::WindowEvent::Destroyed) {
+                    runtime_diagnostics::record("window-destroyed", serde_json::json!({}));
                 }
             }
         })
         .setup(|app| {
             use tauri::Manager;
+            runtime_diagnostics::record("setup-start", serde_json::json!({}));
+            #[cfg(windows)]
+            if let Some(window) = app.get_webview_window("main") {
+                runtime_diagnostics::attach_webview_diagnostics(&window);
+            }
             app.manage(optical::OpticalState::from_installation(app.path().app_data_dir()?.join("optical.hash")));
             app.manage(installation::InstallationSettings::from_installation());
             // Default the JDBC sidecar's driver-JAR directory to
@@ -258,12 +306,41 @@ pub fn run() {
             }
             #[cfg(desktop)]
             setup_system_tray(app)?;
+            runtime_diagnostics::record("setup-complete", serde_json::json!({}));
             Ok(())
         })
-        .build(tauri::generate_context!())
-        .expect("error while building tauri application");
+        .build(context);
+
+    let app = match app {
+        Ok(app) => app,
+        Err(error) => {
+            runtime_diagnostics::record_result("application-build-failed", &Err::<(), _>(error));
+            std::process::exit(1);
+        }
+    };
 
     app.run(|_app, _event| {
+        match &_event {
+            tauri::RunEvent::Ready => {
+                runtime_diagnostics::record("application-ready", serde_json::json!({}));
+                let handle = _app.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+                    if !runtime_diagnostics::frontend_ready() {
+                        use tauri::Manager;
+                        let window = handle.get_webview_window("main");
+                        runtime_diagnostics::record("frontend-ready-timeout", serde_json::json!({
+                            "windowExists": window.is_some(),
+                            "visible": window.as_ref().and_then(|w| w.is_visible().ok()),
+                            "minimized": window.as_ref().and_then(|w| w.is_minimized().ok())
+                        }));
+                    }
+                });
+            }
+            tauri::RunEvent::ExitRequested { code, .. } => runtime_diagnostics::record("exit-requested", serde_json::json!({"code": code})),
+            tauri::RunEvent::Exit => runtime_diagnostics::record("process-exit", serde_json::json!({})),
+            _ => {}
+        }
         #[cfg(target_os = "macos")]
         if let tauri::RunEvent::Reopen {
             has_visible_windows: false,
