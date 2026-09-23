@@ -13,6 +13,9 @@ export default defineConfig({
   clearScreen: false,
   define: { __APP_VERSION__: JSON.stringify(pkg.version) },
   server: { port: 1420, strictPort: true },
+  // Syntax/CSS compatibility for older server clients. Runtime APIs such as
+  // structuredClone are supplied separately by src/polyfills.ts.
+  build: { target: ['es2020', 'edge90'], cssTarget: 'edge90' },
   test: {
     environment: 'jsdom',
     globals: true,
