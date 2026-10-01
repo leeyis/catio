@@ -33,6 +33,9 @@ impl SqliteDriver {
             Connection::open(&path)
                 .map_err(|e| DbError::ConnectFailed(e.to_string()))?
         };
+        // Enforce declared foreign keys by default; an explicit PRAGMA remains a
+        // user-controlled session setting. Do not silently accept orphan rows.
+        conn.pragma_update(None, "foreign_keys", true).map_err(|e| DbError::ConnectFailed(e.to_string()))?;
         // Validate connectivity with a trivial query
         conn.execute_batch("SELECT 1")
             .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
@@ -56,33 +59,7 @@ fn value_ref_to_json(val: ValueRef<'_>) -> serde_json::Value {
     }
 }
 
-#[async_trait]
-impl Driver for SqliteDriver {
-    fn db_type(&self) -> DatabaseType { DatabaseType::Sqlite }
-
-    async fn test(&self) -> Result<String, DbError> {
-        let conn = self.conn.lock().await;
-        let version: String = conn
-            .query_row("SELECT sqlite_version()", [], |row| row.get(0))
-            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
-        Ok(format!("SQLite {}", version))
-    }
-
-    async fn exec_batch(&self, statements: &[String]) -> Result<u64, DbError> {
-        let mut conn = self.conn.lock().await;
-        // Dropping `tx` without commit() rolls back (rusqlite Transaction Drop).
-        let tx = conn.transaction().map_err(|e| DbError::QueryFailed(e.to_string()))?;
-        let mut affected = 0u64;
-        for s in statements {
-            affected += tx.execute(s.as_str(), []).map_err(|e| DbError::QueryFailed(e.to_string()))? as u64;
-        }
-        tx.commit().map_err(|e| DbError::QueryFailed(e.to_string()))?;
-        Ok(affected)
-    }
-
-    async fn query(&self, sql: &str, max_rows: u32) -> Result<QueryResult, DbError> {
-        let conn = self.conn.lock().await;
-
+fn sqlite_query_on_conn(conn: &Connection, sql: &str, max_rows: u32) -> Result<QueryResult, DbError> {
         let mut stmt = conn.prepare(sql)
             .map_err(|e| DbError::QueryFailed(e.to_string()))?;
 
@@ -132,6 +109,57 @@ impl Driver for SqliteDriver {
         }
 
         Ok(QueryResult { columns, rows, rows_affected: None, truncated })
+}
+
+#[async_trait]
+impl Driver for SqliteDriver {
+    fn db_type(&self) -> DatabaseType { DatabaseType::Sqlite }
+
+    async fn test(&self) -> Result<String, DbError> {
+        let conn = self.conn.lock().await;
+        let version: String = conn
+            .query_row("SELECT sqlite_version()", [], |row| row.get(0))
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        Ok(format!("SQLite {}", version))
+    }
+
+    async fn exec_statement_batch(&self, statements: crate::db::driver::StatementBatch) -> Result<u64, DbError> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = conn.blocking_lock();
+            let tx = conn.transaction().map_err(|e| DbError::QueryFailed(e.to_string()))?;
+            let mut affected = 0u64;
+            for s in statements {
+                affected += tx.execute(s?.as_str(), []).map_err(|e| DbError::QueryFailed(e.to_string()))? as u64;
+            }
+            tx.commit().map_err(|e| DbError::QueryFailed(e.to_string()))?;
+            Ok(affected)
+        }).await.map_err(|e| DbError::QueryFailed(e.to_string()))?
+    }
+
+    fn supports_query_cancel(&self) -> bool { true }
+
+    async fn query(&self, sql: &str, max_rows: u32) -> Result<QueryResult, DbError> {
+        self.query_cancellable(sql, max_rows, None, tokio_util::sync::CancellationToken::new()).await
+    }
+
+    async fn query_cancellable(&self, sql: &str, max_rows: u32, _namespace: Option<&str>,
+        cancel: tokio_util::sync::CancellationToken) -> Result<QueryResult, DbError> {
+        let conn = tokio::select! {
+            _ = cancel.cancelled() => return Err(DbError::Cancelled),
+            conn = self.conn.clone().lock_owned() => conn,
+        };
+        let sql = sql.to_string();
+        tokio::task::spawn_blocking(move || {
+            if cancel.is_cancelled() { return Err(DbError::Cancelled); }
+            let hook = cancel.clone();
+            // A progress hook handles cancellation-before-execution too. Calling only
+            // sqlite3_interrupt before a statement starts would lose that signal.
+            conn.progress_handler(1000, Some(move || hook.is_cancelled()));
+            let result = sqlite_query_on_conn(&conn, &sql, max_rows);
+            conn.progress_handler(0, None::<fn() -> bool>);
+            if result.is_err() && cancel.is_cancelled() { Err(DbError::Cancelled) } else { result }
+        }).await.map_err(|e| DbError::QueryFailed(e.to_string()))?
     }
 
     async fn list_schemas(&self) -> Result<Vec<String>, DbError> {

@@ -195,6 +195,8 @@ pub fn run() {
             db::commands::db_test_connection,
             db::commands::db_disconnect,
             db::commands::db_query,
+            db::commands::db_cancel_query,
+            db::commands::db_split_query,
             db::commands::db_schema,
             db::commands::db_schema_columns,
             db::commands::db_schema_functions,

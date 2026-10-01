@@ -14,7 +14,7 @@ use calamine::{open_workbook_auto_from_rs, Data, Reader};
 
 use crate::db::DatabaseType;
 use crate::db::dialect::{quote_ident, qualified_table};
-use crate::db::dml::value_to_sql;
+use crate::db::dml::value_to_sql_for;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -386,7 +386,7 @@ pub fn build_import_insert_batches(
                     let cells = mapped
                         .iter()
                         .map(|(source_index, _)| {
-                            value_to_sql(row.get(*source_index).unwrap_or(&Value::Null))
+                            value_to_sql_for(db, row.get(*source_index).unwrap_or(&Value::Null))
                         })
                         .collect::<Vec<_>>()
                         .join(", ");
@@ -408,7 +408,7 @@ pub fn build_import_insert_batches(
 pub fn truncate_sql(db: DatabaseType, has_schemas: bool, schema: Option<&str>, table: &str) -> String {
     let tbl = qualified_table(db, has_schemas, schema, table);
     match db {
-        DatabaseType::Sqlite => format!("DELETE FROM {tbl}"),
+        DatabaseType::Sqlite | DatabaseType::Mysql | DatabaseType::Duckdb => format!("DELETE FROM {tbl}"),
         _ => format!("TRUNCATE TABLE {tbl}"),
     }
 }
@@ -711,7 +711,7 @@ mod tests {
     #[test]
     fn truncate_sql_uses_delete_on_sqlite() {
         assert_eq!(truncate_sql(DatabaseType::Sqlite, false, None, "t"), "DELETE FROM \"t\"");
-        assert_eq!(truncate_sql(DatabaseType::Mysql, false, None, "t"), "TRUNCATE TABLE `t`");
+        assert_eq!(truncate_sql(DatabaseType::Mysql, false, None, "t"), "DELETE FROM `t`");
     }
 
     #[test]

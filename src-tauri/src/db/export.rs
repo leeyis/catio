@@ -7,7 +7,7 @@
 
 use crate::db::DatabaseType;
 use crate::db::dialect::{quote_ident, qualified_table};
-use crate::db::dml::value_to_sql;
+use crate::db::dml::value_to_sql_for;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -57,7 +57,7 @@ pub fn build_insert_statements(
             let values = chunk
                 .iter()
                 .map(|row| {
-                    let cells = row.iter().map(value_to_sql).collect::<Vec<_>>().join(", ");
+                    let cells = row.iter().map(|value| value_to_sql_for(db, value)).collect::<Vec<_>>().join(", ");
                     format!("({cells})")
                 })
                 .collect::<Vec<_>>()

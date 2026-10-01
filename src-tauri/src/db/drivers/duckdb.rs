@@ -14,7 +14,6 @@
 // the compiler knows `duckdb` at use-site refers to the extern crate, not the module itself.
 
 use async_trait::async_trait;
-use duckdb::types::ValueRef;
 use duckdb::Connection;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -26,6 +25,14 @@ use crate::db::result::{QueryResult, ColumnInfo, safe_i64_to_json, binary_to_jso
 
 pub struct DuckDbDriver {
     conn: Arc<Mutex<Connection>>,
+}
+
+struct DuckQueryCompletion {
+    state: Arc<parking_lot::Mutex<Option<Arc<duckdb::InterruptHandle>>>>,
+    done: tokio_util::sync::CancellationToken,
+}
+impl Drop for DuckQueryCompletion {
+    fn drop(&mut self) { self.state.lock().take(); self.done.cancel(); }
 }
 
 impl DuckDbDriver {
@@ -46,67 +53,62 @@ impl DuckDbDriver {
     }
 }
 
-/// Map a duckdb ValueRef to serde_json::Value.
-/// Adapted from dbx crates/dbx-core/src/db/duckdb_driver.rs value mapping, Apache-2.0.
-fn value_ref_to_json(val: ValueRef<'_>) -> serde_json::Value {
-    match val {
-        ValueRef::Null => serde_json::Value::Null,
-        ValueRef::Boolean(v) => serde_json::Value::Bool(v),
-        ValueRef::TinyInt(v) => safe_i64_to_json(v as i64),
-        ValueRef::SmallInt(v) => safe_i64_to_json(v as i64),
-        ValueRef::Int(v) => safe_i64_to_json(v as i64),
-        ValueRef::BigInt(v) => safe_i64_to_json(v),
-        ValueRef::HugeInt(v) => {
-            // HugeInt is i128; represent as string to avoid precision loss
-            serde_json::Value::String(v.to_string())
+/// Decode Arrow directly: duckdb-rs ValueRef converts DECIMAL(38,s) through a
+/// 96-bit rust_decimal mantissa, which can panic. No lossy intermediate conversion.
+fn duck_arrow_value(column: &dyn duckdb::arrow::array::Array, row: usize) -> Result<serde_json::Value, DbError> {
+    use duckdb::arrow::{array::*, datatypes::*};
+    use serde_json::Value as J;
+    if column.is_null(row) { return Ok(J::Null); }
+    macro_rules! array { ($t:ty) => { column.as_any().downcast_ref::<$t>()
+        .ok_or_else(|| DbError::QueryFailed("Unexpected DuckDB Arrow column representation".into()))? }; }
+    macro_rules! list { ($t:ty) => {{ let values = array!($t).value(row);
+        J::Array((0..values.len()).map(|i| duck_arrow_value(values.as_ref(), i)).collect::<Result<Vec<_>, _>>()?) }}; }
+    macro_rules! dictionary { ($t:ty) => {{ let values = array!(DictionaryArray<$t>);
+        duck_arrow_value(values.values().as_ref(), values.keys().value(row) as usize)? }}; }
+    Ok(match column.data_type() {
+        DataType::Boolean => J::Bool(array!(BooleanArray).value(row)),
+        DataType::Int8 => safe_i64_to_json(array!(Int8Array).value(row) as i64),
+        DataType::Int16 => safe_i64_to_json(array!(Int16Array).value(row) as i64),
+        DataType::Int32 => safe_i64_to_json(array!(Int32Array).value(row) as i64),
+        DataType::Int64 => safe_i64_to_json(array!(Int64Array).value(row)),
+        DataType::UInt8 => safe_i64_to_json(array!(UInt8Array).value(row) as i64),
+        DataType::UInt16 => safe_i64_to_json(array!(UInt16Array).value(row) as i64),
+        DataType::UInt32 => safe_i64_to_json(array!(UInt32Array).value(row) as i64),
+        DataType::UInt64 => { let v = array!(UInt64Array).value(row); if v <= i64::MAX as u64 { safe_i64_to_json(v as i64) } else { J::String(v.to_string()) } },
+        DataType::Float32 => { let v = array!(Float32Array).value(row); serde_json::Number::from_f64(v as f64).map(J::Number).unwrap_or_else(|| J::String(v.to_string())) },
+        DataType::Float64 => { let v = array!(Float64Array).value(row); serde_json::Number::from_f64(v).map(J::Number).unwrap_or_else(|| J::String(v.to_string())) },
+        DataType::Decimal128(_, scale) => J::String(crate::db::result::decimal_i128_to_string(array!(Decimal128Array).value(row), *scale)),
+        DataType::Binary => binary_to_json(array!(BinaryArray).value(row)),
+        DataType::LargeBinary => binary_to_json(array!(LargeBinaryArray).value(row)),
+        DataType::FixedSizeBinary(_) => binary_to_json(array!(FixedSizeBinaryArray).value(row)),
+        DataType::List(_) => list!(ListArray),
+        DataType::LargeList(_) => list!(LargeListArray),
+        DataType::FixedSizeList(_, _) => list!(FixedSizeListArray),
+        DataType::Struct(fields) => {
+            let value = array!(StructArray);
+            J::Object(fields.iter().enumerate().map(|(i, field)| Ok((field.name().clone(),
+                duck_arrow_value(value.column(i).as_ref(), row)?))).collect::<Result<_, DbError>>()?)
         }
-        ValueRef::UTinyInt(v) => safe_i64_to_json(v as i64),
-        ValueRef::USmallInt(v) => safe_i64_to_json(v as i64),
-        ValueRef::UInt(v) => safe_i64_to_json(v as i64),
-        ValueRef::UBigInt(v) => {
-            // u64 may exceed JS safe integer; use safe_i64_to_json via i64 cast when safe
-            if v <= i64::MAX as u64 {
-                safe_i64_to_json(v as i64)
-            } else {
-                serde_json::Value::String(v.to_string())
-            }
+        DataType::Map(_, _) => {
+            let entries = array!(MapArray).value(row);
+            J::Array((0..entries.len()).map(|i| Ok(serde_json::json!({
+                "key": duck_arrow_value(entries.column(0).as_ref(), i)?,
+                "value": duck_arrow_value(entries.column(1).as_ref(), i)?,
+            }))).collect::<Result<Vec<_>, DbError>>()?)
         }
-        ValueRef::Float(v) => serde_json::Number::from_f64(v as f64)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null),
-        ValueRef::Double(v) => serde_json::Number::from_f64(v)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null),
-        ValueRef::Decimal(v) => {
-            // Decimal: convert to f64 via ToPrimitive then to JSON Number
-            use rust_decimal::prelude::ToPrimitive;
-            let f = v.to_f64().unwrap_or(f64::NAN);
-            serde_json::Number::from_f64(f)
-                .map(serde_json::Value::Number)
-                .unwrap_or(serde_json::Value::Null)
-        }
-        ValueRef::Text(v) => serde_json::Value::String(
-            String::from_utf8_lossy(v).to_string(),
-        ),
-        ValueRef::Blob(v) => binary_to_json(v),
-        ValueRef::Date32(v) => {
-            // days since epoch; represent as string
-            serde_json::Value::String(v.to_string())
-        }
-        ValueRef::Time64(_, v) => {
-            serde_json::Value::String(v.to_string())
-        }
-        ValueRef::Timestamp(_, v) => {
-            serde_json::Value::String(v.to_string())
-        }
-        ValueRef::Interval { months, days, nanos } => {
-            serde_json::Value::String(format!("{}mo {}d {}ns", months, days, nanos))
-        }
-        ValueRef::List(_, _) | ValueRef::Struct(_, _) | ValueRef::Array(_, _) | ValueRef::Map(_, _) | ValueRef::Union(_, _) | ValueRef::Enum(_, _) => {
-            // Compound types: fall back to debug string
-            serde_json::Value::String(format!("{:?}", val))
-        }
-    }
+        DataType::Union(_, _) => { let values = array!(UnionArray); duck_arrow_value(values.child(values.type_id(row)).as_ref(), values.value_offset(row))? }
+        DataType::Dictionary(key, _) => match key.as_ref() {
+            DataType::Int8 => dictionary!(Int8Type), DataType::Int16 => dictionary!(Int16Type),
+            DataType::Int32 => dictionary!(Int32Type), DataType::Int64 => dictionary!(Int64Type),
+            DataType::UInt8 => dictionary!(UInt8Type), DataType::UInt16 => dictionary!(UInt16Type),
+            DataType::UInt32 => dictionary!(UInt32Type), DataType::UInt64 => dictionary!(UInt64Type),
+            _ => return Err(DbError::Unsupported("Unsupported DuckDB dictionary key type".into())),
+        },
+        // Arrow's formatter preserves date/time units, timezone, strings, intervals
+        // and Decimal256 without converting through epoch integers or Debug dumps.
+        _ => J::String(duckdb::arrow::util::display::array_value_to_string(column, row)
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?),
+    })
 }
 
 /// Resolve "main" to the actual DuckDB catalog name via `current_database()`.
@@ -121,63 +123,28 @@ fn resolve_catalog(conn: &Connection, database: &str) -> Result<String, DbError>
 }
 
 fn duckdb_query_on_conn(conn: &Connection, sql: &str, max_rows: u32) -> Result<QueryResult, DbError> {
-    // DuckDB's column_count() panics if the statement has not been executed yet
-    // (unlike rusqlite). We always use stmt.query() which internally calls execute()
-    // and then wraps the result. After query() returns, column_count() is safe via
-    // rows.as_ref(). DDL/DML statements return col_count == 0, SELECT returns > 0.
-    let mut stmt = conn.prepare(sql)
-        .map_err(|e| DbError::QueryFailed(e.to_string()))?;
-
-    let mut query_rows = stmt.query([])
-        .map_err(|e| DbError::QueryFailed(e.to_string()))?;
-
-    // After query(), the statement is executed; column_count() is now safe.
-    let col_count = query_rows.as_ref()
-        .map(|s| s.column_count())
-        .unwrap_or(0);
-
-    // Non-row-returning statement (DDL, INSERT, UPDATE, DELETE): col_count == 0
-    if col_count == 0 {
-        // rows_changed is available via raw_statement row_count but is 0 for DDL.
-        // For DML, we can get rows changed via conn.execute(); however since we already
-        // ran via query(), we return None for rows_affected (consistent behavior).
-        return Ok(QueryResult {
-            columns: vec![],
-            rows: vec![],
-            rows_affected: None,
-            truncated: false,
-        });
+    if !crate::db::pagination::returns_rows(DatabaseType::Duckdb, sql) {
+        let affected = conn.execute(sql, []).map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        return Ok(QueryResult { columns: vec![], rows: vec![], rows_affected: Some(affected as u64), truncated: false });
     }
-
-    // Build column info from the executed statement
-    let columns: Vec<ColumnInfo> = (0..col_count).map(|i| {
-        let name = query_rows.as_ref()
-            .and_then(|s| s.column_name(i).ok())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| format!("col{}", i));
-        ColumnInfo { name, type_name: String::new(), pk: false }
+    let mut stmt = conn.prepare(sql).map_err(|e| DbError::QueryFailed(e.to_string()))?;
+    let arrow = stmt.query_arrow([]).map_err(|e| DbError::QueryFailed(e.to_string()))?;
+    let schema = arrow.get_schema();
+    let columns = schema.fields().iter().map(|field| ColumnInfo {
+        name: field.name().clone(),
+        type_name: match field.data_type() {
+            duckdb::arrow::datatypes::DataType::Timestamp(_, Some(_)) => "TIMESTAMPTZ".into(),
+            ty => ty.to_string(),
+        }, pk: false,
     }).collect();
-
-    let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
-    let mut truncated = false;
-
-    while let Some(row) = query_rows.next()
-        .map_err(|e| DbError::QueryFailed(e.to_string()))?
-    {
-        if rows.len() as u32 >= max_rows {
-            truncated = true;
-            break;
+    let mut rows = Vec::new(); let mut truncated = false;
+    'batches: for batch in arrow {
+        for row in 0..batch.num_rows() {
+            if rows.len() >= max_rows as usize { truncated = true; break 'batches; }
+            rows.push(batch.columns().iter().map(|column| duck_arrow_value(column.as_ref(), row))
+                .collect::<Result<Vec<_>, _>>()?);
         }
-        let mut out = Vec::with_capacity(col_count);
-        for i in 0..col_count {
-            let val = row.get_ref(i)
-                .map(value_ref_to_json)
-                .unwrap_or(serde_json::Value::Null);
-            out.push(val);
-        }
-        rows.push(out);
     }
-
     Ok(QueryResult { columns, rows, rows_affected: None, truncated })
 }
 
@@ -193,29 +160,77 @@ impl Driver for DuckDbDriver {
         Ok(format!("DuckDB {}", version))
     }
 
-    async fn query(&self, sql: &str, max_rows: u32) -> Result<QueryResult, DbError> {
-        let conn = self.conn.lock().await;
-        duckdb_query_on_conn(&conn, sql, max_rows)
+    async fn exec_statement_batch(&self, statements: crate::db::driver::StatementBatch) -> Result<u64, DbError> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = conn.blocking_lock();
+            let tx = conn.transaction().map_err(|e| DbError::QueryFailed(e.to_string()))?;
+            let mut affected = 0u64;
+            for s in statements {
+                affected += tx.execute(s?.as_str(), []).map_err(|e| DbError::QueryFailed(e.to_string()))? as u64;
+            }
+            tx.commit().map_err(|e| DbError::QueryFailed(e.to_string()))?;
+            Ok(affected)
+        }).await.map_err(|e| DbError::QueryFailed(e.to_string()))?
     }
 
-    async fn query_with_default_namespace(&self, sql: &str, max_rows: u32, default_namespace: Option<&str>)
-        -> Result<QueryResult, DbError> {
-        let Some(schema) = default_namespace.map(str::trim).filter(|s| !s.is_empty()) else {
-            return self.query(sql, max_rows).await;
+    fn supports_query_cancel(&self) -> bool { true }
+
+    async fn query(&self, sql: &str, max_rows: u32) -> Result<QueryResult, DbError> {
+        self.query_cancellable(sql, max_rows, None, tokio_util::sync::CancellationToken::new()).await
+    }
+
+    async fn query_with_default_namespace(&self, sql: &str, max_rows: u32, namespace: Option<&str>) -> Result<QueryResult, DbError> {
+        self.query_cancellable(sql, max_rows, namespace, tokio_util::sync::CancellationToken::new()).await
+    }
+
+    async fn query_cancellable(&self, sql: &str, max_rows: u32, namespace: Option<&str>, cancel: tokio_util::sync::CancellationToken) -> Result<QueryResult, DbError> {
+        let conn = tokio::select! {
+            _ = cancel.cancelled() => return Err(DbError::Cancelled),
+            conn = self.conn.clone().lock_owned() => conn,
         };
-        let conn = self.conn.lock().await;
-        let original_schema = conn
-            .query_row("SELECT current_schema()", [], |row| row.get::<_, String>(0))
-            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
-        if original_schema != schema {
-            conn.execute_batch(&format!("USE {}", quote_ident(DatabaseType::Duckdb, schema)))
-                .map_err(|e| DbError::QueryFailed(e.to_string()))?;
-        }
-        let result = duckdb_query_on_conn(&conn, sql, max_rows);
-        if original_schema != schema {
-            conn.execute_batch(&format!("USE {}", quote_ident(DatabaseType::Duckdb, &original_schema)))
-                .map_err(|e| DbError::QueryFailed(e.to_string()))?;
-        }
+        let state = Arc::new(parking_lot::Mutex::new(Some(conn.interrupt_handle())));
+        let done = tokio_util::sync::CancellationToken::new();
+        let watcher_state = state.clone(); let watcher_done = done.clone(); let watcher_cancel = cancel.clone();
+        let watcher = tokio::spawn(async move {
+            tokio::select! { _ = watcher_done.cancelled() => return, _ = watcher_cancel.cancelled() => {} }
+            loop {
+                // Checking the active handle and interrupting are one critical section.
+                // Completion clears it BEFORE releasing the connection: never interrupt
+                // the next tab's query. Repetition closes the cancel-before-start race.
+                if let Some(handle) = watcher_state.lock().as_ref() { handle.interrupt(); }
+                tokio::select! {
+                    _ = watcher_done.cancelled() => break,
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+                }
+            }
+        });
+        let abandoned = cancel.clone().drop_guard();
+        let sql = sql.to_string(); let namespace = namespace.map(str::to_string);
+        let result = tokio::task::spawn_blocking(move || {
+            let _completion = DuckQueryCompletion { state: state.clone(), done };
+            if cancel.is_cancelled() { return Err(DbError::Cancelled); }
+            let result = (|| {
+                let original = if let Some(schema) = namespace.as_deref().filter(|s| !s.trim().is_empty()) {
+                    let current: String = conn.query_row("SELECT current_schema()", [], |r| r.get(0))
+                        .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+                    conn.execute_batch(&format!("USE {}", quote_ident(DatabaseType::Duckdb, schema)))
+                        .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+                    Some(current)
+                } else { None };
+                let result = duckdb_query_on_conn(&conn, &sql, max_rows);
+                // Stop interrupts before restoring session state; the lock is still held.
+                state.lock().take();
+                if let Some(original) = original {
+                    conn.execute_batch(&format!("USE {}", quote_ident(DatabaseType::Duckdb, &original)))
+                        .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+                }
+                result
+            })();
+            if result.is_err() && cancel.is_cancelled() { Err(DbError::Cancelled) } else { result }
+        }).await.map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        let _ = watcher.await;
+        let _ = abandoned.disarm();
         result
     }
 

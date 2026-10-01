@@ -115,8 +115,8 @@ async fn es_query_returns_seeded_doc_as_row() {
     ).await;
 
     let driver = connect(&args).await.unwrap();
-    // query() treats `sql` as the index name
-    let r = driver.query(index, 100).await.unwrap();
+    // The current query console accepts REST/SQL, not a bare index name.
+    let r = driver.query(&format!("GET /{index}/_search"), 100).await.unwrap();
     assert!(!r.columns.is_empty(), "expected columns, got empty");
     assert_eq!(r.rows.len(), 1, "expected 1 doc as row, got: {}", r.rows.len());
 

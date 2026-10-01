@@ -1,0 +1,7 @@
+# DuckDB is C++. Its bundled MSVC build must unwind C++ exceptions, otherwise
+# a SQL error can skip mutex destructors and permanently deadlock the connection.
+# Target-qualified variables leave Linux/macOS C++ flags untouched. Explicit
+# developer overrides are respected and must also preserve /EHsc (or /EHa).
+[env]
+CXXFLAGS_x86_64_pc_windows_msvc = { value = "/EHsc", force = false }
+CXXFLAGS_aarch64_pc_windows_msvc = { value = "/EHsc", force = false }

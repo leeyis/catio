@@ -191,6 +191,24 @@ async fn preview_and_apply_edits() {
 }
 
 #[tokio::test]
+async fn grid_batch_failure_rolls_back_all_edits() {
+    let (cl, base) = authed().await;
+    let conn = connect_mem(&cl, &base).await;
+    invoke(&cl, &base, "db_query", json!({ "connId": conn,
+        "sql": "CREATE TABLE atomic_grid(id INTEGER PRIMARY KEY, v TEXT)" })).await;
+    invoke(&cl, &base, "db_query", json!({ "connId": conn,
+        "sql": "INSERT INTO atomic_grid VALUES(1,'original')" })).await;
+    let (st, _) = invoke(&cl, &base, "db_apply_edits", json!({ "connId": conn, "reqs": [
+        { "table": "atomic_grid", "kind": "update", "pk": [["id",1]], "cells": [["v","changed"]] },
+        { "table": "atomic_grid", "kind": "insert", "pk": [], "cells": [["id",1],["v","duplicate"]] }
+    ]})).await;
+    assert_eq!(st, 400);
+    let (_, body) = invoke(&cl, &base, "db_query", json!({ "connId": conn,
+        "sql": "SELECT v FROM atomic_grid WHERE id=1" })).await;
+    assert_eq!(body["rows"][0][0], json!("original"), "partial grid save must never persist");
+}
+
+#[tokio::test]
 async fn object_admin_truncate_and_drop() {
     let (cl, base) = authed().await;
     let conn = connect_mem(&cl, &base).await;

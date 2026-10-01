@@ -16,10 +16,7 @@ pub struct ElasticsearchDriver {
 
 impl ElasticsearchDriver {
     pub async fn connect(args: &ConnectArgs) -> Result<Self, DbError> {
-        let base_url = format!("http://{}:{}", args.host, args.port);
-        let user = if args.user.is_empty() { None } else { Some(args.user.as_str()) };
-        let pass = args.secret.as_deref();
-        let http = HttpClient::new(&base_url, user, pass);
+        let http = HttpClient::from_args(args)?;
         let driver = Self { http };
         driver.test().await?;
         Ok(driver)

@@ -15,7 +15,7 @@ use std::collections::HashSet;
 
 use crate::db::DatabaseType;
 use crate::db::dialect::{quote_ident, qualified_table};
-use crate::db::dml::value_to_sql;
+use crate::db::dml::value_to_sql_for;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -127,12 +127,12 @@ pub fn build_overwrite_pre_sql(db: DatabaseType, has_schemas: bool, schema: Opti
 }
 
 /// 一批行 → 多值 VALUES 片段 `('a', 1), ('b', 2)`（按映射后的源列下标取值）。
-fn value_rows(rows: &[Vec<Value>], source_indexes: &[usize]) -> String {
+fn value_rows(db: DatabaseType, rows: &[Vec<Value>], source_indexes: &[usize]) -> String {
     rows.iter()
         .map(|row| {
             let cells = source_indexes
                 .iter()
-                .map(|&i| value_to_sql(row.get(i).unwrap_or(&Value::Null)))
+                .map(|&i| value_to_sql_for(db, row.get(i).unwrap_or(&Value::Null)))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("({cells})")
@@ -173,7 +173,7 @@ pub fn build_transfer_write_sql(
     let target_columns = mapped.iter().map(|(_, t)| t.clone()).collect::<Vec<_>>();
     let source_indexes = mapped.iter().map(|(i, _)| *i).collect::<Vec<_>>();
     let col_list = target_columns.iter().map(|c| quote_ident(db, c)).collect::<Vec<_>>().join(", ");
-    let values = value_rows(rows, &source_indexes);
+    let values = value_rows(db, rows, &source_indexes);
 
     let base_insert = format!("INSERT INTO {tbl} ({col_list}) VALUES {values}");
 
@@ -356,7 +356,7 @@ mod tests {
             TransferMode::Overwrite, DatabaseType::Mysql, false, None, "t", &mapped, &rows, &[],
         );
         assert_eq!(sql, "INSERT INTO `t` (`id`) VALUES (1)");
-        assert_eq!(build_overwrite_pre_sql(DatabaseType::Mysql, false, None, "t"), "TRUNCATE TABLE `t`");
+        assert_eq!(build_overwrite_pre_sql(DatabaseType::Mysql, false, None, "t"), "DELETE FROM `t`");
         assert_eq!(build_overwrite_pre_sql(DatabaseType::Sqlite, false, None, "t"), "DELETE FROM \"t\"");
     }
 
@@ -409,7 +409,7 @@ mod tests {
         );
         assert_eq!(
             sql,
-            "MERGE INTO [dbo].[t] AS target USING (VALUES (1, 'Ada')) AS src ([id], [name]) ON target.[id] = src.[id] \
+            "MERGE INTO [dbo].[t] AS target USING (VALUES (1, N'Ada')) AS src ([id], [name]) ON target.[id] = src.[id] \
 WHEN MATCHED THEN UPDATE SET target.[name] = src.[name] \
 WHEN NOT MATCHED THEN INSERT ([id], [name]) VALUES (src.[id], src.[name]);"
         );

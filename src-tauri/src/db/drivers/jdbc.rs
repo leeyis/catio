@@ -25,7 +25,7 @@ use crate::db::result::{QueryResult, ColumnInfo};
 use super::jdbc_config;
 
 struct JdbcProc {
-    child: Child,
+    child: Arc<Mutex<Child>>,
     stdin: BufWriter<ChildStdin>,
     stdout: BufReader<ChildStdout>,
     next_id: u64,
@@ -37,6 +37,8 @@ struct JdbcProc {
 
 pub struct JdbcDriver {
     proc: Arc<Mutex<JdbcProc>>,
+    child: Arc<Mutex<Child>>,
+    caps: crate::db::capabilities::Capabilities,
     /// The `connection` object sent with every request (holds the secret —
     /// in-memory only, never logged or persisted).
     connection: Value,
@@ -201,60 +203,59 @@ impl JdbcDriver {
                 }
             });
         }
-        let proc = Arc::new(Mutex::new(JdbcProc { child, stdin, stdout, next_id: 0, stderr_buf }));
+        let child = Arc::new(Mutex::new(child));
+        let proc = Arc::new(Mutex::new(JdbcProc { child: child.clone(), stdin, stdout, next_id: 0, stderr_buf }));
 
-        let driver = Self { proc, connection, database };
+        let mut driver = Self { proc, child, connection, database, caps: crate::db::capabilities::capabilities_for(DatabaseType::Jdbc) };
         // Validate connectivity now (also primes the cached JDBC connection).
-        driver.rpc("connect", json!({})).await?;
+        let info = driver.rpc("connect", json!({})).await?;
+        driver.caps.transactions = info.get("transactions").and_then(Value::as_bool).unwrap_or(false);
+        driver.caps.er = info.get("er").and_then(Value::as_bool).unwrap_or(false);
+        driver.caps.writable = info.get("writable").and_then(Value::as_bool).unwrap_or(true);
         Ok(driver)
     }
 
-    /// One JSON-RPC round-trip. Runs the blocking line IO on a blocking thread.
+    /// Blocking protocol I/O stays off the async runtime. An entire transaction
+    /// holds the same protocol lock so metadata/query requests cannot interleave.
     async fn rpc(&self, method: &str, extra: Value) -> Result<Value, DbError> {
-        let proc = self.proc.clone();
-        let connection = self.connection.clone();
-        let method = method.to_string();
-        tokio::task::spawn_blocking(move || -> Result<Value, DbError> {
-            let mut guard = proc.lock().map_err(|_| DbError::QueryFailed("JDBC sidecar lock poisoned".into()))?;
-            let p = &mut *guard;
-            p.next_id += 1;
-            let id = p.next_id;
-            let mut params = extra;
-            if let Value::Object(ref mut m) = params {
-                m.insert("connection".into(), connection);
-            } else {
-                params = json!({ "connection": connection });
-            }
-            let req = json!({ "id": id, "method": method, "params": params });
-            let line = serde_json::to_string(&req).map_err(|e| DbError::QueryFailed(e.to_string()))?;
-            p.stdin.write_all(line.as_bytes()).and_then(|_| p.stdin.write_all(b"\n")).and_then(|_| p.stdin.flush())
-                .map_err(|e| DbError::ConnectFailed(format!("JDBC sidecar write failed: {e}")))?;
+        let proc = self.proc.clone(); let connection = self.connection.clone(); let method = method.to_string();
+        tokio::task::spawn_blocking(move || {
+            let mut p = proc.lock().map_err(|_| DbError::QueryFailed("JDBC sidecar lock poisoned".into()))?;
+            Self::rpc_locked(&mut p, &connection, &method, extra)
+        }).await.map_err(|e| DbError::QueryFailed(format!("JDBC sidecar task failed: {e}")))?
+    }
 
-            let mut resp = String::new();
-            let n = p.stdout.read_line(&mut resp)
-                .map_err(|e| DbError::ConnectFailed(format!("JDBC sidecar read failed: {e}")))?;
-            if n == 0 {
-                // The sidecar exited without answering. Give the stderr-drain thread
-                // a moment to flush the JVM's dying output, then surface it — that's
-                // the actual cause (driver Error, incompatible Java, bad JAR, …).
-                std::thread::sleep(Duration::from_millis(150));
-                let detail = p.stderr_buf.lock().ok().map(|g| g.trim().to_string()).unwrap_or_default();
-                return Err(DbError::ConnectFailed(if detail.is_empty() {
-                    "JDBC sidecar 意外退出（Java 是否已安装？驱动 JAR 是否就绪？）".into()
-                } else {
-                    format!("JDBC sidecar 意外退出：{detail}")
-                }));
+    fn rpc_locked(p: &mut JdbcProc, connection: &Value, method: &str, mut params: Value) -> Result<Value, DbError> {
+        p.next_id += 1;
+        let id = p.next_id;
+        if let Value::Object(ref mut m) = params { m.insert("connection".into(), connection.clone()); }
+        else { params = json!({ "connection": connection }); }
+        let line = serde_json::to_string(&json!({ "id": id, "method": method, "params": params }))
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        p.stdin.write_all(line.as_bytes()).and_then(|_| p.stdin.write_all(b"\n")).and_then(|_| p.stdin.flush())
+            .map_err(|e| DbError::ConnectFailed(format!("JDBC sidecar write failed: {e}")))?;
+        let mut response = String::new();
+        let n = p.stdout.read_line(&mut response).map_err(|e| DbError::ConnectFailed(format!("JDBC sidecar read failed: {e}")))?;
+        let redact = |message: &str| {
+            match connection.get("password").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                Some(secret) => message.replace(secret, "<redacted>"), None => message.to_string(),
             }
-            let v: Value = serde_json::from_str(resp.trim())
-                .map_err(|e| DbError::QueryFailed(format!("bad JSON from JDBC sidecar: {e}")))?;
-            if let Some(err) = v.get("error") {
-                let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("unknown JDBC error");
-                return Err(classify_sidecar_error(&method, msg));
-            }
-            Ok(v.get("result").cloned().unwrap_or(Value::Null))
-        })
-        .await
-        .map_err(|e| DbError::QueryFailed(format!("JDBC sidecar task failed: {e}")))?
+        };
+        if n == 0 {
+            std::thread::sleep(Duration::from_millis(50));
+            let detail = p.stderr_buf.lock().ok().map(|s| redact(s.trim())).unwrap_or_default();
+            return Err(DbError::ConnectFailed(format!("JDBC sidecar closed: {detail}")));
+        }
+        let value: Value = serde_json::from_str(response.trim()).map_err(|_| DbError::ConnectFailed("Invalid JDBC sidecar response".into()))?;
+        if value.get("id").and_then(Value::as_u64) != Some(id) {
+            if let Ok(mut child) = p.child.lock() { let _ = child.kill(); }
+            return Err(DbError::ConnectFailed("JDBC protocol lost synchronization; reconnect required".into()));
+        }
+        if let Some(error) = value.get("error") {
+            let message = error.get("message").and_then(Value::as_str).unwrap_or("unknown JDBC error");
+            return Err(classify_sidecar_error(method, &redact(message)));
+        }
+        Ok(value.get("result").cloned().unwrap_or(Value::Null))
     }
 
     fn meta_params(&self, schema: &str) -> Value {
@@ -263,20 +264,15 @@ impl JdbcDriver {
 }
 
 impl Drop for JdbcDriver {
-    fn drop(&mut self) {
-        if let Ok(mut g) = self.proc.lock() {
-            let _ = g.child.kill();
-            let _ = g.child.wait();
-        }
-    }
+    fn drop(&mut self) { self.close(); }
 }
 
 /// Map the plugin's executeQuery result → catio QueryResult.
 fn map_query_result(v: &Value, max_rows: u32) -> QueryResult {
     let columns: Vec<ColumnInfo> = v.get("columns").and_then(|c| c.as_array()).map(|arr| {
-        arr.iter().map(|n| ColumnInfo {
+        arr.iter().enumerate().map(|(index, n)| ColumnInfo {
             name: n.as_str().unwrap_or_default().to_string(),
-            type_name: String::new(),
+            type_name: v.get("column_types").and_then(Value::as_array).and_then(|types| types.get(index)).and_then(Value::as_str).unwrap_or("").to_string(),
             pk: false,
         }).collect()
     }).unwrap_or_default();
@@ -285,7 +281,7 @@ fn map_query_result(v: &Value, max_rows: u32) -> QueryResult {
     let mut rows: Vec<Vec<Value>> = v.get("rows").and_then(|r| r.as_array()).map(|arr| {
         arr.iter().filter_map(|row| row.as_array().cloned()).collect()
     }).unwrap_or_default();
-    if max_rows > 0 && rows.len() as u32 > max_rows {
+    if rows.len() as u32 > max_rows {
         rows.truncate(max_rows as usize);
         truncated = true;
     }
@@ -327,6 +323,33 @@ fn table_comment_for(tables: &Value, table: &str) -> String {
 #[async_trait]
 impl Driver for JdbcDriver {
     fn db_type(&self) -> DatabaseType { DatabaseType::Jdbc }
+    fn capabilities(&self) -> crate::db::capabilities::Capabilities { self.caps }
+    fn close(&self) {
+        // Independent from the protocol mutex: disconnect can kill a hung JVM even
+        // while another worker is blocked in stdout.read_line().
+        if let Ok(mut child) = self.child.lock() { let _ = child.kill(); let _ = child.wait(); }
+    }
+
+    async fn exec_statement_batch(&self, statements: crate::db::driver::StatementBatch) -> Result<u64, DbError> {
+        if !self.caps.transactions { return Err(DbError::Unsupported("This JDBC driver does not support transactions".into())); }
+        let proc = self.proc.clone(); let connection = self.connection.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut p = proc.lock().map_err(|_| DbError::QueryFailed("JDBC sidecar lock poisoned".into()))?;
+            Self::rpc_locked(&mut p, &connection, "beginTransaction", json!({}))?;
+            let writes = (|| {
+                let mut count = 0u64;
+                for statement in statements {
+                    let r = Self::rpc_locked(&mut p, &connection, "executeUpdate", json!({"sql": statement?}))?;
+                    count += r.get("affected_rows").and_then(Value::as_u64).unwrap_or(0);
+                }
+                Ok::<_, DbError>(count)
+            })();
+            match writes {
+                Ok(count) => { Self::rpc_locked(&mut p, &connection, "commitTransaction", json!({}))?; Ok(count) }
+                Err(error) => { let _ = Self::rpc_locked(&mut p, &connection, "rollbackTransaction", json!({})); Err(error) }
+            }
+        }).await.map_err(|e| DbError::QueryFailed(e.to_string()))?
+    }
 
     async fn test(&self) -> Result<String, DbError> {
         let r = self.rpc("testConnection", json!({})).await?;
@@ -337,14 +360,14 @@ impl Driver for JdbcDriver {
     async fn query(&self, sql: &str, max_rows: u32) -> Result<QueryResult, DbError> {
         // maxRows 0 means "no cap" to us; the plugin defaults to its own cap, so
         // pass a large value when uncapped (writes ignore it).
-        let plugin_max = if max_rows == 0 { 1_000_000 } else { max_rows };
+        let plugin_max = max_rows.max(1);
         let r = self.rpc("executeQuery", json!({ "sql": sql, "maxRows": plugin_max })).await?;
         Ok(map_query_result(&r, max_rows))
     }
 
     async fn query_with_default_namespace(&self, sql: &str, max_rows: u32, default_namespace: Option<&str>)
         -> Result<QueryResult, DbError> {
-        let plugin_max = if max_rows == 0 { 1_000_000 } else { max_rows };
+        let plugin_max = max_rows.max(1);
         let mut params = json!({ "sql": sql, "maxRows": plugin_max });
         if let Some(namespace) = default_namespace.map(str::trim).filter(|s| !s.is_empty()) {
             if let Value::Object(ref mut m) = params {
@@ -357,6 +380,18 @@ impl Driver for JdbcDriver {
         }
         let r = self.rpc("executeQuery", params).await?;
         Ok(map_query_result(&r, max_rows))
+    }
+
+    async fn paginated_query_with_default_namespace(&self, sql: &str, limit: u32, offset: u32, namespace: Option<&str>) -> Result<QueryResult, DbError> {
+        let plan = crate::db::pagination::build_page_plan(DatabaseType::Jdbc, sql, limit, offset)?;
+        // Let the JDBC cursor discard the prefix, not a giant Rust/JSON array. No
+        // LIMIT is injected into Oracle/DB2/etc, and only one page crosses IPC.
+        let mut params = json!({ "sql": plan.sql, "maxRows": limit, "offsetRows": offset });
+        if let Some(namespace) = namespace.filter(|s| !s.trim().is_empty()) {
+            params["database"] = json!(namespace); params["schema"] = json!(namespace);
+        }
+        let result = self.rpc("executeQuery", params).await?;
+        Ok(map_query_result(&result, limit))
     }
 
     async fn list_schemas(&self) -> Result<Vec<String>, DbError> {
@@ -395,22 +430,55 @@ impl Driver for JdbcDriver {
     async fn table_structure(&self, schema: &str, table: &str) -> Result<TableStructure, DbError> {
         let mut params = self.meta_params(schema);
         if let Value::Object(ref mut m) = params { m.insert("table".into(), json!(table)); }
-        let r = self.rpc("getColumns", params).await?;
+        let r = self.rpc("getColumns", params.clone()).await?;
         // Column comments ride in each column's `comment` (sidecar maps it from
         // DatabaseMetaData.getColumns()'s REMARKS).
-        let columns = map_column_defs(&r);
+        let mut columns = map_column_defs(&r);
         // Table comment comes from getTables()'s REMARKS — the listTables RPC already
         // surfaces it per table, so fetch and pick the matching row (best-effort).
         let comment = match self.rpc("listTables", self.meta_params(schema)).await {
             Ok(tables) => table_comment_for(&tables, table),
             Err(_) => String::new(),
         };
-        // The simple plugin protocol exposes columns only (no index/FK/trigger introspection).
-        Ok(TableStructure { comment, columns, indexes: vec![], fks: vec![], triggers: vec![] })
+        let indexes_value = self.rpc("getIndexes", params.clone()).await?;
+        let keys_value = self.rpc("getForeignKeys", params).await?;
+        let indexes = indexes_value.as_array().into_iter().flatten().map(|index| crate::db::driver::IndexDef {
+            name: index["name"].as_str().unwrap_or("").into(), columns: index["columns"].as_str().unwrap_or("").into(),
+            unique: index["unique"].as_bool().unwrap_or(false), method: index["method"].as_str().unwrap_or("").into(),
+        }).collect();
+        let fks: Vec<_> = keys_value.as_array().into_iter().flatten().map(|key| crate::db::driver::ForeignKeyDef {
+            column: key["column"].as_str().unwrap_or("").into(), references: key["references"].as_str().unwrap_or("").into(),
+            on_delete: key["on_delete"].as_str().unwrap_or("NO ACTION").into(), on_update: key["on_update"].as_str().unwrap_or("NO ACTION").into(),
+            constraint_name: key["constraint_name"].as_str().map(str::to_string),
+        }).collect();
+        for column in &mut columns {
+            if column.key.is_empty() && fks.iter().any(|key| key.column == column.name) { column.key = "FK".into(); }
+        }
+        Ok(TableStructure { comment, columns, indexes, fks, triggers: vec![] })
     }
 
-    async fn er_relations(&self, _schema: &str) -> Result<Vec<ErRelation>, DbError> {
-        Err(DbError::Unsupported("ER relations are not available over the JDBC sidecar".into()))
+    async fn er_relations(&self, schema: &str) -> Result<Vec<ErRelation>, DbError> {
+        if !self.caps.er { return Err(DbError::Unsupported("JDBC driver does not advertise relational integrity metadata".into())); }
+        let mut relations = Vec::new();
+        for table in self.list_tables(schema).await? {
+            let mut params = self.meta_params(schema); params["table"] = json!(table.name);
+            let keys = self.rpc("getForeignKeys", params).await?;
+            for key in keys.as_array().into_iter().flatten() {
+                relations.push(ErRelation { from: table.name.clone(), from_col: key["column"].as_str().unwrap_or("").into(),
+                    to: key["ref_table"].as_str().unwrap_or("").into(), to_col: key["ref_column"].as_str().unwrap_or("").into() });
+            }
+        }
+        Ok(relations)
+    }
+
+    async fn schema_columns(&self, schema: &str) -> Result<Vec<(String, Vec<String>)>, DbError> {
+        let mut result = Vec::new();
+        for table in self.list_tables(schema).await?.into_iter().take(200) {
+            let mut params = self.meta_params(schema); params["table"] = json!(table.name);
+            let columns = self.rpc("getColumns", params).await?;
+            result.push((table.name, map_column_defs(&columns).into_iter().map(|c| c.name).collect()));
+        }
+        Ok(result)
     }
 
     async fn list_functions(&self, schema: &str) -> Result<Vec<String>, DbError> {

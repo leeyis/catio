@@ -87,6 +87,49 @@ async fn jdbc_h2_full_roundtrip() {
 }
 
 #[tokio::test]
+async fn jdbc_h2_metadata_types_and_atomic_edits() {
+    let Some(args) = h2_args() else { return; };
+    let drv = connect(&args).await.unwrap();
+    assert!(drv.capabilities().transactions && drv.capabilities().er);
+    drv.query(r#"CREATE TABLE "parent" ("id" INT PRIMARY KEY)"#, 0).await.unwrap();
+    drv.query(r#"CREATE TABLE "child" ("id" INT PRIMARY KEY, "pid" INT, "note" VARCHAR, CONSTRAINT "fk_child" FOREIGN KEY ("pid") REFERENCES "parent"("id") ON DELETE CASCADE)"#, 0).await.unwrap();
+    drv.query(r#"CREATE UNIQUE INDEX "uq_child" ON "child"("pid", "note")"#, 0).await.unwrap();
+    drv.query(r#"INSERT INTO "parent" VALUES(1)"#, 0).await.unwrap();
+    drv.query(r#"INSERT INTO "child" VALUES(1,1,'original')"#, 0).await.unwrap();
+    let structure = drv.table_structure("PUBLIC", "child").await.unwrap();
+    assert!(structure.indexes.iter().any(|i| i.name == "uq_child" && i.columns == "pid, note" && i.unique));
+    assert!(structure.fks.iter().any(|f| f.constraint_name.as_deref() == Some("fk_child") && f.on_delete == "CASCADE"));
+    assert!(drv.er_relations("PUBLIC").await.unwrap().iter().any(|r| r.from == "child" && r.to == "parent"));
+    let r = drv.query("SELECT CAST(9007199254740993 AS BIGINT) AS N, CAST(12345678901234567890.123456789012 AS DECIMAL(38,12)) AS AMOUNT", 10).await.unwrap();
+    assert!(!r.columns[0].type_name.is_empty());
+    assert_eq!(r.rows[0][0], json!("9007199254740993"));
+    assert_eq!(r.rows[0][1], json!("12345678901234567890.123456789012"));
+    let edits = vec![
+        catio_lib::db::driver::EditRequest { schema: Some("PUBLIC".into()), table: "child".into(), kind: "update".into(), pk: vec![("id".into(), json!(1))], cells: vec![("note".into(), json!("changed"))] },
+        catio_lib::db::driver::EditRequest { schema: Some("PUBLIC".into()), table: "child".into(), kind: "insert".into(), pk: vec![], cells: vec![("id".into(), json!(1))] },
+    ];
+    assert!(catio_lib::db::write_ops::apply_edits(drv.as_ref(), &edits).await.is_err());
+    assert_eq!(drv.query(r#"SELECT "note" FROM "child" WHERE "id"=1"#, 1).await.unwrap().rows[0][0], json!("original"));
+    let page = drv.table_data(Some("PUBLIC"), "child", 1, 0).await.unwrap();
+    assert_eq!(page.rows.len(), 1); assert!(!page.truncated);
+}
+
+#[tokio::test]
+async fn jdbc_disconnect_closes_a_busy_sidecar_without_waiting_for_its_io_lock() {
+    let Some(args) = h2_args() else { return; };
+    let drv = connect(&args).await.unwrap();
+    drv.query("CREATE ALIAS SLEEP FOR 'java.lang.Thread.sleep'", 0).await.unwrap();
+    let mgr = std::sync::Arc::new(catio_lib::db::manager::ConnManager::default());
+    mgr.insert("jdbc".into(), drv).await;
+    let work = mgr.clone();
+    let task = tokio::spawn(async move { work.query("jdbc", "CALL SLEEP(10000)", 1, None, Some("busy-jdbc"), None).await });
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert!(tokio::time::timeout(std::time::Duration::from_secs(2), mgr.remove("jdbc")).await.unwrap());
+    assert!(tokio::time::timeout(std::time::Duration::from_secs(2), task).await.unwrap().unwrap().is_err());
+    assert_eq!(mgr.running.active_count(), 0);
+}
+
+#[tokio::test]
 async fn jdbc_unknown_engine_is_unsupported() {
     if std::env::var("CATIO_TEST_JDBC").ok().as_deref() != Some("1") { return; }
     let args = ConnectArgs {

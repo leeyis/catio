@@ -160,6 +160,10 @@ pub struct EditRequest {
     pub cells: Vec<(String, serde_json::Value)>,
 }
 
+/// A lazy, fallible statement source. Allows disk-spooled transfers to hold one physical
+/// transaction without buffering the full dataset or fetching source rows under a target lock.
+pub type StatementBatch = Box<dyn Iterator<Item = Result<String, DbError>> + Send>;
+
 /// 所有引擎统一抽象。把 dbx 各模块自由函数的函数体搬进这些方法。
 #[async_trait]
 pub trait Driver: Send + Sync {
@@ -171,6 +175,16 @@ pub trait Driver: Send + Sync {
     async fn test(&self) -> Result<String, DbError>;
     /// 执行任意 SQL（读+写）。max_rows 触达即 truncated。
     async fn query(&self, sql: &str, max_rows: u32) -> Result<QueryResult, DbError>;
+    /// Engine transaction support does not imply every table is transactional
+    /// (notably MySQL MyISAM/Aria). Atomic high-level writes check their targets.
+    async fn ensure_atomic_table(&self, _schema: Option<&str>, _table: &str) -> Result<(), DbError> { Ok(()) }
+    fn close(&self) {}
+    fn supports_query_cancel(&self) -> bool { false }
+    async fn query_cancellable(&self, sql: &str, max_rows: u32, namespace: Option<&str>,
+        cancel: tokio_util::sync::CancellationToken) -> Result<QueryResult, DbError> {
+        if cancel.is_cancelled() { return Err(DbError::Cancelled); }
+        self.query_with_default_namespace(sql, max_rows, namespace).await
+    }
     /// Execute SQL with an optional default namespace selected by the UI.
     ///
     /// Engines that can reliably scope a single query/session override this
@@ -184,13 +198,19 @@ pub trait Driver: Send + Sync {
     /// Execute multiple statements as ONE transaction; rolls back on the first error and
     /// returns total rows affected. Default: unsupported — overridden by transaction-capable
     /// SQL engines. Used by Data Compare's "execute sync SQL".
-    async fn exec_batch(&self, _statements: &[String]) -> Result<u64, DbError> {
+    async fn exec_batch(&self, statements: &[String]) -> Result<u64, DbError> {
+        let statements = statements.iter().map(|sql| crate::db::pagination::batch_statement(self.db_type(), sql))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.exec_statement_batch(Box::new(statements.into_iter().map(Ok))).await
+    }
+    /// Implementations must keep one physical connection until commit, and roll back
+    /// on SQL errors AND statement-source errors. Do not emulate using self.query().
+    async fn exec_statement_batch(&self, _statements: StatementBatch) -> Result<u64, DbError> {
         Err(DbError::Unsupported("transactional batch execution is not supported for this engine".into()))
     }
-    /// 分页查询：用方言 paginate 包裹 SQL 后调 query。
+    /// Query paging uses one lookahead row and preserves the user's own limit.
     async fn paginated_query(&self, sql: &str, limit: u32, offset: u32) -> Result<QueryResult, DbError> {
-        let paged = crate::db::dialect::paginate(self.db_type(), sql, limit, offset);
-        self.query(&paged, limit).await
+        self.paginated_query_with_default_namespace(sql, limit, offset, None).await
     }
     /// 分页查询，同时沿用查询控制台选择的默认命名空间。
     async fn paginated_query_with_default_namespace(
@@ -200,8 +220,9 @@ pub trait Driver: Send + Sync {
         offset: u32,
         default_namespace: Option<&str>,
     ) -> Result<QueryResult, DbError> {
-        let paged = crate::db::dialect::paginate(self.db_type(), sql, limit, offset);
-        self.query_with_default_namespace(&paged, limit, default_namespace).await
+        let plan = crate::db::pagination::build_page_plan(self.db_type(), sql, limit, offset)?;
+        let result = self.query_with_default_namespace(&plan.sql, plan.fetch_rows, default_namespace).await?;
+        Ok(crate::db::pagination::finish_page(result, &plan, limit))
     }
 
     /// 表格数据预览：取一张表（或集合 / index / key 空间）的分页行。
@@ -211,17 +232,26 @@ pub trait Driver: Send + Sync {
     /// _search），因为它们不能执行 SQL。这样数据网格无需关心引擎差异。
     async fn table_data(&self, schema: Option<&str>, table: &str, limit: u32, offset: u32)
         -> Result<QueryResult, DbError> {
-        let db = self.db_type();
-        let has_schemas = self.capabilities().schemas;
-        let qualified = crate::db::dialect::qualified_table(db, has_schemas, schema, table);
-        // On Postgres, prepend ctid (aliased __ctid) so the grid can edit/delete
-        // rows in tables with no primary key.
-        let select = if db == DatabaseType::Postgres {
-            format!("SELECT ctid AS __ctid, * FROM {}", qualified)
-        } else {
-            format!("SELECT * FROM {}", qualified)
-        };
-        self.paginated_query(&select, limit, offset).await
+        self.table_query(schema, table, None, None, limit, offset).await
+    }
+
+    /// Only an engine that proves a safe physical row locator may expose one.
+    async fn table_has_row_identity(&self, _schema: Option<&str>, _table: &str) -> Result<bool, DbError> {
+        Ok(false)
+    }
+
+    /// A transport-neutral filtered table preview. Namespace selection is independent
+    /// of the schemas capability: MySQL databases still need qualification.
+    async fn table_query(&self, schema: Option<&str>, table: &str, where_clause: Option<&str>,
+        order_by: Option<&str>, limit: u32, offset: u32) -> Result<QueryResult, DbError> {
+        if matches!(self.db_type(), DatabaseType::Mongodb | DatabaseType::Redis | DatabaseType::Elasticsearch) {
+            return Err(DbError::Unsupported("SQL filters are not supported for this engine".into()));
+        }
+        let with_ctid = self.table_has_row_identity(schema, table).await?;
+        let sql = crate::db::dialect::build_table_select_sql(
+            self.db_type(), true, schema, table, where_clause, order_by, with_ctid,
+        );
+        self.paginated_query(&sql, limit, offset).await
     }
     /// schema 浏览：库下的 schema 名（无 schema 概念的引擎返回单元素如 ["default"]）。
     async fn list_schemas(&self) -> Result<Vec<String>, DbError>;

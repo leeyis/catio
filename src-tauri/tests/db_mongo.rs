@@ -56,8 +56,11 @@ async fn mongo_list_and_query() {
     let coll_name = "people";
 
     // ---- Seed: use the mongodb crate directly ----
-    let uri = format!("mongodb://{}:{}", host, port);
-    let seed_client = Client::with_uri_str(&uri).await.expect("seed client connect");
+    let mut uri = reqwest::Url::parse(&format!("mongodb://{}:{}", host, port)).unwrap();
+    if !args.user.is_empty() { uri.set_username(&args.user).unwrap(); }
+    uri.set_password(args.secret.as_deref()).unwrap();
+    uri.set_path(&db_name);
+    let seed_client = Client::with_uri_str(uri.as_str()).await.expect("seed client connect");
     let seed_db = seed_client.database(&db_name);
     let coll = seed_db.collection::<mongodb::bson::Document>(coll_name);
 
@@ -88,8 +91,8 @@ async fn mongo_list_and_query() {
         "expected '{coll_name}' in tables, got: {tables:?}"
     );
 
-    // query("people") should return 3 rows with name / age columns
-    let result = driver.query(coll_name, 100).await.expect("query failed");
+    // The current console accepts mongo-shell syntax, not a bare collection name.
+    let result = driver.query(&format!("db.{coll_name}.find({{}})"), 100).await.expect("query failed");
     assert_eq!(result.rows.len(), 3, "expected 3 rows, got {}", result.rows.len());
 
     let col_names: Vec<&str> = result.columns.iter().map(|c| c.name.as_str()).collect();

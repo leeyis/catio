@@ -196,7 +196,7 @@ pub fn build_router(state: AppState) -> Router {
     // visits read this server's DB responses cross-origin — exactly the exfiltration we avoid.
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
-        .route("/api/invoke", post(invoke))
+        .route("/api/invoke", post(invoke).layer(DefaultBodyLimit::max(12 * 1024 * 1024)))
         .route("/ws", get(ws_handler))
         // SFTP binary transfers can't go through JSON /api/invoke: download streams the remote
         // file to the browser, upload takes an HTML5 multipart body (M4).
@@ -710,9 +710,11 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
     // Any command that references a live `connId`/`sessionId` must be issued by the OWNER of that
     // resource (admins may use any). Centralized here so every db/ssh/sftp op is covered uniformly
     // and a crafted id (the ids are guessable counters) can't reach another user's connection.
-    if let Some(conn_id) = args.get("connId").and_then(Value::as_str) {
-        if !owns_resource(&st.conn_owners, conn_id, actor) {
-            return Err("connection not found".into());
+    for field in ["connId", "sourceConnId", "targetConnId"] {
+        if let Some(conn_id) = args.get(field).and_then(Value::as_str) {
+            if !owns_resource(&st.conn_owners, conn_id, actor) {
+                return Err("connection not found".into());
+            }
         }
     }
     if let Some(session_id) = args.get("sessionId").and_then(Value::as_str) {
@@ -756,14 +758,22 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
         // ── Query / pagination / explain ────────────────────────────────────────
         "db_query" => {
             let conn_id = require(&args, "connId")?;
-            let drv = conns.get(conn_id).await.ok_or("connection not found")?;
             let sql = require(&args, "sql")?;
             let max_rows = u32_or(&args, "maxRows", 1000);
             let ns = opt_str(&args, "defaultNamespace");
             let started = Instant::now();
-            let result = drv.query_with_default_namespace(sql, max_rows, ns).await.map_err(estr)?;
+            let result = conns.query(conn_id, sql, max_rows, ns, opt_str(&args, "executionId"),
+                args.get("timeoutMs").and_then(Value::as_u64)).await.map_err(estr)?;
             record_history(st, actor, conn_id, sql, format!("{}ms", started.elapsed().as_millis()), &args);
             serde_json::to_value(result).map_err(estr)
+        }
+        "db_split_query" => {
+            let driver = conns.get(require(&args, "connId")?).await.ok_or("connection not found")?;
+            serde_json::to_value(commands::split_query_core(driver.db_type(), require(&args, "sql")?).map_err(estr)?).map_err(estr)
+        }
+        "db_cancel_query" => {
+            conns.cancel_query(require(&args, "connId")?, require(&args, "executionId")?).await.map_err(estr)?;
+            Ok(Value::Null)
         }
         "db_query_page" => {
             let drv = conns.get(require(&args, "connId")?).await.ok_or("connection not found")?;
@@ -838,22 +848,10 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
         }
         "db_table_query" => {
             let drv = conns.get(require(&args, "connId")?).await.ok_or("connection not found")?;
-            let db = drv.db_type();
-            if matches!(db, crate::db::DatabaseType::Mongodb | crate::db::DatabaseType::Redis | crate::db::DatabaseType::Elasticsearch) {
-                return Err("服务端 WHERE/ORDER BY 仅支持 SQL 引擎".into());
-            }
-            let schema = opt_str(&args, "schema");
-            let table = require(&args, "table")?;
-            let where_clause = opt_str(&args, "whereClause");
-            let order_by = opt_str(&args, "orderBy");
-            let limit = u32_or(&args, "limit", 200);
-            let offset = u32_or(&args, "offset", 0);
-            let has_schemas = commands::table_query_should_qualify(schema);
-            let with_ctid = db == crate::db::DatabaseType::Postgres;
-            let sql = crate::db::dialect::build_table_query_sql(
-                db, has_schemas, schema, table, where_clause, order_by, limit, offset, with_ctid,
-            );
-            serde_json::to_value(drv.query(&sql, limit).await.map_err(estr)?).map_err(estr)
+            let result = drv.table_query(opt_str(&args, "schema"), require(&args, "table")?,
+                opt_str(&args, "whereClause"), opt_str(&args, "orderBy"),
+                u32_or(&args, "limit", 200), u32_or(&args, "offset", 0)).await.map_err(estr)?;
+            serde_json::to_value(result).map_err(estr)
         }
 
         // ── Grid edits (preview / apply) + Data-Compare sync batch ───────────────
@@ -861,7 +859,7 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
             let drv = conns.get(require(&args, "connId")?).await.ok_or("connection not found")?;
             let req: EditRequest = from_arg(&args, "req")?;
             if !drv.capabilities().writable { return Err("read-only engine".into()); }
-            if matches!(drv.db_type(), crate::db::DatabaseType::Mongodb | crate::db::DatabaseType::Elasticsearch) {
+            if matches!(drv.db_type(), crate::db::DatabaseType::Mongodb | crate::db::DatabaseType::Elasticsearch | crate::db::DatabaseType::Redis) {
                 return Err("editing via SQL DML is not supported for this engine".into());
             }
             Ok(Value::String(commands::build_sql(drv.db_type(), &req).map_err(estr)?))
@@ -869,22 +867,12 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
         "db_apply_edits" => {
             let drv = conns.get(require(&args, "connId")?).await.ok_or("connection not found")?;
             let reqs: Vec<EditRequest> = from_arg(&args, "reqs")?;
-            if !drv.capabilities().writable { return Err("read-only engine".into()); }
-            if matches!(drv.db_type(), crate::db::DatabaseType::Mongodb | crate::db::DatabaseType::Elasticsearch) {
-                return Err("editing via SQL DML is not supported for this engine".into());
-            }
-            let mut affected = 0u64;
-            for req in &reqs {
-                let sql = commands::build_sql(drv.db_type(), req).map_err(estr)?;
-                let r = drv.query(&sql, 0).await.map_err(estr)?;
-                affected += r.rows_affected.unwrap_or(0);
-            }
-            Ok(json!(affected))
+            Ok(json!(crate::db::write_ops::apply_edits(drv.as_ref(), &reqs).await.map_err(estr)?))
         }
         "db_exec_batch" => {
             let drv = conns.get(require(&args, "connId")?).await.ok_or("connection not found")?;
             if !drv.capabilities().writable { return Err("read-only engine".into()); }
-            if matches!(drv.db_type(), crate::db::DatabaseType::Mongodb | crate::db::DatabaseType::Elasticsearch) {
+            if matches!(drv.db_type(), crate::db::DatabaseType::Mongodb | crate::db::DatabaseType::Elasticsearch | crate::db::DatabaseType::Redis) {
                 return Err("transactional batch execution is not supported for this engine".into());
             }
             let stmts: Vec<String> = from_arg::<Vec<String>>(&args, "statements")?
@@ -920,6 +908,49 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
                 args.get("rowLimit").and_then(Value::as_u64).map(|n| n.min(u32::MAX as u64) as u32),
             ).await.map_err(estr)?;
             Ok(Value::String(sql))
+        }
+
+        // Browser imports accept bounded bytes, never a renderer-provided server file path.
+        "db_import_preview_bytes" | "db_import_table_bytes" => {
+            use base64::{engine::general_purpose::STANDARD as B64, Engine};
+            const MAX_WEB_IMPORT: usize = 8 * 1024 * 1024;
+            let encoded = require(&args, "dataBase64")?;
+            if encoded.len() > (MAX_WEB_IMPORT + 2) / 3 * 4 {
+                return Err("Browser imports are limited to 8 MiB".into());
+            }
+            let bytes = B64.decode(encoded).map_err(|_| "Invalid import file encoding")?;
+            if bytes.len() > MAX_WEB_IMPORT { return Err("Browser imports are limited to 8 MiB".into()); }
+            let name = require(&args, "fileName")?;
+            if cmd == "db_import_preview_bytes" {
+                return serde_json::to_value(crate::db::write_ops::import_preview(name, &bytes).map_err(estr)?).map_err(estr);
+            }
+            let drv = conns.get(require(&args, "connId")?).await.ok_or("connection not found")?;
+            let mappings = from_arg::<Vec<crate::db::table_import::ImportColumnMapping>>(&args, "mappings")?;
+            let result = crate::db::write_ops::import_bytes(drv.as_ref(), opt_str(&args, "schema"),
+                require(&args, "table")?, name, &bytes, &mappings, require(&args, "mode")?,
+                u32_or(&args, "batchSize", 500) as usize,
+                args.get("allowDestructive").and_then(Value::as_bool).unwrap_or(false)).await.map_err(estr)?;
+            serde_json::to_value(result).map_err(estr)
+        }
+        "db_transfer_table" => {
+            let source_id = require(&args, "sourceConnId")?;
+            let target_id = require(&args, "targetConnId")?;
+            let source = conns.get(source_id).await.ok_or("connection not found")?;
+            let target = conns.get(target_id).await.ok_or("connection not found")?;
+            let source_schema = opt_str(&args, "sourceSchema");
+            let target_schema = opt_str(&args, "targetSchema");
+            let source_table = require(&args, "sourceTable")?;
+            let target_table = require(&args, "targetTable")?;
+            if source_id == target_id && source_schema == target_schema && source_table == target_table {
+                return Err("Source and target must not be the same table".into());
+            }
+            let mappings = from_arg::<Vec<crate::db::transfer::TransferColumnMapping>>(&args, "mappings")?;
+            let keys: Vec<String> = serde_json::from_value(args.get("upsertKeys").cloned().filter(|v| !v.is_null()).unwrap_or(json!([]))).map_err(estr)?;
+            let result = crate::db::write_ops::transfer_table(source.as_ref(), source_schema, source_table,
+                target.as_ref(), target_schema, target_table, &mappings, from_arg(&args, "mode")?, &keys,
+                u32_or(&args, "batchSize", 1000) as usize,
+                args.get("allowDestructive").and_then(Value::as_bool).unwrap_or(false), &|_, _| {}).await.map_err(estr)?;
+            serde_json::to_value(result).map_err(estr)
         }
 
         // ── Whole-grid .xlsx export → bytes (server mode downloads in the browser) ───

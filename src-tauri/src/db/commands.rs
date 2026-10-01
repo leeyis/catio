@@ -84,11 +84,10 @@ pub async fn db_disconnect(conn_id: String, mgr: tauri::State<'_, ConnManager>)
 
 #[tauri::command]
 pub async fn db_query(conn_id: String, sql: String, max_rows: Option<u32>, default_namespace: Option<String>,
-    conn_name: Option<String>, engine: Option<String>, profile_id: Option<String>,
+    conn_name: Option<String>, engine: Option<String>, profile_id: Option<String>, execution_id: Option<String>, timeout_ms: Option<u64>,
     mgr: tauri::State<'_, ConnManager>, app: tauri::AppHandle) -> Result<QueryResult, DbError> {
-    let drv = mgr.get(&conn_id).await.ok_or_else(|| DbError::NotFound(conn_id.clone()))?;
     let started = Instant::now();
-    let result = drv.query_with_default_namespace(&sql, max_rows.unwrap_or(1000), default_namespace.as_deref()).await?;
+    let result = mgr.query(&conn_id, &sql, max_rows.unwrap_or(1000), default_namespace.as_deref(), execution_id.as_deref(), timeout_ms).await?;
     let dur = format!("{}ms", started.elapsed().as_millis());
 
     // Best-effort: record a history entry on success. Never fail the query if
@@ -112,6 +111,28 @@ pub async fn db_query(conn_id: String, sql: String, max_rows: Option<u32>, defau
     }
 
     Ok(result)
+}
+
+pub(crate) fn split_query_core(db: crate::db::DatabaseType, sql: &str) -> Result<Vec<String>, DbError> {
+    if matches!(db, crate::db::DatabaseType::Redis | crate::db::DatabaseType::Mongodb | crate::db::DatabaseType::Elasticsearch) {
+        return Err(DbError::Unsupported("SQL statement splitting requires a SQL engine".into()));
+    }
+    if sql.len() > 8 * 1024 * 1024 { return Err(DbError::Unsupported("Query editor scripts are limited to 8 MiB".into())); }
+    let statements = crate::db::sql_file::split_sql_statements_for_database(sql, db);
+    if statements.len() > 100 { return Err(DbError::Unsupported("Query editor scripts are limited to 100 statements; use SQL file execution for larger scripts".into())); }
+    Ok(statements)
+}
+
+#[tauri::command]
+pub async fn db_split_query(conn_id: String, sql: String, mgr: tauri::State<'_, ConnManager>) -> Result<Vec<String>, DbError> {
+    let driver = mgr.get(&conn_id).await.ok_or(DbError::NotFound(conn_id))?;
+    split_query_core(driver.db_type(), &sql)
+}
+
+/// Request cancellation of one execution; the db_query response confirms termination.
+#[tauri::command]
+pub async fn db_cancel_query(conn_id: String, execution_id: String, mgr: tauri::State<'_, ConnManager>) -> Result<(), DbError> {
+    mgr.cancel_query(&conn_id, &execution_id).await
 }
 
 /// Read persisted execution history (most-recent first). `conn_id` is accepted
@@ -267,6 +288,17 @@ pub async fn db_er_model(conn_id: String, schema: String,
 /// `pub(crate)` so the web-server head (`server.rs`) reuses the identical preview/apply
 /// gating instead of duplicating it.
 pub(crate) fn build_sql(db: crate::db::DatabaseType, req: &EditRequest) -> Result<String, DbError> {
+    if req.table.is_empty() { return Err(DbError::Unsupported("An explicit target table is required".into())); }
+    if req.kind != "insert" && req.pk.iter().any(|(_, value)| value.as_str().is_some_and(|text|
+        text.strip_prefix("0x").is_some_and(|hex| hex.len() % 2 == 0 && hex.bytes().all(|b| b.is_ascii_hexdigit())))) {
+        return Err(DbError::Unsupported("Hex-encoded row keys require type-aware binary binding; use explicit SQL to avoid updating a different row".into()));
+    }
+    if req.kind != "insert" && req.pk.iter().any(|(_, value)| value.is_null()) {
+        return Err(DbError::Unsupported("Row edits require a complete, non-null row key".into()));
+    }
+    if db == crate::db::DatabaseType::Clickhouse && req.kind != "insert" {
+        return Err(DbError::Unsupported("ClickHouse primary keys are sorting keys, not unique row identities; use an explicit mutation query".into()));
+    }
     let cells: Vec<CellEdit> = req.cells.iter()
         .map(|(c, v)| CellEdit { column: c.clone(), new_value: v.clone() }).collect();
     Ok(match req.kind.as_str() {
@@ -304,7 +336,7 @@ pub async fn db_preview_dml(conn_id: String, req: EditRequest,
     }
     // Mongo/ES 的网格编辑走 SQL DML 路径,这两类引擎不支持 —— 在入口明确拒绝,
     // 而不是让生成的 SQL 在 query() 里报一个误导性的语法错误。
-    if matches!(drv.db_type(), crate::db::DatabaseType::Mongodb | crate::db::DatabaseType::Elasticsearch) {
+    if matches!(drv.db_type(), crate::db::DatabaseType::Mongodb | crate::db::DatabaseType::Elasticsearch | crate::db::DatabaseType::Redis) {
         return Err(DbError::Unsupported("editing via SQL DML is not supported for this engine".into()));
     }
     build_sql(drv.db_type(), &req)
@@ -314,21 +346,7 @@ pub async fn db_preview_dml(conn_id: String, req: EditRequest,
 pub async fn db_apply_edits(conn_id: String, reqs: Vec<EditRequest>,
     mgr: tauri::State<'_, ConnManager>) -> Result<u64, DbError> {
     let drv = mgr.get(&conn_id).await.ok_or(DbError::NotFound(conn_id))?;
-    if !drv.capabilities().writable {
-        return Err(DbError::Unsupported("read-only engine".into()));
-    }
-    // Mongo/ES 的网格编辑走 SQL DML 路径,这两类引擎不支持 —— 在入口明确拒绝,
-    // 而不是让生成的 SQL 在 query() 里报一个误导性的语法错误。
-    if matches!(drv.db_type(), crate::db::DatabaseType::Mongodb | crate::db::DatabaseType::Elasticsearch) {
-        return Err(DbError::Unsupported("editing via SQL DML is not supported for this engine".into()));
-    }
-    let mut affected = 0u64;
-    for req in &reqs {
-        let sql = build_sql(drv.db_type(), req)?;
-        let r = drv.query(&sql, 0).await?;
-        affected += r.rows_affected.unwrap_or(0);
-    }
-    Ok(affected)
+    crate::db::write_ops::apply_edits(drv.as_ref(), &reqs).await
 }
 
 /// Execute a batch of raw statements (e.g. Data Compare's generated sync SQL) on `conn_id`
@@ -340,7 +358,7 @@ pub async fn db_exec_batch(conn_id: String, statements: Vec<String>,
     if !drv.capabilities().writable {
         return Err(DbError::Unsupported("read-only engine".into()));
     }
-    if matches!(drv.db_type(), crate::db::DatabaseType::Mongodb | crate::db::DatabaseType::Elasticsearch) {
+    if matches!(drv.db_type(), crate::db::DatabaseType::Mongodb | crate::db::DatabaseType::Elasticsearch | crate::db::DatabaseType::Redis) {
         return Err(DbError::Unsupported("transactional batch execution is not supported for this engine".into()));
     }
     let stmts: Vec<String> = statements.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
@@ -523,23 +541,8 @@ pub async fn db_table_preview(conn_id: String, schema: Option<String>, table: St
 pub async fn db_table_query(conn_id: String, schema: Option<String>, table: String,
     where_clause: Option<String>, order_by: Option<String>, limit: u32, offset: u32,
     mgr: tauri::State<'_, ConnManager>) -> Result<QueryResult, DbError> {
-    let drv = mgr.get(&conn_id).await.ok_or_else(|| DbError::NotFound(conn_id.clone()))?;
-    let db = drv.db_type();
-    if matches!(db, crate::db::DatabaseType::Mongodb
-        | crate::db::DatabaseType::Redis
-        | crate::db::DatabaseType::Elasticsearch) {
-        return Err(DbError::Unsupported(
-            "服务端 WHERE/ORDER BY 仅支持 SQL 引擎".into()));
-    }
-    // 是否限定库前缀以「是否选了非空 schema」为准,而非引擎能力位(capabilities().schemas)
-    // —— MySQL schemas=false 但选了非默认库时仍须生成 `db`.`table`,否则落默认库报表不存在。
-    let has_schemas = table_query_should_qualify(schema.as_deref());
-    let with_ctid = db == crate::db::DatabaseType::Postgres;
-    let sql = crate::db::dialect::build_table_query_sql(
-        db, has_schemas, schema.as_deref(), &table,
-        where_clause.as_deref(), order_by.as_deref(), limit, offset, with_ctid,
-    );
-    drv.query(&sql, limit).await
+    let drv = mgr.get(&conn_id).await.ok_or(DbError::NotFound(conn_id))?;
+    drv.table_query(schema.as_deref(), &table, where_clause.as_deref(), order_by.as_deref(), limit, offset).await
 }
 
 /// Write `contents` to `path` on disk. Used by the grid's CSV/JSON export, which
@@ -592,6 +595,7 @@ fn resolve_schema_qualifier(schema: &str) -> Option<&str> {
 /// schemas=false(MySQL 库即 schema、无独立命名空间),导致用户选中的非默认库被丢弃,
 /// `qualified_table` 生成裸表名 → 落连接默认库报「默认库.表 不存在」。正确语义与
 /// `MysqlDriver::table_data` / 整库导出一致:只要选了非空 schema 就限定,空才回落默认库。
+#[cfg(test)]
 pub(crate) fn table_query_should_qualify(schema: Option<&str>) -> bool {
     schema.is_some_and(|s| !s.trim().is_empty())
 }
@@ -620,7 +624,7 @@ pub(crate) async fn export_database_core(
     include_structure: bool, include_data: bool, batch_size: Option<usize>, row_limit: Option<u32>,
 ) -> Result<String, DbError> {
     let drv = mgr.get(&conn_id).await.ok_or_else(|| DbError::NotFound(conn_id.clone()))?;
-    let has_schemas = drv.capabilities().schemas;
+    let has_schemas = !schema.trim().is_empty();
     let batch = batch_size.unwrap_or(crate::db::export::DEFAULT_INSERT_BATCH_SIZE);
     // None = 无上限（导出全部行）；Some(n) = 显式截断到 n 行并在脚本里标注 truncated。
     let cap = resolve_export_row_cap(row_limit);
@@ -636,6 +640,7 @@ pub(crate) async fn export_database_core(
 
     for info in tables_iter {
         let name = &info.name;
+        let has_locator = drv.table_has_row_identity(schema_opt, name).await?;
         let (mut columns, mut rows, mut truncated) = (Vec::new(), Vec::new(), false);
 
         if include_data {
@@ -655,9 +660,9 @@ pub(crate) async fn export_database_core(
                 if columns.is_empty() {
                     // 去掉 Postgres 注入的 __ctid 隐藏列（仅用于无主键行定位，非真实列）。
                     columns = res.columns.iter().map(|c| c.name.clone())
-                        .filter(|c| c != "__ctid").collect();
+                        .filter(|c| !has_locator || c != "__ctid").collect();
                 }
-                let ctid_idx = res.columns.iter().position(|c| c.name == "__ctid");
+                let ctid_idx = if has_locator { res.columns.iter().position(|c| c.name == "__ctid") } else { None };
                 let got = res.rows.len();
                 for row in res.rows {
                     let row: Vec<serde_json::Value> = match ctid_idx {
@@ -752,74 +757,16 @@ pub struct ImportSummary {
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn db_import_table(
-    conn_id: String,
-    schema: Option<String>,
-    table: String,
-    file_path: String,
-    mappings: Vec<crate::db::table_import::ImportColumnMapping>,
-    mode: String,
-    batch_size: Option<usize>,
-    mgr: tauri::State<'_, ConnManager>,
+    conn_id: String, schema: Option<String>, table: String, file_path: String,
+    mappings: Vec<crate::db::table_import::ImportColumnMapping>, mode: String,
+    batch_size: Option<usize>, allow_destructive: Option<bool>, mgr: tauri::State<'_, ConnManager>,
 ) -> Result<ImportSummary, DbError> {
-    use crate::db::table_import as ti;
-    let drv = mgr.get(&conn_id).await.ok_or_else(|| DbError::NotFound(conn_id.clone()))?;
-    let db = drv.db_type();
-    let has_schemas = drv.capabilities().schemas;
-    let schema_opt = schema.as_deref().filter(|s| has_schemas && !s.is_empty());
-    let batch = batch_size.unwrap_or(ti::DEFAULT_BATCH_SIZE);
-
-    let kind = ti::import_file_kind(&file_path).map_err(DbError::QueryFailed)?;
-    // 读盘前先按元数据校验大小,超限直接拒绝（避免整文件 + 展开行同时驻留堆 → OOM）。
+    let drv = mgr.get(&conn_id).await.ok_or(DbError::NotFound(conn_id))?;
     let meta = tokio::fs::metadata(&file_path).await.map_err(|e| DbError::Io(e.to_string()))?;
-    ti::check_import_size(meta.len() as usize).map_err(DbError::QueryFailed)?;
+    crate::db::table_import::check_import_size(meta.len() as usize).map_err(DbError::QueryFailed)?;
     let bytes = tokio::fs::read(&file_path).await.map_err(|e| DbError::Io(e.to_string()))?;
-    // usize::MAX：导入读取全部行（预览才截断）。
-    let parsed = ti::parse_import_bytes(kind, &bytes, usize::MAX).map_err(DbError::QueryFailed)?;
-    let total_rows = parsed.total_rows;
-
-    let batches = ti::build_import_insert_batches(db, has_schemas, schema_opt, &table, &parsed, &mappings, batch)
-        .map_err(DbError::QueryFailed)?;
-
-    let truncate = mode.eq_ignore_ascii_case("truncate");
-    // 支持事务的引擎（PG/MySQL/SQLite/SQLServer/DuckDB）在 truncate 模式下把
-    // 「清表 + 所有 INSERT 批次」包进同一事务,任一步失败即 ROLLBACK,保证原子性;
-    // 不支持事务的引擎（ClickHouse/Redis 等）退化为逐条执行（无回滚,见前端告警）。
-    let use_txn = truncate && ti::import_supports_transaction(db);
-
-    if use_txn {
-        let (begin, commit, rollback) = ti::transaction_keywords(db);
-        drv.query(begin, 0).await?;
-        // 事务内任一步失败 → 先尽力 ROLLBACK,再把原始错误返回。
-        let run = async {
-            let sql = ti::truncate_sql(db, has_schemas, schema_opt, &table);
-            drv.query(&sql, 0).await?;
-            for b in &batches {
-                drv.query(&b.sql, 0).await?;
-            }
-            Ok::<(), DbError>(())
-        };
-        if let Err(e) = run.await {
-            let _ = drv.query(rollback, 0).await; // best-effort 回滚,保留原错误
-            return Err(e);
-        }
-        drv.query(commit, 0).await?;
-        let rows_imported = batches.iter().map(|b| b.row_count).sum::<usize>().min(total_rows);
-        return Ok(ImportSummary { rows_imported, total_rows });
-    }
-
-    // 非事务路径：append 模式,或不支持事务的引擎的 truncate 模式（无回滚）。
-    if truncate {
-        let sql = ti::truncate_sql(db, has_schemas, schema_opt, &table);
-        drv.query(&sql, 0).await?;
-    }
-
-    let mut rows_imported = 0usize;
-    for b in &batches {
-        drv.query(&b.sql, 0).await?;
-        rows_imported = (rows_imported + b.row_count).min(total_rows);
-    }
-
-    Ok(ImportSummary { rows_imported, total_rows })
+    crate::db::write_ops::import_bytes(drv.as_ref(), schema.as_deref(), &table, &file_path, &bytes,
+        &mappings, &mode, batch_size.unwrap_or(500), allow_destructive.unwrap_or(false)).await
 }
 
 // ── 跨库/跨表数据迁移（源表 → 列映射 → 按模式写目标表）──────────────────────────
@@ -842,164 +789,24 @@ pub struct TransferSummary {
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn db_transfer_table(
-    source_conn_id: String,
-    source_schema: Option<String>,
-    source_table: String,
-    target_conn_id: String,
-    target_schema: Option<String>,
-    target_table: String,
-    mappings: Vec<crate::db::transfer::TransferColumnMapping>,
-    mode: crate::db::transfer::TransferMode,
-    upsert_keys: Option<Vec<String>>,
-    batch_size: Option<usize>,
-    allow_destructive: Option<bool>,
-    mgr: tauri::State<'_, ConnManager>,
-    app: tauri::AppHandle,
+    source_conn_id: String, source_schema: Option<String>, source_table: String,
+    target_conn_id: String, target_schema: Option<String>, target_table: String,
+    mappings: Vec<crate::db::transfer::TransferColumnMapping>, mode: crate::db::transfer::TransferMode,
+    upsert_keys: Option<Vec<String>>, batch_size: Option<usize>, allow_destructive: Option<bool>,
+    mgr: tauri::State<'_, ConnManager>, app: tauri::AppHandle,
 ) -> Result<TransferSummary, DbError> {
-    use crate::db::transfer as tr;
-    use crate::db::table_import as ti;
     use tauri::Emitter;
-
-    let src = mgr.get(&source_conn_id).await.ok_or_else(|| DbError::NotFound(source_conn_id.clone()))?;
-    let dst = mgr.get(&target_conn_id).await.ok_or_else(|| DbError::NotFound(target_conn_id.clone()))?;
-
-    let dst_db = dst.db_type();
-    // 真机缺陷修复:此前用 capabilities().schemas 门控,MySQL(schemas=false)会丢弃用户选中的
-    // 目标库,导致迁移落回连接默认库报「默认库.表 不存在」。与导出一致:非空即透传。
-    let src_schema_opt = source_schema.as_deref().and_then(resolve_schema_qualifier);
-    let dst_schema_opt = target_schema.as_deref().and_then(resolve_schema_qualifier);
-    // 写/清表 SQL 是否加库前缀,以「是否选了目标库」为准(而非引擎能力位)——这样 MySQL 选了
-    // eastmoney 也会生成 `eastmoney`.`tbl`,不再落默认库。无选库时退回默认库(default schema)。
-    let dst_qualify = dst_schema_opt.is_some();
-    let batch = batch_size.unwrap_or(tr::DEFAULT_TRANSFER_BATCH_SIZE).max(1);
-    let upsert_keys = upsert_keys.unwrap_or_default();
-    let allow_destructive = allow_destructive.unwrap_or(false);
-
-    // ── 进度上报 ───────────────────────────────────────────────────────────────
-    // 真机反馈:迁移大表时一直转圈无反馈。先 best-effort 取源表总行数(COUNT(*)),再在
-    // 每批写入后 emit `db://transfer-progress`,前端据此显示 已迁移/总数/百分比。
-    #[derive(serde::Serialize, Clone)]
-    #[serde(rename_all = "camelCase")]
-    struct TransferProgress { transferred: u64, total: Option<u64>, done: bool }
-    let total: Option<u64> = {
-        let q = crate::db::dialect::qualified_table(src.db_type(), src_schema_opt.is_some(), src_schema_opt, &source_table);
-        match src.query(&format!("SELECT COUNT(*) FROM {q}"), 1).await {
-            Ok(r) => r.rows.first().and_then(|row| row.first()).and_then(|v| {
-                v.as_u64().or_else(|| v.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
-            }),
-            Err(_) => None, // 计数失败不阻断迁移,前端退化为「已迁移 N 行…」无百分比
-        }
-    };
-    let _ = app.emit("db://transfer-progress", TransferProgress { transferred: 0, total, done: false });
-    let app_w = app.clone();
-
-    // ── 前置校验（在任何写入/清表之前）─────────────────────────────────────────
-    // Upsert: 引擎须原生支持 + 键合法;Overwrite: 必须已显式确认破坏性操作（codex 阻断项）。
-    let mapped_targets =
-        mappings.iter().map(|m| m.target_column.clone()).filter(|c| !c.trim().is_empty()).collect::<Vec<_>>();
-    tr::check_transfer_preconditions(mode, dst_db, &mapped_targets, &upsert_keys, allow_destructive)
-        .map_err(DbError::QueryFailed)?;
-
-    // 先读源表首批,拿到真实列名解析+校验映射（在 Overwrite 清表之前!）——若映射解析失败,
-    // 此时目标表尚未被动过,不会造成不可恢复的数据丢失（codex 阻断项: 清表早于映射解析）。
-    let strip_ctid = |columns: &[crate::db::result::ColumnInfo], rows: Vec<Vec<serde_json::Value>>| {
-        let ctid_idx = columns.iter().position(|c| c.name == "__ctid");
-        rows.into_iter()
-            .map(|row| match ctid_idx {
-                Some(i) => row.into_iter().enumerate().filter(|(j, _)| *j != i).map(|(_, v)| v).collect(),
-                None => row,
-            })
-            .collect::<Vec<_>>()
-    };
-
-    let first = src.table_data(src_schema_opt, &source_table, batch as u32, 0).await?;
-    let source_columns =
-        first.columns.iter().map(|c| c.name.clone()).filter(|c| c != "__ctid").collect::<Vec<_>>();
-    let mapped = tr::resolve_transfer_mapping(&source_columns, &mappings).map_err(DbError::QueryFailed)?;
-
-    let first_got = first.rows.len();
-    let first_rows = strip_ctid(&first.columns, first.rows);
-
-    // ── 一个「逐批写目标」的闭包：从首批开始,继续分页拉取并逐批生成写 SQL 执行 ───────────
-    // Overwrite 的清表与所有写入要么都在同一事务内（支持事务的引擎,任一步失败 ROLLBACK）,
-    // 要么在非事务引擎上按顺序执行（无回滚,前端已二次确认 + 告警）。
-    // 用 Arc 克隆供闭包按值持有,原始 src/dst 仍可用于事务控制（BEGIN/COMMIT/ROLLBACK）。
-    let src_w = src.clone();
-    let dst_w = dst.clone();
-    let mapped_w = mapped.clone();
-    let upsert_keys_w = upsert_keys.clone();
-    let target_table_w = target_table.clone();
-    let do_writes = move |this_first_rows: Vec<Vec<serde_json::Value>>, this_first_got: usize| async move {
-        let mut rows_transferred = 0usize;
-        let mut pending = this_first_rows;
-        let mut got = this_first_got;
-        let mut offset = this_first_got as u32;
-
-        loop {
-            if !pending.is_empty() {
-                let sql = tr::build_transfer_write_sql(
-                    mode, dst_db, dst_qualify, dst_schema_opt, &target_table_w, &mapped_w, &pending, &upsert_keys_w,
-                );
-                if !sql.is_empty() {
-                    dst_w.query(&sql, 0).await?;
-                    rows_transferred += pending.len();
-                    let _ = app_w.emit(
-                        "db://transfer-progress",
-                        TransferProgress { transferred: rows_transferred as u64, total, done: false },
-                    );
-                }
-            }
-            if (got as u32) < batch as u32 {
-                break;
-            }
-            let res = src_w.table_data(src_schema_opt, &source_table, batch as u32, offset).await?;
-            got = res.rows.len();
-            offset += got as u32;
-            pending = strip_ctid(&res.columns, res.rows);
-        }
-        Ok::<usize, DbError>(rows_transferred)
-    };
-
-    // Overwrite 走「清表 + 写入」原子化路径;Append/Upsert 直接写。
-    let result = if mode == tr::TransferMode::Overwrite {
-        let truncate_sql = tr::build_overwrite_pre_sql(dst_db, dst_qualify, dst_schema_opt, &target_table);
-        if ti::import_supports_transaction(dst_db) {
-            // 支持事务: 清表 + 全部写入包进同一事务,任一步失败即 ROLLBACK,目标表保持原状,
-            // 杜绝「已清表但写入失败」的不可恢复数据丢失（codex 阻断项）。
-            let (begin, commit, rollback) = ti::transaction_keywords(dst_db);
-            dst.query(begin, 0).await?;
-            let run = async {
-                dst.query(&truncate_sql, 0).await?;
-                do_writes(first_rows, first_got).await
-            };
-            match run.await {
-                Ok(rows_transferred) => {
-                    dst.query(commit, 0).await?;
-                    Ok(TransferSummary { rows_transferred })
-                }
-                Err(e) => {
-                    let _ = dst.query(rollback, 0).await; // best-effort 回滚,保留原错误
-                    Err(e)
-                }
-            }
-        } else {
-            // 不支持事务的引擎: 无回滚,前端已二次确认 + 展示告警。
-            dst.query(&truncate_sql, 0).await?;
-            let rows_transferred = do_writes(first_rows, first_got).await?;
-            Ok(TransferSummary { rows_transferred })
-        }
-    } else {
-        let rows_transferred = do_writes(first_rows, first_got).await?;
-        Ok(TransferSummary { rows_transferred })
-    };
-    // 完成事件(done=true):让前端把进度收尾到 100% 再切到成功态。
-    if let Ok(ref s) = result {
-        let _ = app.emit(
-            "db://transfer-progress",
-            TransferProgress { transferred: s.rows_transferred as u64, total, done: true },
-        );
+    let source = mgr.get(&source_conn_id).await.ok_or(DbError::NotFound(source_conn_id.clone()))?;
+    let target = mgr.get(&target_conn_id).await.ok_or(DbError::NotFound(target_conn_id.clone()))?;
+    if source_conn_id == target_conn_id && source_schema == target_schema && source_table == target_table {
+        return Err(DbError::QueryFailed("Source and target must not be the same table".into()));
     }
-    result
+    let progress = |transferred: u64, done: bool| {
+        let _ = app.emit("db://transfer-progress", serde_json::json!({"transferred":transferred,"total":null,"done":done}));
+    };
+    crate::db::write_ops::transfer_table(source.as_ref(), source_schema.as_deref(), &source_table,
+        target.as_ref(), target_schema.as_deref(), &target_table, &mappings, mode,
+        &upsert_keys.unwrap_or_default(), batch_size.unwrap_or(1000), allow_destructive.unwrap_or(false), &progress).await
 }
 
 // ── JDBC driver management (DBeaver-style one-click download) ─────────────────

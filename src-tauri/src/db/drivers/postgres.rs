@@ -12,9 +12,39 @@ use crate::db::result::QueryResult;
 
 pub struct PostgresDriver {
     pool: Pool,
+    cancel_tls: Option<rustls::ClientConfig>,
+    // Console statements share a pinned session per connection; metadata and atomic
+    // grid/import jobs keep their independent pool leases. Temp tables and explicit
+    // BEGIN/COMMIT/ROLLBACK must not vanish between console executions.
+    console: tokio::sync::Mutex<Option<deadpool_postgres::ClientWrapper>>,
+    console_poisoned: Arc<std::sync::atomic::AtomicBool>,
     // reserved for family dialect dispatch (cockroachdb/redshift/etc.)
     #[allow(dead_code)]
     profile: Option<String>,
+}
+
+async fn pg_interrupt(token: &tokio_postgres::CancelToken, tls: Option<&rustls::ClientConfig>) -> Result<(), DbError> {
+    let request = async {
+        match tls {
+            Some(config) => token.cancel_query(tokio_postgres_rustls::MakeRustlsConnect::new(config.clone())).await,
+            None => token.cancel_query(NoTls).await,
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), request).await
+        .map_err(|_| DbError::QueryFailed("Cancellation request timed out; query connection was closed".into()))?
+        .map_err(|_| DbError::QueryFailed("Cancellation request failed; query connection was closed".into()))
+}
+struct PgCancelOnDrop { token: tokio_postgres::CancelToken, tls: Option<rustls::ClientConfig>, armed: bool,
+    poisoned: Arc<std::sync::atomic::AtomicBool> }
+impl Drop for PgCancelOnDrop {
+    fn drop(&mut self) {
+        if !self.armed { return; }
+        self.poisoned.store(true, std::sync::atomic::Ordering::SeqCst);
+        let token = self.token.clone(); let tls = self.tls.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move { let _ = pg_interrupt(&token, tls.as_ref()).await; });
+        }
+    }
 }
 
 impl PostgresDriver {
@@ -27,6 +57,9 @@ impl PostgresDriver {
         if let Some(pw) = &args.secret { cfg.password(pw); }
         cfg.ssl_mode(pg_ssl_mode(args));
 
+        let cancel_tls = if pg_uses_tls(args) {
+            Some(build_tls_config(args).map_err(DbError::ConnectFailed)?)
+        } else { None };
         // 仅 Disable 走纯 NoTls；其余(Require/Prefer)挂接 rustls connector。
         // Prefer 语义保持完整:cfg.ssl_mode 已设为 Prefer,tokio-postgres 会先尝试
         // TLS,若服务端拒绝 SSL 协商则自动以明文重连——挂接 connector 不会破坏这一
@@ -49,7 +82,8 @@ impl PostgresDriver {
         };
         // 立即取一个连接验证可达 + 认证
         let _client = pool.get().await.map_err(|e| map_pool_error(e))?;
-        Ok(Self { pool, profile: args.driver_profile.clone() })
+        Ok(Self { pool, profile: args.driver_profile.clone(), cancel_tls,
+            console: tokio::sync::Mutex::new(None), console_poisoned: Arc::new(std::sync::atomic::AtomicBool::new(false)) })
     }
 }
 
@@ -232,53 +266,35 @@ fn pg_query_err(e: &tokio_postgres::Error) -> DbError {
 }
 
 async fn pg_query_on_client(
-    client: &tokio_postgres::Client,
-    sql: &str,
-    max_rows: u32,
+    client: &tokio_postgres::Client, sql: &str, max_rows: u32,
 ) -> Result<QueryResult, DbError> {
-    use crate::db::result::{ColumnInfo, safe_i64_to_json, binary_to_json};
-    use serde_json::Value;
-
-    let stmt = client.prepare(sql).await
-        .map_err(|e| pg_query_err(&e))?;
-
-    // Write statements (UPDATE/INSERT/DELETE/DDL) have no result columns.
-    // Use execute() to get rows_affected count instead of fetching rows.
-    if stmt.columns().is_empty() {
-        let affected = client.execute(&stmt, &[]).await
-            .map_err(|e| pg_query_err(&e))?;
-        return Ok(QueryResult {
-            columns: vec![],
-            rows: vec![],
-            rows_affected: Some(affected),
-            truncated: false,
-        });
-    }
-
-    let cols: Vec<ColumnInfo> = stmt.columns().iter().map(|c| ColumnInfo {
-        name: c.name().to_string(),
-        type_name: c.type_().name().to_string(),
-        pk: false,
+    use crate::db::result::ColumnInfo;
+    use futures_util::{StreamExt, pin_mut};
+    use tokio_postgres::SimpleQueryMessage;
+    // Prepare obtains metadata even for an empty result. Text protocol then preserves
+    // arbitrary NUMERIC precision, UUID, enum/domain/array, ctid and extension types
+    // without pretending an unsupported binary FromSql conversion was SQL NULL.
+    let stmt = client.prepare(sql).await.map_err(|e| pg_query_err(&e))?;
+    let columns: Vec<ColumnInfo> = stmt.columns().iter().map(|c| ColumnInfo {
+        name: c.name().to_string(), type_name: c.type_().name().to_string(), pk: false,
     }).collect();
-
-    let pg_rows = client.query(&stmt, &[]).await
-        .map_err(|e| pg_query_err(&e))?;
-
-    let mut rows: Vec<Vec<Value>> = Vec::new();
+    let stream = client.simple_query_raw(sql).await.map_err(|e| pg_query_err(&e))?;
+    pin_mut!(stream);
+    let mut rows = Vec::new();
+    let mut affected = None;
     let mut truncated = false;
-    for (i, row) in pg_rows.iter().enumerate() {
-        if i as u32 >= max_rows {
-            truncated = true;
-            break;
+    while let Some(message) = stream.next().await {
+        match message.map_err(|e| pg_query_err(&e))? {
+            SimpleQueryMessage::Row(row) => {
+                if rows.len() >= max_rows as usize { truncated = true; continue; }
+                rows.push(stmt.columns().iter().enumerate().map(|(i, col)|
+                    pg_text_value(row.get(i), col.type_())).collect());
+            }
+            SimpleQueryMessage::CommandComplete(count) if columns.is_empty() => affected = Some(count),
+            _ => {}
         }
-        let mut out = Vec::with_capacity(cols.len());
-        for (idx, col) in stmt.columns().iter().enumerate() {
-            let v = pg_value_to_json(row, idx, col.type_(), &safe_i64_to_json, &binary_to_json);
-            out.push(v);
-        }
-        rows.push(out);
     }
-    Ok(QueryResult { columns: cols, rows, rows_affected: None, truncated })
+    Ok(QueryResult { columns, rows, rows_affected: affected, truncated })
 }
 
 /// 协议族默认库名（照搬 dbx models/connection.rs default_database）。
@@ -602,100 +618,20 @@ mod default_db_tests {
 
 /// Map a single PG column value to serde_json::Value.
 /// Type branches adapted from dbx crates/dbx-core/src/db/postgres.rs execute_query, Apache-2.0.
-fn pg_value_to_json(
-    row: &tokio_postgres::Row,
-    idx: usize,
-    ty: &tokio_postgres::types::Type,
-    safe_i64: &dyn Fn(i64) -> serde_json::Value,
-    bin_to_json: &dyn Fn(&[u8]) -> serde_json::Value,
-) -> serde_json::Value {
+fn pg_text_value(text: Option<&str>, ty: &tokio_postgres::types::Type) -> serde_json::Value {
     use serde_json::Value;
     use tokio_postgres::types::Type;
-
-    match ty {
-        &Type::BOOL => match row.try_get::<_, Option<bool>>(idx) {
-            Ok(Some(v)) => Value::Bool(v),
-            _ => Value::Null,
-        },
-        &Type::INT2 => match row.try_get::<_, Option<i16>>(idx) {
-            Ok(Some(v)) => Value::Number((v as i32).into()),
-            _ => Value::Null,
-        },
-        &Type::INT4 => match row.try_get::<_, Option<i32>>(idx) {
-            Ok(Some(v)) => Value::Number(v.into()),
-            _ => Value::Null,
-        },
-        &Type::INT8 => match row.try_get::<_, Option<i64>>(idx) {
-            Ok(Some(v)) => safe_i64(v),
-            _ => Value::Null,
-        },
-        &Type::OID => match row.try_get::<_, Option<u32>>(idx) {
-            Ok(Some(v)) => Value::Number(v.into()),
-            _ => Value::Null,
-        },
-        &Type::FLOAT4 => match row.try_get::<_, Option<f32>>(idx) {
-            Ok(Some(v)) => serde_json::Number::from_f64(v as f64)
-                .map(Value::Number)
-                .unwrap_or(Value::Null),
-            _ => Value::Null,
-        },
-        &Type::FLOAT8 => match row.try_get::<_, Option<f64>>(idx) {
-            Ok(Some(v)) => serde_json::Number::from_f64(v)
-                .map(Value::Number)
-                .unwrap_or(Value::Null),
-            _ => Value::Null,
-        },
-        &Type::BYTEA => match row.try_get::<_, Option<Vec<u8>>>(idx) {
-            Ok(Some(v)) => bin_to_json(&v),
-            _ => Value::Null,
-        },
-        // String-like types: TEXT, VARCHAR, BPCHAR, NAME, UUID
-        &Type::TEXT | &Type::VARCHAR | &Type::BPCHAR | &Type::NAME | &Type::UUID => {
-            match row.try_get::<_, Option<String>>(idx) {
-                Ok(Some(v)) => Value::String(v),
-                _ => Value::Null,
-            }
-        },
-        // JSON / JSONB: try serde_json::Value directly
-        &Type::JSON | &Type::JSONB => {
-            match row.try_get::<_, Option<serde_json::Value>>(idx) {
-                Ok(Some(v)) => v,
-                _ => Value::Null,
-            }
-        },
-        // Temporal types: tokio_postgres has NO `String` FromSql for DATE/TIME/
-        // TIMESTAMP/TIMESTAMPTZ, so the old String fallback always yielded Null
-        // (every date/timestamp column rendered blank). Decode via chrono (the
-        // `with-chrono-0_4` feature is enabled) and format as an ISO-ish, SQL-
-        // round-trippable string the grid's date/datetime editors can parse back.
-        &Type::DATE => match row.try_get::<_, Option<chrono::NaiveDate>>(idx) {
-            Ok(Some(v)) => Value::String(v.format("%Y-%m-%d").to_string()),
-            _ => Value::Null,
-        },
-        &Type::TIME => match row.try_get::<_, Option<chrono::NaiveTime>>(idx) {
-            Ok(Some(v)) => Value::String(v.format("%H:%M:%S").to_string()),
-            _ => Value::Null,
-        },
-        &Type::TIMESTAMP => match row.try_get::<_, Option<chrono::NaiveDateTime>>(idx) {
-            Ok(Some(v)) => Value::String(v.format("%Y-%m-%d %H:%M:%S").to_string()),
-            _ => Value::Null,
-        },
-        &Type::TIMESTAMPTZ => match row.try_get::<_, Option<chrono::DateTime<chrono::Utc>>>(idx) {
-            Ok(Some(v)) => Value::String(v.format("%Y-%m-%d %H:%M:%S%:z").to_string()),
-            _ => Value::Null,
-        },
-        // NUMERIC / DECIMAL: likewise no `String` FromSql — decode via rust_decimal
-        // (the `db-tokio-postgres` feature) and stringify so values aren't lost.
-        // Out-of-Decimal-range values degrade to Null rather than failing the query.
-        &Type::NUMERIC => match row.try_get::<_, Option<rust_decimal::Decimal>>(idx) {
-            Ok(Some(v)) => Value::String(v.to_string()),
-            _ => Value::Null,
-        },
-        // Fallback (other / unrecognised types): try String, then Null
-        _ => match row.try_get::<_, Option<String>>(idx) {
-            Ok(Some(v)) => Value::String(v),
-            _ => Value::Null,
-        },
+    let Some(text) = text else { return Value::Null; };
+    match *ty {
+        Type::BOOL => Value::Bool(text == "t" || text == "true"),
+        Type::INT2 | Type::INT4 | Type::INT8 | Type::OID => text.parse::<i64>()
+            .map(crate::db::result::safe_i64_to_json).unwrap_or_else(|_| Value::String(text.into())),
+        Type::FLOAT4 | Type::FLOAT8 => text.parse::<f64>().ok().and_then(serde_json::Number::from_f64)
+            .map(Value::Number).unwrap_or_else(|| Value::String(text.into())),
+        Type::BYTEA => Value::String(text.strip_prefix("\\x").map(|hex| format!("0x{hex}")).unwrap_or_else(|| text.into())),
+        // JSON is returned as lossless text too: JavaScript JSON.parse would silently
+        // round nested big integers and decimals. Column metadata still identifies JSON.
+        _ => Value::String(text.into()),
     }
 }
 
@@ -716,14 +652,66 @@ impl Driver for PostgresDriver {
         pg_query_on_client(&client, sql, max_rows).await
     }
 
-    async fn exec_batch(&self, statements: &[String]) -> Result<u64, DbError> {
+    fn close(&self) {
+        self.console_poisoned.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.pool.close();
+        if let Ok(mut console) = self.console.try_lock() { console.take(); }
+    }
+    fn supports_query_cancel(&self) -> bool { true }
+
+    async fn query_cancellable(&self, sql: &str, max_rows: u32, namespace: Option<&str>,
+        cancel: tokio_util::sync::CancellationToken) -> Result<QueryResult, DbError> {
+        let mut console = tokio::select! {
+            _ = cancel.cancelled() => return Err(DbError::Cancelled),
+            console = self.console.lock() => console,
+        };
+        if self.console_poisoned.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(DbError::ConnectFailed("SQL session was interrupted without confirmation; reconnect this database".into()));
+        }
+        if console.is_none() {
+            let pooled = tokio::select! {
+                _ = cancel.cancelled() => return Err(DbError::Cancelled),
+                client = self.pool.get() => client.map_err(|e| DbError::ConnectFailed(e.to_string()))?,
+            };
+            *console = Some(deadpool_postgres::Object::take(pooled));
+        }
+        let client = console.as_ref().expect("console owns its client");
+        let mut cleanup = PgCancelOnDrop { token: client.cancel_token(), tls: self.cancel_tls.clone(), armed: true, poisoned: self.console_poisoned.clone() };
+        // In a failed manual transaction, SET would itself fail and block ROLLBACK.
+        if !crate::db::pagination::transaction_control(DatabaseType::Postgres, sql) {
+            if let Some(namespace) = namespace.filter(|s| !s.trim().is_empty()) {
+                if let Err(error) = client.batch_execute(&format!("SET search_path TO {}", quote_ident(DatabaseType::Postgres, namespace))).await {
+                    cleanup.armed = false;
+                    return Err(pg_query_err(&error));
+                }
+            }
+        }
+        if cancel.is_cancelled() { cleanup.armed = false; return Err(DbError::Cancelled); }
+        let mut operation = Box::pin(pg_query_on_client(&client, sql, max_rows));
+        let result = tokio::select! {
+            result = &mut operation => result,
+            _ = cancel.cancelled() => {
+                pg_interrupt(&cleanup.token, cleanup.tls.as_ref()).await?;
+                match tokio::time::timeout(std::time::Duration::from_secs(5), &mut operation).await {
+                    Ok(Ok(result)) => Ok(result), // cancel arrived after successful completion
+                    Ok(Err(_)) => Err(DbError::Cancelled),
+                    Err(_) => Err(DbError::QueryFailed("Cancellation could not be confirmed; query connection was closed".into())),
+                }
+            }
+        };
+        drop(operation);
+        cleanup.armed = false;
+        result
+    }
+
+    async fn exec_statement_batch(&self, statements: crate::db::driver::StatementBatch) -> Result<u64, DbError> {
         let mut client = self.pool.get().await
             .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
         // Dropping `tx` without commit() rolls back (tokio_postgres Transaction Drop).
         let tx = client.transaction().await.map_err(|e| pg_query_err(&e))?;
         let mut affected = 0u64;
         for s in statements {
-            affected += tx.execute(s.as_str(), &[]).await.map_err(|e| pg_query_err(&e))?;
+            affected += tx.execute(s?.as_str(), &[]).await.map_err(|e| pg_query_err(&e))?;
         }
         tx.commit().await.map_err(|e| pg_query_err(&e))?;
         Ok(affected)
@@ -742,6 +730,18 @@ impl Driver for PostgresDriver {
         let _ = client.batch_execute("RESET search_path").await;
         result
     }
+    async fn table_has_row_identity(&self, schema: Option<&str>, table: &str) -> Result<bool, DbError> {
+        let client = self.pool.get().await.map_err(|e| DbError::ConnectFailed(e.to_string()))?;
+        let qualified = crate::db::dialect::qualified_table(DatabaseType::Postgres, true, schema, table);
+        // ctid is absent on views and not globally unique across partition children.
+        // A real user column named __ctid must never be hidden as an internal locator.
+        let row = client.query_opt(
+            "SELECT c.relkind = 'r' AND NOT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = c.oid AND a.attname = '__ctid' AND NOT a.attisdropped) FROM pg_class c WHERE c.oid = to_regclass($1)",
+            &[&qualified],
+        ).await.map_err(|e| pg_query_err(&e))?;
+        Ok(row.map(|r| r.get::<_, bool>(0)).unwrap_or(false))
+    }
+
     // ---- A7: schema / structure / ER introspection ----
     // SQL adapted from dbx crates/dbx-core/src/db/postgres.rs, Apache-2.0
 

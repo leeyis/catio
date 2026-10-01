@@ -42,6 +42,20 @@ pub fn binary_to_json(bytes: &[u8]) -> Value {
     Value::String(s)
 }
 
+/// Format a raw 128-bit decimal without going through f64 or rust_decimal's
+/// 96-bit mantissa. Shared by database decoders with DECIMAL(38, scale).
+pub fn decimal_i128_to_string(value: i128, scale: i8) -> String {
+    if scale == 0 { return value.to_string(); }
+    if scale < 0 { return format!("{}{}", value, "0".repeat((-i16::from(scale)) as usize)); }
+    let digits = value.unsigned_abs().to_string();
+    let scale = scale as usize;
+    let sign = if value < 0 { "-" } else { "" };
+    if digits.len() > scale {
+        let (whole, fraction) = digits.split_at(digits.len() - scale);
+        format!("{sign}{whole}.{fraction}")
+    } else { format!("{sign}0.{digits:0>scale$}") }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

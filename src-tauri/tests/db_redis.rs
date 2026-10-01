@@ -59,7 +59,10 @@ async fn redis_query_lists_keys() {
     let port = args.port;
 
     // ---- Seed: use the redis crate directly on a dedicated key prefix ----
-    let url = format!("redis://{}:{}/", host, port);
+    let mut url = reqwest::Url::parse(&format!("redis://{}:{}/", host, port)).unwrap();
+    if !args.user.is_empty() { url.set_username(&args.user).unwrap(); }
+    url.set_password(args.secret.as_deref()).unwrap();
+    url.set_path(args.database.as_deref().unwrap_or("0"));
     let client = ::redis::Client::open(url.as_str()).expect("seed client open");
     let mut seed_conn = client
         .get_multiplexed_async_connection()
@@ -101,9 +104,11 @@ async fn redis_query_lists_keys() {
     );
     eprintln!("list_tables(db0): {:?}", tables);
 
-    // query with the seeded prefix pattern
+    // The current console runs real Redis commands; the key-grid uses table_data.
+    let command = driver.query(&format!("GET {k1}"), 100).await.expect("GET failed");
+    assert!(command.rows.iter().flatten().any(|value| value.as_str() == Some("value1")));
     let pattern = format!("{}*", prefix);
-    let result = driver.query(&pattern, 100).await.expect("query failed");
+    let result = driver.table_data(Some("db0"), "keys", 100, 0).await.expect("key preview failed");
 
     eprintln!(
         "query({pattern:?}) → {} rows, columns: {:?}",

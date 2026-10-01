@@ -54,6 +54,15 @@ pub fn build_table_query_sql(
     offset: u32,
     with_ctid: bool,
 ) -> String {
+    let sql = build_table_select_sql(db, has_schemas, schema, table, where_clause, order_by, with_ctid);
+    paginate(db, &sql, limit, offset)
+}
+
+/// Unpaged table SQL shared by preview and filtered preview. Paging is planned separately.
+pub fn build_table_select_sql(
+    db: DatabaseType, has_schemas: bool, schema: Option<&str>, table: &str,
+    where_clause: Option<&str>, order_by: Option<&str>, with_ctid: bool,
+) -> String {
     let qualified = qualified_table(db, has_schemas, schema, table);
     let projection = if with_ctid { "ctid AS __ctid, *" } else { "*" };
     let mut sql = format!("SELECT {projection} FROM {qualified}");
@@ -69,7 +78,7 @@ pub fn build_table_query_sql(
             sql.push_str(&format!(" ORDER BY {o}"));
         }
     }
-    paginate(db, &sql, limit, offset)
+    sql
 }
 
 #[cfg(test)]

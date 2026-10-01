@@ -1,7 +1,6 @@
 // adapted from dbx crates/dbx-core/src/db/sqlserver.rs, Apache-2.0
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
-use rust_decimal::Decimal;
 use std::sync::Arc;
 use tiberius::{AuthMethod, Client, ColumnData, Config, FromSql, QueryItem};
 use tokio::net::TcpStream;
@@ -56,6 +55,23 @@ fn sqlserver_table_comment_sql(s: &str, t: &str) -> String {
 /// Tiberius client wrapped in a mutex because `Client` needs `&mut self` for queries.
 pub struct SqlServerDriver {
     client: Arc<Mutex<Client<Compat<TcpStream>>>>,
+}
+
+/// Hold the exclusive client until rollback completes, even if the caller drops its future.
+struct PendingTransaction {
+    client: Option<tokio::sync::OwnedMutexGuard<Client<Compat<TcpStream>>>>,
+}
+
+impl Drop for PendingTransaction {
+    fn drop(&mut self) {
+        if let Some(mut client) = self.client.take() {
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    let _ = client.execute("IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION", &[]).await;
+                });
+            }
+        }
+    }
 }
 
 impl SqlServerDriver {
@@ -189,6 +205,16 @@ fn map_tiberius_error(e: tiberius::error::Error) -> DbError {
 /// Map a tiberius ColumnData cell to serde_json::Value.
 /// Type order mirrors dbx sqlserver.rs sqlserver_cell_to_json.
 fn cell_to_json(cell: &ColumnData<'static>) -> serde_json::Value {
+    // DBX sqlserver.rs (Apache-2.0): decode raw i128 + scale before Decimal.
+    // SQL Server DECIMAL(38,s) exceeds rust_decimal's precision and can panic.
+    if let ColumnData::Numeric(value) = cell {
+        return value.as_ref().map(|n| serde_json::Value::String(sqlserver_numeric(n.value(), n.scale())))
+            .unwrap_or(serde_json::Value::Null);
+    }
+    if let ColumnData::Guid(Some(value)) = cell { return serde_json::Value::String(value.to_string()); }
+    if let Ok(Some(value)) = <&tiberius::xml::XmlData as FromSql>::from_sql(cell) {
+        return serde_json::Value::String(value.as_ref().to_string());
+    }
     // String types first (varchar, nvarchar, char, text, xml)
     if let Ok(Some(v)) = <&str as FromSql>::from_sql(cell) {
         return serde_json::Value::String(v.to_string());
@@ -205,10 +231,6 @@ fn cell_to_json(cell: &ColumnData<'static>) -> serde_json::Value {
     }
     if let Ok(Some(v)) = <chrono::DateTime<chrono::FixedOffset> as FromSql>::from_sql(cell) {
         return serde_json::Value::String(v.to_rfc3339());
-    }
-    // Decimal / numeric → string to preserve precision
-    if let Ok(Some(v)) = <Decimal as FromSql>::from_sql(cell) {
-        return serde_json::Value::String(v.to_string());
     }
     // Numeric integers (tinyint=u8, smallint=i16, int=i32, bigint=i64)
     if let Ok(Some(v)) = <u8 as FromSql>::from_sql(cell) {
@@ -245,10 +267,19 @@ fn cell_to_json(cell: &ColumnData<'static>) -> serde_json::Value {
     serde_json::Value::Null
 }
 
+fn sqlserver_numeric(value: i128, scale: u8) -> String {
+    if scale == 0 { return value.to_string(); }
+    let digits = value.unsigned_abs().to_string(); let scale = scale as usize;
+    let sign = if value < 0 { "-" } else { "" };
+    if digits.len() > scale {
+        let (whole, fraction) = digits.split_at(digits.len() - scale);
+        format!("{sign}{whole}.{fraction}")
+    } else { format!("{sign}0.{digits:0>scale$}") }
+}
+
 /// Detect whether SQL begins with a keyword that returns rows.
 fn is_row_returning(sql: &str) -> bool {
-    let upper = sql.trim_start().to_ascii_uppercase();
-    upper.starts_with("SELECT") || upper.starts_with("WITH") || upper.starts_with("EXEC")
+    crate::db::pagination::returns_rows(DatabaseType::Sqlserver, sql)
 }
 
 #[async_trait]
@@ -273,6 +304,21 @@ impl Driver for SqlServerDriver {
             .unwrap_or("")
             .to_string();
         Ok(version)
+    }
+
+    async fn exec_statement_batch(&self, statements: crate::db::driver::StatementBatch) -> Result<u64, DbError> {
+        let mut pending = PendingTransaction { client: Some(self.client.clone().lock_owned().await) };
+        let client = pending.client.as_mut().expect("transaction owns client");
+        client.execute("BEGIN TRANSACTION", &[]).await.map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        let mut affected = 0u64;
+        for statement in statements {
+            let result = client.execute(statement?.as_str(), &[]).await
+                .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+            affected += result.rows_affected().iter().sum::<u64>();
+        }
+        client.execute("COMMIT TRANSACTION", &[]).await.map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        pending.client.take(); // commit succeeded; release without scheduling a rollback
+        Ok(affected)
     }
 
     async fn query(&self, sql: &str, max_rows: u32) -> Result<QueryResult, DbError> {
@@ -301,7 +347,7 @@ impl Driver for SqlServerDriver {
                             .iter()
                             .map(|c| ColumnInfo {
                                 name: c.name().to_string(),
-                                type_name: String::new(),
+                                type_name: format!("{:?}", c.column_type()),
                                 pk: false,
                             })
                             .collect();

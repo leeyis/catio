@@ -15,10 +15,7 @@ pub struct RqliteDriver {
 
 impl RqliteDriver {
     pub async fn connect(args: &ConnectArgs) -> Result<Self, DbError> {
-        let base_url = format!("http://{}:{}", args.host, args.port);
-        let user = if args.user.is_empty() { None } else { Some(args.user.as_str()) };
-        let pass = args.secret.as_deref();
-        let http = HttpClient::new(&base_url, user, pass);
+        let http = HttpClient::from_args(args)?;
         let driver = Self { http };
         driver.test().await?;
         Ok(driver)
@@ -43,11 +40,7 @@ struct RqliteResult {
 }
 
 fn is_read(sql: &str) -> bool {
-    let upper = sql.trim_start().to_uppercase();
-    upper.starts_with("SELECT")
-        || upper.starts_with("PRAGMA")
-        || upper.starts_with("EXPLAIN")
-        || upper.starts_with("WITH")
+    crate::db::pagination::returns_rows(DatabaseType::Rqlite, sql)
 }
 
 async fn rqlite_query(http: &HttpClient, sql: &str) -> Result<RqliteResult, DbError> {

@@ -5,11 +5,14 @@ pub mod ids;
 pub mod result;
 pub mod capabilities;
 pub mod dialect;
+pub mod pagination;
 pub mod driver;
 pub mod drivers;
 pub mod manager;
+pub mod query_control;
 pub mod commands;
 pub mod dml;
+pub mod write_ops;
 pub mod export;
 pub mod xlsx_export;
 pub mod table_import;
@@ -65,6 +68,10 @@ pub enum DbError {
     QueryFailed(String),
     #[error("unsupported for this engine: {0}")]
     Unsupported(String),
+    #[error("query cancelled")]
+    Cancelled,
+    #[error("query timed out")]
+    TimedOut,
     #[error("io error: {0}")]
     Io(String),
 }
@@ -79,6 +86,8 @@ impl Serialize for DbError {
             DbError::QueryFailed(_) => "QueryFailed",
             DbError::Unsupported(_) => "Unsupported",
             DbError::Io(_) => "Io",
+            DbError::Cancelled => "Cancelled",
+            DbError::TimedOut => "TimedOut",
         };
         let mut st = s.serialize_struct("DbError", 2)?;
         st.serialize_field("kind", kind)?;

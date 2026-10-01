@@ -9,16 +9,40 @@ use crate::db::result::QueryResult;
 
 pub struct MySqlDriver {
     pool: Pool,
+    opts: Opts,
+    console: tokio::sync::Mutex<Option<mysql_async::Conn>>,
+    console_poisoned: std::sync::Arc<std::sync::atomic::AtomicBool>,
     profile: Option<String>,
     /// The database name we connected to (used as the single "schema").
     database: String,
+}
+
+async fn mysql_interrupt(opts: Opts, id: u32) -> Result<(), DbError> {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async move {
+        let mut control = mysql_async::Conn::new(opts).await?;
+        control.query_drop(format!("KILL QUERY {id}")).await?;
+        control.disconnect().await
+    }).await.map_err(|_| DbError::QueryFailed("MySQL cancellation request timed out".into()))?
+        .map_err(|_| DbError::QueryFailed("MySQL cancellation failed; verify the query outcome before retrying a write".into()))
+}
+struct MysqlCancelOnDrop { opts: Opts, id: u32, armed: bool,
+    poisoned: std::sync::Arc<std::sync::atomic::AtomicBool> }
+impl Drop for MysqlCancelOnDrop {
+    fn drop(&mut self) {
+        if !self.armed { return; }
+        self.poisoned.store(true, std::sync::atomic::Ordering::SeqCst);
+        let opts = self.opts.clone(); let id = self.id;
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move { let _ = mysql_interrupt(opts, id).await; });
+        }
+    }
 }
 
 impl MySqlDriver {
     pub async fn connect(args: &ConnectArgs) -> Result<Self, DbError> {
         let db = args.database.clone().unwrap_or_default();
         let opts = build_mysql_opts(args)?;
-        let pool = Pool::new(opts);
+        let pool = Pool::new(opts.clone());
         // Validate by acquiring a connection
         let _conn = pool.get_conn().await.map_err(|e| {
             let s = e.to_string();
@@ -28,7 +52,8 @@ impl MySqlDriver {
                 DbError::ConnectFailed(s)
             }
         })?;
-        Ok(Self { pool, profile: args.driver_profile.clone(), database: db })
+        Ok(Self { pool, opts, profile: args.driver_profile.clone(), database: db,
+            console: tokio::sync::Mutex::new(None), console_poisoned: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)) })
     }
 }
 
@@ -80,19 +105,15 @@ fn build_mysql_query(options: Option<&str>, ssl: bool, insecure: bool) -> String
 /// 该根证书(URL 查询串无法表达自定义 CA,只能经 `SslOpts::with_root_certs`)。
 /// 对齐 dbx 的 ssl + ca_cert_path 能力;无 CA / 无 TLS 时行为与原 URL 路径一致。
 fn build_mysql_opts(args: &ConnectArgs) -> Result<Opts, DbError> {
-    let db = args.database.clone().unwrap_or_default();
     let insecure = args.ssl_reject_unauthorized == Some(false);
     let query = build_mysql_query(args.options.as_deref(), args.ssl, insecure);
-    let url = format!(
-        "mysql://{}:{}@{}:{}/{}{}",
-        args.user,
-        args.secret.clone().unwrap_or_default(),
-        args.host,
-        args.port,
-        db,
-        query,
-    );
-    let opts = Opts::from_url(&url).map_err(|e| DbError::ConnectFailed(e.to_string()))?;
+    // Parse ONLY non-secret driver options as a URL. Credentials and database names
+    // are typed fields, never URL-interpolated (@, /, #, %, Unicode stay literal).
+    let opts = Opts::from_url(&format!("mysql://localhost{query}"))
+        .map_err(|_| DbError::ConnectFailed("Invalid MySQL advanced connection options".into()))?;
+    let opts: Opts = OptsBuilder::from_opts(opts)
+        .ip_or_hostname(args.host.clone()).tcp_port(args.port)
+        .user(Some(args.user.clone())).pass(args.secret.clone()).db_name(args.database.clone()).into();
 
     // 自定义 CA 仅在 TLS 开启时有意义。require_ssl=true 时 from_url 已产出 SslOpts,
     // 在其基础上追加根证书路径(保留 verify_ca/verify_identity 等已解析的开关)。
@@ -143,7 +164,7 @@ fn get_str_by_name(row: &mysql_async::Row, name: &str) -> String {
 
 /// Quote a string value for use in SQL (single-quoted).
 fn quote_value(s: &str) -> String {
-    format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'"))
+    crate::db::dml::value_to_sql_for(DatabaseType::Mysql, &serde_json::Value::String(s.into()))
 }
 
 /// Map a single MySQL row column value to serde_json::Value.
@@ -164,6 +185,10 @@ fn mysql_value_to_json(row: &mysql_async::Row, idx: usize) -> serde_json::Value 
         return Value::Null;
     }
 
+    if column.character_set() == 63 && matches!(column.column_type(),
+        ColumnType::MYSQL_TYPE_STRING | ColumnType::MYSQL_TYPE_VAR_STRING | ColumnType::MYSQL_TYPE_VARCHAR) {
+        if let Some(bytes) = row_get::<Vec<u8>, _>(row, idx) { return binary_to_json(&bytes); }
+    }
     match column.column_type() {
         ColumnType::MYSQL_TYPE_TINY
         | ColumnType::MYSQL_TYPE_SHORT
@@ -312,7 +337,14 @@ async fn mysql_query_on_conn(
         .as_deref()
         .unwrap_or(&[])
         .iter()
-        .map(|c| format!("{:?}", c.column_type()))
+        .map(|c| {
+            let kind = c.column_type();
+            if matches!(kind, ColumnType::MYSQL_TYPE_BLOB | ColumnType::MYSQL_TYPE_LONG_BLOB | ColumnType::MYSQL_TYPE_MEDIUM_BLOB | ColumnType::MYSQL_TYPE_TINY_BLOB) {
+                if c.character_set() == 63 { "BLOB".into() } else { "TEXT".into() }
+            } else if c.character_set() == 63 && matches!(kind, ColumnType::MYSQL_TYPE_STRING | ColumnType::MYSQL_TYPE_VAR_STRING | ColumnType::MYSQL_TYPE_VARCHAR) {
+                "VARBINARY".into()
+            } else { format!("{kind:?}") }
+        })
         .collect();
 
     // No columns means this is a write statement
@@ -339,6 +371,7 @@ async fn mysql_query_on_conn(
     // Stream rows
     let mut rows: Vec<Vec<Value>> = Vec::new();
     let mut truncated = false;
+    {
     let stream = result
         .stream::<mysql_async::Row>()
         .await
@@ -350,13 +383,15 @@ async fn mysql_query_on_conn(
             let row = row_result.map_err(|e| DbError::QueryFailed(e.to_string()))?;
             if rows.len() as u32 >= max_rows {
                 truncated = true;
-                break;
+                continue;
             }
             let values: Vec<Value> = (0..row.len()).map(|i| mysql_value_to_json(&row, i)).collect();
             rows.push(values);
         }
     }
 
+    }
+    result.drop_result().await.map_err(|e| DbError::QueryFailed(e.to_string()))?;
     Ok(QueryResult { columns, rows, rows_affected: None, truncated })
 }
 
@@ -397,7 +432,65 @@ impl Driver for MySqlDriver {
         mysql_query_on_conn(&mut conn, sql, max_rows).await
     }
 
-    async fn exec_batch(&self, statements: &[String]) -> Result<u64, DbError> {
+    async fn ensure_atomic_table(&self, schema: Option<&str>, table: &str) -> Result<(), DbError> {
+        if self.profile.as_deref() == Some("oceanbase-oracle") { return Ok(()); }
+        let database = schema.filter(|s| !s.trim().is_empty()).unwrap_or(&self.database);
+        let mut conn = self.pool.get_conn().await.map_err(|e| DbError::ConnectFailed(e.to_string()))?;
+        let row: Option<mysql_async::Row> = conn.exec_first(
+            "SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?", (database, table))
+            .await.map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        let engine = row.as_ref().map(|r| get_str(r, 0)).unwrap_or_default();
+        if matches!(engine.to_ascii_uppercase().as_str(), "INNODB" | "NDB" | "NDBCLUSTER" | "ROCKSDB") { Ok(()) }
+        else { Err(DbError::Unsupported(format!("Atomic writes require transactional target storage; detected '{}' (views and unknown tables are not eligible)", engine))) }
+    }
+
+    fn close(&self) {
+        self.console_poisoned.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Ok(mut console) = self.console.try_lock() { console.take(); }
+    }
+    fn supports_query_cancel(&self) -> bool { true }
+
+    async fn query_cancellable(&self, sql: &str, max_rows: u32, namespace: Option<&str>,
+        cancel: tokio_util::sync::CancellationToken) -> Result<QueryResult, DbError> {
+        let mut console = tokio::select! {
+            _ = cancel.cancelled() => return Err(DbError::Cancelled),
+            console = self.console.lock() => console,
+        };
+        if self.console_poisoned.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(DbError::ConnectFailed("SQL session was interrupted without confirmation; reconnect this database".into()));
+        }
+        if console.is_none() {
+            *console = Some(tokio::select! {
+                _ = cancel.cancelled() => return Err(DbError::Cancelled),
+                conn = mysql_async::Conn::new(self.opts.clone()) => conn.map_err(|e| DbError::ConnectFailed(e.to_string()))?,
+            });
+        }
+        let conn = console.as_mut().expect("console owns its client");
+        let mut cleanup = MysqlCancelOnDrop { opts: self.opts.clone(), id: conn.id(), armed: true, poisoned: self.console_poisoned.clone() };
+        if let Some(namespace) = namespace.filter(|s| !s.trim().is_empty()) {
+            conn.query_drop(format!("USE {}", quote_mysql_ident(namespace))).await
+                .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        }
+        if cancel.is_cancelled() { cleanup.armed = false; return Err(DbError::Cancelled); }
+        let result = {
+            let mut operation = Box::pin(mysql_query_on_conn(conn, sql, max_rows));
+            tokio::select! {
+                result = &mut operation => result,
+                _ = cancel.cancelled() => {
+                    mysql_interrupt(cleanup.opts.clone(), cleanup.id).await?;
+                    match tokio::time::timeout(std::time::Duration::from_secs(5), &mut operation).await {
+                        Ok(Ok(result)) => Ok(result),
+                        Ok(Err(_)) => Err(DbError::Cancelled),
+                        Err(_) => Err(DbError::QueryFailed("Cancellation could not be confirmed; query connection was closed".into())),
+                    }
+                }
+            }
+        };
+        cleanup.armed = false;
+        result
+    }
+
+    async fn exec_statement_batch(&self, statements: crate::db::driver::StatementBatch) -> Result<u64, DbError> {
         let mut conn = self.pool.get_conn().await
             .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
         // Dropping `tx` without commit() rolls back (mysql_async Transaction Drop).
@@ -405,7 +498,7 @@ impl Driver for MySqlDriver {
             .map_err(|e| DbError::QueryFailed(e.to_string()))?;
         let mut affected = 0u64;
         for s in statements {
-            tx.query_drop(s.as_str()).await.map_err(|e| DbError::QueryFailed(e.to_string()))?;
+            tx.query_drop(s?.as_str()).await.map_err(|e| DbError::QueryFailed(e.to_string()))?;
             affected += tx.affected_rows();
         }
         tx.commit().await.map_err(|e| DbError::QueryFailed(e.to_string()))?;

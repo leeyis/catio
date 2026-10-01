@@ -11,15 +11,13 @@ use crate::db::drivers::http::{HttpClient, check_response_connect, check_respons
 /// sql_console = true, er = false (no FK concept).
 pub struct ClickhouseDriver {
     http: HttpClient,
+    database: Option<String>,
 }
 
 impl ClickhouseDriver {
     pub async fn connect(args: &ConnectArgs) -> Result<Self, DbError> {
-        let base_url = format!("http://{}:{}", args.host, args.port);
-        let user = if args.user.is_empty() { None } else { Some(args.user.as_str()) };
-        let pass = args.secret.as_deref();
-        let http = HttpClient::new(&base_url, user, pass);
-        let driver = Self { http };
+        let http = HttpClient::from_args(args)?;
+        let driver = Self { http, database: args.database.clone().filter(|s| !s.is_empty()) };
         // validate connection
         driver.test().await?;
         Ok(driver)
@@ -93,8 +91,9 @@ impl Driver for ClickhouseDriver {
 
     async fn test(&self) -> Result<String, DbError> {
         let url = "/?query=SELECT+version()";
-        let resp = self.http
-            .get(url)
+        let mut request = self.http.get(url);
+        if let Some(database) = &self.database { request = request.query(&[("database", database)]); }
+        let resp = request
             .send()
             .await
             .map_err(|e| DbError::ConnectFailed(format!("ClickHouse request failed: {e}")))?;
@@ -112,45 +111,28 @@ impl Driver for ClickhouseDriver {
 
     async fn query_with_default_namespace(&self, sql: &str, max_rows: u32, default_namespace: Option<&str>)
         -> Result<QueryResult, DbError> {
-        let sql_upper = sql.trim_start().to_uppercase();
-
-        // For read statements use JSONCompact and parse result set
-        if sql_upper.starts_with("SELECT")
-            || sql_upper.starts_with("SHOW")
-            || sql_upper.starts_with("DESCRIBE")
-            || sql_upper.starts_with("EXPLAIN")
-            || sql_upper.starts_with("WITH")
-        {
-            let result = ch_query_in(&self.http, sql, default_namespace).await?;
-            let columns: Vec<ColumnInfo> = result.meta.iter().map(|m| ColumnInfo {
-                name: m.name.clone(),
-                type_name: m.type_name.clone(),
-                pk: false,
-            }).collect();
-
-            let mut rows = result.data;
-            let truncated = rows.len() > max_rows as usize;
-            if truncated {
-                rows.truncate(max_rows as usize);
-            }
-            Ok(QueryResult { columns, rows, rows_affected: None, truncated })
-        } else {
-            // DDL/DML — POST plain text, ClickHouse returns empty body on success
-            let url = "/?default_format=JSONCompact";
-            let mut req = self.http.post(url);
-            if let Some(db) = default_namespace.map(str::trim).filter(|s| !s.is_empty()) {
-                req = req.query(&[("database", db)]);
-            }
-            let resp = req.body(sql.to_string()).send().await
-                .map_err(|e| DbError::QueryFailed(format!("ClickHouse request failed: {e}")))?;
-            let _ = check_response_query(resp).await?;
-            Ok(QueryResult {
-                columns: vec![],
-                rows: vec![],
-                rows_affected: None, // ClickHouse HTTP doesn't return affected-row count
-                truncated: false,
-            })
+        let namespace = default_namespace.or(self.database.as_deref());
+        let mut request = self.http.post("/?default_format=JSONCompact").query(&[
+            ("wait_end_of_query", "1"), ("output_format_json_quote_64bit_integers", "1"),
+            ("output_format_json_quote_decimals", "1"), ("output_format_json_quote_denormals", "1"),
+        ]);
+        if let Some(database) = namespace { request = request.query(&[("database", database)]); }
+        let response = request.body(sql.to_string()).send().await.map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        let response = check_response_query(response).await?;
+        let exception = response.headers().get("X-ClickHouse-Exception-Code").and_then(|v| v.to_str().ok()).is_some_and(|v| v != "0");
+        let body = crate::db::drivers::http::read_body(response, 32 * 1024 * 1024).await?;
+        // HTTP 200 alone is NOT execution success. ClickHouse can append an error
+        // after sending headers; consume and inspect the complete response body.
+        if exception || body.trim_start().starts_with("Code:") {
+            return Err(DbError::QueryFailed(body.chars().take(4096).collect()));
         }
+        if body.trim().is_empty() { return Ok(QueryResult::default()); }
+        let result: ChJsonCompact = serde_json::from_str(&body)
+            .map_err(|_| DbError::QueryFailed("Unexpected ClickHouse response; verify the operation outcome before retrying a write".into()))?;
+        let columns = result.meta.into_iter().map(|m| ColumnInfo { name: m.name, type_name: m.type_name, pk: false }).collect();
+        let mut rows = result.data; let truncated = rows.len() > max_rows as usize;
+        rows.truncate(max_rows as usize);
+        Ok(QueryResult { columns, rows, rows_affected: None, truncated })
     }
 
     async fn list_schemas(&self) -> Result<Vec<String>, DbError> {
