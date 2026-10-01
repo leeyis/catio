@@ -34,6 +34,20 @@ describe('SchemaBrowser', () => {
     expect(screen.getByTestId('schema-tbl:eastmoney.orders')).toBeInTheDocument()
   })
 
+  it('shows the real connection name without a demo address or fabricated latency', () => {
+    renderBrowser()
+    expect(screen.getByText(`已连接 · ${CONN.name}`)).toBeInTheDocument()
+    expect(screen.queryByText(/localhost:5432|12 ms/)).not.toBeInTheDocument()
+  })
+
+  it('labels the disconnected demo footer explicitly', () => {
+    render(<LanguageProvider><DataProvider>
+      <SchemaBrowser onPick={noop} active={null} onNewQuery={noop} onOpenER={noop}
+        erActive={false} sqlActive={false} />
+    </DataProvider></LanguageProvider>)
+    expect(screen.getByText('演示连接')).toBeInTheDocument()
+  })
+
   it('default shows ALL schemas', () => {
     renderBrowser()
     expect(screen.getByTestId('schema-node:eastmoney')).toBeInTheDocument()

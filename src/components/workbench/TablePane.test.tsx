@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest'
-import { render, waitFor } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import { LanguageProvider } from '../../state/LanguageContext'
 import { DataProvider } from '../../state/DataContext'
 import i18n from '../../i18n'
@@ -10,9 +10,11 @@ import type { DbCapabilities } from '../../services/db'
 // Capture the columns TablePane hands to DataGrid so we can assert the
 // name→comment mapping built from the parallel structure fetch.
 let lastGridColumns: ResultColumn[] | null = null
+let lastGridTruncated: boolean | undefined
 vi.mock('../dbviews', () => ({
-  DataGrid: (props: { columns: ResultColumn[] }) => {
+  DataGrid: (props: { columns: ResultColumn[]; truncated?: boolean }) => {
     lastGridColumns = props.columns
+    lastGridTruncated = props.truncated
     return <div data-testid="datagrid-stub" />
   },
   StructureView: () => <div data-testid="structure-stub" />,
@@ -65,6 +67,22 @@ describe('TablePane comment mapping', () => {
       expect(byName.id).toBe('主键')
       expect(byName.status).toBe('订单状态')
     })
+  })
+
+  it('preserves the backend lookahead flag for the grid', async () => {
+    tablePreview.mockResolvedValue({ columns: [{ name: 'id', type: 'int' }], rows: [[1]], truncated: true })
+    tableStructure.mockResolvedValue({ comment: '', columns: [], indexes: [], fks: [] })
+    wrap(<TablePane conn={conn} connId="c1" caps={caps} schema="public" table="items" />)
+    await waitFor(() => expect(lastGridTruncated).toBe(true))
+  })
+
+  it('does not present the initial page length as the table total', async () => {
+    tablePreview.mockResolvedValue({ columns: [{ name: 'id', type: 'int' }], rows: [[1]], truncated: true })
+    tableStructure.mockResolvedValue({ comment: '', columns: [], indexes: [], fks: [] })
+    wrap(<TablePane conn={conn} connId="c1" caps={caps} schema="public" table="items" />)
+    await waitFor(() => expect(lastGridColumns).toHaveLength(1))
+    expect(screen.getByText(`1 ${i18n.t('workbench.colsLabel')}`)).toBeInTheDocument()
+    expect(screen.queryByText(`1 ${i18n.t('workbench.rowsLabel')} · 1 ${i18n.t('workbench.colsLabel')}`)).not.toBeInTheDocument()
   })
 
   it('leaves comment undefined for columns absent from the structure', async () => {

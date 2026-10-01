@@ -4,8 +4,9 @@ import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn } from '../atoms'
 import { useData } from '../../state/DataContext'
-import { runQuery, runExplain, getSchema, schemaColumns, tablePreview, erRelations, dbErrMsg } from '../../services/db'
-import type { ResultColumn, Schema, ErRelation } from '../../services/types'
+import { runQuery, splitQuery, cancelQuery, runExplain, getSchema, schemaColumns, tablePreview, erRelations, dbErrMsg } from '../../services/db'
+import type { QueryResult, Schema, ErRelation } from '../../services/types'
+import { classifyAiSqlExecution } from '../../services/aiSqlExecutionPolicy'
 import { sqlAdvancedCompletion, type JoinTable } from './sqlAdvancedCompletion'
 import { SqlEditor, type SqlEditorHandle } from './SqlEditor'
 import { mongoCompletion } from './mongoCompletion'
@@ -60,7 +61,9 @@ export interface SqlConsoleProps {
   onFullscreenChange?: (fullscreen: boolean) => void
 }
 
-export function SqlConsole({ density, fresh, writable = true, connId, initialCode, initialDefaultSchema, autoRun, active, engine, connName, profileId, onFullscreenChange }: SqlConsoleProps) {
+interface CompletedStatement { sql: string; defaultNamespace?: string; result?: QueryResult; error?: string }
+
+export function SqlConsole({ density, fresh, connId, initialCode, initialDefaultSchema, autoRun, active, engine, connName, profileId, onFullscreenChange }: SqlConsoleProps) {
   const { t } = useTranslation()
   // mongodb/elasticsearch/redis 用各自语法(mongo shell / REST+SQL / Redis 命令),
   // 编辑器走 plain 模式:不挂 SQL 补全、显示语法占位提示、结果网格只读(mongo 的 _id
@@ -69,7 +72,7 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
   const plain = engine === 'mongodb' || engine === 'elasticsearch' || engine === 'redis'
   // Redis 命令在连接时选定的 default_db 上执行(查询页不传库),故不显示库选择器,
   // 避免"选了 db 却不生效"的误导(ES 本就无多库概念)。
-  const supportsDefaultNamespace = engine !== 'elasticsearch' && engine !== 'redis'
+  const supportsDefaultNamespace = !['elasticsearch', 'redis', 'sqlserver'].includes(engine ?? '')
   const editorPlaceholder = engine === 'mongodb' ? t('dbviews.mongoPlaceholder')
     : engine === 'elasticsearch' ? t('dbviews.esPlaceholder')
     : engine === 'redis' ? t('dbviews.redisPlaceholder')
@@ -82,13 +85,19 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
   )
   const [phase, setPhase] = useState<'idle' | 'running' | 'done'>(fresh ? 'idle' : 'done')
   // Live result of the last successful run (only used when connId is set).
-  const [result, setResult] = useState<{
-    columns: ResultColumn[]
-    rows: unknown[][]
+  const [result, setResult] = useState<(QueryResult & {
     sql: string
     defaultNamespace?: string
-  } | null>(null)
+  }) | null>(null)
   const [runErr, setRunErr] = useState<string | null>(null)
+  const [cancelRequested, setCancelRequested] = useState(false)
+  const [timeoutMs, setTimeoutMs] = useState(0)
+  const [resultLimit, setResultLimit] = useState(1000)
+  const [statementResults, setStatementResults] = useState<CompletedStatement[]>([])
+  const [selectedStatement, setSelectedStatement] = useState(0)
+  const [statementProgress, setStatementProgress] = useState({ current: 0, total: 0 })
+  const stopAfterStatement = useRef(false)
+  const nativeCancellation = ['postgres', 'mysql', 'sqlite', 'duckdb'].includes(engine ?? '')
   // T12 执行计划(EXPLAIN):非空时结果区显示 ExplainPlanViewer(树/表/JSON),关闭后回到普通结果。
   // 仅 PG/MySQL 且已连接(connId)支持(supportsExplainPlan + connId 门控)。
   const [explain, setExplain] = useState<{ plan?: ParsedExplainPlan; loading: boolean; error?: string } | null>(null)
@@ -101,6 +110,7 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
   // Live schema/database namespaces (table names) fetched from the backend when connected.
   const [liveSchema, setLiveSchema] = useState<Schema | null>(null)
   const [defaultNamespace, setDefaultNamespace] = useState(initialDefaultSchema ?? '')
+  const [schemaError, setSchemaError] = useState<string | null>(null)
   // Live columns per schema namespace: { [schemaName]: { [table]: columns } }.
   const [liveColumns, setLiveColumns] = useState<Record<string, Record<string, string[]>>>({})
   // Live foreign-key relations per schema namespace (S3 外键 JOIN 建议的数据源)。
@@ -155,7 +165,10 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
   useEffect(() => {
     if (!connId || !supportsDefaultNamespace) { setLiveSchema(null); return }
     let alive = true
-    getSchema(connId).then(s => { if (alive) setLiveSchema(s) }).catch(() => {})
+    setLiveSchema(null); setSchemaError(null)
+    getSchema(connId).then(s => { if (alive) setLiveSchema(s) }).catch(e => {
+      if (alive) { setLiveSchema({ db: connId, schemas: [] }); setSchemaError(dbErrMsg(e)) }
+    })
     return () => { alive = false }
   }, [connId, supportsDefaultNamespace])
 
@@ -236,7 +249,7 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
   }, [profileId])
 
   const schemaOptions = useMemo(
-    () => (liveSchema ?? D.schema).schemas.map(ns => ns.name).filter(Boolean).filter(name => !hiddenSchemas.has(name)),
+    () => (liveSchema ?? (connId ? { db: connId, schemas: [] } : D.schema)).schemas.map(ns => ns.name).filter(Boolean).filter(name => !hiddenSchemas.has(name)),
     [liveSchema, D.schema, hiddenSchemas],
   )
   const schemaOptionsKey = schemaOptions.join('\u0000')
@@ -322,7 +335,7 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
       self: { label, type: 'type' },
       children: cols,
     })
-    const namespaces = (liveSchema ?? D.schema).schemas
+    const namespaces = (liveSchema ?? (connId ? { db: connId, schemas: [] } : D.schema)).schemas
     for (const ns of namespaces) {
       const realCols = connId ? liveColumns[ns.name] : undefined
       const tables: Record<string, SQLNamespace> = {}
@@ -348,7 +361,7 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
   // 持有于 ref,使补全源标识稳定(schema/列/外键加载不重建编辑器)。
   const joinTablesRef = useRef<JoinTable[]>([])
   useEffect(() => {
-    const namespaces = (liveSchema ?? D.schema).schemas
+    const namespaces = (liveSchema ?? (connId ? { db: connId, schemas: [] } : D.schema)).schemas
     const byName = new Map<string, JoinTable>()
     const ensure = (name: string): JoinTable => {
       const key = name.toLowerCase()
@@ -389,6 +402,12 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
   // 自增运行令牌：每次运行/停止都 +1，在途的 then/catch 只有令牌仍匹配时才落地。
   // 这样"停止"或被新一次运行取代时，旧结果会被丢弃,UI 立即交还控制权。
   const runToken = useRef(0)
+  const activeExecution = useRef<string | null>(null)
+  useEffect(() => () => {
+    runToken.current++
+    if (connId && activeExecution.current) void cancelQuery(connId, activeExecution.current).catch(() => {})
+    activeExecution.current = null
+  }, [connId])
 
   function run(sqlOverride?: string) {
     // 运行中不重复触发（避免 Alt↵ 在执行中再起一次）。
@@ -401,28 +420,43 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
     // 空 / 纯空白 SQL 不执行：拦在所有入口（按钮 / Alt+Enter / 片段运行）之前，
     // 避免把空语句发给后端报错，或 mock 路径空转出现"执行中"。
     if (!sql.trim()) return
-    const runDefaultNamespace = supportsDefaultNamespace && defaultNamespace && schemaOptions.includes(defaultNamespace)
-      ? defaultNamespace
+    const runDefaultNamespace = supportsDefaultNamespace && (defaultNamespace || initialDefaultSchema)
+      ? (defaultNamespace || initialDefaultSchema)
       : undefined
     const myToken = ++runToken.current
     if (connId) {
-      // Live path: execute the typed SQL against the backend.
-      setPhase('running')
-      runQuery(connId, sql, runDefaultNamespace, { name: connName, engine, profileId })
-        .then(res => {
-          if (myToken !== runToken.current) return // 已被停止/被新运行取代
-          setResult({ columns: res.columns, rows: res.rows, sql, defaultNamespace: runDefaultNamespace })
-          setRunSeq(s => s + 1)
-          setPhase('done')
-        })
-        .catch(e => {
-          if (myToken !== runToken.current) return
-          // 失败时清空上一次的结果,避免旧数据与错误信息并存(误导)。
-          setResult(null)
-          setRunErr(dbErrMsg(e))
-          setRunSeq(s => s + 1)
-          setPhase('done')
-        })
+      setPhase('running'); setCancelRequested(false); setStatementResults([]); setResult(null)
+      stopAfterStatement.current = false
+      const runId = globalThis.crypto?.randomUUID?.() ?? `query-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+      void (async () => {
+        try {
+          const statements = plain ? [sql] : await splitQuery(connId, sql)
+          const completed: CompletedStatement[] = []
+          for (let index = 0; index < statements.length; index++) {
+            if (myToken !== runToken.current || stopAfterStatement.current) break
+            const executionId = `${runId}-${index}`
+            activeExecution.current = executionId
+            setStatementProgress({ current: index + 1, total: statements.length })
+            let entry: CompletedStatement
+            try {
+              const res = await runQuery(connId, statements[index], runDefaultNamespace,
+                { name: connName, engine, profileId }, resultLimit,
+                { executionId, timeoutMs: nativeCancellation ? timeoutMs : 0 })
+              entry = { sql: statements[index], defaultNamespace: runDefaultNamespace, result: res }
+            } catch (e) { entry = { sql: statements[index], defaultNamespace: runDefaultNamespace, error: dbErrMsg(e) } }
+            if (myToken !== runToken.current) return
+            completed.push(entry)
+            setStatementResults([...completed]); setSelectedStatement(index)
+            setResult(entry.result ? { ...entry.result, sql: entry.sql, defaultNamespace: entry.defaultNamespace } : null)
+            setRunErr(entry.error ?? null); setRunSeq(sequence => sequence + 1)
+            if (entry.error || stopAfterStatement.current) break // never execute the remainder after failure/stop
+          }
+        } catch (e) {
+          if (myToken === runToken.current) { setResult(null); setRunErr(dbErrMsg(e)) }
+        } finally {
+          if (myToken === runToken.current) { activeExecution.current = null; setCancelRequested(false); setPhase('done') }
+        }
+      })()
       return
     }
     // Mock path: unchanged demo timing.
@@ -430,12 +464,18 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
     setTimeout(() => { if (myToken === runToken.current) setPhase('done') }, 450)
   }
 
-  // 停止：作废在途结果并把 UI 交还到就绪态。注意——这是前端层面的"停止等待"，
-  // 后端/JDBC sidecar 当前不支持中断已发出的语句，服务端查询可能仍会跑完。
-  function stop() {
-    runToken.current++
-    setPhase('idle')
-    setRunErr(null)
+  // Do not release the UI or claim "stopped" before the backend query terminates.
+  async function stop() {
+    if (!connId) { runToken.current++; setPhase('idle'); return }
+    if (cancelRequested) return
+    stopAfterStatement.current = true
+    const executionId = activeExecution.current
+    setCancelRequested(true)
+    if (!executionId) return // split/dispatch phase: no statement is allowed to start afterward
+    try { await cancelQuery(connId, executionId) }
+    catch (e) {
+      if (activeExecution.current === executionId) { setRunErr(dbErrMsg(e)); setCancelRequested(false) }
+    }
   }
 
   // T12「解释」:对当前(或选中)SQL 取执行计划。复用 runToken 令牌,使其与
@@ -452,8 +492,8 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
     setPaneMode('split')
     setExplain({ loading: true })
     // 与普通 run() 一致:把选中的默认库/Schema 传给 EXPLAIN,否则后端落连接默认库报表不存在。
-    const explainNamespace = supportsDefaultNamespace && defaultNamespace && schemaOptions.includes(defaultNamespace)
-      ? defaultNamespace
+    const explainNamespace = supportsDefaultNamespace && (defaultNamespace || initialDefaultSchema)
+      ? (defaultNamespace || initialDefaultSchema)
       : undefined
     runExplain(connId!, sql, explainNamespace)
       .then(res => {
@@ -524,13 +564,14 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
 
   return (
     <div ref={splitContainerRef} className="col" style={{ height: '100%', width: '100%', minHeight: 0, minWidth: 0 }}>
+      {schemaError && <div role="alert" style={{ padding: '6px 12px', color: 'var(--danger-fg)', fontSize: 12 }}>{t('dbviews.loadError', { message: schemaError })}</div>}
       {/* console toolbar — the query name lives in the tab strip above, so it's not
           repeated here; just the editor actions, right-aligned. */}
-      <div className="row" style={{ justifyContent: 'space-between', gap: 10, padding: '7px 12px', borderBottom: '1px solid var(--border-hairline)', flex: 'none' }}>
+      <div className="row" style={{ justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, padding: '7px 12px', borderBottom: '1px solid var(--border-hairline)', flex: 'none' }}>
         <div className="row gap6">
           {phase === 'running' ? (
-            <Btn size="sm" variant="danger" style={{ height: 26, padding: '0 10px', fontSize: 11.5 }} icon="square" onClick={stop}>
-              {t('dbviews.stop')}
+            <Btn size="sm" variant="danger" style={{ height: 26, padding: '0 10px', fontSize: 11.5 }} icon="square" disabled={cancelRequested} onClick={stop}>
+              {t(cancelRequested ? 'dbviews.cancelling' : 'dbviews.stop')}
             </Btn>
           ) : (
             <Btn size="sm" variant="primary" testId="sql-run" disabled={!code.trim()} style={{ height: 26, padding: '0 10px', fontSize: 11.5 }} icon="play" onClick={() => run()}>
@@ -554,7 +595,22 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
             <button className="icon-btn bare" title={t('dbviews.sqlFileRunFile')} data-testid="sql-run-file" onClick={() => setSqlFileOpen(true)}><Icon name="file-code" size={15} /></button>
           )}
         </div>
-        <div className="row gap6" style={{ minWidth: 0 }}>
+        <div className="row gap6" style={{ minWidth: 0, flexWrap: 'wrap' }}>
+          {['postgres', 'mysql', 'sqlite', 'duckdb', 'sqlserver', 'jdbc'].includes(engine ?? '') && connId && <span className="chip" title={t('dbviews.sqlSessionHint')} style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{t('dbviews.sqlSession')}</span>}
+          {connId && <label className="row gap6" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+            {t('dbviews.resultLimit')}
+            <select aria-label={t('dbviews.resultLimit')} value={resultLimit} disabled={phase === 'running'} onChange={e => setResultLimit(Number(e.target.value))}
+              style={{ background: 'var(--surface-sunken)', color: 'var(--text-primary)', border: '1px solid var(--border-hairline)', borderRadius: 6, padding: '3px 5px' }}>
+              {[100, 1000, 10000, 100000].map(limit => <option key={limit} value={limit}>{limit.toLocaleString()}</option>)}
+            </select>
+          </label>}
+          {nativeCancellation && <label className="row gap6" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+            {t('dbviews.queryTimeout')}
+            <select aria-label={t('dbviews.queryTimeout')} value={timeoutMs} disabled={phase === 'running'} onChange={e => setTimeoutMs(Number(e.target.value))}
+              style={{ background: 'var(--surface-sunken)', color: 'var(--text-primary)', border: '1px solid var(--border-hairline)', borderRadius: 6, padding: '3px 5px' }}>
+              <option value={0}>{t('dbviews.noTimeout')}</option><option value={30000}>30 s</option><option value={60000}>60 s</option><option value={300000}>5 min</option>
+            </select>
+          </label>}
           {supportsDefaultNamespace && schemaOptions.length > 1 && (
             <label className="row gap6" title={t('workbench.defaultSchema')}
               style={{ height: 30, minWidth: 0, maxWidth: 260, padding: '0 8px', border: '1px solid var(--border-hairline)', borderRadius: 9, background: 'var(--surface-sunken)', color: 'var(--text-tertiary)', fontSize: 11.5 }}>
@@ -563,7 +619,7 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
               <select
                 data-testid="sql-default-schema"
                 aria-label={t('workbench.defaultSchema')}
-                value={defaultNamespace}
+                value={defaultNamespace} disabled={phase === 'running'}
                 onChange={e => setDefaultNamespace(e.target.value)}
                 style={{ minWidth: 82, maxWidth: 130, border: 'none', outline: 'none', background: 'transparent', color: 'var(--text-primary)', fontSize: 12, fontFamily: "'Geist Mono', monospace" }}>
                 {schemaOptions.map(schema => <option key={schema} value={schema}>{schema}</option>)}
@@ -610,8 +666,20 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
           功能#6:maxEditor 时隐藏;maxResults 占满;split 按 1-ratio 分配。 */}
       {hasResults && paneMode !== 'maxEditor' && (
         <div className="col" style={{ flexGrow: paneMode === 'maxResults' ? 1 : 1 - splitRatio, flexBasis: 0, minHeight: 0, width: '100%' }}>
+          {statementResults.length > 1 && <div role="tablist" aria-label={t('dbviews.statementResults')} className="row scrollon" style={{ gap: 4, flex: 'none', overflowX: 'auto', padding: '4px 8px', borderBottom: '1px solid var(--border-hairline)' }}>
+            {statementResults.map((entry, index) => <button key={index} role="tab" aria-selected={selectedStatement === index}
+              title={entry.error ?? entry.sql} onClick={() => {
+                setSelectedStatement(index); setRunErr(entry.error ?? null)
+                setResult(entry.result ? { ...entry.result, sql: entry.sql, defaultNamespace: entry.defaultNamespace } : null)
+                setRunSeq(sequence => sequence + 1)
+              }} style={{ flex: 'none', border: '1px solid var(--border-hairline)', borderRadius: 6, padding: '4px 8px', cursor: 'pointer', fontSize: 11,
+                background: selectedStatement === index ? 'var(--accent-soft)' : 'var(--surface-sunken)', color: entry.error ? 'var(--danger-fg)' : 'var(--text-primary)' }}>
+              {t('dbviews.statementNumber', { number: index + 1 })}{entry.error ? ' !' : ''}
+            </button>)}
+          </div>}
           {/* 功能#6:结果区极简工具条,仅放最大化/恢复入口(控制 maxResults<->split)。视觉克制,右对齐。 */}
           <div className="row" style={{ justifyContent: 'flex-end', flex: 'none', padding: '3px 8px', borderBottom: '1px solid var(--border-hairline)' }}>
+            {result?.rowsAffected != null && <span role="status" style={{ marginRight: 'auto', color: 'var(--signal-green)', fontSize: 12 }}>{t('dbviews.rowsAffected', { count: result.rowsAffected })}</span>}
             {paneMode === 'maxResults'
               ? <button className="icon-btn bare" title={t('dbviews.restorePane')} onClick={() => setPaneMode('split')}><Icon name="minimize-2" size={15} /></button>
               : <button className="icon-btn bare" title={t('dbviews.maximizeResults')} onClick={() => setPaneMode('maxResults')}><Icon name="maximize-2" size={15} /></button>}
@@ -623,6 +691,8 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
             ? <div className="col" style={{ alignItems: 'center', justifyContent: 'center', height: '100%', gap: 10, color: 'var(--text-tertiary)' }}>
                 <Icon name="loader" size={26} style={{ animation: 'spin 1s linear infinite' }} />
                 <span style={{ fontSize: 13 }}>{t('dbviews.executingOn', { target: connName || defaultNamespace || '—' })}</span>
+                {statementProgress.total > 1 && <span>{t('dbviews.statementProgress', statementProgress)}</span>}
+                {runErr && <span role="alert" style={{ color: 'var(--danger-fg)' }}>{runErr}</span>}
               </div>
             : (connId
                 ? <DataGrid
@@ -630,9 +700,9 @@ export function SqlConsole({ density, fresh, writable = true, connId, initialCod
                     columns={result?.columns ?? []}
                     rows={result?.rows ?? []}
                     statusTones={D.statusTones} density={density}
-                    writable={writable && !plain} connId={connId}
+                    writable={false} connId={connId} engine={engine} truncated={result?.truncated}
                     // plain 引擎(mongo/es)不传 sql:服务端分页会拼 SQL LIMIT/OFFSET 必败,回落客户端分页。
-                    sql={plain ? undefined : result?.sql}
+                    sql={plain || !result?.sql || result.rowsAffected != null || classifyAiSqlExecution(result.sql).category !== 'read' || classifyAiSqlExecution(result.sql).reasons.includes('multi_statement') ? undefined : result.sql}
                     defaultNamespace={result?.defaultNamespace}
                     resultLabel={t('dbviews.queryResult')}
                     loadError={runErr ?? undefined} />

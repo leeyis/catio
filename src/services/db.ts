@@ -152,7 +152,7 @@ export interface QueryHistoryMeta {
   profileId?: string
 }
 
-export async function runQuery(connId: string, sql: string, defaultNamespace?: string, meta?: QueryHistoryMeta, maxRows?: number): Promise<QueryResult> {
+export async function runQuery(connId: string, sql: string, defaultNamespace?: string, meta?: QueryHistoryMeta, maxRows?: number, execution?: { executionId: string; timeoutMs?: number }): Promise<QueryResult> {
   if (!isTauri() && !isServer()) return mockQueryResult()
   const args: Record<string, unknown> = { connId, sql }
   if (defaultNamespace) args.defaultNamespace = defaultNamespace
@@ -160,7 +160,20 @@ export async function runQuery(connId: string, sql: string, defaultNamespace?: s
   if (meta?.engine) args.engine = meta.engine
   if (meta?.profileId) args.profileId = meta.profileId
   if (maxRows != null) args.maxRows = maxRows
+  if (execution) { args.executionId = execution.executionId; if (execution.timeoutMs != null) args.timeoutMs = execution.timeoutMs }
   return rpc<QueryResult>('db_query', args)
+}
+
+/** Split using the backend's tested dialect parser (quotes, comments, dollar bodies). */
+export async function splitQuery(connId: string, sql: string): Promise<string[]> {
+  if (!isTauri() && !isServer()) return [sql]
+  return rpc<string[]>('db_split_query', { connId, sql })
+}
+
+/** Request a real, execution-scoped interrupt. The runQuery promise is the terminal result. */
+export async function cancelQuery(connId: string, executionId: string): Promise<void> {
+  if (!isTauri() && !isServer()) return
+  return rpc('db_cancel_query', { connId, executionId })
 }
 
 /**
@@ -399,6 +412,20 @@ export async function importTable(args: {
 }): Promise<ImportSummary> {
   if (!isTauri()) throw new Error('importTable requires the Tauri runtime')
   return rpc<ImportSummary>('db_import_table', args)
+}
+
+/** Browser import sends bounded file bytes to the current authenticated server, never a server path. */
+export interface BrowserImportFile { fileName: string; dataBase64: string }
+export async function importPreviewBytes(file: BrowserImportFile): Promise<ImportPreview> {
+  if (!isServer()) throw new Error('Browser import requires server mode')
+  return rpc<ImportPreview>('db_import_preview_bytes', { ...file })
+}
+export async function importTableBytes(args: BrowserImportFile & {
+  connId: string; schema?: string; table: string; mappings: ImportColumnMapping[];
+  mode: 'append' | 'truncate'; batchSize?: number; allowDestructive?: boolean;
+}): Promise<ImportSummary> {
+  if (!isServer()) throw new Error('Browser import requires server mode')
+  return rpc<ImportSummary>('db_import_table_bytes', { ...args })
 }
 
 // ---- 跨库/跨表数据迁移（源表 → 列映射 → 按模式写目标表）----

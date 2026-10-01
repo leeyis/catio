@@ -34,7 +34,7 @@ export function TablePane({ conn, connId, caps, schema, table, density }: TableP
   )
 
   // ---- Live table-data fetch(平移自 DbWorkbench,语义不变)----
-  const [live, setLive] = useState<{ columns: ResultColumn[]; rows: unknown[][] } | null>(null)
+  const [live, setLive] = useState<{ columns: ResultColumn[]; rows: unknown[][]; truncated?: boolean } | null>(null)
   const [liveErr, setLiveErr] = useState<string | null>(null)
   const [rowKeys, setRowKeys] = useState<string[] | null>(null)
   // True while (re)fetching a table's preview — drives the result-area loading
@@ -44,6 +44,7 @@ export function TablePane({ conn, connId, caps, schema, table, density }: TableP
   useEffect(() => {
     if (!connId) { setLive(null); setLiveErr(null); setRowKeys(null); setLoading(false); return }
     let cancelled = false
+    setLive(null); setRowKeys(null)
     setLiveErr(null)
     setLoading(true)
     Promise.all([
@@ -52,12 +53,13 @@ export function TablePane({ conn, connId, caps, schema, table, density }: TableP
     ])
       .then(([res, struct]) => {
         if (cancelled) return
-        const pkNames = new Set((struct?.columns ?? []).filter(c => c.key === 'PK').map(c => c.name))
+        const pkNames = new Set((struct?.columns ?? []).filter(c => c.key === 'PK' && conn.engine !== 'clickhouse').map(c => c.name))
         // 列名→注释映射（零额外请求,来自并行加载的 structure）。仅表预览使用;
         // 空注释不入表,避免给所有列硬塞空串而误触发结果区的注释切换按钮。
         const commentByName = new Map<string, string>()
         for (const c of struct?.columns ?? []) if (c.comment) commentByName.set(c.name, c.comment)
-        const ctidIdx = res.columns.findIndex(c => c.name === '__ctid')
+        const ctidIdx = conn.engine === 'postgres' && struct && !struct.columns.some(c => c.name === '__ctid')
+          ? res.columns.findIndex(c => c.name === '__ctid') : -1
         let cols = res.columns
         let rws = res.rows
         let keys: string[] | null = null
@@ -71,7 +73,7 @@ export function TablePane({ conn, connId, caps, schema, table, density }: TableP
           const pk = pkNames.has(c.name) || undefined
           return (comment !== undefined || pk) ? { ...c, ...(pk ? { pk: true } : {}), ...(comment !== undefined ? { comment } : {}) } : c
         })
-        setLive({ columns, rows: rws })
+        setLive({ columns, rows: rws, truncated: res.truncated })
         setRowKeys(keys)
       })
       .catch(e => { if (!cancelled) { setLiveErr(dbErrMsg(e)); setRowKeys(null) } })
@@ -80,7 +82,7 @@ export function TablePane({ conn, connId, caps, schema, table, density }: TableP
   }, [connId, schema, table])
 
   // mongo/es 的数据网格编辑会生成 SQL DML(db_apply_edits),对这两类引擎必败 → 预览只读。
-  const sqlDml = conn.engine !== 'mongodb' && conn.engine !== 'elasticsearch'
+  const sqlDml = !['mongodb', 'elasticsearch', 'redis'].includes(conn.engine ?? '')
   // Redis 无表结构:第二个 segment 改为展示 key 元信息(keyspace 概览)而非列/DDL。
   const isRedis = (conn.engine ?? '').toLowerCase() === 'redis'
 
@@ -92,7 +94,8 @@ export function TablePane({ conn, connId, caps, schema, table, density }: TableP
           <div className="col" style={{ lineHeight: 1.25, minWidth: 0 }}>
             <span className="mono ell" style={{ fontSize: 13.5, fontWeight: 700 }}>{connId ? (schema ? `${schema}.${table}` : table) : `public.${table}`}</span>
             <span className="mono" style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{connId
-              ? `${live?.rows?.length ?? 0} ${t('workbench.rowsLabel')} · ${live?.columns?.length ?? 0} ${t('workbench.colsLabel')}`
+              // DataGrid owns subsequent pages; this initial preview is not the table's row count.
+              ? (live ? `${live.columns.length} ${t('workbench.colsLabel')}` : '')
               : mockTbl ? `${mockTbl.rows} ${t('workbench.rowsLabel')} · ${mockTbl.cols} ${t('workbench.colsLabel')}` : ''}</span>
           </div>
         </div>
@@ -112,10 +115,10 @@ export function TablePane({ conn, connId, caps, schema, table, density }: TableP
           ? <DataGrid
               columns={(live?.columns ?? [])}
               rows={(live?.rows ?? [])}
-              statusTones={D.statusTones} density={density} key={`${schema ?? ''}.${table}`}
-              writable={caps.writable && sqlDml} connId={connId} table={table} schema={schema} engine={conn.engine}
+              statusTones={D.statusTones} density={density} key={`${connId}.${schema ?? ''}.${table}`}
+              writable={caps.writable && sqlDml} transactions={caps.transactions} connId={connId} table={table} schema={schema} engine={conn.engine}
               rowKeys={rowKeys ?? undefined} keyColumn={rowKeys ? 'ctid' : undefined}
-              livePreview loadError={liveErr ?? undefined} />
+              livePreview truncated={live?.truncated} loadError={liveErr ?? undefined} />
           : <DataGrid
               columns={D.ordersColumns.map((c): ResultColumn => ({ name: c.name, type: c.type, pk: c.pk, fk: c.fk, icon: c.icon }))}
               rows={D.ordersRows.map(r => D.ordersColumns.map(c => (r as unknown as Record<string, unknown>)[c.name]))}

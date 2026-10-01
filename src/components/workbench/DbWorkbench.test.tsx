@@ -282,14 +282,14 @@ describe('DbWorkbench unified tabs', () => {
     wrap(<DbWorkbench conn={CONN} />)
     // 用户从树里打开第一张表(不再自动打开)
     const tableChip = await openTable()
-    expect(await screen.findByText('101')).toBeInTheDocument()
+    expect((await screen.findAllByText('101')).find(element => element.closest('.gridrow'))).toBeInTheDocument()
     // 新建查询 → sql tab 出现,表 tab 仍在
     fireEvent.click(screen.getByTestId('wb-new-query'))
     expect(await screen.findByTestId('wbtab-sql:1')).toBeInTheDocument()
     expect(screen.getByTestId('wbtab-table:public.orders')).toBeInTheDocument()
     // 切回表 tab → 数据仍然渲染(pane 保持 mounted)
     fireEvent.click(tableChip)
-    expect(screen.getByText('101')).toBeVisible()
+    expect(screen.getAllByText('101').find(element => element.closest('.gridrow'))).toBeVisible()
   })
 
   it('Redis 连接也能新建查询(sqlConsole=true,查询页走 key glob 模式)', async () => {
@@ -332,7 +332,7 @@ describe('DbWorkbench unified tabs', () => {
     // 运行按钮在编辑器为空时置灰;经 catio-run 事件注入并运行一条语句(等价 snippet/历史运行)
     window.dispatchEvent(new CustomEvent('catio-run', { detail: { kind: 'sql', text: 'select 1' } }))
     await waitFor(() => expect(h.runQuery).toHaveBeenCalled())
-    expect(h.runQuery).toHaveBeenCalledWith('conn-live', expect.any(String), 'dwd', expect.objectContaining({ profileId: 'd-orders' }))
+    expect(h.runQuery).toHaveBeenCalledWith('conn-live', expect.any(String), 'dwd', expect.objectContaining({ profileId: 'd-orders' }), 1000, expect.objectContaining({ executionId: expect.any(String), timeoutMs: 0 }))
   })
 
   it('MongoDB 多 database 查询也显示默认库选择并传给 runQuery', async () => {
@@ -361,7 +361,7 @@ describe('DbWorkbench unified tabs', () => {
     // 运行按钮在编辑器为空时置灰;经 catio-run 事件注入并运行一条语句(等价 snippet/历史运行)
     window.dispatchEvent(new CustomEvent('catio-run', { detail: { kind: 'sql', text: 'db.orders.find()' } }))
     await waitFor(() => expect(h.runQuery).toHaveBeenCalled())
-    expect(h.runQuery).toHaveBeenCalledWith('conn-live', expect.any(String), 'app', expect.objectContaining({ profileId: 'd-orders' }))
+    expect(h.runQuery).toHaveBeenCalledWith('conn-live', expect.any(String), 'app', expect.objectContaining({ profileId: 'd-orders' }), 1000, expect.objectContaining({ executionId: expect.any(String), timeoutMs: 0 }))
   })
 
   it('再次单击同一表复用已开 tab,不重复新开', async () => {
@@ -402,12 +402,12 @@ describe('DbWorkbench unified tabs', () => {
   it('关闭当前 tab 后相邻 tab 成为激活态(内容可见)', async () => {
     wrap(<DbWorkbench conn={CONN} />)
     await openTable()
-    await screen.findByText('101')
+    await waitFor(() => expect(screen.getAllByText('101').find(element => element.closest('.gridrow'))).toBeInTheDocument())
     fireEvent.click(screen.getByTestId('wb-new-query'))
     await screen.findByTestId('wbtab-sql:1')
     fireEvent.click(screen.getByTestId('wbtab-close-sql:1'))
     // 关闭激活的 sql tab 后,表 tab 被激活,其内容重新可见
-    expect(screen.getByText('101')).toBeVisible()
+    expect(screen.getAllByText('101').find(element => element.closest('.gridrow'))).toBeVisible()
   })
 
   it('schema 刷新后失效的表 tab 被剔除,activeId 回落到存活 tab', async () => {
@@ -549,7 +549,7 @@ describe('DbWorkbench 历史记录无窗口执行 (功能#3)', () => {
     expect(await screen.findByTestId('wbtab-sql:1')).toBeInTheDocument()
     await waitFor(() => expect(h.runQuery).toHaveBeenCalledTimes(1))
     expect(h.runQuery).toHaveBeenCalledWith(
-      'conn-live', 'select 1', 'public', expect.objectContaining({ profileId: 'd-orders' }),
+      'conn-live', 'select 1', 'public', expect.objectContaining({ profileId: 'd-orders' }), 1000, expect.objectContaining({ executionId: expect.any(String), timeoutMs: 0 }),
     )
   })
 
@@ -562,12 +562,11 @@ describe('DbWorkbench 历史记录无窗口执行 (功能#3)', () => {
     // 再点"运行"(运行整个编辑器内容):若新建时既 seed initialCode 又 autoRun 插入,
     // 编辑器会是两行 → runQuery 收到重复语句。修复后应只发一条。
     h.runQuery.mockClear()
-    await waitFor(() => {
-      fireEvent.click(screen.getByTestId('sql-run'))
-      expect(h.runQuery).toHaveBeenCalledTimes(1)
-    })
+    await waitFor(() => expect(screen.getByTestId('sql-run')).toBeEnabled())
+    fireEvent.click(screen.getByTestId('sql-run'))
+    await waitFor(() => expect(h.runQuery).toHaveBeenCalledTimes(1))
     expect(h.runQuery).toHaveBeenCalledWith(
-      'conn-live', 'select 1', 'public', expect.objectContaining({ profileId: 'd-orders' }),
+      'conn-live', 'select 1', 'public', expect.objectContaining({ profileId: 'd-orders' }), 1000, expect.objectContaining({ executionId: expect.any(String), timeoutMs: 0 }),
     )
   })
 
@@ -586,7 +585,7 @@ describe('DbWorkbench 历史记录无窗口执行 (功能#3)', () => {
     expect(screen.queryByTestId('wbtab-sql:2')).not.toBeInTheDocument()
     expect(screen.getByTestId('wbtab-sql:1')).toBeInTheDocument()
     expect(h.runQuery).toHaveBeenCalledWith(
-      'conn-live', 'select 2', 'public', expect.objectContaining({ profileId: 'd-orders' }),
+      'conn-live', 'select 2', 'public', expect.objectContaining({ profileId: 'd-orders' }), 1000, expect.objectContaining({ executionId: expect.any(String), timeoutMs: 0 }),
     )
   })
 

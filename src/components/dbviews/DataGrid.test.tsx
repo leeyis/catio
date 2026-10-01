@@ -30,7 +30,7 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({ save: (...a: unknown[]) => dialogS
 const wrap = (ui: React.ReactNode) => render(<LanguageProvider>{ui}</LanguageProvider>)
 
 describe('DataGrid generic rows', () => {
-  beforeAll(async () => { await i18n.changeLanguage('en') })
+  beforeAll(async () => { await i18n.changeLanguage('en'); Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true }) })
   beforeEach(() => { previewDml.mockReset(); applyEdits.mockReset(); queryPage.mockReset(); tablePreview.mockReset(); tableQuery.mockReset(); exportFile.mockReset() })
 
   it('renders columns and indexed row values', () => {

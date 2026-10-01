@@ -230,7 +230,9 @@ export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpen
       {/* footer */}
       <div className="row gap8" style={{ padding: '8px 12px', borderTop: '1px solid var(--border-hairline)' }}>
         <StatusDot status="up" size={6} />
-        <span style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{t('workbench.connectedFooter')}</span>
+        <span className="ell" style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{live
+          ? t('workbench.connectedLiveFooter', { target: conn?.name ?? conn?.engine ?? '—' })
+          : t('workbench.connectedFooter')}</span>
       </div>
     </div>
   )

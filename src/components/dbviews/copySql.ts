@@ -1,86 +1,65 @@
-/**
- * 把网格选中行渲染成可复制的 SQL INSERT / UPDATE 语句(右键菜单「复制为 SQL」)。
- *
- * 值转义与语句结构语义参照后端 src-tauri/src/db/dml.rs 的 value_to_sql/build_insert/
- * build_update;标识符引用沿用本目录 structureDdl 的 dialectFor/quoteIdent/qualifiedTable,
- * 避免重复实现一套方言逻辑。纯函数,不触碰剪贴板/DOM,便于单测。
- */
-
-import { type StructDialect, quoteIdent, qualifiedTable } from './structureDdl'
-
+/** SQL clipboard/export generation. Keep literal semantics aligned with db/dml.rs.
+ * Never turn a selected-row copy into an unqualified whole-table UPDATE. */
+import { type StructDialect } from './structureDdl'
 export type { StructDialect }
+export type CopyDialect = StructDialect | 'sqlserver' | 'sqlite' | 'duckdb' | 'clickhouse' | 'jdbc'
 
-/**
- * 单元格值 → SQL 字面量。对齐 dml.rs::value_to_sql:
- *   null/undefined → NULL;布尔 → TRUE/FALSE;数字原样;字符串单引号 + 内嵌单引号加倍。
- *   对象/数组先 JSON 序列化再作为字符串字面量(覆盖 MongoDB 子文档 / JSON 列)。
- */
-export function sqlValue(v: unknown): string {
-  if (v == null) return 'NULL'
-  if (typeof v === 'boolean') return v ? 'TRUE' : 'FALSE'
-  if (typeof v === 'number') return Number.isFinite(v) ? String(v) : 'NULL'
-  if (typeof v === 'string') return quoteString(v)
-  if (typeof v === 'object') {
-    try { return quoteString(JSON.stringify(v)) } catch { return quoteString(String(v)) }
+export function copyDialectFor(engine?: string): CopyDialect {
+  return ['mysql', 'sqlserver', 'sqlite', 'duckdb', 'clickhouse', 'jdbc'].includes(engine ?? '')
+    ? engine as CopyDialect : 'postgres'
+}
+function quoteIdent(dialect: CopyDialect, name: string): string {
+  if (dialect === 'mysql') return '`' + name.replace(/`/g, '``') + '`'
+  if (dialect === 'sqlserver') return '[' + name.replace(/]/g, ']]') + ']'
+  return '"' + name.replace(/"/g, '""') + '"'
+}
+function qualifiedTable(dialect: CopyDialect, schema: string | undefined, table: string): string {
+  return schema ? `${quoteIdent(dialect, schema)}.${quoteIdent(dialect, table)}` : quoteIdent(dialect, table)
+}
+function quoteString(value: string, dialect: CopyDialect): string {
+  if ((dialect === 'mysql' || dialect === 'clickhouse') && /[\\\0]/.test(value)) {
+    const hex = Array.from(new TextEncoder().encode(value), byte => byte.toString(16).padStart(2, '0')).join('')
+    return dialect === 'mysql' ? `CONVERT(X'${hex}' USING utf8mb4)` : `unhex('${hex}')`
   }
-  return quoteString(String(v))
+  const text = dialect === 'postgres' ? value.replace(/\\/g, '\\\\') : value
+  const prefix = dialect === 'sqlserver' ? 'N' : dialect === 'postgres' && value.includes('\\') ? 'E' : ''
+  return `${prefix}'${text.replace(/'/g, "''")}'`
+}
+export function sqlValue(value: unknown, dialect: CopyDialect = 'postgres'): string {
+  if (value == null) return 'NULL'
+  if (typeof value === 'boolean') return dialect === 'sqlserver' ? (value ? '1' : '0') : (value ? 'TRUE' : 'FALSE')
+  if (typeof value === 'number') return Number.isFinite(value) ? String(value) : quoteString(String(value), dialect)
+  if (typeof value === 'object') {
+    try { return quoteString(JSON.stringify(value), dialect) } catch { return quoteString(String(value), dialect) }
+  }
+  return quoteString(String(value), dialect)
 }
 
-/** 单引号字符串字面量,内嵌单引号加倍转义。 */
-function quoteString(s: string): string {
-  return `'${s.replace(/'/g, "''")}'`
+export function buildInsertSql(rows: unknown[][], table: string, columns: string[], dialect: CopyDialect, schema?: string): string {
+  if (!table || columns.length === 0) return ''
+  const target = qualifiedTable(dialect, schema, table)
+  const names = columns.map(column => quoteIdent(dialect, column)).join(', ')
+  return rows.map(row => `INSERT INTO ${target} (${names}) VALUES (${columns.map((_, index) => sqlValue(row[index], dialect)).join(', ')});`).join('\n')
 }
-
-/**
- * 生成 INSERT:每行一条 `INSERT INTO <tbl> (<cols>) VALUES (<vals>);`,多行以换行分隔。
- * 行内值按列顺序对齐 columns。
- */
-export function buildInsertSql(
-  rows: unknown[][], table: string, columns: string[], dialect: StructDialect, schema?: string,
-): string {
-  const tbl = qualifiedTable(dialect, schema, table)
-  const colList = columns.map(c => quoteIdent(dialect, c)).join(', ')
-  return rows.map(row => {
-    const vals = columns.map((_, i) => sqlValue(row[i])).join(', ')
-    return `INSERT INTO ${tbl} (${colList}) VALUES (${vals});`
-  }).join('\n')
-}
-
-/**
- * 无真实主键时(PK-less 表,如 Postgres ctid 路径)的伪主键定位:`column` 是伪主键
- * 列名,`values` 与 rows 等长一一对应每行的 key 值(该值不在行数据里,由调用方从
- * activeRowKeys 取得)。
- */
 export type KeyOverride = { column: string; values: unknown[] }
 
-/**
- * 生成 UPDATE:每行一条。`pk` 给出主键列名;SET 写非主键列,WHERE 用主键列定位。
- * 当 pk 为空时:
- *   - 若提供 `keyOverride` 且当前行有可用 key 值,SET 全列、WHERE 用伪主键 (ctid) 定位;
- *   - 否则退化为 SET 全列、无 WHERE(复制后由用户自行补 WHERE)。
- * 真实 PK 始终优先于 keyOverride。
- */
-export function buildUpdateSql(
-  rows: unknown[][], table: string, columns: string[], dialect: StructDialect,
-  schema: string | undefined, pk: string[], keyOverride?: KeyOverride,
-): string {
-  const tbl = qualifiedTable(dialect, schema, table)
-  const pkSet = new Set(pk)
-  return rows.map((row, i) => {
-    const setCols = pk.length > 0 ? columns.filter(c => !pkSet.has(c)) : columns
-    const set = setCols
-      .map(c => `${quoteIdent(dialect, c)} = ${sqlValue(row[columns.indexOf(c)])}`)
-      .join(', ')
-    if (pk.length > 0) {
-      const where = pk
-        .map(c => `${quoteIdent(dialect, c)} = ${sqlValue(row[columns.indexOf(c)])}`)
-        .join(' AND ')
-      return `UPDATE ${tbl} SET ${set} WHERE ${where};`
-    }
-    const keyVal = keyOverride?.values[i]
-    if (keyOverride && keyVal != null) {
-      return `UPDATE ${tbl} SET ${set} WHERE ${quoteIdent(dialect, keyOverride.column)} = ${sqlValue(keyVal)};`
-    }
-    return `UPDATE ${tbl} SET ${set};`
+export function buildUpdateSql(rows: unknown[][], table: string, columns: string[], dialect: CopyDialect,
+  schema: string | undefined, pk: string[], keyOverride?: KeyOverride): string {
+  if (!table || !rows.length) return ''
+  const keyIndexes = pk.map(key => columns.indexOf(key))
+  const hasKeys = pk.length > 0
+    ? keyIndexes.every(index => index >= 0) && rows.every(row => keyIndexes.every(index => row[index] != null))
+    : !!keyOverride && rows.every((_, index) => keyOverride.values[index] != null)
+  if (!hasKeys) return ''
+  const keySet = new Set(pk)
+  const setColumns = pk.length ? columns.filter(column => !keySet.has(column)) : columns
+  if (!setColumns.length) return ''
+  const target = qualifiedTable(dialect, schema, table)
+  return rows.map((row, index) => {
+    const changes = setColumns.map(column => `${quoteIdent(dialect, column)} = ${sqlValue(row[columns.indexOf(column)], dialect)}`).join(', ')
+    const where = pk.length
+      ? pk.map((column, i) => `${quoteIdent(dialect, column)} = ${sqlValue(row[keyIndexes[i]], dialect)}`).join(' AND ')
+      : `${quoteIdent(dialect, keyOverride!.column)} = ${sqlValue(keyOverride!.values[index], dialect)}`
+    return `UPDATE ${target} SET ${changes} WHERE ${where};`
   }).join('\n')
 }

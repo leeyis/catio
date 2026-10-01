@@ -43,6 +43,8 @@ const getSchemaMock = vi.fn(() => Promise.resolve({ schemas: [] as StubNs[] }))
 
 vi.mock('../../services/db', () => ({
   runQuery: vi.fn(),
+  splitQuery: vi.fn((_id: string, sql: string) => Promise.resolve([sql])),
+  cancelQuery: vi.fn(() => Promise.resolve()),
   runExplain: (...args: unknown[]) => runExplainMock(...(args as [])),
   getSchema: (...args: unknown[]) => getSchemaMock(...(args as [])),
   schemaColumns: vi.fn(() => Promise.resolve([])),
@@ -177,9 +179,8 @@ describe('SqlConsole 执行计划(EXPLAIN)入口', () => {
   it('点击「解释」调用 runExplain 并渲染执行计划查看器', async () => {
     wrap(<SqlConsole connId="c1" engine="postgres" initialCode="select * from orders" fresh />)
     fireEvent.click(screen.getByTitle('Show execution plan'))
-    // 第三参为选中的默认库/Schema:EXPLAIN 必须沿用它(此处 mock 自动选中首个库 public),
-    // 否则后端落连接默认库,对未限定库名的查询报「默认库.表 不存在」(真机缺陷)。
-    expect(runExplainMock).toHaveBeenCalledWith('c1', 'select * from orders', 'public')
+    // Metadata has not loaded a namespace: use the connection default, never a demo schema.
+    expect(runExplainMock).toHaveBeenCalledWith('c1', 'select * from orders', undefined)
     // 解析后的计划树出现在结果区(节点标题含表名)。
     expect(await screen.findByText('Seq Scan on orders')).toBeInTheDocument()
   })
@@ -190,9 +191,8 @@ describe('SqlConsole 执行计划(EXPLAIN)入口', () => {
     stubSelectedText = 'select * from orders'
     wrap(<SqlConsole connId="c1" engine="postgres" initialCode="select 1;\nselect * from orders;" fresh />)
     fireEvent.click(screen.getByTitle('Show execution plan'))
-    // 第三参为选中的默认库/Schema:EXPLAIN 必须沿用它(此处 mock 自动选中首个库 public),
-    // 否则后端落连接默认库,对未限定库名的查询报「默认库.表 不存在」(真机缺陷)。
-    expect(runExplainMock).toHaveBeenCalledWith('c1', 'select * from orders', 'public')
+    // Metadata has not loaded a namespace: use the connection default, never a demo schema.
+    expect(runExplainMock).toHaveBeenCalledWith('c1', 'select * from orders', undefined)
   })
 })
 

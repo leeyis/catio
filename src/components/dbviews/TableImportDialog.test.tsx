@@ -94,11 +94,15 @@ describe('TableImportDialog', () => {
 
     // Switch to truncate mode.
     fireEvent.click(screen.getByRole('button', { name: /Truncate first/i }))
+    expect(apply1).toBeDisabled()
+    expect(importTable).not.toHaveBeenCalled()
+    fireEvent.change(screen.getByRole('textbox', { name: /Type users to confirm/i }), { target: { value: 'users' } })
     fireEvent.click(apply1)
 
     await waitFor(() => expect(importTable).toHaveBeenCalledTimes(1))
     const arg = importTable.mock.calls[0][0]
     expect(arg.mode).toBe('truncate')
+    expect(arg.allowDestructive).toBe(true)
     expect(arg.mappings).toEqual([{ sourceColumn: 'user_id', targetColumn: 'user_id' }])
   })
 

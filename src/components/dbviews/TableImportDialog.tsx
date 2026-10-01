@@ -1,11 +1,12 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn, IconBtn } from '../atoms'
 import {
-  importPreview, importTable, tableStructure, dbErrMsg,
-  type ImportPreview, type ImportColumnMapping,
+  importPreview, importTable, importPreviewBytes, importTableBytes, tableStructure, dbErrMsg,
+  type ImportPreview, type ImportColumnMapping, type BrowserImportFile,
 } from '../../services/db'
+import { isServer } from '../../services/transport'
 import { autoMapImportColumns, IMPORT_SKIP_TARGET, engineSupportsImportTransaction } from './tableImport'
 
 export interface TableImportDialogProps {
@@ -16,6 +17,7 @@ export interface TableImportDialogProps {
   table: string
   /** 连接引擎串：用于判断 truncate 模式是否有事务回滚保护。 */
   engine?: string
+  transactions?: boolean
   onClose: () => void
   /** 导入成功后回调（父组件刷新数据网格）。 */
   onImported?: (rowsImported: number) => void
@@ -26,13 +28,16 @@ export interface TableImportDialogProps {
  * 解析 / 列映射 / INSERT 生成均在后端纯函数（table_import.rs，已单测），自动映射在
  * tableImport.ts（已单测），这里只负责对话框编排与状态。
  */
-export function TableImportDialog({ connId, schema, table, engine, onClose, onImported }: TableImportDialogProps) {
+export function TableImportDialog({ connId, schema, table, engine, transactions, onClose, onImported }: TableImportDialogProps) {
   const { t } = useTranslation()
   // 不支持事务的引擎在 truncate 模式无回滚保护，额外提示用户。
-  const noRollback = !engineSupportsImportTransaction(engine)
+  const noRollback = !(transactions ?? engineSupportsImportTransaction(engine))
 
   const [filePath, setFilePath] = useState<string | null>(null)
   const [preview, setPreview] = useState<ImportPreview | null>(null)
+  const [webFile, setWebFile] = useState<BrowserImportFile | null>(null)
+  const fileInput = useRef<HTMLInputElement>(null)
+  const [confirmation, setConfirmation] = useState('')
   const [targetColumns, setTargetColumns] = useState<string[]>([])
   // source column → target column ('' = 跳过)
   const [mapping, setMapping] = useState<Record<string, string>>({})
@@ -54,7 +59,8 @@ export function TableImportDialog({ connId, schema, table, engine, onClose, onIm
   }, [connId, schema, table])
 
   async function pickFile() {
-    setErr(null)
+    if (isServer()) { fileInput.current?.click(); return }
+    setErr(null); setWebFile(null); setPreview(null); setFilePath(null); setConfirmation('')
     try {
       const { open } = await import('@tauri-apps/plugin-dialog')
       const picked = await open({
@@ -78,6 +84,25 @@ export function TableImportDialog({ connId, schema, table, engine, onClose, onIm
     }
   }
 
+  async function pickBrowserFile(file?: File) {
+    if (!file) return
+    setErr(null); setPreview(null); setWebFile(null); setFilePath(null); setSummary(null); setConfirmation('')
+    if (file.size > 8 * 1024 * 1024) { setErr(t('dbviews.webImportLimit')); return }
+    setBusy(true); setUserEdited(false)
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer())
+      let binary = ''
+      for (let offset = 0; offset < bytes.length; offset += 32768) {
+        binary += String.fromCharCode(...bytes.subarray(offset, offset + 32768))
+      }
+      const payload = { fileName: file.name, dataBase64: btoa(binary) }
+      const pv = await importPreviewBytes(payload)
+      setWebFile(payload); setFilePath(file.name); setPreview(pv)
+      setMapping(autoMapImportColumns(pv.columns, targetColumns))
+    } catch (e) { setErr(dbErrMsg(e)) }
+    finally { setBusy(false) }
+  }
+
   // preview 或目标列变化且用户尚未手动调整时，重算自动映射。
   useEffect(() => {
     if (preview && !userEdited) {
@@ -96,14 +121,17 @@ export function TableImportDialog({ connId, schema, table, engine, onClose, onIm
   }
 
   async function runImport() {
-    if (!filePath || mappedCount === 0) return
+    if (!filePath || !preview || mappedCount === 0 || busy) return
+    if (mode === 'truncate' && (noRollback || confirmation !== table)) return
     setErr(null)
     setBusy(true)
     try {
       const mappings: ImportColumnMapping[] = Object.entries(mapping)
         .filter(([, target]) => target.trim() !== '')
         .map(([sourceColumn, targetColumn]) => ({ sourceColumn, targetColumn }))
-      const res = await importTable({ connId, schema, table, filePath, mappings, mode })
+      const args = { connId, schema, table, mappings, mode, ...(mode === 'truncate' ? { allowDestructive: true } : {}) }
+      const res = webFile ? await importTableBytes({ ...args, ...webFile })
+        : await importTable({ ...args, filePath })
       setSummary(res.rowsImported)
       onImported?.(res.rowsImported)
     } catch (e) {
@@ -121,7 +149,7 @@ export function TableImportDialog({ connId, schema, table, engine, onClose, onIm
   const labelStyle: React.CSSProperties = { fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }
 
   return (
-    <div onClick={onClose}
+    <div onClick={() => { if (!busy) onClose() }}
       style={{ position: 'absolute', inset: 0, zIndex: 70, background: 'color-mix(in srgb, var(--cta-bg) 42%, transparent)', backdropFilter: 'blur(3px)', display: 'grid', placeItems: 'center' }}>
       <div onClick={e => e.stopPropagation()} className="pop-in"
         style={{ width: 680, maxWidth: '92%', maxHeight: '88%', background: 'var(--surface-card)', borderRadius: 18, border: '1px solid var(--border-hairline)', boxShadow: 'var(--shadow-window)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
@@ -133,7 +161,7 @@ export function TableImportDialog({ connId, schema, table, engine, onClose, onIm
               {schema ? `${schema}.${table}` : table}
             </span>
           </div>
-          <IconBtn name="x" size={16} variant="bare" onClick={onClose} />
+          <IconBtn name="x" size={16} variant="bare" onClick={() => { if (!busy) onClose() }} />
         </div>
 
         {/* body */}
@@ -142,6 +170,8 @@ export function TableImportDialog({ connId, schema, table, engine, onClose, onIm
           <div className="col" style={{ gap: 6 }}>
             <span style={labelStyle}>{t('dbviews.importFile')}</span>
             <div className="row gap8" style={{ alignItems: 'center' }}>
+              {isServer() && <input ref={fileInput} type="file" hidden accept=".csv,.tsv,.json,.xlsx,.xlsm,.xls"
+                data-testid="browser-import-file" onChange={e => { const file = e.currentTarget.files?.[0]; e.currentTarget.value = ''; void pickBrowserFile(file) }} />}
               <Btn size="sm" variant="secondary" icon="upload" onClick={pickFile} disabled={busy}>
                 {t('dbviews.importChooseFile')}
               </Btn>
@@ -216,7 +246,7 @@ export function TableImportDialog({ connId, schema, table, engine, onClose, onIm
               <span style={labelStyle}>{t('dbviews.importMode')}</span>
               <div className="row gap8">
                 {(['append', 'truncate'] as const).map(m => (
-                  <button key={m} className="row" onClick={() => setMode(m)}
+                  <button key={m} className="row" disabled={busy} onClick={() => { setMode(m); setConfirmation('') }}
                     style={{ gap: 6, padding: '6px 12px', borderRadius: 8, border: `1px solid ${mode === m ? 'var(--accent-primary)' : 'var(--border-hairline-alt)'}`, background: mode === m ? 'var(--accent-soft)' : 'transparent', color: mode === m ? 'var(--accent-primary)' : 'var(--text-secondary)', cursor: 'pointer', fontSize: 12.5 }}>
                     <Icon name={m === 'append' ? 'plus' : 'trash-2'} size={13} />
                     {t(m === 'append' ? 'dbviews.importModeAppend' : 'dbviews.importModeTruncate')}
@@ -224,16 +254,20 @@ export function TableImportDialog({ connId, schema, table, engine, onClose, onIm
                 ))}
               </div>
               {mode === 'truncate' && (
-                <span style={{ fontSize: 11, color: 'var(--danger, #d9534f)' }}>{t('dbviews.importTruncateWarn')}</span>
+                <span style={{ fontSize: 11, color: 'var(--danger-fg)' }}>{t('dbviews.importTruncateWarn')}</span>
+              )}
+              {mode === 'truncate' && !noRollback && (
+                <input aria-label={t('dbviews.importConfirmTable', { table })} value={confirmation} disabled={busy}
+                  placeholder={t('dbviews.importConfirmTable', { table })} onChange={e => setConfirmation(e.target.value)} style={inputStyle} />
               )}
               {mode === 'truncate' && noRollback && (
-                <span style={{ fontSize: 11, color: 'var(--danger, #d9534f)' }}>{t('dbviews.importTruncateNoRollback')}</span>
+                <span style={{ fontSize: 11, color: 'var(--danger-fg)' }}>{t('dbviews.importAtomicUnavailable')}</span>
               )}
             </div>
           )}
 
           {err && (
-            <div className="row gap8" style={{ alignItems: 'center', color: 'var(--danger, #d9534f)', fontSize: 12 }}>
+            <div className="row gap8" style={{ alignItems: 'center', color: 'var(--danger-fg)', fontSize: 12 }}>
               <Icon name="alert-triangle" size={14} />
               <span>{t('dbviews.importError', { message: err })}</span>
             </div>
@@ -248,10 +282,10 @@ export function TableImportDialog({ connId, schema, table, engine, onClose, onIm
 
         {/* footer */}
         <div className="row gap8" style={{ justifyContent: 'flex-end', padding: '14px 20px 18px', borderTop: '1px solid var(--border-hairline)', flex: 'none' }}>
-          <Btn variant="ghost" onClick={onClose}>{summary != null ? t('dbviews.close') : t('dbviews.cancel')}</Btn>
+          <Btn variant="ghost" onClick={onClose} disabled={busy}>{summary != null ? t('dbviews.close') : t('dbviews.cancel')}</Btn>
           <Btn variant="primary" icon="upload"
             onClick={runImport}
-            disabled={busy || !preview || mappedCount === 0}>
+            disabled={busy || !preview || mappedCount === 0 || (mode === 'truncate' && (noRollback || confirmation !== table))}>
             {busy ? t('dbviews.importing') : t('dbviews.importApply', { count: mappedCount })}
           </Btn>
         </div>

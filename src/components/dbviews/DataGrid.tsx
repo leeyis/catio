@@ -8,10 +8,11 @@ import { isServer } from '../../services/transport'
 import type { ResultColumn } from '../../services/types'
 import { reduceCellSelection, reduceRowSelection, isCellInRange, normalizeRange, cellsInRange, type GridSelection } from './gridSelection'
 import { filterRows, filterModeNeedsValue, type FilterRule, type FilterMode } from './gridFilter'
-import { buildInsertSql, buildUpdateSql } from './copySql'
+import { buildInsertSql, buildUpdateSql, copyDialectFor } from './copySql'
 import { buildMarkdownTable } from './markdownTable'
 import { visibleColumnNames, allNullColumnNames, toggleColumnVisibility, showAllColumns } from './columnVisibility'
-import { dialectFor } from './structureDdl'
+import { uniqueGridColumns } from './gridColumns'
+import { copyTextToClipboard } from '../../services/clipboard'
 import { supportsServerFilter } from './serverFilter'
 import { clauseSuggest, applyClauseItem, type ClauseMode, type ClauseSuggest, type ClauseItem } from './clauseComplete'
 import { TableImportDialog } from './TableImportDialog'
@@ -23,6 +24,7 @@ export interface DataGridProps {
   density?: 'comfortable' | 'compact'
   /** Read-only engines (per capabilities.writable) disable cell editing + Save. Defaults true so mock/demo stays editable. */
   writable?: boolean
+  transactions?: boolean
   /** When set, Save + pagination talk to the backend for this connection. */
   connId?: string
   /** Target table for generated DML (defaults to 'orders' to match the seeded mock). */
@@ -115,9 +117,10 @@ function colIcon(col: ResultColumn): string {
   return 'type'
 }
 
-export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortable', writable = true, connId, table = 'orders', schema, engine, sql, defaultNamespace, livePreview, onRefresh, truncated, loadError, resultLabel, rowKeys, keyColumn }: DataGridProps) {
+export function DataGrid({ columns: inputColumns, rows, statusTones = {}, density = 'comfortable', writable = true, transactions, connId, table = connId ? '' : 'orders', schema, engine, sql, defaultNamespace, livePreview, onRefresh, truncated, loadError, resultLabel, rowKeys, keyColumn }: DataGridProps) {
   const { t } = useTranslation()
-  const [sel, setSel] = useState({ r: 2, c: 3 })
+  const columns = useMemo(() => uniqueGridColumns(inputColumns), [inputColumns])
+  const [sel, setSel] = useState({ r: connId ? 0 : 2, c: connId ? 0 : 3 })
   // 多选状态（叠加在单选之上）：单元格矩形 anchor/focus + 行多选集合（origIdx）。
   // 纯函数 reduce* 负责把点击事件归约为新选择，组件只持有状态。
   const [gridSel, setGridSel] = useState<GridSelection>({ anchor: null, focus: null, rows: new Set() })
@@ -129,12 +132,12 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   const [bulkVal, setBulkVal] = useState('')
   const [sortCol, setSortCol] = useState<string | null>(null)
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
-  const [edits, setEdits] = useState<Record<string, string | number>>({})
+  const [edits, setEdits] = useState<Record<string, string | number | boolean | null>>({})
   const [editing, setEditing] = useState<{ r: number; c: number } | null>(null)
   const [editVal, setEditVal] = useState('')
   // Pending new rows: each is a map of column-name → value. Keyed by a negative
   // synthetic index (-1, -2, …) so cell-edit keys never collide with existing rows.
-  const [newRows, setNewRows] = useState<{ id: number; cells: Record<string, string | number> }[]>([])
+  const [newRows, setNewRows] = useState<{ id: number; cells: Record<string, string | number | boolean | null> }[]>([])
   const newRowSeq = useRef(0)
   // Original indexes (into baseRows) of existing rows marked for deletion.
   const [deleted, setDeleted] = useState<Set<number>>(new Set())
@@ -151,6 +154,17 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   const [serverRowKeys, setServerRowKeys] = useState<string[] | null>(null)
   // toolbar: refresh / filter / sort / export UI state
   const [refreshing, setRefreshing] = useState(false)
+  const [pageError, setPageError] = useState<string | null>(null)
+  const pageRequest = useRef(0)
+  const editTouched = useRef(false)
+  const activeEditorKind = useRef<'date' | 'datetime' | 'time' | 'text'>('text')
+  useEffect(() => {
+    pageRequest.current++
+    setServerRows(null); setServerRowKeys(null); setPage(1); setRefreshing(false)
+    setEdits({}); setNewRows([]); setDeleted(new Set()); setEditing(null); setPreview(null)
+    setPageError(null)
+    return () => { pageRequest.current++ }
+  }, [connId, schema, table, sql, defaultNamespace])
   const [filterOpen, setFilterOpen] = useState(false)
   const [filterText, setFilterText] = useState('')
   // 列级结构化筛选规则(8 种操作符 + AND/OR)。叠加在全局文本搜索之上,二者同时生效。
@@ -248,7 +262,8 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   // over the parent-provided first-page keys, mirroring serverRows ?? rows.
   const activeRowKeys = serverRowKeys ?? rowKeys ?? null
   // Editable when there's a PK, OR a key column + per-row keys (ctid fallback).
-  const canEdit = writable && (pkCols.length > 0 || !!(keyColumn && activeRowKeys))
+  const canEdit = writable && (!connId || !!table) && (pkCols.length > 0 || !!(keyColumn && activeRowKeys))
+  const canInsert = writable && !!table && (!!livePreview || canEdit)
 
   // Find the index of sortCol in columns for indexed-value sort
   const sortColIdx = useMemo(() => {
@@ -308,7 +323,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   )
   const filterActive = filterOpen && (filterText.trim().length > 0 || hasActiveRules)
   const pageRows = (serverRows || filterActive) ? sorted : sorted.slice((page - 1) * PAGE, page * PAGE)
-  const pages = serverRows ? page + (serverTruncated ? 1 : 0) : Math.max(1, Math.ceil(filtered.length / PAGE))
+  const pages = serverRows ? page + (serverTruncated ? 1 : 0) : Math.max(1, Math.ceil(filtered.length / PAGE) + (truncated && connId && (livePreview || sql) ? 1 : 0))
   const showTruncated = serverRows ? serverTruncated : !!truncated
 
   // ---- 行明细查看 ----
@@ -355,7 +370,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   // fetched columns rather than from `keyColumn` (which is only set for PK-less
   // tables); capture its values as the per-row keys for ctid-based editing.
   function applyServerPage(res: { columns?: ResultColumn[]; rows: unknown[][]; truncated?: boolean }) {
-    const hasCtid = res.columns?.[0]?.name === '__ctid'
+    const hasCtid = res.columns?.[0]?.name === '__ctid' && !columns.some(c => c.name === '__ctid')
     if (hasCtid) {
       setServerRowKeys(res.rows.map(r => String(r[0])))
       setServerRows(res.rows.map(r => r.slice(1)))
@@ -366,45 +381,53 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
     setServerTruncated(!!res.truncated)
   }
 
-  async function gotoPage(next: number) {
-    if (next < 1) return
-    setDetailIdx(null) // 翻页关闭行明细（其上一条/下一条按当前页定义）
-    if (fetchPage) {
-      const res = await fetchPage(PAGE, (next - 1) * PAGE)
+  function mayReplaceRows() {
+    if (pendingTotal > 0 || editing || applying) {
+      setPageError(t('dbviews.pendingPageChanges'))
+      return false
+    }
+    return true
+  }
+
+  async function loadPage(fetcher: NonNullable<typeof fetchPage>, next: number, size: number, after?: () => void) {
+    const request = ++pageRequest.current
+    setRefreshing(true); setPageError(null)
+    try {
+      const res = await fetcher(size, (next - 1) * size)
+      if (request !== pageRequest.current) return
       applyServerPage(res)
-      setPage(next)
-    } else {
-      setPage(Math.min(pages, Math.max(1, next)))
+      setPage(next); setPageSize(size); setDetailIdx(null)
+      setGridSel({ anchor: null, focus: null, rows: new Set() }); lastRowRef.current = null
+      setSel({ r: 0, c: 0 })
+      after?.()
+    } catch (e) {
+      if (request === pageRequest.current) setPageError(dbErrMsg(e))
+    } finally {
+      if (request === pageRequest.current) setRefreshing(false)
     }
   }
 
-  // 提交服务端 WHERE / ORDER BY:固化当前输入框文本为生效片段,从首页(offset=0)按
-  // 条件+排序重新取数。任一片段非空 → tableQuery;两者皆空 → 回落 tablePreview(全量)。
-  // 直接用提交值构造取数闭包,避免 setState 后 fetchPage memo 尚未刷新导致读到旧片段。
+  async function gotoPage(next: number) {
+    if (refreshing || next < 1 || next > pages || !mayReplaceRows()) return
+    if (fetchPage) await loadPage(fetchPage, next, PAGE)
+    else { setDetailIdx(null); setPage(next) }
+  }
+
   async function submitServerFilter() {
-    if (!(connId && livePreview)) return
+    if (!(connId && livePreview) || refreshing || !mayReplaceRows()) return
     setClause(null)
-    const w = whereInput.trim()
-    const o = orderInput.trim()
-    setServerWhere(w)
-    setServerOrder(o)
-    setDetailIdx(null)
-    setPage(1)
+    const w = whereInput.trim(), o = orderInput.trim()
     const fetcher = (w || o)
       ? (limit: number, offset: number) => tableQuery(connId, schema, table, w || undefined, o || undefined, limit, offset)
       : (limit: number, offset: number) => tablePreview(connId, schema, table, limit, offset)
-    const res = await fetcher(PAGE, 0)
-    applyServerPage(res)
+    await loadPage(fetcher, 1, PAGE, () => { setServerWhere(w); setServerOrder(o) })
   }
 
   function changePageSize(v: string) {
     const n = Number(v)
-    setDetailIdx(null)
-    setPageSize(n)
-    setPage(1)
-    if (fetchPage) {
-      fetchPage(n, 0).then(applyServerPage)
-    }
+    if (![50, 100, 500].includes(n) || refreshing || !mayReplaceRows()) return
+    if (fetchPage) void loadPage(fetchPage, 1, n)
+    else { setPageSize(n); setPage(1); setDetailIdx(null) }
   }
 
   function toggleSort(name: string) {
@@ -466,18 +489,9 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   // Refresh: re-fetch the current page from the server when possible, else ask the
   // parent to refresh. Brief spinner while the fetch is in flight.
   async function refresh() {
-    if (refreshing) return
-    if (fetchPage) {
-      setRefreshing(true)
-      try {
-        const res = await fetchPage(PAGE, (page - 1) * PAGE)
-        applyServerPage(res)
-      } finally {
-        setRefreshing(false)
-      }
-    } else {
-      onRefresh?.()
-    }
+    if (refreshing || !mayReplaceRows()) return
+    if (fetchPage) await loadPage(fetchPage, page, PAGE)
+    else onRefresh?.()
   }
 
   // CSV-escape a single value: empty for null/undefined; quote+double-quote when the
@@ -509,7 +523,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
     const displayRows = pageRows.map(({ row }) => row)
     if (format === 'sql') {
       const colNames = columns.map(c => c.name)
-      const sql = buildInsertSql(displayRows, table, colNames, dialectFor(engine), schema)
+      const sql = buildInsertSql(displayRows, table, colNames, copyDialectFor(engine), schema)
       return { text: sql, type: 'text/plain' }
     }
     if (format === 'md') {
@@ -589,6 +603,10 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
       setExportErr(t('dbviews.applyError', { message: dbErrMsg(e) }))
     }
   }
+  async function copyValue(text: string) {
+    if (await copyTextToClipboard(text)) { setCopied(true); setTimeout(() => setCopied(false), 1500) }
+    else setPageError(t('dbviews.copyFailed'))
+  }
   function cellKey(rowIdx: number, col: string) { return `${rowIdx}-${col}` }
 
   // The ORIGINAL (unedited) value of an existing cell, looked up from baseRows by
@@ -603,8 +621,11 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
 
   // --- typed editors --------------------------------------------------------
   // Classify a column type into the native input it should use when editing.
+  function binaryColumn(type: string | undefined): boolean { return /bytea|blob|binary|varbin|^image$/i.test(type ?? '') }
+  function hexKey(value: unknown): boolean { return typeof value === 'string' && /^0x(?:[0-9a-f]{2})*$/i.test(value) }
   function editorKind(type: string | undefined): 'date' | 'datetime' | 'time' | 'text' {
     const t = (type ?? '').toLowerCase()
+    if (/timestamptz|with time zone|datetimeoffset/.test(t)) return 'text'
     if (/timestamp|datetime/.test(t)) return 'datetime'
     if (/date/.test(t)) return 'date'
     if (/time/.test(t)) return 'time'
@@ -623,7 +644,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
     }
     if (kind === 'datetime') {
       // datetime-local wants YYYY-MM-DDTHH:mm — accept space or T separators.
-      const m = raw.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})/)
+      const m = raw.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)/)
       return m ? `${m[1]}T${m[2]}` : raw
     }
     // time → HH:mm[:ss]
@@ -639,8 +660,15 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   }
 
   function startEdit(rIdx: number, cIdx: number, _rowIdx: number, _col: string, val: unknown) {
-    if (!canEdit) return
-    const kind = editorKind(columns[cIdx]?.type)
+    if ((rIdx < 0 ? !canInsert : !canEdit) || refreshing || applying) return
+    if (rIdx >= 0 && rowPk(rIdx, baseRows[rIdx] ?? []).length === 0) { setPageError(t('dbviews.noStableRowKey')); return }
+    if (binaryColumn(columns[cIdx]?.type) || (engine === 'sqlite' && hexKey(val))) { setPageError(t('dbviews.binaryWriteUnsupported')); return }
+    editTouched.current = false
+    let kind = editorKind(columns[cIdx]?.type)
+    // Native time pickers may round micro/nanoseconds. Preserve precise values as
+    // raw editable text rather than silently shortening a database timestamp.
+    if ((kind === 'datetime' || kind === 'time') && /\.\d{4,}/.test(cellText(val))) kind = 'text'
+    activeEditorKind.current = kind
     setEditing({ r: rIdx, c: cIdx }); setEditVal(toEditorValue(kind, cellText(val))); setSel({ r: rIdx, c: cIdx })
   }
   // Commit an edit. Existing rows (origIdx >= 0) write into the `edits` map; new
@@ -649,8 +677,13 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   // value DIFFERS (string-compare) from the original cell value; if it's reverted
   // to the original (or unchanged), remove any existing edit entry for that cell.
   function commitEdit(rowIdx: number, col: string) {
-    const kind = editorKind(columns.find(c => c.name === col)?.type)
-    const value = fromEditorValue(kind, editVal)
+    if (!editTouched.current) { setEditing(null); return }
+    editTouched.current = false
+    const kind = activeEditorKind.current
+    const text = fromEditorValue(kind, editVal)
+    const type = columns.find(c => c.name === col)?.type.toLowerCase() ?? ''
+    const value = /^(bool|boolean|bit)$/.test(type) && /^(true|false)$/i.test(text)
+      ? text.toLowerCase() === 'true' : text
     if (rowIdx < 0) {
       const id = -rowIdx - 1
       setNewRows(rs => rs.map(r => r.id === id ? { ...r, cells: { ...r.cells, [col]: value } } : r))
@@ -658,7 +691,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
       const orig = originalCellValue(rowIdx, col)
       const k = cellKey(rowIdx, col)
       setEdits(e => {
-        if (value === String(orig ?? '')) {
+        if (orig != null && String(value) === cellText(orig)) {
           if (e[k] === undefined) return e
           const next = { ...e }
           delete next[k]
@@ -692,7 +725,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
 
   // Add an empty pending row (tracked separately; becomes an INSERT on Save).
   function addRow() {
-    if (!canEdit) return
+    if (!canInsert || refreshing || applying) return
     const id = newRowSeq.current++
     setNewRows(rs => [...rs, { id, cells: {} }])
   }
@@ -772,7 +805,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
     } else {
       text = selCell?.full ?? ''
     }
-    navigator.clipboard?.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500) }).catch(() => {})
+    void copyValue(text)
   }
   // 选中的行集合（按 origIdx）：行多选优先；否则取单元格矩形覆盖的各行。
   function selectedOrigIdxs(): number[] {
@@ -789,10 +822,29 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   function ctxDeleteRows() {
     setCtxMenu(null)
     const idxs = selectedOrigIdxs()
+    if (idxs.some(index => rowPk(index, baseRows[index] ?? []).length === 0)) { setPageError(t('dbviews.noStableRowKey')); return }
     if (idxs.length === 0) return
     setDeleted(d => { const next = new Set(d); for (const i of idxs) next.add(i); return next })
   }
   // 菜单「批量编辑」打开对话框。
+  function setSelectedValue(value: null | '') {
+    if (!canEdit || refreshing || applying) return
+    const col = columns[ctxMenu?.col ?? sel.c]
+    if (!col) return
+    if (value !== null && binaryColumn(col.type)) { setPageError(t('dbviews.binaryWriteUnsupported')); setCtxMenu(null); return }
+    if (selectedOrigIdxs().some(index => rowPk(index, baseRows[index] ?? []).length === 0)) { setPageError(t('dbviews.noStableRowKey')); setCtxMenu(null); return }
+    setEdits(previous => {
+      const next = { ...previous }
+      for (const row of selectedOrigIdxs()) {
+        const key = cellKey(row, col.name)
+        if (originalCellValue(row, col.name) === value) delete next[key]
+        else next[key] = value
+      }
+      return next
+    })
+    setCtxMenu(null)
+  }
+
   function ctxBulkEdit() { setCtxMenu(null); setBulkVal(''); setBulkOpen(true) }
 
   // 收集选中行的「显示值」矩阵(行多选 > 单元格矩形覆盖到的整行),按 columns 顺序对齐,
@@ -812,7 +864,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
     setCtxMenu(null)
     const data = selectedRowValues()
     if (data.length === 0) return
-    const dialect = dialectFor(engine)
+    const dialect = copyDialectFor(engine)
     const colNames = columns.map(c => c.name)
     // PK-less 表(ctid 路径):pkCols 为空,需用 keyColumn + 逐行 activeRowKeys 作伪主键定位,
     // 否则 UPDATE 退化为无 WHERE 的全表更新。key 值与 selectedRowValues() 同序(都来自 selectedOrigIdxs)。
@@ -822,7 +874,8 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
     const text = kind === 'insert'
       ? buildInsertSql(data, table, colNames, dialect, schema)
       : buildUpdateSql(data, table, colNames, dialect, schema, pkCols, keyOverride)
-    navigator.clipboard?.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500) }).catch(() => {})
+    if (!text) { setPageError(t('dbviews.noStableRowKey')); return }
+    void copyValue(text)
   }
   // 当前选中单元格数（用于菜单/对话框文案 + 决定批量编辑可用性）。
   const selectedCellCount = useMemo(() => cellsInRange(gridSel).length, [gridSel])
@@ -830,6 +883,9 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   function applyBulkEdit() {
     if (!gridSel.anchor || !gridSel.focus) { setBulkOpen(false); return }
     const { r0, r1, c0, c1 } = normalizeRange(gridSel.anchor, gridSel.focus)
+    if (columns.slice(c0, c1 + 1).some(column => binaryColumn(column.type)) || selectedOrigIdxs().some(index => rowPk(index, baseRows[index] ?? []).length === 0)) {
+      setPageError(t('dbviews.binaryWriteUnsupported')); setBulkOpen(false); return
+    }
     setEdits(prev => {
       const next = { ...prev }
       for (let r = r0; r <= r1; r++) {
@@ -854,6 +910,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   // Toggle an existing row (by its origIdx) in/out of the pending-delete set.
   function toggleDelete(origIdx: number) {
     if (!canEdit) return
+    if (rowPk(origIdx, baseRows[origIdx] ?? []).length === 0) { setPageError(t('dbviews.noStableRowKey')); return }
     setDeleted(d => {
       const next = new Set(d)
       if (next.has(origIdx)) next.delete(origIdx); else next.add(origIdx)
@@ -889,7 +946,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
 
     // --- INSERTs (one per new row that has at least one filled cell) ---
     for (const nr of newRows) {
-      const cells = Object.entries(nr.cells).filter(([, v]) => String(v).length > 0) as [string, unknown][]
+      const cells = Object.entries(nr.cells) as [string, unknown][]
       if (cells.length === 0) continue
       reqs.push({ schema, table, kind: 'insert', pk: [], cells })
     }
@@ -913,29 +970,38 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
    */
   function rowPk(origIdx: number, row: unknown[]): [string, unknown][] {
     if (pkCols.length > 0) {
+      if (pkCols.some(name => { const value = row[columns.findIndex(c => c.name === name)]; return value == null || hexKey(value) })) return []
       return pkCols.map(name => {
         const ci = columns.findIndex(c => c.name === name)
         return [name, row[ci]] as [string, unknown]
       })
     }
-    if (keyColumn && activeRowKeys && activeRowKeys[origIdx] != null) {
+    if (keyColumn && activeRowKeys && activeRowKeys[origIdx] != null && !hexKey(activeRowKeys[origIdx])) {
       return [[keyColumn, activeRowKeys[origIdx]]]
     }
     return []
   }
 
   async function openPreview() {
+    if (applying || refreshing) return
     const reqs = buildEditRequests()
     if (reqs.length === 0) return
-    // Render each statement; previewDml returns a stub outside Tauri.
-    const stmts = await Promise.all(reqs.map(r => previewDml(connId ?? '', r)))
-    setApplyMsg(null)
-    setApplyErr(null)
-    setPreview({ reqs, sql: stmts.join(';\n') + ';' })
+    const request = pageRequest.current
+    setApplying(true); setPageError(null); setApplyErr(null)
+    try {
+      const stmts = await Promise.all(reqs.map(r => previewDml(connId ?? '', r)))
+      if (request !== pageRequest.current) return
+      setApplyMsg(null)
+      setPreview({ reqs, sql: stmts.join(';\n') + ';' })
+    } catch (e) {
+      if (request === pageRequest.current) setPageError(dbErrMsg(e))
+    } finally {
+      if (request === pageRequest.current) setApplying(false)
+    }
   }
 
   async function confirmApply() {
-    if (!preview) return
+    if (!preview || applying) return
     setApplying(true)
     setApplyErr(null)
     try {
@@ -945,11 +1011,8 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
       setNewRows([])
       setDeleted(new Set())
       setPreview(null)
-      if (fetchPage) {
-        const res = await fetchPage(PAGE, (page - 1) * PAGE)
-        applyServerPage(res)
-      }
-      onRefresh?.()
+      if (fetchPage) await loadPage(fetchPage, page, PAGE)
+      else onRefresh?.()
     } catch (e) {
       // Surface the failure inline in the preview gate instead of failing silently.
       setApplyErr(t('dbviews.applyError', { message: dbErrMsg(e) }))
@@ -989,7 +1052,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
   // The trailing action column now exists ONLY to host the remove-X on pending
   // new rows. Existing-row deletion moved to the toolbar (删除行), so per-row
   // trash icons are gone; the column collapses entirely when there are no new rows.
-  const showActionCol = canEdit && newRows.length > 0
+  const showActionCol = canInsert && newRows.length > 0
   // Toolbar table chip: live path uses the real schema/table (no bogus `public.`);
   // mock/demo path keeps the original `public.orders` label for pixel parity.
   const toolbarLabel = resultLabel ?? (connId ? (schema ? `${schema}.${table}` : table) : 'public.orders')
@@ -1025,10 +1088,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
     if ((e.target as HTMLElement).tagName === 'INPUT') return
     if ((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C') && selCell) {
       e.preventDefault()
-      navigator.clipboard?.writeText(selCell.full).then(() => {
-        setCopied(true)
-        setTimeout(() => setCopied(false), 1500)
-      }).catch(() => {})
+      ctxCopy()
     }
   }
 
@@ -1059,12 +1119,12 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
         </div>
         <div className="row gap6">
           {/* edit actions as compact icons w/ hover tooltips (新增行/删除行/撤销/保存) */}
-          {canEdit && (
+          {(canEdit || canInsert) && (
             <>
-              <button className="icon-btn bare" title={t('dbviews.addRow')} onClick={addRow}><Icon name="plus" size={15} /></button>
-              <button className="icon-btn bare" title={t('dbviews.deleteRow')} onClick={() => toggleDelete(sel.r)}><Icon name="trash-2" size={15} /></button>
+              <button className="icon-btn bare" title={t('dbviews.addRow')} disabled={!canInsert || refreshing || applying} onClick={addRow}><Icon name="plus" size={15} /></button>
+              <button className="icon-btn bare" title={t('dbviews.deleteRow')} disabled={!canEdit || refreshing || applying} onClick={() => toggleDelete(sel.r)}><Icon name="trash-2" size={15} /></button>
               {pendingTotal > 0 && <button className="icon-btn bare" title={t('dbviews.discardChanges')} onClick={discardChanges}><Icon name="rotate-ccw" size={15} /></button>}
-              {pendingTotal > 0 && <button className="icon-btn bare" title={t('dbviews.saveEdits')} onClick={openPreview} style={{ color: 'var(--accent-primary)' }}><Icon name="save" size={15} /></button>}
+              {pendingTotal > 0 && <button className="icon-btn bare" title={t('dbviews.saveEdits')} disabled={applying || refreshing} onClick={openPreview} style={{ color: 'var(--accent-primary)' }}><Icon name="save" size={15} /></button>}
               <div style={{ width: 1, height: 18, background: 'var(--border-hairline)' }} />
             </>
           )}
@@ -1128,12 +1188,12 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
               </div>
             )}
           </div>
-          <button className="icon-btn bare" title={t('dbviews.refresh')} disabled={refreshing} onClick={refresh}>
+          <button className="icon-btn bare" title={t('dbviews.refresh')} disabled={refreshing || pendingTotal > 0 || !!editing || applying} onClick={refresh}>
             <Icon name="refresh-cw" size={15} style={refreshing ? { animation: 'spin 0.8s linear infinite' } : undefined} />
           </button>
           <div style={{ width: 1, height: 18, background: 'var(--border-hairline)' }} />
           {livePreview && writable && connId && table && (
-            <Btn size="sm" variant="secondary" icon="upload" onClick={() => setImportOpen(true)}>{t('dbviews.import')}</Btn>
+            <Btn size="sm" variant="secondary" icon="upload" disabled={pendingTotal > 0 || refreshing || applying} onClick={() => setImportOpen(true)}>{t('dbviews.import')}</Btn>
           )}
           <div ref={exportMenuRef} style={{ position: 'relative' }}>
             <Btn size="sm" variant="secondary" icon="download" iconR="chevron-down"
@@ -1146,7 +1206,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
                   { fmt: 'sql', icon: 'database', label: 'SQL' },
                   { fmt: 'xlsx', icon: 'layout-grid', label: 'Excel' },
                   { fmt: 'md', icon: 'file-code', label: 'Markdown' },
-                ] as const).map(({ fmt, icon, label }) => (
+                ] as const).filter(item => item.fmt !== 'sql' || (!!table && !resultLabel)).map(({ fmt, icon, label }) => (
                   <button key={fmt} className="row" onClick={() => exportAs(fmt)}
                     style={{ width: '100%', gap: 8, padding: '6px 10px', borderRadius: 7, border: 'none', background: 'transparent', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 12.5, textAlign: 'left' }}>
                     <Icon name={icon} size={13} />
@@ -1202,7 +1262,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
               </div>
             </div>
           ))}
-          <Btn size="sm" variant="secondary" icon="search" onClick={submitServerFilter}>{t('dbviews.applyServerFilter')}</Btn>
+          <Btn size="sm" variant="secondary" icon="search" disabled={pendingTotal > 0 || refreshing || applying} onClick={submitServerFilter}>{t('dbviews.applyServerFilter')}</Btn>
         </div>
       )}
 
@@ -1289,7 +1349,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
               <div key={col.name} style={{ ...thStyle, position: 'relative' }} onClick={() => toggleSort(col.name)} className="gridhead">
                 <Icon name={col.icon ?? colIcon(col)} size={12} style={{ color: col.pk ? 'var(--signal-amber)' : col.fk ? 'var(--signal-blue)' : 'var(--text-faint)' }} />
                 <span className="ell" style={{ color: 'var(--text-secondary)', fontWeight: 600 }}
-                  title={commentMode && col.comment ? col.comment : undefined}>{headLabel(col)}</span>
+                  title={commentMode && col.comment ? col.comment : col.sourceName !== undefined ? t('dbviews.originalColumn', { name: col.sourceName || '""' }) : undefined}>{headLabel(col)}</span>
                 {col.pk && <span style={{ fontSize: 9, color: 'var(--signal-amber)', fontWeight: 700 }}>PK</span>}
                 {sortCol === col.name && <Icon name={sortDir === 'asc' ? 'chevron-up' : 'chevron-down'} size={12} style={{ color: 'var(--accent-primary)', marginLeft: 'auto' }} />}
                 {/* 列宽拖动手柄：列右缘，stopPropagation 避免触发排序 */}
@@ -1343,17 +1403,17 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
                         color: 'var(--text-secondary)',
                       }}>
                       {isEditing ? (
-                        <input autoFocus type={(() => { const ek = editorKind(col.type); return ek === 'datetime' ? 'datetime-local' : ek })()}
-                          value={editVal} onChange={e => setEditVal(e.target.value)}
+                        <input autoFocus step="any" type={activeEditorKind.current === 'datetime' ? 'datetime-local' : activeEditorKind.current}
+                          value={editVal} onChange={e => { editTouched.current = true; setEditVal(e.target.value) }}
                           onBlur={() => commitEdit(origIdx, col.name)}
-                          onKeyDown={e => { if (e.key === 'Enter') commitEdit(origIdx, col.name); if (e.key === 'Escape') setEditing(null) }}
+                          onKeyDown={e => { if (e.key === 'Enter') commitEdit(origIdx, col.name); if (e.key === 'Escape') { editTouched.current = false; setEditing(null) } }}
                           style={{ width: '100%', border: 'none', outline: 'none', background: 'transparent', font: 'inherit', color: 'var(--text-primary)' }} />
-                      ) : col.name === 'status' ? (
+                      ) : val === null ? (<span style={{ color: 'var(--text-faint)', fontStyle: 'italic' }}>NULL</span>) : col.name === 'status' ? (
                         <span className="row gap6" style={{ minWidth: 0 }}>
                           <span className="dot" style={{ background: statusTones[String(val)] || 'var(--text-faint)' }} />
                           <span className="ell" style={{ color: 'var(--text-primary)' }}>{cellText(val)}</span>
                         </span>
-                      ) : col.name === 'total_cents' ? (
+                      ) : !connId && col.name === 'total_cents' ? (
                         <span className="ell" style={{ color: isEdited ? 'var(--signal-amber)' : 'var(--text-primary)', fontWeight: 500, marginLeft: 'auto' }}>{Number(val).toLocaleString()}</span>
                       ) : col.name === 'id' ? (
                         <span className="ell" style={{ color: 'var(--text-tertiary)' }}>{cellText(val)}</span>
@@ -1377,7 +1437,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
             )
           })}
           {/* pending new rows (rendered after existing rows; become INSERTs on Save) */}
-          {canEdit && newRows.map(nr => {
+          {canInsert && newRows.map(nr => {
             const r = -(nr.id + 1)
             return (
               <div key={`new-${nr.id}`} style={{ display: 'grid', gridTemplateColumns: gridTemplate, height: rowH, background: 'color-mix(in srgb, var(--signal-green) 12%, transparent)' }}
@@ -1392,10 +1452,10 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
                       onDoubleClick={() => startEdit(r, ci, r, col.name, val)}
                       style={{ ...tdStyle, cursor: 'cell', background: isEditing ? 'var(--surface-card)' : 'transparent', color: 'var(--text-secondary)' }}>
                       {isEditing ? (
-                        <input autoFocus type={(() => { const ek = editorKind(col.type); return ek === 'datetime' ? 'datetime-local' : ek })()}
-                          value={editVal} onChange={e => setEditVal(e.target.value)}
+                        <input autoFocus step="any" type={activeEditorKind.current === 'datetime' ? 'datetime-local' : activeEditorKind.current}
+                          value={editVal} onChange={e => { editTouched.current = true; setEditVal(e.target.value) }}
                           onBlur={() => commitEdit(r, col.name)}
-                          onKeyDown={e => { if (e.key === 'Enter') commitEdit(r, col.name); if (e.key === 'Escape') setEditing(null) }}
+                          onKeyDown={e => { if (e.key === 'Enter') commitEdit(r, col.name); if (e.key === 'Escape') { editTouched.current = false; setEditing(null) } }}
                           style={{ width: '100%', border: 'none', outline: 'none', background: 'transparent', font: 'inherit', color: 'var(--text-primary)' }} />
                       ) : (
                         <span className="ell" style={{ color: cellText(val).length ? 'var(--text-primary)' : 'var(--text-faint)' }}>{cellText(val).length ? cellText(val) : '—'}</span>
@@ -1434,6 +1494,8 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
           {applyMsg && <span style={{ color: 'var(--signal-green)' }}>{applyMsg}</span>}
           {copied && <span style={{ color: 'var(--signal-green)' }}>{t('dbviews.cellCopied')}</span>}
           {loadError && <span className="row gap6" style={{ color: 'var(--danger-fg)' }}><Icon name="alert-triangle" size={12} /> {t('dbviews.loadError', { message: loadError })}</span>}
+          {pageError && <span role="alert" style={{ color: 'var(--danger-fg)' }}>{pageError}</span>}
+          {pendingTotal > 0 && <span title={t('dbviews.pendingPageChanges')} style={{ color: 'var(--signal-amber)' }}><Icon name="lock" size={12} /></span>}
           {exportErr && <span className="row gap6" style={{ color: 'var(--danger-fg)' }}><Icon name="alert-triangle" size={12} /> {exportErr}</span>}
         </div>
         <div className="row gap8">
@@ -1445,14 +1507,14 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
           </span>
           <div style={{ width: 1, height: 14, background: 'var(--border-hairline)' }} />
           {/* 每页行数：下拉框 */}
-          <select value={String(pageSize)} onChange={e => changePageSize(e.target.value)}
+          <select value={String(pageSize)} disabled={pendingTotal > 0 || refreshing || !!editing || applying} onChange={e => changePageSize(e.target.value)}
             title={t('dbviews.pageSize')} aria-label={t('dbviews.pageSize')}
             style={{ height: 24, border: '1px solid var(--border-hairline)', borderRadius: 7, background: 'var(--surface-sunken)', color: 'var(--text-secondary)', fontSize: 11.5, padding: '0 4px', outline: 'none', fontFamily: 'inherit', cursor: 'pointer' }}>
             {[50, 100, 500].map(n => <option key={n} value={n}>{n}</option>)}
           </select>
-          <button className="icon-btn bare" style={{ width: 22, height: 22 }} onClick={() => gotoPage(page - 1)}><Icon name="chevron-left" size={14} /></button>
+          <button className="icon-btn bare" style={{ width: 22, height: 22 }} aria-label={t('dbviews.previousPage')} disabled={page <= 1 || refreshing || pendingTotal > 0 || !!editing || applying} onClick={() => gotoPage(page - 1)}><Icon name="chevron-left" size={14} /></button>
           <span className="mono">{page} / {pages}</span>
-          <button className="icon-btn bare" style={{ width: 22, height: 22 }} onClick={() => gotoPage(page + 1)}><Icon name="chevron-right" size={14} /></button>
+          <button className="icon-btn bare" style={{ width: 22, height: 22 }} aria-label={t('dbviews.nextPage')} disabled={page >= pages || refreshing || pendingTotal > 0 || !!editing || applying} onClick={() => gotoPage(page + 1)}><Icon name="chevron-right" size={14} /></button>
         </div>
       </div>
 
@@ -1498,7 +1560,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
                 <span className="mono ell" style={{ fontSize: 11.5, color: 'var(--text-tertiary)' }}>{cellViewer.label}</span>
               </div>
               <div className="row gap8">
-                <button className="icon-btn bare" title={t('dbviews.copy')} onClick={() => navigator.clipboard?.writeText(cellViewer.text).catch(() => {})}><Icon name="copy" size={15} /></button>
+                <button className="icon-btn bare" title={t('dbviews.copy')} onClick={() => copyValue(cellViewer.text)}><Icon name="copy" size={15} /></button>
                 <IconBtn name="x" size={16} variant="bare" onClick={() => setCellViewer(null)} />
               </div>
             </div>
@@ -1553,8 +1615,10 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
             style={{ position: 'fixed', top: ctxMenu.y, left: ctxMenu.x, minWidth: 180, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', borderRadius: 10, boxShadow: 'var(--shadow-window)', padding: 4 }}>
             {([
               { key: 'copy', icon: 'copy', label: t('dbviews.ctxCopy'), onClick: ctxCopy, show: true, danger: false },
-              { key: 'copy-insert', icon: 'file-code', label: t('dbviews.ctxCopyInsert', { count: selectedOrigIdxs().length }), onClick: () => ctxCopySql('insert'), show: !resultLabel && selectedOrigIdxs().length > 0, danger: false },
-              { key: 'copy-update', icon: 'file-code', label: t('dbviews.ctxCopyUpdate', { count: selectedOrigIdxs().length }), onClick: () => ctxCopySql('update'), show: !resultLabel && selectedOrigIdxs().length > 0, danger: false },
+              { key: 'copy-insert', icon: 'file-code', label: t('dbviews.ctxCopyInsert', { count: selectedOrigIdxs().length }), onClick: () => ctxCopySql('insert'), show: !!table && !resultLabel && selectedOrigIdxs().length > 0, danger: false },
+              { key: 'copy-update', icon: 'file-code', label: t('dbviews.ctxCopyUpdate', { count: selectedOrigIdxs().length }), onClick: () => ctxCopySql('update'), show: canEdit && !resultLabel && selectedOrigIdxs().every(index => rowPk(index, baseRows[index] ?? []).length > 0) && selectedOrigIdxs().length > 0, danger: false },
+              { key: 'null', icon: 'minus', label: t('dbviews.setNull'), onClick: () => setSelectedValue(null), show: canEdit && selectedOrigIdxs().length > 0, danger: false },
+              { key: 'empty', icon: 'type', label: t('dbviews.setEmptyString'), onClick: () => setSelectedValue(''), show: canEdit && selectedOrigIdxs().length > 0, danger: false },
               { key: 'delete', icon: 'trash-2', label: t('dbviews.ctxDeleteRows', { count: selectedOrigIdxs().length }), onClick: ctxDeleteRows, show: canEdit && selectedOrigIdxs().length > 0, danger: true },
               { key: 'bulk', icon: 'pencil', label: t('dbviews.ctxBulkEdit', { count: selectedCellCount }), onClick: ctxBulkEdit, show: canEdit && selectedCellCount > 0, danger: false },
             ] as const).filter(it => it.show).map(it => (
@@ -1600,7 +1664,7 @@ export function DataGrid({ columns, rows, statusTones = {}, density = 'comfortab
           connId={connId}
           schema={schema}
           table={table}
-          engine={engine}
+          engine={engine} transactions={transactions}
           onClose={() => setImportOpen(false)}
           onImported={() => { setImportOpen(false); refresh() }}
         />
