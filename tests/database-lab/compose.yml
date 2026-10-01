@@ -1,0 +1,103 @@
+# Disposable database fixtures only. Default binding is loopback; never use production volumes.
+name: catio-db-lab
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: ${CATIO_LAB_PASSWORD:?Set a disposable test password}
+      POSTGRES_DB: catio
+    ports: ["${CATIO_LAB_BIND:-127.0.0.1}:55432:5432"]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U postgres -d catio"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: ${CATIO_LAB_PASSWORD:?Set a disposable test password}
+      MYSQL_DATABASE: catio
+    ports: ["${CATIO_LAB_BIND:-127.0.0.1}:53306:3306"]
+    healthcheck:
+      test: [CMD-SHELL, 'mysqladmin ping -h 127.0.0.1 -uroot -p"$$MYSQL_ROOT_PASSWORD"']
+      interval: 5s
+      timeout: 5s
+      retries: 40
+  redis:
+    image: redis:7-alpine
+    command: [redis-server, --requirepass, "${CATIO_LAB_PASSWORD:?Set a disposable test password}"]
+    ports: ["${CATIO_LAB_BIND:-127.0.0.1}:56379:6379"]
+  mongo:
+    image: mongo:7
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: catio
+      MONGO_INITDB_ROOT_PASSWORD: ${CATIO_LAB_PASSWORD:?Set a disposable test password}
+    ports: ["${CATIO_LAB_BIND:-127.0.0.1}:57017:27017"]
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Developer
+      MSSQL_SA_PASSWORD: ${CATIO_LAB_PASSWORD:?Use a mixed-case test password with digits}
+    ports: ["${CATIO_LAB_BIND:-127.0.0.1}:51433:1433"]
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    environment:
+      CLICKHOUSE_USER: catio
+      CLICKHOUSE_PASSWORD: ${CATIO_LAB_PASSWORD:?Set a disposable test password}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports: ["${CATIO_LAB_BIND:-127.0.0.1}:58123:8123"]
+  rqlite:
+    image: rqlite/rqlite:8.36.6
+    # This fixture has no authentication. Keep loopback-only; use an SSH tunnel for remote tests.
+    ports: ["127.0.0.1:54001:4001"]
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+      # Sandbox only: avoids host-wide sysctl changes on old kernels.
+      node.store.allow_mmap: "false"
+    ports: ["127.0.0.1:59200:9200"]
+  # Optional remote test access for the two unauthenticated fixtures. The relay
+  # accepts ONLY the explicitly configured client IPv4/CIDR, not the whole LAN.
+  es-access:
+    profiles: [remote-test]
+    image: alpine:3.20
+    network_mode: host
+    environment:
+      http_proxy: ${CATIO_LAB_PROXY:-}
+      https_proxy: ${CATIO_LAB_PROXY:-}
+    command: [sh, -ec, 'apk add --no-cache socat >/dev/null; exec socat "$$1" "$$2"', '--', 'TCP4-LISTEN:59201,bind=${CATIO_LAB_BIND:-127.0.0.1},fork,reuseaddr,range=${CATIO_LAB_CLIENT_CIDR:-127.0.0.1/32}', 'TCP4:127.0.0.1:59200']
+  rqlite-access:
+    profiles: [remote-test]
+    image: alpine:3.20
+    network_mode: host
+    environment:
+      http_proxy: ${CATIO_LAB_PROXY:-}
+      https_proxy: ${CATIO_LAB_PROXY:-}
+    command: [sh, -ec, 'apk add --no-cache socat >/dev/null; exec socat "$$1" "$$2"', '--', 'TCP4-LISTEN:54002,bind=${CATIO_LAB_BIND:-127.0.0.1},fork,reuseaddr,range=${CATIO_LAB_CLIENT_CIDR:-127.0.0.1/32}', 'TCP4:127.0.0.1:54001']
+  clickhouse-tls:
+    profiles: [tls]
+    image: caddy:2-alpine
+    network_mode: host
+    environment:
+      CATIO_LAB_BIND: ${CATIO_LAB_BIND:-127.0.0.1}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - tls-data:/data
+  # SQL Server 2022 can fail in SQLPAL on legacy 3.10 kernels. This separate
+  # fixture never mounts or downgrades the 2022 instance's data.
+  mssql2019:
+    profiles: [legacy-kernel]
+    image: mcr.microsoft.com/mssql/server:2019-latest
+    mem_limit: 4g
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Developer
+      MSSQL_MEMORY_LIMIT_MB: "2048"
+      MSSQL_SA_PASSWORD: ${CATIO_LAB_PASSWORD:?Use a mixed-case test password with digits}
+    ports: ["${CATIO_LAB_BIND:-127.0.0.1}:51434:1433"]
+volumes:
+  tls-data:

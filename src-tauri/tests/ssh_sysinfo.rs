@@ -15,7 +15,7 @@ mod common;
 use common::test_server;
 
 use catio_lib::ssh::conn::{connect_authenticated, AuthMethod, ConnectArgs};
-use catio_lib::ssh::monitor::run_cmd;
+use catio_lib::ssh::exec::run_cmd;
 
 #[tokio::test]
 async fn ssh_sysinfo_run_cmd_returns_ok_nonempty() {

@@ -1,0 +1,9 @@
+{
+    admin off
+    auto_https disable_redirects
+}
+
+https://{$CATIO_LAB_BIND}:59443 {
+    tls internal
+    reverse_proxy {$CATIO_LAB_BIND}:58123
+}
