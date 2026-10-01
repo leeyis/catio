@@ -11,6 +11,10 @@ import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.net.URLEncoder;
 import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.TreeMap;
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.charset.StandardCharsets;
@@ -147,6 +151,9 @@ public final class CatioJdbcPlugin {
                 // surface it (mirrors the native drivers' SELECT version()).
                 try {
                     DatabaseMetaData md = conn.getMetaData();
+                    result.put("transactions", md.supportsTransactions());
+                    result.put("er", md.supportsIntegrityEnhancementFacility());
+                    result.put("writable", !conn.isReadOnly());
                     String product = md.getDatabaseProductName();
                     String version = md.getDatabaseProductVersion();
                     result.put("version", ((product == null ? "" : product) + " "
@@ -165,8 +172,15 @@ public final class CatioJdbcPlugin {
                 optionalText(params, "schema"),
                 positiveInt(params, "maxRows", MAX_ROWS),
                 nonNegativeInt(params, "fetchSize", 0),
-                nonNegativeInt(params, "timeoutSecs", -1)
+                nonNegativeInt(params, "timeoutSecs", -1),
+                nonNegativeInt(params, "offsetRows", 0)
             );
+            case "beginTransaction" -> beginTransaction(connection);
+            case "commitTransaction" -> finishTransaction(connection, true);
+            case "rollbackTransaction" -> finishTransaction(connection, false);
+            case "executeUpdate" -> executeUpdate(connection, requireText(params, "sql"));
+            case "getIndexes" -> getIndexes(connection, optionalText(params, "database"), optionalText(params, "schema"), requireText(params, "table"));
+            case "getForeignKeys" -> getForeignKeys(connection, optionalText(params, "database"), optionalText(params, "schema"), requireText(params, "table"));
             case "listDatabases" -> listDatabases(connection);
             case "listSchemas" -> listSchemas(connection, optionalText(params, "database"));
             case "listTables" -> listTables(connection, optionalText(params, "database"), optionalText(params, "schema"));
@@ -286,16 +300,19 @@ public final class CatioJdbcPlugin {
         String schema,
         int maxRows,
         int fetchSize,
-        int timeoutSecs
+        int timeoutSecs,
+        int offsetRows
     ) throws SQLException {
         long start = System.nanoTime();
         Connection conn = openConnection(connection);
         applyExecutionContext(connection, conn, database, schema);
         try (Statement statement = conn.createStatement()) {
-            applyStatementOptions(statement, maxRows, fetchSize, timeoutSecs);
+            int window = (int) Math.min(Integer.MAX_VALUE - 1L, (long) maxRows + offsetRows);
+            applyStatementOptions(statement, window, fetchSize, timeoutSecs);
             boolean hasResultSet = statement.execute(trimStatementSql(sql));
             ObjectNode result = MAPPER.createObjectNode();
             ArrayNode columns = MAPPER.createArrayNode();
+            ArrayNode columnTypes = MAPPER.createArrayNode();
             ArrayNode rows = MAPPER.createArrayNode();
             boolean truncated = false;
 
@@ -306,8 +323,11 @@ public final class CatioJdbcPlugin {
                     for (int i = 1; i <= columnCount; i++) {
                         String label = meta.getColumnLabel(i);
                         columns.add(label == null || label.isBlank() ? meta.getColumnName(i) : label);
+                        columnTypes.add(meta.getColumnTypeName(i));
                     }
+                    int skipped = 0;
                     while (rs.next()) {
+                        if (skipped < offsetRows) { skipped++; continue; }
                         if (rows.size() >= maxRows) {
                             truncated = true;
                             break;
@@ -322,12 +342,114 @@ public final class CatioJdbcPlugin {
             }
 
             result.set("columns", columns);
+            result.set("column_types", columnTypes);
             result.set("rows", rows);
             result.put("affected_rows", hasResultSet ? 0 : Math.max(statement.getUpdateCount(), 0));
             result.put("execution_time_ms", (System.nanoTime() - start) / 1_000_000);
             result.put("truncated", truncated);
             return result;
         }
+    }
+
+    private static JsonNode beginTransaction(JsonNode connection) throws SQLException {
+        Connection conn = openConnection(connection);
+        if (!conn.getMetaData().supportsTransactions()) throw new SQLException("Transactions are not supported by this JDBC driver");
+        if (!conn.getAutoCommit()) throw new SQLException("A JDBC transaction is already active");
+        conn.setAutoCommit(false);
+        return MAPPER.createObjectNode().put("ok", true);
+    }
+
+    private static JsonNode finishTransaction(JsonNode connection, boolean commit) throws SQLException {
+        Connection conn = openConnection(connection);
+        if (conn.getAutoCommit()) throw new SQLException("No JDBC transaction is active");
+        try {
+            if (commit) conn.commit(); else conn.rollback();
+        } catch (SQLException failure) {
+            // Never switch auto-commit back on after a failed rollback: some drivers
+            // would commit outstanding work. Close the unusable connection instead.
+            try { conn.rollback(); } catch (SQLException rollbackFailure) {
+                closeSharedConnection(); throw failure;
+            }
+            conn.setAutoCommit(true);
+            throw failure;
+        }
+        conn.setAutoCommit(true);
+        return MAPPER.createObjectNode().put("ok", true);
+    }
+
+    private static JsonNode executeUpdate(JsonNode connection, String sql) throws SQLException {
+        Connection conn = openConnection(connection);
+        if (conn.getAutoCommit()) throw new SQLException("Batch update requires an active transaction");
+        try (Statement statement = conn.createStatement()) {
+            return MAPPER.createObjectNode().put("affected_rows", Math.max(0, statement.executeUpdate(trimStatementSql(sql))));
+        }
+    }
+
+    private static JsonNode getIndexes(JsonNode connection, String database, String schema, String table) throws SQLException {
+        Connection conn = openConnection(connection);
+        DatabaseMetaData meta = conn.getMetaData();
+        JdbcDriverQuirks quirks = driverQuirks(connection);
+        String catalog = metadataCatalog(database, quirks);
+        String namespace = resolveSchemaPattern(meta, database, schema, quirks);
+        ArrayNode result = indexes(meta, catalog, namespace, table);
+        return result.isEmpty() && catalog != null ? indexes(meta, null, namespace, table) : result;
+    }
+
+    private static ArrayNode indexes(DatabaseMetaData meta, String catalog, String schema, String table) throws SQLException {
+        Map<String, ObjectNode> indexes = new LinkedHashMap<>();
+        Map<String, TreeMap<Integer, String>> columns = new LinkedHashMap<>();
+        try (ResultSet rs = meta.getIndexInfo(catalog, schema, table, false, false)) {
+            while (rs.next()) {
+                String name = rs.getString("INDEX_NAME"), column = rs.getString("COLUMN_NAME");
+                if (name == null || column == null || rs.getShort("TYPE") == DatabaseMetaData.tableIndexStatistic) continue;
+                ObjectNode item = indexes.computeIfAbsent(name, k -> MAPPER.createObjectNode().put("name", k));
+                item.put("unique", !rs.getBoolean("NON_UNIQUE"));
+                item.put("method", rs.getShort("TYPE") == DatabaseMetaData.tableIndexHashed ? "hash" : "btree");
+                columns.computeIfAbsent(name, k -> new TreeMap<>()).put(rs.getInt("ORDINAL_POSITION"), column);
+            }
+        } catch (SQLFeatureNotSupportedException unsupported) { return MAPPER.createArrayNode(); }
+        ArrayNode result = MAPPER.createArrayNode();
+        indexes.forEach((name, item) -> { item.put("columns", String.join(", ", columns.get(name).values())); result.add(item); });
+        return result;
+    }
+
+    private static JsonNode getForeignKeys(JsonNode connection, String database, String schema, String table) throws SQLException {
+        Connection conn = openConnection(connection);
+        DatabaseMetaData meta = conn.getMetaData();
+        JdbcDriverQuirks quirks = driverQuirks(connection);
+        String catalog = metadataCatalog(database, quirks);
+        String namespace = resolveSchemaPattern(meta, database, schema, quirks);
+        ArrayNode result = foreignKeys(meta, catalog, namespace, table);
+        return result.isEmpty() && catalog != null ? foreignKeys(meta, null, namespace, table) : result;
+    }
+
+    private static ArrayNode foreignKeys(DatabaseMetaData meta, String catalog, String schema, String table) throws SQLException {
+        ArrayNode result = MAPPER.createArrayNode();
+        try (ResultSet rs = meta.getImportedKeys(catalog, schema, table)) {
+            while (rs.next()) {
+                ObjectNode item = result.addObject();
+                String refSchema = rs.getString("PKTABLE_SCHEM");
+                item.put("column", rs.getString("FKCOLUMN_NAME"));
+                item.put("references", (refSchema == null || refSchema.isBlank() ? "" : refSchema + ".")
+                    + rs.getString("PKTABLE_NAME") + "." + rs.getString("PKCOLUMN_NAME"));
+                item.put("ref_table", rs.getString("PKTABLE_NAME"));
+                item.put("ref_column", rs.getString("PKCOLUMN_NAME"));
+                item.put("constraint_name", rs.getString("FK_NAME"));
+                item.put("on_delete", foreignKeyRule(rs.getShort("DELETE_RULE")));
+                item.put("on_update", foreignKeyRule(rs.getShort("UPDATE_RULE")));
+            }
+        } catch (SQLFeatureNotSupportedException unsupported) { return MAPPER.createArrayNode(); }
+        return result;
+    }
+
+    private static String foreignKeyRule(short rule) {
+        return switch (rule) {
+            case DatabaseMetaData.importedKeyCascade -> "CASCADE";
+            case DatabaseMetaData.importedKeyRestrict -> "RESTRICT";
+            case DatabaseMetaData.importedKeySetNull -> "SET NULL";
+            case DatabaseMetaData.importedKeySetDefault -> "SET DEFAULT";
+            default -> "NO ACTION";
+        };
     }
 
     private static void applyStatementOptions(Statement statement, int maxRows, int fetchSize, int timeoutSecs)
@@ -1185,6 +1307,7 @@ public final class CatioJdbcPlugin {
         if (value == null) {
             return null;
         }
+        if (value instanceof byte[] bytes && "JSON".equalsIgnoreCase(meta.getColumnTypeName(index))) return new String(bytes, StandardCharsets.UTF_8);
         if (value instanceof byte[] bytes) {
             return binaryToHex(bytes);
         }
@@ -1196,8 +1319,12 @@ public final class CatioJdbcPlugin {
             return value.toString();
         }
         if (value instanceof BigDecimal decimal) {
-            return decimal;
+            return decimal.toPlainString();
         }
+        if (value instanceof Long number && (number > 9007199254740991L || number < -9007199254740991L)) return number.toString();
+        if (value instanceof BigInteger number) return number.toString();
+        if (value instanceof Double number && !Double.isFinite(number)) return number.toString();
+        if (value instanceof Float number && !Float.isFinite(number)) return number.toString();
         if (value instanceof Number || value instanceof Boolean || value instanceof String) {
             return value;
         }
