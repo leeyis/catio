@@ -184,6 +184,25 @@ pub trait Driver: Send + Sync {
     /// (notably MySQL MyISAM/Aria). Atomic high-level writes check their targets.
     async fn ensure_atomic_table(&self, _schema: Option<&str>, _table: &str) -> Result<(), DbError> { Ok(()) }
     fn close(&self) {}
+    /// Separate physical session on the SAME database, never a shared transaction handle.
+    async fn fork_query_session(&self) -> Result<Arc<dyn Driver>,DbError> {
+        Err(DbError::Unsupported("Independent query sessions are unavailable for this engine".into()))
+    }
+    async fn transaction_state(&self) -> Result<crate::db::query_session::TransactionState,DbError> {
+        Ok(crate::db::query_session::TransactionState::Unknown)
+    }
+    /// Called after active executions are cancelled; always release the physical session.
+    async fn close_query_session(&self) -> Result<(),DbError> { self.close(); Ok(()) }
+    async fn transaction_command(&self, action: crate::db::query_session::TransactionAction,
+        cancel: tokio_util::sync::CancellationToken) -> Result<(),DbError> {
+        use crate::db::query_session::TransactionAction as A;
+        if !self.capabilities().transactions {return Err(DbError::Unsupported("Transactions unavailable".into()));}
+        let sql=match action {
+            A::Begin if self.db_type()==DatabaseType::Sqlserver=>"BEGIN TRANSACTION",
+            A::Begin=>"BEGIN",A::Commit=>"COMMIT",A::Rollback=>"ROLLBACK",
+        };
+        self.query_cancellable(sql,0,None,cancel).await?;Ok(())
+    }
     fn supports_query_cancel(&self) -> bool { false }
     async fn query_cancellable(&self, sql: &str, max_rows: u32, namespace: Option<&str>,
         cancel: tokio_util::sync::CancellationToken) -> Result<QueryResult, DbError> {

@@ -100,3 +100,39 @@ async fn web_transfer_works_and_both_connection_owners_are_checked() {
     let (status, _) = rig.call(&bob, "db_cancel_query", json!({"connId":source,"executionId":"cannot-cancel-other-user"})).await;
     assert_eq!(status, 400);
 }
+
+#[tokio::test]
+async fn http_query_session_transaction_paging_and_close_rollback() {
+    let (rig,client)=Rig::start().await;let conn=rig.connection(&client).await;
+    rig.sql(&client,&conn,"CREATE TABLE scoped_rows(id INTEGER)").await;
+    let (status,session)=rig.call(&client,"db_open_query_session",json!({"connId":conn})).await;
+    assert_eq!(status,200,"{session}");let id=session["id"].as_str().unwrap();
+    let args=json!({"connId":conn,"querySessionId":id});
+    let mut begin=args.clone();begin["action"]=json!("begin");
+    let (_,state)=rig.call(&client,"db_query_session_transaction",begin).await;
+    assert_eq!(state["transactionState"],"active");
+    let mut sql=args.clone();sql["sql"]=json!("INSERT INTO scoped_rows VALUES(1),(2),(3)");
+    assert_eq!(rig.call(&client,"db_query",sql).await.0,200);
+    let mut page=args.clone();page["sql"]=json!("SELECT id FROM scoped_rows ORDER BY id");page["limit"]=json!(1);page["offset"]=json!(1);
+    let (status,rows)=rig.call(&client,"db_query_page",page).await;assert_eq!(status,200,"{rows}");assert_eq!(rows["rows"],json!([[2]]));
+    assert_eq!(rig.call(&client,"db_close_query_session",args.clone()).await.0,200);
+    assert_eq!(rig.call(&client,"db_close_query_session",args).await.0,200);
+    assert_eq!(rig.sql(&client,&conn,"SELECT COUNT(*) FROM scoped_rows").await["rows"],json!([[0]]));
+}
+
+#[tokio::test]
+async fn http_sql_session_requires_both_connection_owner_and_matching_parent() {
+    let (rig,admin)=Rig::start().await;let alice_conn=rig.connection(&admin).await;
+    let (_,session)=rig.call(&admin,"db_open_query_session",json!({"connId":alice_conn})).await;
+    let id=session["id"].as_str().unwrap();
+    let bob=Rig::client();assert_eq!(rig.call(&bob,"auth_register",json!({"username":"bob","password":"fixture-only-123"})).await.0,200);
+    let bob_conn=rig.connection(&bob).await;
+    for conn in [&alice_conn,&bob_conn] {
+        let args=json!({"connId":conn,"querySessionId":id,"sql":"SELECT 1","action":"commit","executionId":"foreign-session"});
+        for command in ["db_query","db_query_session_status","db_query_session_ping","db_query_session_transaction","db_close_query_session","db_cancel_query"] {
+            assert_eq!(rig.call(&bob,command,args.clone()).await.0,400,"{command}");
+        }
+    }
+    let (_,state)=rig.call(&admin,"db_query_session_status",json!({"connId":alice_conn,"querySessionId":id})).await;
+    assert_eq!(state["transactionState"],"idle");
+}

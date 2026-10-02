@@ -12,6 +12,8 @@ use crate::db::result::QueryResult;
 
 pub struct PostgresDriver {
     pool: Pool,
+    is_query_session: bool,
+    backend_pid: std::sync::atomic::AtomicI32,
     cancel_tls: Option<rustls::ClientConfig>,
     // Console statements share a pinned session per connection; metadata and atomic
     // grid/import jobs keep their independent pool leases. Temp tables and explicit
@@ -82,7 +84,7 @@ impl PostgresDriver {
         };
         // 立即取一个连接验证可达 + 认证
         let _client = pool.get().await.map_err(|e| map_pool_error(e))?;
-        Ok(Self { pool, profile: args.driver_profile.clone(), cancel_tls,
+        Ok(Self { pool, is_query_session: false, backend_pid: std::sync::atomic::AtomicI32::new(0), profile: args.driver_profile.clone(), cancel_tls,
             console: tokio::sync::Mutex::new(None), console_poisoned: Arc::new(std::sync::atomic::AtomicBool::new(false)) })
     }
 }
@@ -655,6 +657,7 @@ impl Driver for PostgresDriver {
     }
 
     async fn query(&self, sql: &str, max_rows: u32) -> Result<QueryResult, DbError> {
+        if self.is_query_session { return self.query_cancellable(sql,max_rows,None,tokio_util::sync::CancellationToken::new()).await; }
         let client = self.pool.get().await
             .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
         pg_query_on_client(&client, sql, max_rows).await
@@ -662,10 +665,38 @@ impl Driver for PostgresDriver {
 
     fn close(&self) {
         self.console_poisoned.store(true, std::sync::atomic::Ordering::SeqCst);
-        self.pool.close();
+        if !self.is_query_session { self.pool.close(); }
         if let Ok(mut console) = self.console.try_lock() { console.take(); }
     }
     fn supports_query_cancel(&self) -> bool { true }
+    async fn fork_query_session(&self) -> Result<Arc<dyn Driver>,DbError> {
+        if self.console_poisoned.load(std::sync::atomic::Ordering::SeqCst) {return Err(DbError::NotFound("closed connection".into()));}
+        let child=Self {pool:self.pool.clone(),is_query_session:true,backend_pid:std::sync::atomic::AtomicI32::new(0),
+            profile:self.profile.clone(),cancel_tls:self.cancel_tls.clone(),console:tokio::sync::Mutex::new(None),
+            console_poisoned:Arc::new(std::sync::atomic::AtomicBool::new(false))};
+        child.query("SELECT 1",1).await?;
+        Ok(Arc::new(child))
+    }
+    async fn transaction_state(&self) -> Result<crate::db::query_session::TransactionState,DbError> {
+        use crate::db::query_session::TransactionState as T;
+        if self.console_poisoned.load(std::sync::atomic::Ordering::SeqCst) {return Err(DbError::NotFound("closed SQL session".into()));}
+        let pid=self.backend_pid.load(std::sync::atomic::Ordering::SeqCst);
+        if pid==0 {return Ok(T::Idle);}
+        // Observe our own backend from another physical connection: a query on an
+        // aborted transaction would itself fail and could not report the state.
+        let client=self.pool.get().await.map_err(map_pool_error)?;
+        let row=client.query_opt("SELECT state FROM pg_catalog.pg_stat_activity WHERE pid=$1",&[&pid]).await.map_err(|e|pg_query_err(&e))?;
+        Ok(match row.and_then(|r|r.get::<_,Option<String>>(0)).as_deref() {
+            Some("idle in transaction (aborted)")=>T::Failed, Some("idle in transaction")=>T::Active,
+            Some("idle")=>T::Idle,_=>T::Unknown,
+        })
+    }
+    async fn close_query_session(&self) -> Result<(),DbError> {
+        self.console_poisoned.store(true,std::sync::atomic::Ordering::SeqCst);
+        if let Some(client)=self.console.lock().await.take() { let _=client.batch_execute("ROLLBACK").await; }
+        if !self.is_query_session {self.pool.close();}
+        Ok(())
+    }
 
     async fn query_cancellable(&self, sql: &str, max_rows: u32, namespace: Option<&str>,
         cancel: tokio_util::sync::CancellationToken) -> Result<QueryResult, DbError> {
@@ -681,7 +712,10 @@ impl Driver for PostgresDriver {
                 _ = cancel.cancelled() => return Err(DbError::Cancelled),
                 client = self.pool.get() => client.map_err(|e| DbError::ConnectFailed(e.to_string()))?,
             };
-            *console = Some(deadpool_postgres::Object::take(pooled));
+            let detached=deadpool_postgres::Object::take(pooled);
+            let row=detached.query_one("SELECT pg_catalog.pg_backend_pid()",&[]).await.map_err(|e|pg_query_err(&e))?;
+            self.backend_pid.store(row.get(0),std::sync::atomic::Ordering::SeqCst);
+            *console = Some(detached);
         }
         let client = console.as_ref().expect("console owns its client");
         let mut cleanup = PgCancelOnDrop { token: client.cancel_token(), tls: self.cancel_tls.clone(), armed: true, poisoned: self.console_poisoned.clone() };
@@ -727,6 +761,7 @@ impl Driver for PostgresDriver {
 
     async fn query_with_default_namespace(&self, sql: &str, max_rows: u32, default_namespace: Option<&str>)
         -> Result<QueryResult, DbError> {
+        if self.is_query_session { return self.query_cancellable(sql,max_rows,default_namespace,tokio_util::sync::CancellationToken::new()).await; }
         let Some(schema) = default_namespace.map(str::trim).filter(|s| !s.is_empty()) else {
             return self.query(sql, max_rows).await;
         };

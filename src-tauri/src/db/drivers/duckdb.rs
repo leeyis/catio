@@ -25,6 +25,8 @@ use crate::db::result::{QueryResult, ColumnInfo, safe_i64_to_json, binary_to_jso
 
 pub struct DuckDbDriver {
     conn: Arc<Mutex<Connection>>,
+    closed: std::sync::atomic::AtomicBool,
+    is_query_session: bool,
 }
 
 struct DuckQueryCompletion {
@@ -49,7 +51,7 @@ impl DuckDbDriver {
         // Validate connectivity with a trivial query
         conn.execute_batch("SELECT 1")
             .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
-        Ok(Self { conn: Arc::new(Mutex::new(conn)) })
+        Ok(Self { conn: Arc::new(Mutex::new(conn)), closed: std::sync::atomic::AtomicBool::new(false), is_query_session: false })
     }
 }
 
@@ -175,6 +177,33 @@ impl Driver for DuckDbDriver {
     }
 
     fn supports_query_cancel(&self) -> bool { true }
+    fn close(&self) {self.closed.store(true,std::sync::atomic::Ordering::SeqCst);}
+    async fn fork_query_session(&self) -> Result<Arc<dyn Driver>,DbError> {
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst) {return Err(DbError::NotFound("closed connection".into()));}
+        let conn=self.conn.lock().await.try_clone().map_err(|e|DbError::ConnectFailed(e.to_string()))?;
+        Ok(Arc::new(Self{conn:Arc::new(Mutex::new(conn)),closed:std::sync::atomic::AtomicBool::new(false),is_query_session:true}))
+    }
+    async fn transaction_state(&self) -> Result<crate::db::query_session::TransactionState,DbError> {
+        use crate::db::query_session::TransactionState as T;
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst) {return Err(DbError::NotFound("closed SQL session".into()));}
+        let conn=self.conn.lock().await;
+        // duckdb-rs 1.10503.1 exposes is_autocommit(), but its implementation is
+        // a literal 'true'. Observe two actual transaction IDs while holding the
+        // same connection lock: autocommit creates a new transaction per probe.
+        let probe=||conn.query_row("SELECT CAST(system.main.txid_current() AS VARCHAR)",[],|r|r.get::<_,String>(0));
+        match probe().and_then(|first|probe().map(|second|(first,second))) {
+            Ok((first,second))=>Ok(if first==second {T::Active}else{T::Idle}),
+            Err(e) if e.to_string().to_ascii_lowercase().contains("aborted")=>Ok(T::Failed),
+            Err(_)=>Ok(T::Unknown),
+        }
+    }
+    async fn close_query_session(&self) -> Result<(),DbError> {
+        self.close();let conn=self.conn.lock().await;
+        if let Err(error)=conn.execute_batch("ROLLBACK") {
+            if !error.to_string().to_ascii_lowercase().contains("no transaction is active") {return Err(DbError::QueryFailed(error.to_string()));}
+        }
+        Ok(())
+    }
 
     async fn query(&self, sql: &str, max_rows: u32) -> Result<QueryResult, DbError> {
         self.query_cancellable(sql, max_rows, None, tokio_util::sync::CancellationToken::new()).await
@@ -189,6 +218,7 @@ impl Driver for DuckDbDriver {
             _ = cancel.cancelled() => return Err(DbError::Cancelled),
             conn = self.conn.clone().lock_owned() => conn,
         };
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst) {return Err(DbError::NotFound("closed SQL session".into()));}
         let state = Arc::new(parking_lot::Mutex::new(Some(conn.interrupt_handle())));
         let done = tokio_util::sync::CancellationToken::new();
         let watcher_state = state.clone(); let watcher_done = done.clone(); let watcher_cancel = cancel.clone();
@@ -207,16 +237,17 @@ impl Driver for DuckDbDriver {
         });
         let abandoned = cancel.clone().drop_guard();
         let sql = sql.to_string(); let namespace = namespace.map(str::to_string);
+        let is_query_session=self.is_query_session;
         let result = tokio::task::spawn_blocking(move || {
             let _completion = DuckQueryCompletion { state: state.clone(), done };
             if cancel.is_cancelled() { return Err(DbError::Cancelled); }
             let result = (|| {
-                let original = if let Some(schema) = namespace.as_deref().filter(|s| !s.trim().is_empty()) {
+                let original = if let Some(schema) = namespace.as_deref().filter(|s| !s.trim().is_empty() && !crate::db::pagination::transaction_control(DatabaseType::Duckdb,&sql)) {
                     let current: String = conn.query_row("SELECT current_schema()", [], |r| r.get(0))
                         .map_err(|e| DbError::QueryFailed(e.to_string()))?;
                     conn.execute_batch(&format!("USE {}", quote_ident(DatabaseType::Duckdb, schema)))
                         .map_err(|e| DbError::QueryFailed(e.to_string()))?;
-                    Some(current)
+                    if is_query_session {None}else{Some(current)}
                 } else { None };
                 let result = duckdb_query_on_conn(&conn, &sql, max_rows);
                 // Stop interrupts before restoring session state; the lock is still held.
@@ -625,7 +656,7 @@ mod comment_tests {
              COMMENT ON TABLE t IS 'people table'; \
              COMMENT ON COLUMN t.name IS 'full name';",
         ).unwrap();
-        let driver = DuckDbDriver { conn: Arc::new(Mutex::new(conn)) };
+        let driver = DuckDbDriver { conn: Arc::new(Mutex::new(conn)), closed: std::sync::atomic::AtomicBool::new(false), is_query_session: false };
 
         let st = driver.table_structure("main", "t").await.unwrap();
         assert_eq!(st.comment, "people table", "表注释应来自 duckdb_tables().comment");

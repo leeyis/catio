@@ -55,6 +55,9 @@ fn sqlserver_table_comment_sql(s: &str, t: &str) -> String {
 /// Tiberius client wrapped in a mutex because `Client` needs `&mut self` for queries.
 pub struct SqlServerDriver {
     client: Arc<Mutex<Client<Compat<TcpStream>>>>,
+    args: ConnectArgs,
+    shutdown: std::net::TcpStream,
+    closed: std::sync::atomic::AtomicBool,
 }
 
 // Adapted from DBX's SQL Server transport decision: RPC sp_executesql must not
@@ -119,12 +122,15 @@ impl SqlServerDriver {
         let tcp = TcpStream::connect(config.get_addr())
             .await
             .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
+        let tcp=tcp.into_std().map_err(|e|DbError::ConnectFailed(e.to_string()))?;
+        let shutdown=tcp.try_clone().map_err(|e|DbError::ConnectFailed(e.to_string()))?;
+        let tcp=TcpStream::from_std(tcp).map_err(|e|DbError::ConnectFailed(e.to_string()))?;
         let client = Client::connect(config, tcp.compat_write())
             .await
             .map_err(|e| map_tiberius_error(e))?;
 
         Ok(Self {
-            client: Arc::new(Mutex::new(client)),
+            client: Arc::new(Mutex::new(client)), args:args.clone(),shutdown,closed:std::sync::atomic::AtomicBool::new(false),
         })
     }
 }
@@ -340,8 +346,31 @@ impl Driver for SqlServerDriver {
         Ok(affected)
     }
 
+    fn close(&self) {
+        self.closed.store(true,std::sync::atomic::Ordering::SeqCst);
+        let _=self.shutdown.shutdown(std::net::Shutdown::Both);
+    }
+    async fn fork_query_session(&self) -> Result<Arc<dyn Driver>,DbError> {
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst) {return Err(DbError::NotFound("closed connection".into()));}
+        Ok(Arc::new(Self::connect(&self.args).await?))
+    }
+    async fn transaction_state(&self) -> Result<crate::db::query_session::TransactionState,DbError> {
+        use crate::db::query_session::TransactionState as T;
+        let result=self.query("SELECT XACT_STATE()",1).await?;
+        Ok(match result.rows.first().and_then(|r|r.first()).and_then(|v|v.as_i64()){Some(0)=>T::Idle,Some(1)=>T::Active,Some(-1)=>T::Failed,_=>T::Unknown})
+    }
+    async fn close_query_session(&self) -> Result<(),DbError> {
+        // SQL Server may still be running an uncancellable request. Closing this
+        // session's own socket after the bounded grace period releases its locks.
+        let _=tokio::time::timeout(std::time::Duration::from_secs(5),async {
+            let mut client=self.client.lock().await;
+            sqlserver_control(&mut client,"IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION").await
+        }).await;
+        self.close();Ok(())
+    }
     async fn query(&self, sql: &str, max_rows: u32) -> Result<QueryResult, DbError> {
         let mut client = self.client.lock().await;
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst) {return Err(DbError::NotFound("closed SQL session".into()));}
 
         if is_row_returning(sql) || needs_session_batch(sql) {
             // SELECT / WITH / EXEC — stream rows, honour max_rows

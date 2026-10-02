@@ -762,8 +762,8 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
             let max_rows = u32_or(&args, "maxRows", 1000);
             let ns = opt_str(&args, "defaultNamespace");
             let started = Instant::now();
-            let result = conns.query(conn_id, sql, max_rows, ns, opt_str(&args, "executionId"),
-                args.get("timeoutMs").and_then(Value::as_u64)).await.map_err(estr)?;
+            let result = conns.query_in_session(conn_id, sql, max_rows, ns, opt_str(&args, "executionId"),
+                args.get("timeoutMs").and_then(Value::as_u64), opt_str(&args,"querySessionId")).await.map_err(estr)?;
             record_history(st, actor, conn_id, sql, format!("{}ms", started.elapsed().as_millis()), &args);
             serde_json::to_value(result).map_err(estr)
         }
@@ -772,16 +772,28 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
             serde_json::to_value(commands::split_query_core(driver.db_type(), require(&args, "sql")?).map_err(estr)?).map_err(estr)
         }
         "db_cancel_query" => {
-            conns.cancel_query(require(&args, "connId")?, require(&args, "executionId")?).await.map_err(estr)?;
+            conns.cancel_query_in_session(require(&args, "connId")?, require(&args, "executionId")?, opt_str(&args,"querySessionId")).await.map_err(estr)?;
             Ok(Value::Null)
         }
+        "db_open_query_session" => serde_json::to_value(conns.open_query_session(require(&args,"connId")?).await.map_err(estr)?).map_err(estr),
+        "db_close_query_session" => {
+            conns.close_query_session(require(&args,"connId")?,require(&args,"querySessionId")?).await.map_err(estr)?;Ok(Value::Null)
+        }
+        "db_query_session_ping" => {
+            conns.touch_query_session(require(&args,"connId")?,require(&args,"querySessionId")?).await.map_err(estr)?;Ok(Value::Null)
+        }
+        "db_query_session_status" => serde_json::to_value(conns.query_session_status(require(&args,"connId")?,require(&args,"querySessionId")?).await.map_err(estr)?).map_err(estr),
+        "db_query_session_transaction" => serde_json::to_value(conns.query_session_transaction(require(&args,"connId")?,require(&args,"querySessionId")?,from_arg(&args,"action")?).await.map_err(estr)?).map_err(estr),
         "db_query_page" => {
             let drv = conns.get(require(&args, "connId")?).await.ok_or("connection not found")?;
             let sql = require(&args, "sql")?;
             let limit = u32_or(&args, "limit", 1000);
             let offset = u32_or(&args, "offset", 0);
             let ns = opt_str(&args, "defaultNamespace");
-            serde_json::to_value(drv.paginated_query_with_default_namespace(sql, limit, offset, ns).await.map_err(estr)?).map_err(estr)
+            let result=if let Some(session)=opt_str(&args,"querySessionId") {
+                conns.query_page_in_session(require(&args,"connId")?,session,sql,limit,offset,ns).await
+            } else {drv.paginated_query_with_default_namespace(sql,limit,offset,ns).await};
+            serde_json::to_value(result.map_err(estr)?).map_err(estr)
         }
         "db_explain" => {
             let drv = conns.get(require(&args, "connId")?).await.ok_or("connection not found")?;
@@ -790,7 +802,7 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
             let built = crate::db::query_explain_sql::build_explain_sql(drv.db_type(), sql);
             match built.sql {
                 Some(explain_sql) => serde_json::to_value(
-                    drv.query_with_default_namespace(&explain_sql, 1000, ns).await.map_err(estr)?,
+                    conns.query_in_session(require(&args,"connId")?,&explain_sql,1000,ns,None,None,opt_str(&args,"querySessionId")).await.map_err(estr)?,
                 ).map_err(estr),
                 None => Err(match built.reason.as_deref() {
                     Some("unsupported") => "此引擎不支持执行计划".into(),

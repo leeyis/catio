@@ -10,6 +10,8 @@ pub mod driver;
 pub mod drivers;
 pub mod manager;
 pub mod query_control;
+pub mod query_session;
+pub mod query_session_registry;
 pub mod commands;
 pub mod dml;
 pub mod write_ops;

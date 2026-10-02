@@ -75,6 +75,9 @@ impl RunningQueries {
     }
 
     pub fn active_count(&self) -> usize { self.inner.lock().active.len() }
+    pub fn has_active(&self, connection: &str) -> bool {
+        self.inner.lock().active.keys().any(|key|key.0==connection)
+    }
 }
 
 #[cfg(test)]

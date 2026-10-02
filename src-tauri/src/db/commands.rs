@@ -84,10 +84,10 @@ pub async fn db_disconnect(conn_id: String, mgr: tauri::State<'_, ConnManager>)
 
 #[tauri::command]
 pub async fn db_query(conn_id: String, sql: String, max_rows: Option<u32>, default_namespace: Option<String>,
-    conn_name: Option<String>, engine: Option<String>, profile_id: Option<String>, execution_id: Option<String>, timeout_ms: Option<u64>,
+    conn_name: Option<String>, engine: Option<String>, profile_id: Option<String>, execution_id: Option<String>, timeout_ms: Option<u64>, query_session_id: Option<String>,
     mgr: tauri::State<'_, ConnManager>, app: tauri::AppHandle) -> Result<QueryResult, DbError> {
     let started = Instant::now();
-    let result = mgr.query(&conn_id, &sql, max_rows.unwrap_or(1000), default_namespace.as_deref(), execution_id.as_deref(), timeout_ms).await?;
+    let result = mgr.query_in_session(&conn_id, &sql, max_rows.unwrap_or(1000), default_namespace.as_deref(), execution_id.as_deref(), timeout_ms, query_session_id.as_deref()).await?;
     let dur = format!("{}ms", started.elapsed().as_millis());
 
     // Best-effort: record a history entry on success. Never fail the query if
@@ -131,8 +131,30 @@ pub async fn db_split_query(conn_id: String, sql: String, mgr: tauri::State<'_, 
 
 /// Request cancellation of one execution; the db_query response confirms termination.
 #[tauri::command]
-pub async fn db_cancel_query(conn_id: String, execution_id: String, mgr: tauri::State<'_, ConnManager>) -> Result<(), DbError> {
-    mgr.cancel_query(&conn_id, &execution_id).await
+pub async fn db_cancel_query(conn_id: String, execution_id: String, query_session_id: Option<String>, mgr: tauri::State<'_, ConnManager>) -> Result<(), DbError> {
+    mgr.cancel_query_in_session(&conn_id, &execution_id, query_session_id.as_deref()).await
+}
+
+#[tauri::command]
+pub async fn db_open_query_session(conn_id:String,mgr:tauri::State<'_,ConnManager>)->Result<crate::db::query_session::QuerySessionInfo,DbError>{
+    mgr.open_query_session(&conn_id).await
+}
+#[tauri::command]
+pub async fn db_close_query_session(conn_id:String,query_session_id:String,mgr:tauri::State<'_,ConnManager>)->Result<(),DbError>{
+    mgr.close_query_session(&conn_id,&query_session_id).await
+}
+#[tauri::command]
+pub async fn db_query_session_status(conn_id:String,query_session_id:String,mgr:tauri::State<'_,ConnManager>)->Result<crate::db::query_session::QuerySessionInfo,DbError>{
+    mgr.query_session_status(&conn_id,&query_session_id).await
+}
+#[tauri::command]
+pub async fn db_query_session_ping(conn_id:String,query_session_id:String,mgr:tauri::State<'_,ConnManager>)->Result<(),DbError>{
+    mgr.touch_query_session(&conn_id,&query_session_id).await
+}
+#[tauri::command]
+pub async fn db_query_session_transaction(conn_id:String,query_session_id:String,action:crate::db::query_session::TransactionAction,
+    mgr:tauri::State<'_,ConnManager>)->Result<crate::db::query_session::QuerySessionInfo,DbError>{
+    mgr.query_session_transaction(&conn_id,&query_session_id,action).await
 }
 
 /// Read persisted execution history (most-recent first). `conn_id` is accepted
@@ -488,8 +510,9 @@ pub async fn db_duplicate_table_structure(conn_id: String, schema: Option<String
 }
 
 #[tauri::command]
-pub async fn db_query_page(conn_id: String, sql: String, limit: u32, offset: u32, default_namespace: Option<String>,
+pub async fn db_query_page(conn_id: String, sql: String, limit: u32, offset: u32, default_namespace: Option<String>, query_session_id: Option<String>,
     mgr: tauri::State<'_, ConnManager>) -> Result<QueryResult, DbError> {
+    if let Some(session)=query_session_id {return mgr.query_page_in_session(&conn_id,&session,&sql,limit,offset,default_namespace.as_deref()).await;}
     let drv = mgr.get(&conn_id).await.ok_or(DbError::NotFound(conn_id))?;
     drv.paginated_query_with_default_namespace(&sql, limit, offset, default_namespace.as_deref()).await
 }
@@ -498,14 +521,14 @@ pub async fn db_query_page(conn_id: String, sql: String, limit: u32, offset: u32
 /// FORMAT=JSON,只对只读语句放行,然后执行并把原始计划结果(单行单列 JSON)交给
 /// 前端解析。仅 PG/MySQL 支持;其他引擎或不安全/空 SQL 返回 Unsupported/QueryFailed。
 #[tauri::command]
-pub async fn db_explain(conn_id: String, sql: String, default_namespace: Option<String>,
+pub async fn db_explain(conn_id: String, sql: String, default_namespace: Option<String>, query_session_id: Option<String>,
     mgr: tauri::State<'_, ConnManager>) -> Result<QueryResult, DbError> {
     let drv = mgr.get(&conn_id).await.ok_or_else(|| DbError::NotFound(conn_id.clone()))?;
     let built = query_explain_sql::build_explain_sql(drv.db_type(), &sql);
     match built.sql {
         // 真机缺陷修复:必须沿用选中的 schema/库(default_namespace)执行 EXPLAIN,否则落
         // 连接默认库,对未限定库名的查询报「默认库.表 不存在」(与普通 db_query 一致)。
-        Some(explain_sql) => drv.query_with_default_namespace(&explain_sql, 1000, default_namespace.as_deref()).await,
+        Some(explain_sql) => mgr.query_in_session(&conn_id,&explain_sql,1000,default_namespace.as_deref(),None,None,query_session_id.as_deref()).await,
         None => Err(match built.reason.as_deref() {
             Some("unsupported") => DbError::Unsupported("此引擎不支持执行计划".into()),
             Some("empty") => DbError::QueryFailed("没有可解释的 SQL".into()),

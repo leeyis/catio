@@ -102,13 +102,13 @@ pwsh tests/database-lab/New-LabCertificate.ps1 -ServerAddress <sandbox> -OutputD
 ## 5. 明确的验收边界
 
 - 这些测试不证明全部兼容品牌/商业 JDBC 引擎均可用；每一种实际引擎/版本需要自己的夹具与验收。
-- 查询标签当前共享连接级 SQL 会话，不是独立事务；独立事务请使用独立连接。
+- PostgreSQL/MySQL/SQL Server/SQLite/DuckDB 查询标签使用独立物理会话，支持事务工具栏和关闭回滚；查询事务不包含表格编辑操作。每连接最多 16 个查询会话，浏览器每 30 秒续约，失联 30 分钟回收。JDBC 独立会话继续实施，未声明完成。
 - 原生中断与 timeout 覆盖 PostgreSQL、MySQL、SQLite、DuckDB。其他引擎不得把停止等待描述为已中断；JDBC 可通过断开连接终止 sidecar。
 - 事务回滚证明针对 SQL/约束失败。**提交时断网的结果可能不确定，不自动重试写入，应先核对数据。**
 - 跨库迁移要求准备期间源表保持稳定；这不是跨数据库一致性快照。暂存上限为 1 GiB。
 - 顶层 BLOB 已覆盖 SQLite、DuckDB、PostgreSQL、MySQL、SQL Server、JDBC/H2、rqlite 的键/值编辑、迁移、SQL 恢复；JSON 的无损往返使用 `catio-table-v1`（含 `binaryCells`），普通 CSV/TSV 不携带类型信息。嵌套二进制和长尾 JDBC 方言仍未算完整验收。
 - rqlite 使用单请求原子事务（实际 JSON 请求最多 8 MiB），不是跨 HTTP 请求的手动事务。SQL Server 使用普通 batch 保留事务与临时表作用域，不用 RPC 承载独立 BEGIN/COMMIT。
-- 完整原生备份恢复、更多引擎的 DDL/执行计划、按标签隔离事务等仍需专项实现，不能用引擎名称数量冒充能力。
+- 完整原生备份恢复、更多引擎的 DDL/执行计划、JDBC 会话与取消等仍需继续实现，不能用引擎名称数量冒充能力。
 - Web 部署允许执行数据库 SQL，不构成操作系统级 SQL 沙箱；只向可信用户开放，尤其是本地嵌入式数据库及 JDBC 驱动。
 
 停止夹具优先使用 `docker compose ... stop`，保留容器和数据。只有明确要重置本实验室时才使用 `down -v`，不要对生产项目执行该命令。

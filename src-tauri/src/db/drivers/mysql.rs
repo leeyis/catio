@@ -9,6 +9,7 @@ use crate::db::result::QueryResult;
 
 pub struct MySqlDriver {
     pool: Pool,
+    is_query_session: bool,
     opts: Opts,
     console: tokio::sync::Mutex<Option<mysql_async::Conn>>,
     console_poisoned: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -52,7 +53,7 @@ impl MySqlDriver {
                 DbError::ConnectFailed(s)
             }
         })?;
-        Ok(Self { pool, opts, profile: args.driver_profile.clone(), database: db,
+        Ok(Self { pool, is_query_session: false, opts, profile: args.driver_profile.clone(), database: db,
             console: tokio::sync::Mutex::new(None), console_poisoned: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)) })
     }
 }
@@ -428,6 +429,7 @@ impl Driver for MySqlDriver {
     }
 
     async fn query(&self, sql: &str, max_rows: u32) -> Result<QueryResult, DbError> {
+        if self.is_query_session {return self.query_cancellable(sql,max_rows,None,tokio_util::sync::CancellationToken::new()).await;}
         let mut conn = self.pool.get_conn().await
             .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
         mysql_query_on_conn(&mut conn, sql, max_rows).await
@@ -450,6 +452,27 @@ impl Driver for MySqlDriver {
         if let Ok(mut console) = self.console.try_lock() { console.take(); }
     }
     fn supports_query_cancel(&self) -> bool { true }
+    async fn fork_query_session(&self) -> Result<std::sync::Arc<dyn Driver>,DbError> {
+        if self.console_poisoned.load(std::sync::atomic::Ordering::SeqCst) {return Err(DbError::NotFound("closed connection".into()));}
+        let child=Self{pool:self.pool.clone(),is_query_session:true,opts:self.opts.clone(),profile:self.profile.clone(),database:self.database.clone(),
+            console:tokio::sync::Mutex::new(None),console_poisoned:std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false))};
+        child.query("SELECT 1",1).await?;
+        Ok(std::sync::Arc::new(child))
+    }
+    async fn transaction_state(&self) -> Result<crate::db::query_session::TransactionState,DbError> {
+        use crate::db::query_session::TransactionState as T;
+        if self.console_poisoned.load(std::sync::atomic::Ordering::SeqCst) {return Err(DbError::NotFound("closed SQL session".into()));}
+        let mut console=self.console.lock().await;let Some(conn)=console.as_mut() else {return Ok(T::Idle);};
+        // A failed statement clears last_ok_packet; COM_PING obtains fresh status
+        // without starting/committing a SQL transaction or parsing SQL text.
+        conn.ping().await.map_err(|e|DbError::QueryFailed(e.to_string()))?;
+        Ok(conn.last_ok_packet().map(|packet|if packet.status_flags().contains(mysql_async::consts::StatusFlags::SERVER_STATUS_IN_TRANS){T::Active}else{T::Idle}).unwrap_or(T::Unknown))
+    }
+    async fn close_query_session(&self) -> Result<(),DbError> {
+        self.console_poisoned.store(true,std::sync::atomic::Ordering::SeqCst);
+        if let Some(mut conn)=self.console.lock().await.take() {let _=conn.query_drop("ROLLBACK").await;let _=conn.disconnect().await;}
+        Ok(())
+    }
 
     async fn query_cancellable(&self, sql: &str, max_rows: u32, namespace: Option<&str>,
         cancel: tokio_util::sync::CancellationToken) -> Result<QueryResult, DbError> {
@@ -468,7 +491,7 @@ impl Driver for MySqlDriver {
         }
         let conn = console.as_mut().expect("console owns its client");
         let mut cleanup = MysqlCancelOnDrop { opts: self.opts.clone(), id: conn.id(), armed: true, poisoned: self.console_poisoned.clone() };
-        if let Some(namespace) = namespace.filter(|s| !s.trim().is_empty()) {
+        if let Some(namespace) = namespace.filter(|s| !s.trim().is_empty() && !crate::db::pagination::transaction_control(DatabaseType::Mysql,sql)) {
             conn.query_drop(format!("USE {}", quote_mysql_ident(namespace))).await
                 .map_err(|e| DbError::QueryFailed(e.to_string()))?;
         }
@@ -508,6 +531,7 @@ impl Driver for MySqlDriver {
 
     async fn query_with_default_namespace(&self, sql: &str, max_rows: u32, default_namespace: Option<&str>)
         -> Result<QueryResult, DbError> {
+        if self.is_query_session {return self.query_cancellable(sql,max_rows,default_namespace,tokio_util::sync::CancellationToken::new()).await;}
         let Some(database) = default_namespace.map(str::trim).filter(|s| !s.is_empty()) else {
             return self.query(sql, max_rows).await;
         };

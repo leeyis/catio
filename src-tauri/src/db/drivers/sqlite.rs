@@ -1,12 +1,8 @@
 // adapted from dbx crates/dbx-core/src/db/sqlite.rs, Apache-2.0
 //
-// Async-wrapping choice: SqliteDriver holds Arc<tokio::sync::Mutex<rusqlite::Connection>>.
-// All Driver methods lock the mutex and call rusqlite synchronously *without* spawn_blocking.
-// Rationale: rusqlite::Connection is !Sync, so it cannot be moved into spawn_blocking without
-// Arc<std::sync::Mutex<>> + unwrap dance. For SQLite (local/in-memory, fast ops) doing the sync
-// work while holding a tokio async Mutex is acceptable — no network latency, no long blocking.
-// The critical correctness requirement for :memory: is satisfied: the SAME Connection instance
-// is reused across all calls (no new open per query).
+// Each driver owns one mutexed physical connection; query and batch work runs on
+// blocking workers with engine cancellation. Named, random shared-memory URIs let
+// query tabs share a database while isolating their transactions and temp tables.
 
 use async_trait::async_trait;
 use rusqlite::types::ValueRef;
@@ -20,26 +16,26 @@ use crate::db::result::{QueryResult, ColumnInfo, safe_i64_to_json, binary_to_jso
 
 pub struct SqliteDriver {
     conn: Arc<Mutex<Connection>>,
+    path: String,
+    closed: std::sync::atomic::AtomicBool,
 }
 
 impl SqliteDriver {
     pub async fn connect(args: &ConnectArgs) -> Result<Self, DbError> {
-        let path = args.host.clone();
-        // Open in-memory or file connection
-        let conn = if path.trim().eq_ignore_ascii_case(":memory:") {
-            Connection::open_in_memory()
-                .map_err(|e| DbError::ConnectFailed(e.to_string()))?
-        } else {
-            Connection::open(&path)
-                .map_err(|e| DbError::ConnectFailed(e.to_string()))?
-        };
+        // A random URI shares only this database across physical tab sessions.
+        // The UI/profile still contains :memory:, not the private runtime URI.
+        let path=if args.host.trim().eq_ignore_ascii_case(":memory:") {
+            format!("file:catio-{:032x}?mode=memory&cache=shared",rand::random::<u128>())
+        } else {args.host.clone()};
+        let conn=Connection::open_with_flags(&path,rusqlite::OpenFlags::default() | rusqlite::OpenFlags::SQLITE_OPEN_URI)
+            .map_err(|e|DbError::ConnectFailed(e.to_string()))?;
         // Enforce declared foreign keys by default; an explicit PRAGMA remains a
         // user-controlled session setting. Do not silently accept orphan rows.
         conn.pragma_update(None, "foreign_keys", true).map_err(|e| DbError::ConnectFailed(e.to_string()))?;
         // Validate connectivity with a trivial query
         conn.execute_batch("SELECT 1")
             .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
-        Ok(Self { conn: Arc::new(Mutex::new(conn)) })
+        Ok(Self { conn: Arc::new(Mutex::new(conn)), path, closed: std::sync::atomic::AtomicBool::new(false) })
     }
 }
 
@@ -140,6 +136,23 @@ impl Driver for SqliteDriver {
     }
 
     fn supports_query_cancel(&self) -> bool { true }
+    fn close(&self) {self.closed.store(true,std::sync::atomic::Ordering::SeqCst);}
+    async fn fork_query_session(&self) -> Result<Arc<dyn Driver>,DbError> {
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst) {return Err(DbError::NotFound("closed connection".into()));}
+        let conn=Connection::open_with_flags(&self.path,rusqlite::OpenFlags::default() | rusqlite::OpenFlags::SQLITE_OPEN_URI)
+            .map_err(|e|DbError::ConnectFailed(e.to_string()))?;
+        conn.pragma_update(None,"foreign_keys",true).map_err(|e|DbError::QueryFailed(e.to_string()))?;
+        Ok(Arc::new(Self{conn:Arc::new(Mutex::new(conn)),path:self.path.clone(),closed:std::sync::atomic::AtomicBool::new(false)}))
+    }
+    async fn transaction_state(&self) -> Result<crate::db::query_session::TransactionState,DbError> {
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst) {return Err(DbError::NotFound("closed SQL session".into()));}
+        Ok(if self.conn.lock().await.is_autocommit(){crate::db::query_session::TransactionState::Idle}else{crate::db::query_session::TransactionState::Active})
+    }
+    async fn close_query_session(&self) -> Result<(),DbError> {
+        self.close();let conn=self.conn.lock().await;
+        if !conn.is_autocommit(){conn.execute_batch("ROLLBACK").map_err(|e|DbError::QueryFailed(e.to_string()))?;}
+        Ok(())
+    }
 
     async fn query(&self, sql: &str, max_rows: u32) -> Result<QueryResult, DbError> {
         self.query_cancellable(sql, max_rows, None, tokio_util::sync::CancellationToken::new()).await
@@ -151,6 +164,7 @@ impl Driver for SqliteDriver {
             _ = cancel.cancelled() => return Err(DbError::Cancelled),
             conn = self.conn.clone().lock_owned() => conn,
         };
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst) {return Err(DbError::NotFound("closed SQL session".into()));}
         let sql = sql.to_string();
         tokio::task::spawn_blocking(move || {
             if cancel.is_cancelled() { return Err(DbError::Cancelled); }

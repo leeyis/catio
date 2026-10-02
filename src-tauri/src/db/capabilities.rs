@@ -5,6 +5,7 @@ use crate::db::DatabaseType;
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Capabilities {
+    pub query_sessions: bool,
     pub writable: bool,
     pub transactions: bool,
     pub schemas: bool,       // 有 schema 命名空间概念（PG 有，MySQL 无）
@@ -19,22 +20,22 @@ pub struct Capabilities {
 pub fn capabilities_for(db: DatabaseType) -> Capabilities {
     use DatabaseType::*;
     match db {
-        Postgres | Sqlserver => Capabilities {
+        Postgres | Sqlserver => Capabilities { query_sessions: true,
             writable: true, transactions: true, schemas: true,
             sql_console: true, er: true, structure_edit: true,
             views: true, functions: true,
         },
         // SQLite/Rqlite 有视图但无存储函数/过程概念 → functions = false（仅对 Sqlite）。
-        Mysql | Sqlite | Duckdb => Capabilities {
+        Mysql | Sqlite | Duckdb => Capabilities { query_sessions: true,
             writable: true, transactions: true, schemas: db == Duckdb,
             sql_console: true, er: true, structure_edit: true,
             views: true, functions: db != Sqlite,
         },
-        Rqlite => Capabilities {
+        Rqlite => Capabilities { query_sessions: false,
             writable: true, transactions: true, schemas: false,
             sql_console: true, er: false, structure_edit: false, views: true, functions: false,
         },
-        Clickhouse => Capabilities {
+        Clickhouse => Capabilities { query_sessions: false,
             writable: true, transactions: false, schemas: false,
             sql_console: true, er: false, structure_edit: false,
             // ClickHouse 有视图+UDF；Rqlite 基于 SQLite，有视图但无存储函数。
@@ -43,7 +44,7 @@ pub fn capabilities_for(db: DatabaseType) -> Capabilities {
         // Mongo 用 mongo shell 语法、ES 用 REST/SELECT(见各 driver 的 query()),
         // 控制台可用 → sql_console = true。文档库/检索引擎无 SQL 视图与存储函数概念,
         // 且 Mongo driver 的 list_tables 不区分视图 → views/functions 均关闭。
-        Elasticsearch | Mongodb => Capabilities {
+        Elasticsearch | Mongodb => Capabilities { query_sessions: false,
             writable: true, transactions: false, schemas: db == Mongodb,
             sql_console: true, er: false, structure_edit: false,
             views: false, functions: false,
@@ -51,7 +52,7 @@ pub fn capabilities_for(db: DatabaseType) -> Capabilities {
         // KV 存储:无表/视图/函数概念,树里只保留 keys。查询控制台可用——
         // 但语义不是 SQL,而是把输入当 key 的 glob 模式做 SCAN(见 redis driver
         // 的 query()),前端 SqlConsole 对 Redis 走 plain 模式(不挂 SQL 补全)。
-        Redis => Capabilities {
+        Redis => Capabilities { query_sessions: false,
             writable: true, transactions: false, schemas: true,
             sql_console: true, er: false, structure_edit: false,
             views: false, functions: false,
@@ -60,7 +61,7 @@ pub fn capabilities_for(db: DatabaseType) -> Capabilities {
         // exposes columns but no FK/index introspection, so ER and structure
         // editing are off. Schemas on (most JDBC engines are schema-aware).
         // 多数 JDBC 引擎为关系型,有视图与存储函数(list_functions 已实现) → 开启。
-        Jdbc => Capabilities {
+        Jdbc => Capabilities { query_sessions: false,
             writable: true, transactions: false, schemas: true,
             sql_console: true, er: false, structure_edit: false,
             views: true, functions: true,
