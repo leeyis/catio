@@ -699,6 +699,7 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
                     key={runSeq}
                     columns={result?.columns ?? []}
                     rows={result?.rows ?? []}
+                    binaryCells={result?.binaryCells}
                     statusTones={D.statusTones} density={density}
                     writable={false} connId={connId} engine={engine} truncated={result?.truncated}
                     // plain 引擎(mongo/es)不传 sql:服务端分页会拼 SQL LIMIT/OFFSET 必败,回落客户端分页。

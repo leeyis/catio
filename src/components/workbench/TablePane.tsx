@@ -7,7 +7,8 @@ import { Segmented } from '../atoms'
 import { DataGrid, StructureView, RedisKeyspaceView } from '../dbviews'
 import { useData } from '../../state/DataContext'
 import { tablePreview, tableStructure, dbErrMsg, type DbCapabilities } from '../../services/db'
-import type { Connection, ResultColumn } from '../../services/types'
+import { removeBinaryColumn } from '../dbviews/binaryValue'
+import type { Connection, ResultColumn, BinaryCell } from '../../services/types'
 
 /** Initial page size for the live table preview (matches DataGrid's default). */
 const PREVIEW_PAGE = 100
@@ -34,7 +35,7 @@ export function TablePane({ conn, connId, caps, schema, table, density }: TableP
   )
 
   // ---- Live table-data fetch(平移自 DbWorkbench,语义不变)----
-  const [live, setLive] = useState<{ columns: ResultColumn[]; rows: unknown[][]; truncated?: boolean } | null>(null)
+  const [live, setLive] = useState<{ columns: ResultColumn[]; rows: unknown[][]; binaryCells?: BinaryCell[]; truncated?: boolean } | null>(null)
   const [liveErr, setLiveErr] = useState<string | null>(null)
   const [rowKeys, setRowKeys] = useState<string[] | null>(null)
   // True while (re)fetching a table's preview — drives the result-area loading
@@ -73,7 +74,7 @@ export function TablePane({ conn, connId, caps, schema, table, density }: TableP
           const pk = pkNames.has(c.name) || undefined
           return (comment !== undefined || pk) ? { ...c, ...(pk ? { pk: true } : {}), ...(comment !== undefined ? { comment } : {}) } : c
         })
-        setLive({ columns, rows: rws, truncated: res.truncated })
+        setLive({ columns, rows: rws, binaryCells: removeBinaryColumn(res.binaryCells, ctidIdx), truncated: res.truncated })
         setRowKeys(keys)
       })
       .catch(e => { if (!cancelled) { setLiveErr(dbErrMsg(e)); setRowKeys(null) } })
@@ -115,6 +116,7 @@ export function TablePane({ conn, connId, caps, schema, table, density }: TableP
           ? <DataGrid
               columns={(live?.columns ?? [])}
               rows={(live?.rows ?? [])}
+              binaryCells={live?.binaryCells}
               statusTones={D.statusTones} density={density} key={`${connId}.${schema ?? ''}.${table}`}
               writable={caps.writable && sqlDml} transactions={caps.transactions} connId={connId} table={table} schema={schema} engine={conn.engine}
               rowKeys={rowKeys ?? undefined} keyColumn={rowKeys ? 'ctid' : undefined}

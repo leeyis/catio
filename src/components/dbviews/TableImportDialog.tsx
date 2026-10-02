@@ -35,6 +35,7 @@ export function TableImportDialog({ connId, schema, table, engine, transactions,
 
   const [filePath, setFilePath] = useState<string | null>(null)
   const [preview, setPreview] = useState<ImportPreview | null>(null)
+  const binaryCells = useMemo(() => new Set((preview?.binaryCells ?? []).map(([r,c]) => `${r}:${c}`)), [preview])
   const [webFile, setWebFile] = useState<BrowserImportFile | null>(null)
   const fileInput = useRef<HTMLInputElement>(null)
   const [confirmation, setConfirmation] = useState('')
@@ -229,7 +230,8 @@ export function TableImportDialog({ connId, schema, table, engine, transactions,
                       <tr key={ri}>
                         {preview.columns.map((_, ci) => (
                           <td key={ci} className="mono" style={{ padding: '5px 10px', borderBottom: '1px solid var(--border-hairline-alt)', color: 'var(--text-secondary)', whiteSpace: 'nowrap', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                            {row[ci] == null ? <span style={{ color: 'var(--text-faint)', fontStyle: 'italic' }}>NULL</span> : String(row[ci])}
+                            {row[ci] == null ? <span style={{ color: 'var(--text-faint)', fontStyle: 'italic' }}>NULL</span> : typeof row[ci] === 'object' ? JSON.stringify(row[ci]) : String(row[ci])}
+                            {binaryCells.has(`${ri}:${ci}`) && <span title={t('dbviews.binaryEditorLabel')} style={{ marginLeft: 6, fontSize: 9, color: 'var(--accent-primary)' }}>HEX</span>}
                           </td>
                         ))}
                       </tr>

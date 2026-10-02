@@ -15,7 +15,7 @@ export const IMPORT_SKIP_TARGET = ''
  * 模式额外提示「无回滚」风险。未知/缺省引擎按支持事务处理（不弹吓人的告警）。
  */
 const NON_TRANSACTIONAL_ENGINES = new Set([
-  'clickhouse', 'rqlite', 'redis', 'mongodb', 'elasticsearch', 'jdbc',
+  'clickhouse', 'redis', 'mongodb', 'elasticsearch', 'jdbc',
 ])
 
 /** 引擎是否支持导入事务（truncate 原子化）。大小写不敏感;未知引擎默认 true。 */

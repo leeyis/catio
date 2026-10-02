@@ -6,13 +6,13 @@ import {
 
 describe('engineSupportsImportTransaction', () => {
   it('returns true for transactional relational engines', () => {
-    for (const e of ['postgres', 'mysql', 'sqlite', 'sqlserver', 'duckdb']) {
+    for (const e of ['postgres', 'mysql', 'sqlite', 'sqlserver', 'duckdb', 'rqlite']) {
       expect(engineSupportsImportTransaction(e)).toBe(true)
     }
   })
 
   it('returns false for non-transactional engines (no rollback on truncate)', () => {
-    for (const e of ['clickhouse', 'rqlite', 'redis', 'mongodb', 'elasticsearch', 'jdbc']) {
+    for (const e of ['clickhouse', 'redis', 'mongodb', 'elasticsearch', 'jdbc']) {
       expect(engineSupportsImportTransaction(e)).toBe(false)
     }
   })

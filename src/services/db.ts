@@ -212,6 +212,8 @@ export interface EditRequest {
   pk: [string, unknown][]
   /** Edited columns → new values (the SET / VALUES payload). */
   cells: [string, unknown][]
+  binaryColumns?: string[]
+  binaryPkColumns?: string[]
 }
 
 /**
@@ -388,6 +390,7 @@ export interface ImportColumnMapping { sourceColumn: string; targetColumn: strin
 
 /** 导入文件预览：列 + 样本行（后端按 50 行截断）+ 总行数。 */
 export interface ImportPreview {
+  binaryCells?: import('./types').BinaryCell[] | null
   fileName: string
   fileType: string
   sizeBytes: number

@@ -121,7 +121,10 @@ export interface ResultColumn {
   /** Column comment, filled only for table-preview results; absent for arbitrary SQL results. */
   comment?: string
 }
+export type BinaryCell = [row: number, column: number]
 export interface QueryResult {
+  /** Actual storage metadata; undefined means a legacy/untyped result. */
+  binaryCells?: BinaryCell[]
   columns: ResultColumn[]
   rows: unknown[][]
   rowsAffected?: number

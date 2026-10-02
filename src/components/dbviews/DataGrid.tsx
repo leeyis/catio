@@ -5,7 +5,8 @@ import { Icon } from '../Icon'
 import { Btn, IconBtn } from '../atoms'
 import { previewDml, applyEdits, queryPage, tablePreview, tableQuery, exportFile, exportXlsx, exportXlsxBytes, dbErrMsg, type EditRequest } from '../../services/db'
 import { isServer } from '../../services/transport'
-import type { ResultColumn } from '../../services/types'
+import { validBinaryHex, removeBinaryColumn } from './binaryValue'
+import type { ResultColumn, BinaryCell } from '../../services/types'
 import { reduceCellSelection, reduceRowSelection, isCellInRange, normalizeRange, cellsInRange, type GridSelection } from './gridSelection'
 import { filterRows, filterModeNeedsValue, type FilterRule, type FilterMode } from './gridFilter'
 import { buildInsertSql, buildUpdateSql, copyDialectFor } from './copySql'
@@ -20,6 +21,7 @@ import { TableImportDialog } from './TableImportDialog'
 export interface DataGridProps {
   columns: ResultColumn[]
   rows: unknown[][]
+  binaryCells?: BinaryCell[]
   statusTones?: Record<string, string>
   density?: 'comfortable' | 'compact'
   /** Read-only engines (per capabilities.writable) disable cell editing + Save. Defaults true so mock/demo stays editable. */
@@ -117,7 +119,7 @@ function colIcon(col: ResultColumn): string {
   return 'type'
 }
 
-export function DataGrid({ columns: inputColumns, rows, statusTones = {}, density = 'comfortable', writable = true, transactions, connId, table = connId ? '' : 'orders', schema, engine, sql, defaultNamespace, livePreview, onRefresh, truncated, loadError, resultLabel, rowKeys, keyColumn }: DataGridProps) {
+export function DataGrid({ columns: inputColumns, rows, binaryCells, statusTones = {}, density = 'comfortable', writable = true, transactions, connId, table = connId ? '' : 'orders', schema, engine, sql, defaultNamespace, livePreview, onRefresh, truncated, loadError, resultLabel, rowKeys, keyColumn }: DataGridProps) {
   const { t } = useTranslation()
   const columns = useMemo(() => uniqueGridColumns(inputColumns), [inputColumns])
   const [sel, setSel] = useState({ r: connId ? 0 : 2, c: connId ? 0 : 3 })
@@ -148,6 +150,7 @@ export function DataGrid({ columns: inputColumns, rows, statusTones = {}, densit
   const [pageSize, setPageSize] = useState(100)
   // server-side page rows (when connId set); null → use client-side slice of `rows`
   const [serverRows, setServerRows] = useState<unknown[][] | null>(null)
+  const [serverBinaryCells, setServerBinaryCells] = useState<BinaryCell[] | undefined>(undefined)
   const [serverTruncated, setServerTruncated] = useState(false)
   // server-side per-row keys for the ctid path (aligned to serverRows), when the
   // grid paginates a PK-less Postgres table itself. Null → use the prop `rowKeys`.
@@ -160,7 +163,7 @@ export function DataGrid({ columns: inputColumns, rows, statusTones = {}, densit
   const activeEditorKind = useRef<'date' | 'datetime' | 'time' | 'text'>('text')
   useEffect(() => {
     pageRequest.current++
-    setServerRows(null); setServerRowKeys(null); setPage(1); setRefreshing(false)
+    setServerRows(null); setServerBinaryCells(undefined); setServerRowKeys(null); setPage(1); setRefreshing(false)
     setEdits({}); setNewRows([]); setDeleted(new Set()); setEditing(null); setPreview(null)
     setPageError(null)
     return () => { pageRequest.current++ }
@@ -273,6 +276,23 @@ export function DataGrid({ columns: inputColumns, rows, statusTones = {}, densit
 
   // base rows: server page (if fetched) else the full client-side set
   const baseRows = serverRows ?? rows
+  const activeBinaryCells = serverRows === null ? binaryCells : serverBinaryCells
+  const binaryMetadataKnown = activeBinaryCells !== undefined
+  const binaryIndexes = useMemo(()=>new Set((activeBinaryCells ?? []).map(([r,c])=>`${r}:${c}`)),[activeBinaryCells])
+  function isBinaryCell(row: number, column: number): boolean {
+    if (row < 0 || baseRows[row]?.[column] == null) return binaryColumn(columns[column]?.type)
+    return binaryIndexes.has(`${row}:${column}`)
+  }
+  function editTypes(row: number, cells: [string, unknown][], pk: [string, unknown][] = []): Partial<EditRequest> {
+    if (!binaryMetadataKnown) return {}
+    return { binaryColumns: cells.filter(([c])=>isBinaryCell(row,colNames.indexOf(c))).map(([c])=>c),
+      binaryPkColumns: pk.filter(([c])=>binaryIndexes.has(`${row}:${colNames.indexOf(c)}`)).map(([c])=>c) }
+  }
+
+  function binaryForRows(indexes: number[], values: unknown[][]): BinaryCell[] {
+    return indexes.flatMap((original,r) => columns.flatMap((_,c): BinaryCell[] =>
+      values[r]?.[c] != null && isBinaryCell(original,c) ? [[r,c]] : []))
+  }
 
   // Tag each row with its original (unsorted) index so keys and edits are stable under sort.
   const tagged = useMemo(() => baseRows.map((row, i) => ({ row, origIdx: i })), [baseRows])
@@ -369,7 +389,7 @@ export function DataGrid({ columns: inputColumns, rows, statusTones = {}, densit
   // too, or the values shift one column left of their headers. Detect it from the
   // fetched columns rather than from `keyColumn` (which is only set for PK-less
   // tables); capture its values as the per-row keys for ctid-based editing.
-  function applyServerPage(res: { columns?: ResultColumn[]; rows: unknown[][]; truncated?: boolean }) {
+  function applyServerPage(res: { columns?: ResultColumn[]; rows: unknown[][]; binaryCells?: BinaryCell[]; truncated?: boolean }) {
     const hasCtid = res.columns?.[0]?.name === '__ctid' && !columns.some(c => c.name === '__ctid')
     if (hasCtid) {
       setServerRowKeys(res.rows.map(r => String(r[0])))
@@ -378,6 +398,7 @@ export function DataGrid({ columns: inputColumns, rows, statusTones = {}, densit
       setServerRowKeys(null)
       setServerRows(res.rows)
     }
+    setServerBinaryCells(removeBinaryColumn(res.binaryCells, hasCtid ? 0 : -1))
     setServerTruncated(!!res.truncated)
   }
 
@@ -520,10 +541,13 @@ export function DataGrid({ columns: inputColumns, rows, statusTones = {}, densit
   // grid's "copy as SQL" path (copySql.buildInsertSql), so escaping/quoting stays
   // consistent with single-row edits (dml.rs::build_insert).
   function buildExport(format: 'csv' | 'json' | 'sql' | 'md'): { text: string; type: string } {
-    const displayRows = pageRows.map(({ row }) => row)
+    const displayRows = pageRows.map(({ row, origIdx }) => columns.map((col,c) => {
+      const value = edits[cellKey(origIdx,col.name)]
+      return value !== undefined ? value : row[c]
+    }))
     if (format === 'sql') {
       const colNames = columns.map(c => c.name)
-      const sql = buildInsertSql(displayRows, table, colNames, copyDialectFor(engine), schema)
+      const sql = buildInsertSql(displayRows, table, colNames, copyDialectFor(engine), schema, binaryForRows(pageRows.map(e=>e.origIdx),displayRows))
       return { text: sql, type: 'text/plain' }
     }
     if (format === 'md') {
@@ -535,6 +559,8 @@ export function DataGrid({ columns: inputColumns, rows, statusTones = {}, densit
       const lines = displayRows.map(row => columns.map((_, ci) => csvEscape(row[ci])).join(','))
       return { text: [header, ...lines].join('\n'), type: 'text/csv' }
     }
+    const typedBinary = binaryForRows(pageRows.map(e=>e.origIdx),displayRows)
+    if (typedBinary.length) return { text: JSON.stringify({format:'catio-table-v1',columns:colNames,rows:displayRows,binaryCells:typedBinary},null,2), type:'application/json' }
     const objs = displayRows.map(row => {
       const o: Record<string, unknown> = {}
       columns.forEach((c, ci) => { o[c.name] = row[ci] ?? null })
@@ -587,7 +613,9 @@ export function DataGrid({ columns: inputColumns, rows, statusTones = {}, densit
       }
       return
     }
-    const { text, type } = buildExport(format)
+    let built: { text: string; type: string }
+    try { built = buildExport(format) } catch (e) { setExportErr(dbErrMsg(e)); return }
+    const { text, type } = built
     if (!isTauri()) {
       triggerDownload(text, type, `export.${format}`)
       return
@@ -662,7 +690,7 @@ export function DataGrid({ columns: inputColumns, rows, statusTones = {}, densit
   function startEdit(rIdx: number, cIdx: number, _rowIdx: number, _col: string, val: unknown) {
     if ((rIdx < 0 ? !canInsert : !canEdit) || refreshing || applying) return
     if (rIdx >= 0 && rowPk(rIdx, baseRows[rIdx] ?? []).length === 0) { setPageError(t('dbviews.noStableRowKey')); return }
-    if (binaryColumn(columns[cIdx]?.type) || (engine === 'sqlite' && hexKey(val))) { setPageError(t('dbviews.binaryWriteUnsupported')); return }
+    if (!binaryMetadataKnown && (binaryColumn(columns[cIdx]?.type) || (engine === 'sqlite' && hexKey(val)))) { setPageError(t('dbviews.binaryWriteUnsupported')); return }
     editTouched.current = false
     let kind = editorKind(columns[cIdx]?.type)
     // Native time pickers may round micro/nanoseconds. Preserve precise values as
@@ -681,6 +709,10 @@ export function DataGrid({ columns: inputColumns, rows, statusTones = {}, densit
     editTouched.current = false
     const kind = activeEditorKind.current
     const text = fromEditorValue(kind, editVal)
+    if (isBinaryCell(rowIdx,colNames.indexOf(col)) && !validBinaryHex(text)) {
+      editTouched.current = true; setPageError(t('dbviews.binaryHexInvalid')); return
+    }
+    setPageError(null)
     const type = columns.find(c => c.name === col)?.type.toLowerCase() ?? ''
     const value = /^(bool|boolean|bit)$/.test(type) && /^(true|false)$/i.test(text)
       ? text.toLowerCase() === 'true' : text
@@ -831,14 +863,15 @@ export function DataGrid({ columns: inputColumns, rows, statusTones = {}, densit
     if (!canEdit || refreshing || applying) return
     const col = columns[ctxMenu?.col ?? sel.c]
     if (!col) return
-    if (value !== null && binaryColumn(col.type)) { setPageError(t('dbviews.binaryWriteUnsupported')); setCtxMenu(null); return }
+    if (!binaryMetadataKnown && value !== null && binaryColumn(col.type)) { setPageError(t('dbviews.binaryWriteUnsupported')); setCtxMenu(null); return }
     if (selectedOrigIdxs().some(index => rowPk(index, baseRows[index] ?? []).length === 0)) { setPageError(t('dbviews.noStableRowKey')); setCtxMenu(null); return }
     setEdits(previous => {
       const next = { ...previous }
       for (const row of selectedOrigIdxs()) {
         const key = cellKey(row, col.name)
-        if (originalCellValue(row, col.name) === value) delete next[key]
-        else next[key] = value
+        const typedValue = value === '' && isBinaryCell(row,colNames.indexOf(col.name)) ? '0x' : value
+        if (originalCellValue(row, col.name) === typedValue) delete next[key]
+        else next[key] = typedValue
       }
       return next
     })
@@ -871,9 +904,12 @@ export function DataGrid({ columns: inputColumns, rows, statusTones = {}, densit
     const keyOverride = pkCols.length === 0 && keyColumn && activeRowKeys
       ? { column: keyColumn, values: selectedOrigIdxs().map(origIdx => activeRowKeys[origIdx]) }
       : undefined
-    const text = kind === 'insert'
-      ? buildInsertSql(data, table, colNames, dialect, schema)
-      : buildUpdateSql(data, table, colNames, dialect, schema, pkCols, keyOverride)
+    let text: string
+    const metadata = binaryForRows(selectedOrigIdxs(),data)
+    try { text = kind === 'insert'
+      ? buildInsertSql(data, table, colNames, dialect, schema, metadata)
+      : buildUpdateSql(data, table, colNames, dialect, schema, pkCols, keyOverride, metadata)
+    } catch (e) { setPageError(dbErrMsg(e)); return }
     if (!text) { setPageError(t('dbviews.noStableRowKey')); return }
     void copyValue(text)
   }
@@ -883,8 +919,11 @@ export function DataGrid({ columns: inputColumns, rows, statusTones = {}, densit
   function applyBulkEdit() {
     if (!gridSel.anchor || !gridSel.focus) { setBulkOpen(false); return }
     const { r0, r1, c0, c1 } = normalizeRange(gridSel.anchor, gridSel.focus)
-    if (columns.slice(c0, c1 + 1).some(column => binaryColumn(column.type)) || selectedOrigIdxs().some(index => rowPk(index, baseRows[index] ?? []).length === 0)) {
+    if ((!binaryMetadataKnown && columns.slice(c0, c1 + 1).some(column => binaryColumn(column.type))) || selectedOrigIdxs().some(index => rowPk(index, baseRows[index] ?? []).length === 0)) {
       setPageError(t('dbviews.binaryWriteUnsupported')); setBulkOpen(false); return
+    }
+    if (selectedOrigIdxs().some(r=>columns.some((_,c)=>c>=c0 && c<=c1 && isBinaryCell(r,c))) && !validBinaryHex(bulkVal)) {
+      setPageError(t('dbviews.binaryHexInvalid')); return
     }
     setEdits(prev => {
       const next = { ...prev }
@@ -941,14 +980,14 @@ export function DataGrid({ columns: inputColumns, rows, statusTones = {}, densit
       if (!entry) continue
       const pk = rowPk(origIdx, entry.row)
       if (pk.length === 0) continue
-      reqs.push({ schema, table, kind: 'update', pk, cells })
+      reqs.push({ schema, table, kind: 'update', pk, cells, ...editTypes(origIdx,cells,pk) })
     }
 
     // --- INSERTs (one per new row that has at least one filled cell) ---
     for (const nr of newRows) {
       const cells = Object.entries(nr.cells) as [string, unknown][]
       if (cells.length === 0) continue
-      reqs.push({ schema, table, kind: 'insert', pk: [], cells })
+      reqs.push({ schema, table, kind: 'insert', pk: [], cells, ...editTypes(-nr.id-1,cells) })
     }
 
     // --- DELETEs (one per marked existing row) ---
@@ -957,7 +996,7 @@ export function DataGrid({ columns: inputColumns, rows, statusTones = {}, densit
       if (!entry) continue
       const pk = rowPk(origIdx, entry.row)
       if (pk.length === 0) continue
-      reqs.push({ schema, table, kind: 'delete', pk, cells: [] })
+      reqs.push({ schema, table, kind: 'delete', pk, cells: [], ...editTypes(origIdx,[],pk) })
     }
 
     return reqs
@@ -970,7 +1009,7 @@ export function DataGrid({ columns: inputColumns, rows, statusTones = {}, densit
    */
   function rowPk(origIdx: number, row: unknown[]): [string, unknown][] {
     if (pkCols.length > 0) {
-      if (pkCols.some(name => { const value = row[columns.findIndex(c => c.name === name)]; return value == null || hexKey(value) })) return []
+      if (pkCols.some(name => { const value = row[columns.findIndex(c => c.name === name)]; return value == null || (!binaryMetadataKnown && hexKey(value)) })) return []
       return pkCols.map(name => {
         const ci = columns.findIndex(c => c.name === name)
         return [name, row[ci]] as [string, unknown]
@@ -1392,7 +1431,7 @@ export function DataGrid({ columns: inputColumns, rows, statusTones = {}, densit
                   const inMultiSel = inRange || gridSel.rows.has(ri)
                   const isEditing = editing && editing.r === origIdx && editing.c === ci
                   return (
-                    <div key={col.name} onClick={e => onCellSelect(ri, ci, origIdx, e)}
+                    <div key={col.name} data-cell-type={isBinaryCell(origIdx,ci) ? 'binary' : undefined} onClick={e => onCellSelect(ri, ci, origIdx, e)}
                       onContextMenu={e => onCellContext(ri, ci, origIdx, e)}
                       onDoubleClick={() => startEdit(origIdx, ci, origIdx, col.name, val)}
                       style={{
@@ -1404,6 +1443,8 @@ export function DataGrid({ columns: inputColumns, rows, statusTones = {}, densit
                       }}>
                       {isEditing ? (
                         <input autoFocus step="any" type={activeEditorKind.current === 'datetime' ? 'datetime-local' : activeEditorKind.current}
+                          aria-label={isBinaryCell(origIdx,ci) ? t('dbviews.binaryEditorLabel') : undefined}
+                          placeholder={isBinaryCell(origIdx,ci) ? '0x00ff' : undefined}
                           value={editVal} onChange={e => { editTouched.current = true; setEditVal(e.target.value) }}
                           onBlur={() => commitEdit(origIdx, col.name)}
                           onKeyDown={e => { if (e.key === 'Enter') commitEdit(origIdx, col.name); if (e.key === 'Escape') { editTouched.current = false; setEditing(null) } }}
@@ -1422,6 +1463,7 @@ export function DataGrid({ columns: inputColumns, rows, statusTones = {}, densit
                       ) : (
                         <span className="ell">{cellText(val)}</span>
                       )}
+                      {!isEditing && isBinaryCell(origIdx,ci) && val != null && <span title={t('dbviews.binaryEditorLabel')} style={{fontSize:9,color:'var(--accent-primary)',marginLeft:'auto'}}>HEX</span>}
                       {isEdited && !isEditing && (
                         <button className="icon-btn bare cell-revert" style={{ width: 18, height: 18, marginLeft: 'auto', flex: 'none' }}
                           title={t('dbviews.revertCell')}
@@ -1618,7 +1660,7 @@ export function DataGrid({ columns: inputColumns, rows, statusTones = {}, densit
               { key: 'copy-insert', icon: 'file-code', label: t('dbviews.ctxCopyInsert', { count: selectedOrigIdxs().length }), onClick: () => ctxCopySql('insert'), show: !!table && !resultLabel && selectedOrigIdxs().length > 0, danger: false },
               { key: 'copy-update', icon: 'file-code', label: t('dbviews.ctxCopyUpdate', { count: selectedOrigIdxs().length }), onClick: () => ctxCopySql('update'), show: canEdit && !resultLabel && selectedOrigIdxs().every(index => rowPk(index, baseRows[index] ?? []).length > 0) && selectedOrigIdxs().length > 0, danger: false },
               { key: 'null', icon: 'minus', label: t('dbviews.setNull'), onClick: () => setSelectedValue(null), show: canEdit && selectedOrigIdxs().length > 0, danger: false },
-              { key: 'empty', icon: 'type', label: t('dbviews.setEmptyString'), onClick: () => setSelectedValue(''), show: canEdit && selectedOrigIdxs().length > 0, danger: false },
+              { key: 'empty', icon: 'type', label: t(selectedOrigIdxs().some(r=>isBinaryCell(r,ctxMenu.col)) ? 'dbviews.setEmptyTextOrBytes' : 'dbviews.setEmptyString'), onClick: () => setSelectedValue(''), show: canEdit && selectedOrigIdxs().length > 0, danger: false },
               { key: 'delete', icon: 'trash-2', label: t('dbviews.ctxDeleteRows', { count: selectedOrigIdxs().length }), onClick: ctxDeleteRows, show: canEdit && selectedOrigIdxs().length > 0, danger: true },
               { key: 'bulk', icon: 'pencil', label: t('dbviews.ctxBulkEdit', { count: selectedCellCount }), onClick: ctxBulkEdit, show: canEdit && selectedCellCount > 0, danger: false },
             ] as const).filter(it => it.show).map(it => (
