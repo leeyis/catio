@@ -249,6 +249,13 @@ pub trait Driver: Send + Sync {
         Ok(crate::db::pagination::finish_page(result, &plan, limit))
     }
 
+    async fn paginated_query_cancellable(&self, sql:&str, limit:u32, offset:u32, namespace:Option<&str>,
+        cancel:tokio_util::sync::CancellationToken)->Result<QueryResult,DbError> {
+        let plan=crate::db::pagination::build_page_plan(self.db_type(),sql,limit,offset)?;
+        let result=self.query_cancellable(&plan.sql,plan.fetch_rows,namespace,cancel).await?;
+        Ok(crate::db::pagination::finish_page(result,&plan,limit))
+    }
+
     /// 表格数据预览：取一张表（或集合 / index / key 空间）的分页行。
     ///
     /// 默认走关系型 SQL 路径：`SELECT * FROM <qualified>` + 方言分页。非 SQL 引擎

@@ -4,7 +4,8 @@
 //!
 //! One Java process per connection; the connection params (incl. secret) ride in
 //! every request's `connection` object and the plugin caches the live JDBC
-//! Connection by key, so repeated calls reuse it. The process is killed on drop.
+//! Connection by session ID and key. Child sessions share the JVM, not transactions.
+//! Parent disconnect/drop kills the process; a child closes only its own connection.
 //!
 //! Driver JARs for proprietary engines are user-supplied: every *.jar found in
 //! the drivers dir (env `CATIO_JDBC_DRIVERS_DIR`, else <app>/jdbc/drivers) is
@@ -12,11 +13,11 @@
 //! built-in self-test needs no external driver.
 
 use async_trait::async_trait;
-use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::time::Duration;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, atomic::{AtomicBool,Ordering}};
+use super::jdbc_transport::JdbcProcess;
 use serde_json::{json, Value};
 
 use crate::db::{DbError, DatabaseType};
@@ -24,26 +25,21 @@ use crate::db::driver::{ConnectArgs, Driver, TableInfo, TableStructure, ErRelati
 use crate::db::result::{QueryResult, ColumnInfo};
 use super::jdbc_config;
 
-struct JdbcProc {
-    child: Arc<Mutex<Child>>,
-    stdin: BufWriter<ChildStdin>,
-    stdout: BufReader<ChildStdout>,
-    next_id: u64,
-    /// Tail of the sidecar's stderr, drained on a background thread. Surfaced when
-    /// the process dies unexpectedly so a JVM crash (e.g. a driver `Error`, a bad
-    /// JAR, or an incompatible Java version) is diagnosable instead of an opaque EOF.
-    stderr_buf: Arc<Mutex<String>>,
-}
-
 pub struct JdbcDriver {
-    proc: Arc<Mutex<JdbcProc>>,
-    child: Arc<Mutex<Child>>,
+    proc: Arc<JdbcProcess>,
+    operation: Arc<tokio::sync::Mutex<()>>,
+    session_id: String,
+    owns_process: bool,
+    closed: Arc<AtomicBool>,
+    can_cancel: bool,
     caps: crate::db::capabilities::Capabilities,
-    /// The `connection` object sent with every request (holds the secret —
-    /// in-memory only, never logged or persisted).
+    // Credentials stay in memory; never log or persist this object.
     connection: Value,
-    /// The database the user connected to (passed as `database` in metadata calls).
     database: String,
+}
+struct JdbcAbandoned { proc:Arc<JdbcProcess>,params:Value,closed:Arc<AtomicBool>,armed:bool }
+impl Drop for JdbcAbandoned {
+    fn drop(&mut self){if self.armed {self.closed.store(true,Ordering::SeqCst);self.proc.detached("closeSession",self.params.clone());}}
 }
 
 // ── process / jar / java location ────────────────────────────────────────────
@@ -175,87 +171,81 @@ impl JdbcDriver {
             use std::os::windows::process::CommandExt;
             cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
         }
-        let mut child = cmd.spawn().map_err(|e| {
+        let child = cmd.spawn().map_err(|e| {
             DbError::ConnectFailed(format!(
                 "无法启动 Java JDBC sidecar（{}）：{e}。请确认已安装 JDK/JRE 17+ 并在 PATH 中，\
                  或设置 JAVA_HOME / CATIO_JAVA_BIN。", java_bin()))
         })?;
-        let stdin = BufWriter::new(child.stdin.take().ok_or_else(|| DbError::ConnectFailed("no sidecar stdin".into()))?);
-        let stdout = BufReader::new(child.stdout.take().ok_or_else(|| DbError::ConnectFailed("no sidecar stdout".into()))?);
-        // Drain stderr on a background thread so the OS pipe never fills (which would
-        // deadlock the JVM), keeping the tail for crash diagnostics.
-        let stderr_buf = Arc::new(Mutex::new(String::new()));
-        if let Some(err) = child.stderr.take() {
-            let buf = stderr_buf.clone();
-            std::thread::spawn(move || {
-                let mut reader = BufReader::new(err);
-                let mut line = String::new();
-                loop {
-                    line.clear();
-                    match reader.read_line(&mut line) {
-                        Ok(0) | Err(_) => break,
-                        Ok(_) => {
-                            if let Ok(mut g) = buf.lock() {
-                                if g.len() < 8192 { g.push_str(&line); }
-                            }
-                        }
-                    }
-                }
-            });
-        }
-        let child = Arc::new(Mutex::new(child));
-        let proc = Arc::new(Mutex::new(JdbcProc { child: child.clone(), stdin, stdout, next_id: 0, stderr_buf }));
-
-        let mut driver = Self { proc, child, connection, database, caps: crate::db::capabilities::capabilities_for(DatabaseType::Jdbc) };
+        let proc=JdbcProcess::new(child)?;
+        let mut driver=Self{proc,operation:Arc::new(tokio::sync::Mutex::new(())),session_id:String::new(),owns_process:true,
+            closed:Arc::new(AtomicBool::new(false)),can_cancel:profile=="h2",connection,database,
+            caps:crate::db::capabilities::capabilities_for(DatabaseType::Jdbc)};
         // Validate connectivity now (also primes the cached JDBC connection).
         let info = driver.rpc("connect", json!({})).await?;
+        driver.caps.query_sessions = info.get("query_sessions").and_then(Value::as_bool).unwrap_or(false);
         driver.caps.transactions = info.get("transactions").and_then(Value::as_bool).unwrap_or(false);
         driver.caps.er = info.get("er").and_then(Value::as_bool).unwrap_or(false);
         driver.caps.writable = info.get("writable").and_then(Value::as_bool).unwrap_or(true);
         Ok(driver)
     }
 
-    /// Blocking protocol I/O stays off the async runtime. An entire transaction
-    /// holds the same protocol lock so metadata/query requests cannot interleave.
-    async fn rpc(&self, method: &str, extra: Value) -> Result<Value, DbError> {
-        let proc = self.proc.clone(); let connection = self.connection.clone(); let method = method.to_string();
-        tokio::task::spawn_blocking(move || {
-            let mut p = proc.lock().map_err(|_| DbError::QueryFailed("JDBC sidecar lock poisoned".into()))?;
-            Self::rpc_locked(&mut p, &connection, &method, extra)
-        }).await.map_err(|e| DbError::QueryFailed(format!("JDBC sidecar task failed: {e}")))?
+    fn params(&self,mut params:Value)->Value {
+        if !params.is_object(){params=json!({});}
+        params["connection"]=self.connection.clone();params["sessionId"]=json!(self.session_id);params
     }
-
-    fn rpc_locked(p: &mut JdbcProc, connection: &Value, method: &str, mut params: Value) -> Result<Value, DbError> {
-        p.next_id += 1;
-        let id = p.next_id;
-        if let Value::Object(ref mut m) = params { m.insert("connection".into(), connection.clone()); }
-        else { params = json!({ "connection": connection }); }
-        let line = serde_json::to_string(&json!({ "id": id, "method": method, "params": params }))
-            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
-        p.stdin.write_all(line.as_bytes()).and_then(|_| p.stdin.write_all(b"\n")).and_then(|_| p.stdin.flush())
-            .map_err(|e| DbError::ConnectFailed(format!("JDBC sidecar write failed: {e}")))?;
-        let mut response = String::new();
-        let n = p.stdout.read_line(&mut response).map_err(|e| DbError::ConnectFailed(format!("JDBC sidecar read failed: {e}")))?;
-        let redact = |message: &str| {
-            match connection.get("password").and_then(Value::as_str).filter(|s| !s.is_empty()) {
-                Some(secret) => message.replace(secret, "<redacted>"), None => message.to_string(),
+    fn redact(&self,message:&str)->String {
+        match self.connection.get("password").and_then(Value::as_str).filter(|s|!s.is_empty()){
+            Some(secret)=>message.replace(secret,"<redacted>"),None=>message.to_string(),
+        }
+    }
+    fn response(&self,method:&str,result:Result<Value,String>)->Result<Value,DbError> {
+        let mut value=result.map_err(|message|{
+            let tail=self.proc.stderr_tail();DbError::ConnectFailed(self.redact(&format!("{message} {tail}")))
+        })?;
+        if let Some(error)=value.get("error") {
+            if matches!(error.get("sql_state").and_then(Value::as_str),Some("57014"|"HY008")){return Err(DbError::Cancelled);}
+            return Err(classify_sidecar_error(method,&self.redact(error.get("message").and_then(Value::as_str).unwrap_or("JDBC request failed"))));
+        }
+        Ok(value.as_object_mut().and_then(|v|v.remove("result")).unwrap_or(Value::Null))
+    }
+    async fn rpc_unlocked(&self,method:&str,extra:Value)->Result<Value,DbError> {
+        let request=self.proc.start(method,self.params(extra))?;
+        self.response(method,request.response().await)
+    }
+    async fn rpc(&self,method:&str,extra:Value)->Result<Value,DbError> {
+        let _operation=self.operation.lock().await;
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst){return Err(DbError::NotFound("closed JDBC session".into()));}
+        self.rpc_unlocked(method,extra).await
+    }
+    async fn execute_query(&self,sql:&str,max_rows:u32,namespace:Option<&str>,offset:u32,
+        cancel:tokio_util::sync::CancellationToken)->Result<QueryResult,DbError> {
+        let _operation=tokio::select!{_=cancel.cancelled()=>return Err(DbError::Cancelled),lock=self.operation.lock()=>lock};
+        if self.closed.load(std::sync::atomic::Ordering::SeqCst){return Err(DbError::NotFound("closed JDBC session".into()));}
+        if cancel.is_cancelled(){return Err(DbError::Cancelled);}
+        let mut params=json!({"sql":sql,"maxRows":max_rows.max(1),"offsetRows":offset});
+        if let Some(namespace)=namespace.filter(|s|!s.trim().is_empty()){params["database"]=json!(namespace);params["schema"]=json!(namespace);}
+        let request=self.proc.start("executeQuery",self.params(params))?;
+        let request_id=request.id;let mut response=Box::pin(request.response());
+        let mut abandoned=JdbcAbandoned{proc:self.proc.clone(),params:self.params(json!({})),closed:self.closed.clone(),armed:true};
+        let received=tokio::select! {
+            result=&mut response=>result,
+            _=cancel.cancelled()=>{
+                let started=std::time::Instant::now();
+                loop {
+                    // A cancel racing with Statement.execute must not be lost; repeat
+                    // only for this request ID, never for whichever statement runs next.
+                    let _=tokio::time::timeout(Duration::from_millis(500),self.rpc_unlocked("cancelRequest",json!({"targetRequestId":request_id}))).await;
+                    match tokio::time::timeout(Duration::from_millis(100),&mut response).await {
+                        Ok(result)=>break result,
+                        Err(_) if started.elapsed()>Duration::from_secs(5)=>return Err(DbError::QueryFailed(
+                            "JDBC cancellation could not be confirmed. This session is unusable; disconnect the database to terminate its sidecar before retrying writes".into())),
+                        Err(_)=>{},
+                    }
+                }
             }
         };
-        if n == 0 {
-            std::thread::sleep(Duration::from_millis(50));
-            let detail = p.stderr_buf.lock().ok().map(|s| redact(s.trim())).unwrap_or_default();
-            return Err(DbError::ConnectFailed(format!("JDBC sidecar closed: {detail}")));
-        }
-        let value: Value = serde_json::from_str(response.trim()).map_err(|_| DbError::ConnectFailed("Invalid JDBC sidecar response".into()))?;
-        if value.get("id").and_then(Value::as_u64) != Some(id) {
-            if let Ok(mut child) = p.child.lock() { let _ = child.kill(); }
-            return Err(DbError::ConnectFailed("JDBC protocol lost synchronization; reconnect required".into()));
-        }
-        if let Some(error) = value.get("error") {
-            let message = error.get("message").and_then(Value::as_str).unwrap_or("unknown JDBC error");
-            return Err(classify_sidecar_error(method, &redact(message)));
-        }
-        Ok(value.get("result").cloned().unwrap_or(Value::Null))
+        abandoned.armed=false;
+        Ok(map_query_result(&self.response("executeQuery",received)?,max_rows))
     }
 
     fn meta_params(&self, schema: &str) -> Value {
@@ -325,30 +315,55 @@ impl Driver for JdbcDriver {
     fn db_type(&self) -> DatabaseType { DatabaseType::Jdbc }
     fn capabilities(&self) -> crate::db::capabilities::Capabilities { self.caps }
     fn close(&self) {
-        // Independent from the protocol mutex: disconnect can kill a hung JVM even
-        // while another worker is blocked in stdout.read_line().
-        if let Ok(mut child) = self.child.lock() { let _ = child.kill(); let _ = child.wait(); }
+        self.closed.store(true,Ordering::SeqCst);
+        if self.owns_process {self.proc.close();}else{self.proc.detached("closeSession",self.params(json!({})));}
     }
-
-    async fn exec_statement_batch(&self, statements: crate::db::driver::StatementBatch) -> Result<u64, DbError> {
-        if !self.caps.transactions { return Err(DbError::Unsupported("This JDBC driver does not support transactions".into())); }
-        let proc = self.proc.clone(); let connection = self.connection.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut p = proc.lock().map_err(|_| DbError::QueryFailed("JDBC sidecar lock poisoned".into()))?;
-            Self::rpc_locked(&mut p, &connection, "beginTransaction", json!({}))?;
-            let writes = (|| {
-                let mut count = 0u64;
-                for statement in statements {
-                    let r = Self::rpc_locked(&mut p, &connection, "executeUpdate", json!({"sql": statement?}))?;
-                    count += r.get("affected_rows").and_then(Value::as_u64).unwrap_or(0);
-                }
-                Ok::<_, DbError>(count)
-            })();
-            match writes {
-                Ok(count) => { Self::rpc_locked(&mut p, &connection, "commitTransaction", json!({}))?; Ok(count) }
-                Err(error) => { let _ = Self::rpc_locked(&mut p, &connection, "rollbackTransaction", json!({})); Err(error) }
+    fn supports_query_cancel(&self)->bool {self.can_cancel}
+    async fn fork_query_session(&self)->Result<Arc<dyn Driver>,DbError> {
+        if !self.caps.query_sessions{return Err(DbError::Unsupported("This JDBC plugin does not support independent sessions".into()));}
+        if self.closed.load(Ordering::SeqCst){return Err(DbError::NotFound("closed JDBC parent connection".into()));}
+        let child=Self{proc:self.proc.clone(),operation:Arc::new(tokio::sync::Mutex::new(())),
+            session_id:format!("jdbc-{:032x}",rand::random::<u128>()),owns_process:false,closed:Arc::new(AtomicBool::new(false)),
+            can_cancel:self.can_cancel,caps:self.caps,connection:self.connection.clone(),database:self.database.clone()};
+        child.rpc("openSession",json!({})).await?;
+        Ok(Arc::new(child))
+    }
+    async fn transaction_state(&self)->Result<crate::db::query_session::TransactionState,DbError> {
+        let state=self.rpc("sessionStatus",json!({})).await?;
+        Ok(match state.get("transactionState").and_then(Value::as_str) {
+            Some("idle")=>crate::db::query_session::TransactionState::Idle,
+            Some("manual")=>crate::db::query_session::TransactionState::Manual,
+            _=>crate::db::query_session::TransactionState::Unknown,
+        })
+    }
+    async fn transaction_command(&self,action:crate::db::query_session::TransactionAction,cancel:tokio_util::sync::CancellationToken)->Result<(),DbError> {
+        use crate::db::query_session::TransactionAction as A;
+        if !self.caps.transactions{return Err(DbError::Unsupported("This JDBC engine has no transactions".into()));}
+        if cancel.is_cancelled(){return Err(DbError::Cancelled);}
+        let method=match action{A::Begin=>"beginTransaction",A::Commit=>"commitTransaction",A::Rollback=>"rollbackTransaction"};
+        self.rpc(method,json!({})).await?;Ok(())
+    }
+    async fn close_query_session(&self)->Result<(),DbError> {
+        self.closed.store(true,Ordering::SeqCst);
+        let result=self.rpc_unlocked("closeSession",json!({})).await;
+        if self.owns_process{self.proc.close();}
+        result.map(|_|())
+    }
+    async fn exec_statement_batch(&self,statements:crate::db::driver::StatementBatch)->Result<u64,DbError> {
+        if !self.caps.transactions{return Err(DbError::Unsupported("This JDBC driver does not support transactions".into()));}
+        let _operation=self.operation.lock().await;
+        if self.closed.load(Ordering::SeqCst){return Err(DbError::NotFound("closed JDBC session".into()));}
+        let mut abandoned=JdbcAbandoned{proc:self.proc.clone(),params:self.params(json!({})),closed:self.closed.clone(),armed:true};
+        self.rpc_unlocked("beginTransaction",json!({})).await?;
+        let mut affected=0;
+        for statement in statements {
+            let result=match statement {Ok(sql)=>self.rpc_unlocked("executeUpdate",json!({"sql":sql})).await,Err(error)=>Err(error)};
+            match result {
+                Ok(value)=>affected+=value.get("affected_rows").and_then(Value::as_u64).unwrap_or(0),
+                Err(error)=>{if self.rpc_unlocked("rollbackTransaction",json!({})).await.is_ok(){abandoned.armed=false;}return Err(error);}
             }
-        }).await.map_err(|e| DbError::QueryFailed(e.to_string()))?
+        }
+        self.rpc_unlocked("commitTransaction",json!({})).await?;abandoned.armed=false;Ok(affected)
     }
 
     async fn test(&self) -> Result<String, DbError> {
@@ -357,41 +372,21 @@ impl Driver for JdbcDriver {
             .unwrap_or("JDBC connected").to_string())
     }
 
-    async fn query(&self, sql: &str, max_rows: u32) -> Result<QueryResult, DbError> {
-        // maxRows 0 means "no cap" to us; the plugin defaults to its own cap, so
-        // pass a large value when uncapped (writes ignore it).
-        let plugin_max = max_rows.max(1);
-        let r = self.rpc("executeQuery", json!({ "sql": sql, "maxRows": plugin_max })).await?;
-        Ok(map_query_result(&r, max_rows))
+    async fn query(&self,sql:&str,max_rows:u32)->Result<QueryResult,DbError>{
+        self.execute_query(sql,max_rows,None,0,tokio_util::sync::CancellationToken::new()).await
     }
-
-    async fn query_with_default_namespace(&self, sql: &str, max_rows: u32, default_namespace: Option<&str>)
-        -> Result<QueryResult, DbError> {
-        let plugin_max = max_rows.max(1);
-        let mut params = json!({ "sql": sql, "maxRows": plugin_max });
-        if let Some(namespace) = default_namespace.map(str::trim).filter(|s| !s.is_empty()) {
-            if let Value::Object(ref mut m) = params {
-                // The sidecar mirrors DBX's execution context support:
-                // JDBC catalog/database engines consume `database`, schema-aware
-                // engines consume `schema`, unsupported drivers ignore either.
-                m.insert("database".into(), json!(namespace));
-                m.insert("schema".into(), json!(namespace));
-            }
-        }
-        let r = self.rpc("executeQuery", params).await?;
-        Ok(map_query_result(&r, max_rows))
+    async fn query_with_default_namespace(&self,sql:&str,max_rows:u32,namespace:Option<&str>)->Result<QueryResult,DbError>{
+        self.execute_query(sql,max_rows,namespace,0,tokio_util::sync::CancellationToken::new()).await
     }
-
-    async fn paginated_query_with_default_namespace(&self, sql: &str, limit: u32, offset: u32, namespace: Option<&str>) -> Result<QueryResult, DbError> {
-        let plan = crate::db::pagination::build_page_plan(DatabaseType::Jdbc, sql, limit, offset)?;
-        // Let the JDBC cursor discard the prefix, not a giant Rust/JSON array. No
-        // LIMIT is injected into Oracle/DB2/etc, and only one page crosses IPC.
-        let mut params = json!({ "sql": plan.sql, "maxRows": limit, "offsetRows": offset });
-        if let Some(namespace) = namespace.filter(|s| !s.trim().is_empty()) {
-            params["database"] = json!(namespace); params["schema"] = json!(namespace);
-        }
-        let result = self.rpc("executeQuery", params).await?;
-        Ok(map_query_result(&result, limit))
+    async fn query_cancellable(&self,sql:&str,max_rows:u32,namespace:Option<&str>,cancel:tokio_util::sync::CancellationToken)->Result<QueryResult,DbError>{
+        self.execute_query(sql,max_rows,namespace,0,cancel).await
+    }
+    async fn paginated_query_with_default_namespace(&self,sql:&str,limit:u32,offset:u32,namespace:Option<&str>)->Result<QueryResult,DbError>{
+        self.paginated_query_cancellable(sql,limit,offset,namespace,tokio_util::sync::CancellationToken::new()).await
+    }
+    async fn paginated_query_cancellable(&self,sql:&str,limit:u32,offset:u32,namespace:Option<&str>,cancel:tokio_util::sync::CancellationToken)->Result<QueryResult,DbError>{
+        let plan=crate::db::pagination::build_page_plan(DatabaseType::Jdbc,sql,limit,offset)?;
+        self.execute_query(&plan.sql,limit,namespace,offset,cancel).await
     }
 
     async fn list_schemas(&self) -> Result<Vec<String>, DbError> {

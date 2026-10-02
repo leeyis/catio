@@ -38,6 +38,26 @@ The JVM is located via `CATIO_JAVA_BIN`, then `JAVA_HOME/bin/java`, then `java`
 on `PATH`. **End users still need a JRE/JDK 17+ installed** (catio bundles the
 plugin jar, not a JVM).
 
+## Query sessions and protocol
+
+One JVM belongs to a parent database connection; query tabs open independent JDBC
+connections inside that JVM. This preserves H2 in-memory database sharing without
+sharing transactions or local temporary tables. JSON-line responses are matched by
+request ID, not arrival order; a slow query does not hold a global response lock.
+
+The sidecar uses bounded query/control executors, per-session serialization,
+request-scoped Statement cancellation, early-cancel handling and closed-session
+IDs. Closing a child rolls back/releases only that connection; disconnecting the
+parent terminates the process. Rust bounds pending requests, response frames and
+stderr retention. Connection secrets remain in memory and are redacted from errors.
+
+`sessionStatus` reports JDBC auto-commit/manual-commit mode. It is not proof that a
+vendor has not implicitly committed DDL or a procedure. Raw transaction control can
+make the state unknown. H2 session isolation, cancellation and lifecycle behavior
+are covered end-to-end; other vendors require their own actual-driver validation.
+Native statement cancellation is advertised for the validated H2 profile, not all
+JDBC brands merely because the JDBC interface contains `Statement.cancel()`.
+
 ## Driver JARs
 
 catio does not redistribute proprietary JDBC drivers. Drop each engine's driver

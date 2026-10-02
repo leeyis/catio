@@ -102,8 +102,8 @@ pwsh tests/database-lab/New-LabCertificate.ps1 -ServerAddress <sandbox> -OutputD
 ## 5. 明确的验收边界
 
 - 这些测试不证明全部兼容品牌/商业 JDBC 引擎均可用；每一种实际引擎/版本需要自己的夹具与验收。
-- PostgreSQL/MySQL/SQL Server/SQLite/DuckDB 查询标签使用独立物理会话，支持事务工具栏和关闭回滚；查询事务不包含表格编辑操作。每连接最多 16 个查询会话，浏览器每 30 秒续约，失联 30 分钟回收。JDBC 独立会话继续实施，未声明完成。
-- 原生中断与 timeout 覆盖 PostgreSQL、MySQL、SQLite、DuckDB。其他引擎不得把停止等待描述为已中断；JDBC 可通过断开连接终止 sidecar。
+- PostgreSQL/MySQL/SQL Server/SQLite/DuckDB 查询标签使用独立物理会话，支持事务工具栏和关闭回滚；查询事务不包含表格编辑操作。每连接最多 16 个查询会话，浏览器每 30 秒续约，失联 30 分钟回收。JDBC 也提供同 JVM 内独立 connection，已通过 H2 端到端验收；其他厂商需单独实测。
+- 原生中断与 timeout 覆盖 PostgreSQL、MySQL、SQLite、DuckDB。JDBC/H2 已验证请求级 Statement 取消；其他 JDBC 厂商未一概声明支持。无法确认取消时必须提示结果不确定，可通过断开父连接终止 sidecar，不把停止等待描述为已中断。
 - 事务回滚证明针对 SQL/约束失败。**提交时断网的结果可能不确定，不自动重试写入，应先核对数据。**
 - 跨库迁移要求准备期间源表保持稳定；这不是跨数据库一致性快照。暂存上限为 1 GiB。
 - 顶层 BLOB 已覆盖 SQLite、DuckDB、PostgreSQL、MySQL、SQL Server、JDBC/H2、rqlite 的键/值编辑、迁移、SQL 恢复；JSON 的无损往返使用 `catio-table-v1`（含 `binaryCells`），普通 CSV/TSV 不携带类型信息。嵌套二进制和长尾 JDBC 方言仍未算完整验收。

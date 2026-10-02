@@ -67,8 +67,7 @@ public final class CatioJdbcPlugin {
         new JdbcDriverQuirkRule("jdbc:dm:", ORACLE_QUIRKS)
     );
     private static String registeredDriverKey = "";
-    private static String sharedConnectionKey = "";
-    private static Connection sharedConnection;
+    private static final Map<Long,SessionRuntime.ActiveStatement> activeStatements = SessionRuntime.activeStatements;
 
     record JdbcDriverQuirks(
         boolean skipExecutionContext,
@@ -86,67 +85,74 @@ public final class CatioJdbcPlugin {
     }
 
     public static void main(String[] args) throws Exception {
-        try (
-            BufferedReader reader = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
-            BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(System.out, StandardCharsets.UTF_8))
-        ) {
+        java.util.concurrent.ThreadFactory daemon = task -> { Thread thread=new Thread(task,"catio-jdbc-request");thread.setDaemon(true);return thread; };
+        java.util.concurrent.ExecutorService workers=new java.util.concurrent.ThreadPoolExecutor(8,8,0L,java.util.concurrent.TimeUnit.MILLISECONDS,
+            new java.util.concurrent.ArrayBlockingQueue<>(128),daemon,new java.util.concurrent.ThreadPoolExecutor.AbortPolicy());
+        java.util.concurrent.ExecutorService controls=new java.util.concurrent.ThreadPoolExecutor(2,2,0L,java.util.concurrent.TimeUnit.MILLISECONDS,
+            new java.util.concurrent.ArrayBlockingQueue<>(64),daemon,new java.util.concurrent.ThreadPoolExecutor.AbortPolicy());
+        try (BufferedReader reader=new BufferedReader(new InputStreamReader(System.in,StandardCharsets.UTF_8));
+             BufferedWriter writer=new BufferedWriter(new OutputStreamWriter(System.out,StandardCharsets.UTF_8))) {
             String line;
-            while ((line = reader.readLine()) != null) {
-                if (line.isBlank()) {
-                    continue;
-                }
-                ObjectNode response = handleLine(line);
-                writer.write(MAPPER.writeValueAsString(response));
-                writer.newLine();
-                writer.flush();
-                if (response.path("_dbx_close").asBoolean(false)) {
-                    break;
+            while((line=reader.readLine())!=null) {
+                if(line.isBlank())continue;
+                final String request=line;
+                JsonNode header=MAPPER.readTree(request);
+                String method=header.path("method").asText();
+                if("close".equals(method)){writeResponse(writer,handleLine(request));break;}
+                java.util.concurrent.ExecutorService executor=Set.of("cancelRequest","closeSession").contains(method)?controls:workers;
+                try { executor.execute(()->{
+                    try {writeResponse(writer,handleLine(request));}
+                    catch(Exception error){ // never echo the request: it contains credentials
+                        ObjectNode response=MAPPER.createObjectNode();response.set("id",header.path("id"));
+                        response.set("error",MAPPER.createObjectNode().put("message","JDBC request processing failed"));
+                        try{writeResponse(writer,response);}catch(Exception ignored){}
+                    }
+                }); } catch(java.util.concurrent.RejectedExecutionException busy) {
+                    ObjectNode response=MAPPER.createObjectNode();response.set("id",header.path("id"));
+                    response.set("error",MAPPER.createObjectNode().put("message","JDBC request queue is full"));writeResponse(writer,response);
                 }
             }
-        } finally {
-            closeSharedConnection();
-        }
+        } finally {workers.shutdownNow();controls.shutdownNow();closeSharedConnection();}
     }
-
+    private static void writeResponse(BufferedWriter writer,ObjectNode response) throws Exception {
+        synchronized(writer){writer.write(MAPPER.writeValueAsString(response));writer.newLine();writer.flush();}
+    }
     private static ObjectNode handleLine(String line) throws Exception {
-        JsonNode request = MAPPER.readTree(line);
-        JsonNode id = request.path("id");
-        ObjectNode response = MAPPER.createObjectNode();
-        response.set("id", id.isMissingNode() ? MAPPER.getNodeFactory().numberNode(1) : id);
-
+        JsonNode request=MAPPER.readTree(line),id=request.path("id");
+        ObjectNode response=MAPPER.createObjectNode();response.set("id",id.isMissingNode()?MAPPER.getNodeFactory().numberNode(1):id);
+        String method=request.path("method").asText(),sessionId=request.path("params").path("sessionId").asText("");
+        SessionRuntime.Session session=null;boolean locked=false;
         try {
-            String method = requireText(request, "method");
-            JsonNode params = request.path("params");
-            JsonNode connection = params.path("connection");
-            if ("close".equals(method)) {
-                closeSharedConnection();
-                ObjectNode result = MAPPER.createObjectNode();
-                result.put("ok", true);
-                response.set("result", result);
-                response.put("_dbx_close", true);
-                return response;
+            if(method.isBlank())throw new IllegalArgumentException("JDBC method required");
+            JsonNode params=request.path("params"),connection=params.path("connection");
+            if("close".equals(method)){closeSharedConnection();response.set("result",MAPPER.createObjectNode().put("ok",true));response.put("_dbx_close",true);return response;}
+            if("cancelRequest".equals(method)) {
+                long target=params.path("targetRequestId").asLong(-1);if(target<1)throw new IllegalArgumentException("Invalid cancellation request ID");
+                boolean active=SessionRuntime.cancel(target,sessionId);
+                response.set("result",MAPPER.createObjectNode().put("requested",true).put("active",active));return response;
             }
+            if("closeSession".equals(method)){SessionRuntime.close(sessionId);response.set("result",MAPPER.createObjectNode().put("ok",true));return response;}
+            session=SessionRuntime.lookup(sessionId,"openSession".equals(method));
+            session.operation.lockInterruptibly();locked=true;
+            SessionRuntime.enter(id.asLong(1),sessionId,session);
             registerDrivers(connection);
-            response.set("result", handle(method, params, connection));
-        } catch (Throwable error) {
-            // Catch Throwable, not just Exception: a JDBC driver can throw Error
-            // subclasses (NoClassDefFoundError, ExceptionInInitializerError,
-            // LinkageError, …) while loading classes or reading metadata. Letting
-            // those escape would kill the whole sidecar process (the catio side
-            // then sees an unexplained EOF) instead of returning a usable error.
-            ObjectNode errorNode = MAPPER.createObjectNode();
-            errorNode.put("message", error.getMessage() == null ? error.toString() : error.getMessage());
-            response.set("error", errorNode);
-        }
+            response.set("result",handle(method,params,connection));
+        } catch(Throwable error) {
+            if("openSession".equals(method))SessionRuntime.close(sessionId);
+            ObjectNode message=MAPPER.createObjectNode();message.put("message",error.getMessage()==null?error.toString():error.getMessage());
+            if(error instanceof SQLException sqlError)message.put("sql_state",sqlError.getSQLState());
+            response.set("error",message);
+        } finally {SessionRuntime.leave();if(locked)session.operation.unlock();}
         return response;
     }
 
     private static JsonNode handle(String method, JsonNode params, JsonNode connection) throws Exception {
         return switch (method) {
-            case "testConnection", "connect" -> {
+            case "testConnection", "connect", "openSession" -> {
                 Connection conn = openConnection(connection);
                 ObjectNode result = MAPPER.createObjectNode();
                 result.put("ok", true);
+                result.put("query_sessions",true);
                 // Report a human-readable server version so catio's test() can
                 // surface it (mirrors the native drivers' SELECT version()).
                 try {
@@ -164,6 +170,11 @@ public final class CatioJdbcPlugin {
                     // the version number fail the connection itself.
                 }
                 yield result;
+            }
+            case "sessionStatus" -> {
+                Connection conn=openConnection(connection);
+                boolean auto=conn.getAutoCommit();
+                yield MAPPER.createObjectNode().put("autoCommit",auto).put("transactionState",!auto?"manual":SessionRuntime.current().session().unmanagedTransaction?"unknown":"idle");
             }
             case "executeQuery" -> executeQuery(
                 connection,
@@ -206,7 +217,7 @@ public final class CatioJdbcPlugin {
         };
     }
 
-    private static void registerDrivers(JsonNode connection) throws Exception {
+    private static synchronized void registerDrivers(JsonNode connection) throws Exception {
         String driverKey = driverKey(connection);
         if (driverKey.equals(registeredDriverKey)) {
             return;
@@ -252,10 +263,12 @@ public final class CatioJdbcPlugin {
             throw new IllegalArgumentException("JDBC URL is required.");
         }
         String key = connectionKey(connection);
-        if (sharedConnection != null && key.equals(sharedConnectionKey) && !sharedConnection.isClosed()) {
-            return sharedConnection;
+        SessionRuntime.Session session=SessionRuntime.current().session();
+        synchronized(session) {
+            if(session.closed)throw new SQLException("JDBC SQL session is closed");
+            if(session.connection!=null&&key.equals(session.connectionKey)&&!session.connection.isClosed())return session.connection;
         }
-        closeSharedConnection();
+        SessionRuntime.closeConnection(session);
 
         Properties properties = new Properties();
         String username = optionalText(connection, "username");
@@ -270,9 +283,12 @@ public final class CatioJdbcPlugin {
         if (isOracleUrl(url)) {
             applyOracleProperties(connection, properties);
         }
-        sharedConnection = DriverManager.getConnection(url, properties);
-        sharedConnectionKey = key;
-        return sharedConnection;
+        Connection opened=DriverManager.getConnection(url,properties);
+        synchronized(session) {
+            if(session.closed){opened.close();throw new SQLException("JDBC SQL session closed while connecting");}
+            session.connection=opened;session.connectionKey=key;
+        }
+        return opened;
     }
 
     private static void applyConnectTimeout(JsonNode connection, Properties properties) {
@@ -305,10 +321,14 @@ public final class CatioJdbcPlugin {
     ) throws SQLException {
         long start = System.nanoTime();
         Connection conn = openConnection(connection);
-        applyExecutionContext(connection, conn, database, schema);
+        boolean transactionSql=mayChangeTransactionMode(sql);
+        if(transactionSql)SessionRuntime.current().session().unmanagedTransaction=true;
+        else applyExecutionContext(connection, conn, database, schema);
         try (Statement statement = conn.createStatement()) {
+            SessionRuntime.track(statement);
             int window = (int) Math.min(Integer.MAX_VALUE - 1L, (long) maxRows + offsetRows);
             applyStatementOptions(statement, window, fetchSize, timeoutSecs);
+            SessionRuntime.checkCancelled();
             boolean hasResultSet = statement.execute(trimStatementSql(sql));
             ObjectNode result = MAPPER.createObjectNode();
             ArrayNode columns = MAPPER.createArrayNode();
@@ -351,29 +371,47 @@ public final class CatioJdbcPlugin {
         }
     }
 
+    private static boolean mayChangeTransactionMode(String sql) {
+        String text=sql.stripLeading();
+        while(text.startsWith("--")||text.startsWith("/*")) {
+            if(text.startsWith("--")){int end=text.indexOf('\n');if(end<0)return false;text=text.substring(end+1).stripLeading();}
+            else {int end=text.indexOf("*/",2);if(end<0)return true;text=text.substring(end+2).stripLeading();}
+        }
+        return text.matches("(?is)^(BEGIN|START\\s+TRANSACTION|COMMIT|ROLLBACK|SAVEPOINT|RELEASE|CALL|EXEC|EXECUTE|DECLARE|DO|SET\\s+(AUTO|IMPLICIT)_?COMMIT|SET\\s+IMPLICIT_TRANSACTIONS)\\b.*");
+    }
+
     private static JsonNode beginTransaction(JsonNode connection) throws SQLException {
         Connection conn = openConnection(connection);
         if (!conn.getMetaData().supportsTransactions()) throw new SQLException("Transactions are not supported by this JDBC driver");
-        if (!conn.getAutoCommit()) throw new SQLException("A JDBC transaction is already active");
+        if (!conn.getAutoCommit() || SessionRuntime.current().session().unmanagedTransaction) throw new SQLException("A JDBC transaction is active or its state is unknown");
         conn.setAutoCommit(false);
+        SessionRuntime.current().session().unmanagedTransaction=false;
         return MAPPER.createObjectNode().put("ok", true);
     }
 
     private static JsonNode finishTransaction(JsonNode connection, boolean commit) throws SQLException {
         Connection conn = openConnection(connection);
-        if (conn.getAutoCommit()) throw new SQLException("No JDBC transaction is active");
+        if (conn.getAutoCommit()) {
+            if(!commit && SessionRuntime.current().session().unmanagedTransaction) {
+                try(Statement statement=conn.createStatement()){statement.execute("ROLLBACK");}
+                SessionRuntime.current().session().unmanagedTransaction=false;
+                return MAPPER.createObjectNode().put("ok",true);
+            }
+            throw new SQLException("No JDBC transaction is active");
+        }
         try {
             if (commit) conn.commit(); else conn.rollback();
         } catch (SQLException failure) {
             // Never switch auto-commit back on after a failed rollback: some drivers
             // would commit outstanding work. Close the unusable connection instead.
             try { conn.rollback(); } catch (SQLException rollbackFailure) {
-                closeSharedConnection(); throw failure;
+                SessionRuntime.failCurrent(); throw failure;
             }
             conn.setAutoCommit(true);
             throw failure;
         }
         conn.setAutoCommit(true);
+        SessionRuntime.current().session().unmanagedTransaction=false;
         return MAPPER.createObjectNode().put("ok", true);
     }
 
@@ -381,6 +419,7 @@ public final class CatioJdbcPlugin {
         Connection conn = openConnection(connection);
         if (conn.getAutoCommit()) throw new SQLException("Batch update requires an active transaction");
         try (Statement statement = conn.createStatement()) {
+            SessionRuntime.track(statement);SessionRuntime.checkCancelled();
             return MAPPER.createObjectNode().put("affected_rows", Math.max(0, statement.executeUpdate(trimStatementSql(sql))));
         }
     }
@@ -902,16 +941,7 @@ public final class CatioJdbcPlugin {
         return -1;
     }
 
-    private static void closeSharedConnection() {
-        if (sharedConnection != null) {
-            try {
-                sharedConnection.close();
-            } catch (SQLException ignored) {
-            }
-            sharedConnection = null;
-            sharedConnectionKey = "";
-        }
-    }
+    private static void closeSharedConnection() {SessionRuntime.closeAll();}
 
     private static String driverKey(JsonNode connection) {
         return optionalText(connection, "jdbc_driver_class") + "|" + connection.path("jdbc_driver_paths").toString();

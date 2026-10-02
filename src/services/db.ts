@@ -684,9 +684,9 @@ export async function erRelations(connId: string, schema: string): Promise<ErRel
 }
 
 // Independent, leased SQL sessions. IDs are runtime-only and never saved in profiles.
-export type TransactionState = 'idle' | 'active' | 'failed' | 'unknown'
+export type TransactionState = 'idle' | 'active' | 'manual' | 'failed' | 'unknown'
 export type TransactionAction = 'begin' | 'commit' | 'rollback'
-export interface QuerySessionInfo { id: string; transactionState: TransactionState; busy: boolean; canCancel: boolean; leaseSeconds: number }
+export interface QuerySessionInfo { id: string; transactionState: TransactionState; busy: boolean; canCancel: boolean; supportsTransactions?: boolean; leaseSeconds: number }
 export async function openQuerySession(connId: string): Promise<QuerySessionInfo> {
   if (!isTauri() && !isServer()) throw new Error('Independent SQL sessions require an active backend')
   return rpc('db_open_query_session',{connId})

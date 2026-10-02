@@ -60,7 +60,7 @@ impl ConnManager {
         let transaction_state=if busy {TransactionState::Unknown} else {
             tokio::time::timeout(std::time::Duration::from_secs(5),driver.transaction_state()).await.ok().and_then(Result::ok).unwrap_or(TransactionState::Unknown)
         };
-        Ok(QuerySessionInfo{id:session.into(),transaction_state,busy,can_cancel:driver.supports_query_cancel(),lease_seconds:SESSION_LEASE_SECONDS})
+        Ok(QuerySessionInfo{id:session.into(),transaction_state,busy,can_cancel:driver.supports_query_cancel(),supports_transactions:driver.capabilities().transactions,lease_seconds:SESSION_LEASE_SECONDS})
     }
     async fn acquire(&self,connection:&str,session:Option<&str>,execution:&str)
         ->Result<(Arc<dyn Driver>,Option<Arc<Mutex<()>>>,QueryGuard),DbError> {
@@ -90,9 +90,8 @@ impl ConnManager {
     }
     pub async fn query_page_in_session(&self,connection:&str,session:&str,sql:&str,limit:u32,offset:u32,namespace:Option<&str>)->Result<QueryResult,DbError>{
         let (driver,operation,guard)=self.acquire(connection,Some(session),&QUERY_IDS.next()).await?;
-        let plan=crate::db::pagination::build_page_plan(driver.db_type(),sql,limit,offset)?;
-        let result=Self::execute(driver,operation,guard,&plan.sql,plan.fetch_rows,namespace,None).await?;
-        Ok(crate::db::pagination::finish_page(result,&plan,limit))
+        let _operation=tokio::select!{_=guard.token.cancelled()=>return Err(DbError::Cancelled),lock=operation.expect("session operation lock").lock_owned()=>lock};
+        driver.paginated_query_cancellable(sql,limit,offset,namespace,guard.token.clone()).await
     }
     #[allow(clippy::too_many_arguments)]
     async fn execute(driver:Arc<dyn Driver>,operation:Option<Arc<Mutex<()>>>,guard:QueryGuard,sql:&str,max_rows:u32,namespace:Option<&str>,timeout_ms:Option<u64>)->Result<QueryResult,DbError>{
@@ -118,13 +117,13 @@ impl ConnManager {
         if action==TransactionAction::Begin && before!=TransactionState::Idle {
             return Err(DbError::QueryFailed("Cannot start another transaction: current state is active, failed, or unknown".into()));
         }
-        if action==TransactionAction::Commit && before!=TransactionState::Active {
+        if action==TransactionAction::Commit && !matches!(before,TransactionState::Active|TransactionState::Manual) {
             return Err(DbError::QueryFailed("Commit requires a healthy active transaction; roll back a failed transaction".into()));
         }
         if before!=TransactionState::Idle || action==TransactionAction::Begin {
             driver.transaction_command(action,guard.token.clone()).await?;
         }
         let state=driver.transaction_state().await.unwrap_or(TransactionState::Unknown);
-        Ok(QuerySessionInfo{id:session.into(),transaction_state:state,busy:false,can_cancel:driver.supports_query_cancel(),lease_seconds:SESSION_LEASE_SECONDS})
+        Ok(QuerySessionInfo{id:session.into(),transaction_state:state,busy:false,can_cancel:driver.supports_query_cancel(),supports_transactions:driver.capabilities().transactions,lease_seconds:SESSION_LEASE_SECONDS})
     }
 }

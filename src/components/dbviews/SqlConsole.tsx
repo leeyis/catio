@@ -105,7 +105,7 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
   const [selectedStatement, setSelectedStatement] = useState(0)
   const [statementProgress, setStatementProgress] = useState({ current: 0, total: 0 })
   const stopAfterStatement = useRef(false)
-  const nativeCancellation = ['postgres', 'mysql', 'sqlite', 'duckdb'].includes(engine ?? '')
+  const nativeCancellation = querySessions && session.info ? session.info.canCancel : ['postgres', 'mysql', 'sqlite', 'duckdb'].includes(engine ?? '')
   // T12 执行计划(EXPLAIN):非空时结果区显示 ExplainPlanViewer(树/表/JSON),关闭后回到普通结果。
   // 仅 PG/MySQL 且已连接(connId)支持(supportsExplainPlan + connId 门控)。
   const [explain, setExplain] = useState<{ plan?: ParsedExplainPlan; loading: boolean; error?: string } | null>(null)
