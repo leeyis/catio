@@ -54,6 +54,7 @@ export interface DbConnectArgs {
 }
 
 export interface DbCapabilities {
+  querySessions?: boolean
   writable: boolean
   transactions: boolean
   schemas: boolean
@@ -152,7 +153,7 @@ export interface QueryHistoryMeta {
   profileId?: string
 }
 
-export async function runQuery(connId: string, sql: string, defaultNamespace?: string, meta?: QueryHistoryMeta, maxRows?: number, execution?: { executionId: string; timeoutMs?: number }): Promise<QueryResult> {
+export async function runQuery(connId: string, sql: string, defaultNamespace?: string, meta?: QueryHistoryMeta, maxRows?: number, execution?: { executionId: string; timeoutMs?: number; querySessionId?: string }): Promise<QueryResult> {
   if (!isTauri() && !isServer()) return mockQueryResult()
   const args: Record<string, unknown> = { connId, sql }
   if (defaultNamespace) args.defaultNamespace = defaultNamespace
@@ -160,6 +161,7 @@ export async function runQuery(connId: string, sql: string, defaultNamespace?: s
   if (meta?.engine) args.engine = meta.engine
   if (meta?.profileId) args.profileId = meta.profileId
   if (maxRows != null) args.maxRows = maxRows
+  if (execution?.querySessionId) args.querySessionId = execution.querySessionId
   if (execution) { args.executionId = execution.executionId; if (execution.timeoutMs != null) args.timeoutMs = execution.timeoutMs }
   return rpc<QueryResult>('db_query', args)
 }
@@ -171,9 +173,9 @@ export async function splitQuery(connId: string, sql: string): Promise<string[]>
 }
 
 /** Request a real, execution-scoped interrupt. The runQuery promise is the terminal result. */
-export async function cancelQuery(connId: string, executionId: string): Promise<void> {
+export async function cancelQuery(connId: string, executionId: string, querySessionId?: string): Promise<void> {
   if (!isTauri() && !isServer()) return
-  return rpc('db_cancel_query', { connId, executionId })
+  return rpc('db_cancel_query', { connId, executionId, ...(querySessionId ? {querySessionId} : {}) })
 }
 
 /**
@@ -193,11 +195,12 @@ export async function execSyncBatch(connId: string, statements: string[]): Promi
  * result; the frontend parses it via `parseExplainResult`. Only PG/MySQL support
  * this. Throws outside Tauri (no meaningful mock for a real plan).
  */
-export async function runExplain(connId: string, sql: string, defaultNamespace?: string): Promise<QueryResult> {
+export async function runExplain(connId: string, sql: string, defaultNamespace?: string, querySessionId?: string): Promise<QueryResult> {
   if (!isTauri() && !isServer()) throw new Error('执行计划需要 Tauri 运行时')
   const args: Record<string, unknown> = { connId, sql }
   // 沿用选中的 schema/库执行 EXPLAIN,否则后端落连接默认库,对未限定库名的查询报表不存在。
   if (defaultNamespace) args.defaultNamespace = defaultNamespace
+  if (querySessionId) args.querySessionId=querySessionId
   return rpc<QueryResult>('db_explain', args)
 }
 
@@ -293,10 +296,11 @@ export async function duplicateTableStructure(connId: string, schema: string | u
 }
 
 /** Paginated query — same shape as runQuery but with limit/offset windowing. */
-export async function queryPage(connId: string, sql: string, limit: number, offset: number, defaultNamespace?: string): Promise<QueryResult> {
+export async function queryPage(connId: string, sql: string, limit: number, offset: number, defaultNamespace?: string, querySessionId?: string): Promise<QueryResult> {
   if (!isTauri() && !isServer()) return mockQueryResult()
   const args: Record<string, unknown> = { connId, sql, limit, offset }
   if (defaultNamespace) args.defaultNamespace = defaultNamespace
+  if (querySessionId) args.querySessionId=querySessionId
   return rpc<QueryResult>('db_query_page', args)
 }
 
@@ -677,4 +681,25 @@ export async function saveObjectSource(connId: string, schema: string, name: str
 export async function erRelations(connId: string, schema: string): Promise<ErRelation[]> {
   if (!isTauri() && !isServer()) return DATA.erModel.relations
   return rpc<ErRelation[]>('db_er_model', { connId, schema })
+}
+
+// Independent, leased SQL sessions. IDs are runtime-only and never saved in profiles.
+export type TransactionState = 'idle' | 'active' | 'failed' | 'unknown'
+export type TransactionAction = 'begin' | 'commit' | 'rollback'
+export interface QuerySessionInfo { id: string; transactionState: TransactionState; busy: boolean; canCancel: boolean; leaseSeconds: number }
+export async function openQuerySession(connId: string): Promise<QuerySessionInfo> {
+  if (!isTauri() && !isServer()) throw new Error('Independent SQL sessions require an active backend')
+  return rpc('db_open_query_session',{connId})
+}
+export async function closeQuerySession(connId: string, querySessionId: string): Promise<void> {
+  return rpc('db_close_query_session',{connId,querySessionId})
+}
+export async function querySessionStatus(connId: string, querySessionId: string): Promise<QuerySessionInfo> {
+  return rpc('db_query_session_status',{connId,querySessionId})
+}
+export async function pingQuerySession(connId: string, querySessionId: string): Promise<void> {
+  return rpc('db_query_session_ping',{connId,querySessionId})
+}
+export async function querySessionTransaction(connId: string, querySessionId: string, action: TransactionAction): Promise<QuerySessionInfo> {
+  return rpc('db_query_session_transaction',{connId,querySessionId,action})
 }

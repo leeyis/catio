@@ -11,6 +11,7 @@ import { LocalSplitTerminal } from './components/workbench/LocalSplitTerminal'
 import { SplitTerminal } from './components/workbench/SplitTerminal'
 import { VncPane } from './components/workbench/VncPane'
 import { DbWorkbench } from './components/workbench/DbWorkbench'
+import { hasPendingQueryWork, listQuerySessionWork } from './state/querySessionWork'
 import { AIPanel } from './components/panels/AIPanel'
 import { SftpPanel } from './components/panels/SftpPanel'
 import { MonitorPanel } from './components/panels/MonitorPanel'
@@ -34,7 +35,7 @@ import { usePrefs, uiFontStack, monoFontStack } from './state/preferences'
 import { readTermBufferTail } from './services/termBuffers'
 import { buildAgentSystemPrompt } from './services/agentPrompt'
 import { useData } from './state/DataContext'
-import { dbConnect, dbConnectArgsFromProfile, dbDisconnect, getHistory as getDbHistory, clearDbHistory, deleteDbHistory, deleteDbHistoryForProfile, dbErrMsg } from './services/db'
+import { dbConnect, dbConnectArgsFromProfile, dbDisconnect, closeQuerySession, getHistory as getDbHistory, clearDbHistory, deleteDbHistory, deleteDbHistoryForProfile, dbErrMsg } from './services/db'
 import {
   useDbConnections, useActiveDbConnections, dbProfileToConnection, listActiveDbConnections,
   setActiveDbConnection, removeDbConnection, removeActiveDbConnection, saveDbConnection,
@@ -134,6 +135,26 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<string>(() => restoreOpenTabs()?.activeTab ?? '')
   // Pending unsaved-changes confirmation when closing a dirty remote-file tab.
   const [closeConfirm, setCloseConfirm] = useState<{ id: string; title: string } | null>(null)
+  const [queryCloseAction,setQueryCloseAction]=useState<(()=>void)|null>(null)
+  const allowNativeClose=useRef(false)
+  useEffect(()=>{
+    const beforeUnload=(event:BeforeUnloadEvent)=>{if(!allowNativeClose.current&&hasPendingQueryWork()){event.preventDefault();event.returnValue=''}}
+    window.addEventListener('beforeunload',beforeUnload)
+    let disposed=false;let unlisten:(()=>void)|undefined
+    if(isTauri())void import('@tauri-apps/api/window').then(async ({getCurrentWindow})=>{
+      const native=getCurrentWindow()
+      const stop=await native.onCloseRequested(event=>{
+        if(allowNativeClose.current||!hasPendingQueryWork())return
+        event.preventDefault()
+        setQueryCloseAction(()=>()=>{
+          void Promise.allSettled(listQuerySessionWork().map(item=>closeQuerySession(item.connectionId,item.info.id)))
+            .then(()=>{allowNativeClose.current=true;return native.close()}).catch(()=>{})
+        })
+      })
+      if(disposed)stop();else unlisten=stop
+    }).catch(()=>{})
+    return()=>{disposed=true;unlisten?.();window.removeEventListener('beforeunload',beforeUnload)}
+  },[])
   // Transient VNC passwords (connId → password), in-memory only — never persisted.
   const [vncSecrets, setVncSecrets] = useState<Record<string, string>>({})
   // Monotonic counter for unique tab ids. A connId can now own MULTIPLE tabs
@@ -1174,12 +1195,14 @@ export default function App() {
     })
   }
   // Guard: closing a remote-file tab with unsaved edits asks for confirmation first.
-  function closeTab(id: string) {
+  function closeTab(id: string, confirmed = false) {
+    if(confirmed!==true&&hasPendingQueryWork({workbenchId:id})){setQueryCloseAction(()=>()=>closeTab(id,true));return}
     const tab = tabs.find(tb => tb.id === id)
     if (tab && tab.kind === 'remote-file' && tab.dirty) { setCloseConfirm({ id, title: tab.title }); return }
     doCloseTab(id)
   }
-  function closeOthers(id: string) {
+  function closeOthers(id: string, confirmed = false) {
+    if(confirmed!==true&&tabs.some(tab=>tab.id!==id&&hasPendingQueryWork({workbenchId:tab.id}))){setQueryCloseAction(()=>()=>closeOthers(id,true));return}
     setTabs(prev => {
       const next = prev.filter(tb => tb.id === id)
       prev.filter(tb => tb.id !== id).forEach(tb => reapSession(tb, next))
@@ -1191,7 +1214,8 @@ export default function App() {
       return next
     })
   }
-  function closeAll() {
+  function closeAll(confirmed = false) {
+    if(confirmed!==true&&tabs.some(tab=>hasPendingQueryWork({workbenchId:tab.id}))){setQueryCloseAction(()=>()=>closeAll(true));return}
     setTabs(prev => {
       prev.forEach(tb => reapSession(tb, []))
       return []
@@ -1223,7 +1247,9 @@ export default function App() {
     setEditProfile(profile)
     setShowNew(true)
   }
-  function deleteDbProfile(profile: DbProfile) {
+  async function deleteDbProfile(profile: DbProfile, confirmed = false) {
+    if(confirmed!==true&&hasPendingQueryWork({profileId:profile.id})){setQueryCloseAction(()=>()=>{void deleteDbProfile(profile,true)});return}
+    await disconnectDbProfile(profile,true)
     // Drop any active live connection for this profile, then remove the profile.
     listActiveDbConnections()
       .filter(a => a.profileId === profile.id)
@@ -1276,7 +1302,8 @@ export default function App() {
   }
 
   // Disconnect every live connection for a DB profile (details panel "关闭连接").
-  async function disconnectDbProfile(profile: DbProfile) {
+  async function disconnectDbProfile(profile: DbProfile, confirmed = false) {
+    if(confirmed!==true&&hasPendingQueryWork({profileId:profile.id})){setQueryCloseAction(()=>()=>{void disconnectDbProfile(profile,true)});return}
     const actives = listActiveDbConnections().filter(a => a.profileId === profile.id)
     for (const a of actives) {
       try { await dbDisconnect(a.connId) } catch { /* best-effort */ }
@@ -1284,7 +1311,7 @@ export default function App() {
     }
     // A conn may own multiple tabs now — close every tab for this profile.
     const closing = tabs.filter(tb => tb.connId === profile.id).map(tb => tb.id)
-    closing.forEach(id => closeTab(id))
+    closing.forEach(id => closeTab(id,true))
     bumpDbActive()
     // Reflect the new (disconnected) status in the open details panel.
     setDetailConn(prev => (prev && prev.id === profile.id ? { ...prev, status: 'idle' } : prev))
@@ -1456,7 +1483,8 @@ export default function App() {
   }
 
   // 批量维护：删除选中连接（host 走 deleteProfile + 拆会话 + 删历史；db 复用 deleteDbProfile）。
-  function batchDelete(conns: Connection[]) {
+  function batchDelete(conns: Connection[], confirmed = false) {
+    if(confirmed!==true&&conns.some(conn=>conn.kind==='db'&&hasPendingQueryWork({profileId:conn.id}))){setQueryCloseAction(()=>()=>batchDelete(conns,true));return}
     for (const c of conns) {
       if (c.kind === 'host') {
         if (sessionMap[c.id]) teardownSession(c.id)
@@ -1470,7 +1498,7 @@ export default function App() {
         try { removeVncConnection(c.id) } catch { /* ignore */ }
       } else {
         const p = dbProfiles.find(x => x.id === c.id)
-        if (p) deleteDbProfile(p)
+        if (p) void deleteDbProfile(p,true)
       }
     }
     setHistory(loadHistory())
@@ -2259,7 +2287,7 @@ export default function App() {
                           <SplitTerminal tabId={tab.id} conn={tabConn} sessionId={tab.sessionId} active={isShown} connected={terminalTabConnected(tab)} resolveSessionId={resolveSessionId} mxCandidates={mxCandidates} ensureSession={ensureSession} onConnectTarget={onConnectTarget} sendToPty={sendToPty} onSessionClosed={markSshSessionClosed} onReconnect={() => reconnectTerminalTab(tab.id)} onChannel={(_sid, chan) => setChanMap(m => { const n = { ...m }; if (chan) n[tab.id] = chan; else delete n[tab.id]; return n })} />
                         )}
                         {tab.kind === 'sql' && tabConn && (
-                          <DbWorkbench conn={tabConn} density={density} active={isShown} />
+                          <DbWorkbench conn={tabConn} density={density} active={isShown} workspaceTabId={tab.id} />
                         )}
                         {tab.kind === 'remote-file' && tab.path && (
                           <RemoteFileEditor sessionId={tab.sessionId} path={tab.path}
@@ -2448,6 +2476,9 @@ export default function App() {
         />
       )}
 
+      {queryCloseAction && <ConfirmModal title={t('dbviews.sessionCloseTitle')} message={t('dbviews.sessionCloseWarning')}
+        confirmLabel={t('dbviews.sessionCloseConfirm')} danger confirmIcon="x"
+        onCancel={()=>setQueryCloseAction(null)} onConfirm={()=>{const action=queryCloseAction;setQueryCloseAction(null);action()}}/>}
       {closeConfirm && (
         <ConfirmModal
           title={t('remoteFile.closeUnsavedTitle')}

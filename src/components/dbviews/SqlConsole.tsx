@@ -16,6 +16,8 @@ import { sqlLinter, linterTableNames } from './sqlDiagnostics'
 import { formatSql } from './sqlFormatter'
 import type { SQLNamespace } from '@codemirror/lang-sql'
 import { DataGrid } from './DataGrid'
+import { useQuerySession } from './useQuerySession'
+import { QuerySessionToolbar } from './QuerySessionToolbar'
 import { ExplainPlanViewer } from './ExplainPlanViewer'
 import { SqlFileDialog } from './SqlFileDialog'
 import { parseExplainResult, supportsExplainPlan, type ParsedExplainPlan } from './explainPlan'
@@ -30,6 +32,9 @@ export interface SqlConsoleProps {
   writable?: boolean
   /** When set, Run executes the typed SQL against the live backend instead of mock. */
   connId?: string
+  querySessions?: boolean
+  workbenchId?: string
+  sessionOwnerId?: string
   /** Seed text for a fresh console (e.g. a CREATE TABLE/VIEW template). Falls back to empty. */
   initialCode?: string
   /** Namespace selected when this query tab is opened from a scoped action. */
@@ -61,10 +66,12 @@ export interface SqlConsoleProps {
   onFullscreenChange?: (fullscreen: boolean) => void
 }
 
-interface CompletedStatement { sql: string; defaultNamespace?: string; result?: QueryResult; error?: string }
+interface CompletedStatement { querySessionId?: string; sql: string; defaultNamespace?: string; result?: QueryResult; error?: string }
 
-export function SqlConsole({ density, fresh, connId, initialCode, initialDefaultSchema, autoRun, active, engine, connName, profileId, onFullscreenChange }: SqlConsoleProps) {
+export function SqlConsole({ density, fresh, connId, initialCode, initialDefaultSchema, autoRun, active, engine, connName, profileId, onFullscreenChange, querySessions = false, workbenchId, sessionOwnerId }: SqlConsoleProps) {
   const { t } = useTranslation()
+  const session = useQuerySession(connId, querySessions, {profileId,workbenchId,ownerId:sessionOwnerId})
+  const runBusy = useRef(false)
   // mongodb/elasticsearch/redis 用各自语法(mongo shell / REST+SQL / Redis 命令),
   // 编辑器走 plain 模式:不挂 SQL 补全、显示语法占位提示、结果网格只读(mongo 的 _id
   // 带 pk 标记会让 DataGrid 误开 SQL DML 编辑——对这些引擎必然失败)。
@@ -87,6 +94,7 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
   // Live result of the last successful run (only used when connId is set).
   const [result, setResult] = useState<(QueryResult & {
     sql: string
+    querySessionId?: string
     defaultNamespace?: string
   }) | null>(null)
   const [runErr, setRunErr] = useState<string | null>(null)
@@ -403,15 +411,19 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
   // 这样"停止"或被新一次运行取代时，旧结果会被丢弃,UI 立即交还控制权。
   const runToken = useRef(0)
   const activeExecution = useRef<string | null>(null)
+  const executionSession = useRef<string | undefined>(undefined)
   useEffect(() => () => {
     runToken.current++
-    if (connId && activeExecution.current) void cancelQuery(connId, activeExecution.current).catch(() => {})
+    runBusy.current=false
+    if (connId && activeExecution.current) void (executionSession.current
+      ? cancelQuery(connId,activeExecution.current,executionSession.current)
+      : cancelQuery(connId,activeExecution.current)).catch(()=>{})
     activeExecution.current = null
   }, [connId])
 
   function run(sqlOverride?: string) {
     // 运行中不重复触发（避免 Alt↵ 在执行中再起一次）。
-    if (phase === 'running') return
+    if (phase === 'running' || runBusy.current || session.actionBusy) return
     setRunErr(null)
     // 普通运行接管结果区:清掉可能正在展示的执行计划,回到数据网格。
     setExplain(null)
@@ -424,12 +436,17 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
       ? (defaultNamespace || initialDefaultSchema)
       : undefined
     const myToken = ++runToken.current
+    runBusy.current=true
     if (connId) {
       setPhase('running'); setCancelRequested(false); setStatementResults([]); setResult(null)
       stopAfterStatement.current = false
       const runId = globalThis.crypto?.randomUUID?.() ?? `query-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
       void (async () => {
         try {
+          const ownedSession=querySessions ? await session.ensure() : undefined
+          if(myToken!==runToken.current || stopAfterStatement.current)return
+          executionSession.current=ownedSession?.id
+          session.markBusy(true)
           const statements = plain ? [sql] : await splitQuery(connId, sql)
           const completed: CompletedStatement[] = []
           for (let index = 0; index < statements.length; index++) {
@@ -441,38 +458,42 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
             try {
               const res = await runQuery(connId, statements[index], runDefaultNamespace,
                 { name: connName, engine, profileId }, resultLimit,
-                { executionId, timeoutMs: nativeCancellation ? timeoutMs : 0 })
-              entry = { sql: statements[index], defaultNamespace: runDefaultNamespace, result: res }
-            } catch (e) { entry = { sql: statements[index], defaultNamespace: runDefaultNamespace, error: dbErrMsg(e) } }
+                { executionId, timeoutMs: nativeCancellation ? timeoutMs : 0, ...(ownedSession ? {querySessionId:ownedSession.id} : {}) })
+              entry = { sql: statements[index], defaultNamespace: runDefaultNamespace, querySessionId:ownedSession?.id, result: res }
+            } catch (e) { entry = { sql: statements[index], defaultNamespace: runDefaultNamespace, querySessionId:ownedSession?.id, error: dbErrMsg(e) } }
             if (myToken !== runToken.current) return
             completed.push(entry)
             setStatementResults([...completed]); setSelectedStatement(index)
-            setResult(entry.result ? { ...entry.result, sql: entry.sql, defaultNamespace: entry.defaultNamespace } : null)
+            setResult(entry.result ? { ...entry.result, sql: entry.sql, defaultNamespace: entry.defaultNamespace, querySessionId: entry.querySessionId } : null)
             setRunErr(entry.error ?? null); setRunSeq(sequence => sequence + 1)
             if (entry.error || stopAfterStatement.current) break // never execute the remainder after failure/stop
           }
         } catch (e) {
           if (myToken === runToken.current) { setResult(null); setRunErr(dbErrMsg(e)) }
         } finally {
-          if (myToken === runToken.current) { activeExecution.current = null; setCancelRequested(false); setPhase('done') }
+          if(myToken===runToken.current) {
+            activeExecution.current=null;executionSession.current=undefined
+            await session.refresh()
+            if(myToken===runToken.current){runBusy.current=false;setCancelRequested(false);setPhase('done')}
+          }
         }
       })()
       return
     }
     // Mock path: unchanged demo timing.
     setPhase('running')
-    setTimeout(() => { if (myToken === runToken.current) setPhase('done') }, 450)
+    setTimeout(() => { if (myToken === runToken.current) {runBusy.current=false;setPhase('done')} }, 450)
   }
 
   // Do not release the UI or claim "stopped" before the backend query terminates.
   async function stop() {
-    if (!connId) { runToken.current++; setPhase('idle'); return }
+    if (!connId) { runToken.current++; runBusy.current=false;setPhase('idle'); return }
     if (cancelRequested) return
     stopAfterStatement.current = true
     const executionId = activeExecution.current
     setCancelRequested(true)
     if (!executionId) return // split/dispatch phase: no statement is allowed to start afterward
-    try { await cancelQuery(connId, executionId) }
+    try { await (executionSession.current ? cancelQuery(connId,executionId,executionSession.current) : cancelQuery(connId, executionId)) }
     catch (e) {
       if (activeExecution.current === executionId) { setRunErr(dbErrMsg(e)); setCancelRequested(false) }
     }
@@ -482,7 +503,7 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
   // 普通运行/停止互斥(在途的 explain 被新运行/停止取代时丢弃),并切到 split 态
   // 让结果区可见。失败时把后端报错原样展示在查看器里(不污染普通结果)。
   function runExplainPlan() {
-    if (!canExplain) return
+    if (!canExplain || runBusy.current || session.actionBusy) return
     // 选中优先:与普通 run() 一致 —— 编辑区选中片段时只对选中文本取计划,
     // 避免在多语句编辑区里对整段 code 运行 EXPLAIN(多语句会拼出非法 EXPLAIN)。
     const selected = editorRef.current?.getSelectedText()
@@ -490,12 +511,17 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
     if (!sql.trim()) return
     const myToken = ++runToken.current
     setPaneMode('split')
-    setExplain({ loading: true })
+    setExplain({ loading: true });runBusy.current=true
     // 与普通 run() 一致:把选中的默认库/Schema 传给 EXPLAIN,否则后端落连接默认库报表不存在。
     const explainNamespace = supportsDefaultNamespace && (defaultNamespace || initialDefaultSchema)
       ? (defaultNamespace || initialDefaultSchema)
       : undefined
-    runExplain(connId!, sql, explainNamespace)
+    ;(async()=>{
+      const owned=querySessions ? await session.ensure() : undefined
+      if(myToken!==runToken.current)throw new Error('SQL session owner changed')
+      session.markBusy(true)
+      return owned ? runExplain(connId!,sql,explainNamespace,owned.id) : runExplain(connId!,sql,explainNamespace)
+    })()
       .then(res => {
         if (myToken !== runToken.current) return
         // engine 已被 canExplain 收窄为 PG/MySQL 之一。
@@ -505,7 +531,7 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
       .catch(e => {
         if (myToken !== runToken.current) return
         setExplain({ loading: false, error: dbErrMsg(e) })
-      })
+      }).finally(async()=>{await session.refresh();if(myToken===runToken.current)runBusy.current=false})
   }
 
   // Keep the latest run() in a ref so the (active-gated) event listener always
@@ -565,6 +591,9 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
   return (
     <div ref={splitContainerRef} className="col" style={{ height: '100%', width: '100%', minHeight: 0, minWidth: 0 }}>
       {schemaError && <div role="alert" style={{ padding: '6px 12px', color: 'var(--danger-fg)', fontSize: 12 }}>{t('dbviews.loadError', { message: schemaError })}</div>}
+      {querySessions && connId && <QuerySessionToolbar info={session.info} loading={session.loading}
+        busy={phase==='running'||session.actionBusy||!!explain?.loading} error={session.error}
+        onAction={action=>{void session.transact(action)}} onReconnect={()=>{void session.reconnect()}}/>}
       {/* console toolbar — the query name lives in the tab strip above, so it's not
           repeated here; just the editor actions, right-aligned. */}
       <div className="row" style={{ justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, padding: '7px 12px', borderBottom: '1px solid var(--border-hairline)', flex: 'none' }}>
@@ -574,14 +603,14 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
               {t(cancelRequested ? 'dbviews.cancelling' : 'dbviews.stop')}
             </Btn>
           ) : (
-            <Btn size="sm" variant="primary" testId="sql-run" disabled={!code.trim()} style={{ height: 26, padding: '0 10px', fontSize: 11.5 }} icon="play" onClick={() => run()}>
+            <Btn size="sm" variant="primary" testId="sql-run" disabled={!code.trim() || session.loading || session.actionBusy || !!explain?.loading} style={{ height: 26, padding: '0 10px', fontSize: 11.5 }} icon="play" onClick={() => run()}>
               {t('dbviews.run')} <span style={{ opacity: .6, fontSize: 10, marginLeft: 2 }}>Alt↵</span>
             </Btn>
           )}
           {/* T12 执行计划入口:仅 PG/MySQL 且已连接时出现,空 SQL 时禁用。纯 icon + 悬浮提示
               「查看执行计划」(与右侧格式化/清除等工具按钮一致;\"解释\"二字易误解,去掉文字)。 */}
           {canExplain && (
-            <button className="icon-btn bare" data-testid="sql-explain" disabled={!code.trim()}
+            <button className="icon-btn bare" data-testid="sql-explain" disabled={!code.trim() || phase==='running' || session.loading || session.actionBusy || !!explain?.loading}
               title={t('dbviews.explainTitle')} onClick={runExplainPlan}>
               <Icon name="git-branch" size={15} />
             </button>
@@ -596,7 +625,7 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
           )}
         </div>
         <div className="row gap6" style={{ minWidth: 0, flexWrap: 'wrap' }}>
-          {['postgres', 'mysql', 'sqlite', 'duckdb', 'sqlserver', 'jdbc'].includes(engine ?? '') && connId && <span className="chip" title={t('dbviews.sqlSessionHint')} style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{t('dbviews.sqlSession')}</span>}
+          {!querySessions && ['postgres', 'mysql', 'sqlite', 'duckdb', 'sqlserver', 'jdbc'].includes(engine ?? '') && connId && <span className="chip" title={t('dbviews.sqlSessionHint')} style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{t('dbviews.sqlSession')}</span>}
           {connId && <label className="row gap6" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
             {t('dbviews.resultLimit')}
             <select aria-label={t('dbviews.resultLimit')} value={resultLimit} disabled={phase === 'running'} onChange={e => setResultLimit(Number(e.target.value))}
@@ -670,7 +699,7 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
             {statementResults.map((entry, index) => <button key={index} role="tab" aria-selected={selectedStatement === index}
               title={entry.error ?? entry.sql} onClick={() => {
                 setSelectedStatement(index); setRunErr(entry.error ?? null)
-                setResult(entry.result ? { ...entry.result, sql: entry.sql, defaultNamespace: entry.defaultNamespace } : null)
+                setResult(entry.result ? { ...entry.result, sql: entry.sql, defaultNamespace: entry.defaultNamespace, querySessionId: entry.querySessionId } : null)
                 setRunSeq(sequence => sequence + 1)
               }} style={{ flex: 'none', border: '1px solid var(--border-hairline)', borderRadius: 6, padding: '4px 8px', cursor: 'pointer', fontSize: 11,
                 background: selectedStatement === index ? 'var(--accent-soft)' : 'var(--surface-sunken)', color: entry.error ? 'var(--danger-fg)' : 'var(--text-primary)' }}>
@@ -705,6 +734,7 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
                     // plain 引擎(mongo/es)不传 sql:服务端分页会拼 SQL LIMIT/OFFSET 必败,回落客户端分页。
                     sql={plain || !result?.sql || result.rowsAffected != null || classifyAiSqlExecution(result.sql).category !== 'read' || classifyAiSqlExecution(result.sql).reasons.includes('multi_statement') ? undefined : result.sql}
                     defaultNamespace={result?.defaultNamespace}
+                    querySessionId={result?.querySessionId}
                     resultLabel={t('dbviews.queryResult')}
                     loadError={runErr ?? undefined} />
                 : <DataGrid

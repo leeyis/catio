@@ -42,6 +42,7 @@ export interface DataGridProps {
   sql?: string
   /** Default database/schema namespace to reuse when paginating an ad-hoc query. */
   defaultNamespace?: string
+  querySessionId?: string
   /**
    * When set, pagination uses the dialect-correct `tablePreview` (schema/table)
    * backend command instead of re-running a raw `sql`. Preferred for the live
@@ -119,7 +120,7 @@ function colIcon(col: ResultColumn): string {
   return 'type'
 }
 
-export function DataGrid({ columns: inputColumns, rows, binaryCells, statusTones = {}, density = 'comfortable', writable = true, transactions, connId, table = connId ? '' : 'orders', schema, engine, sql, defaultNamespace, livePreview, onRefresh, truncated, loadError, resultLabel, rowKeys, keyColumn }: DataGridProps) {
+export function DataGrid({ columns: inputColumns, rows, binaryCells, statusTones = {}, density = 'comfortable', writable = true, transactions, connId, table = connId ? '' : 'orders', schema, engine, sql, defaultNamespace, querySessionId, livePreview, onRefresh, truncated, loadError, resultLabel, rowKeys, keyColumn }: DataGridProps) {
   const { t } = useTranslation()
   const columns = useMemo(() => uniqueGridColumns(inputColumns), [inputColumns])
   const [sel, setSel] = useState({ r: connId ? 0 : 2, c: connId ? 0 : 3 })
@@ -167,7 +168,7 @@ export function DataGrid({ columns: inputColumns, rows, binaryCells, statusTones
     setEdits({}); setNewRows([]); setDeleted(new Set()); setEditing(null); setPreview(null)
     setPageError(null)
     return () => { pageRequest.current++ }
-  }, [connId, schema, table, sql, defaultNamespace])
+  }, [connId, schema, table, sql, defaultNamespace, querySessionId])
   const [filterOpen, setFilterOpen] = useState(false)
   const [filterText, setFilterText] = useState('')
   // 列级结构化筛选规则(8 种操作符 + AND/OR)。叠加在全局文本搜索之上,二者同时生效。
@@ -378,10 +379,12 @@ export function DataGrid({ columns: inputColumns, rows, binaryCells, statusTones
       return (limit: number, offset: number) => tablePreview(connId, schema, table, limit, offset)
     }
     if (connId && sql) {
-      return (limit: number, offset: number) => queryPage(connId, sql, limit, offset, defaultNamespace)
+      return (limit: number, offset: number) => querySessionId
+        ? queryPage(connId,sql,limit,offset,defaultNamespace,querySessionId)
+        : queryPage(connId, sql, limit, offset, defaultNamespace)
     }
     return null
-  }, [connId, livePreview, sql, schema, table, defaultNamespace, serverWhere, serverOrder])
+  }, [connId, livePreview, sql, schema, table, defaultNamespace, querySessionId, serverWhere, serverOrder])
 
   // Apply a freshly-fetched server page. The Postgres live preview ALWAYS returns a
   // leading `__ctid` system column (for EVERY table, PK or not) — the parent strips

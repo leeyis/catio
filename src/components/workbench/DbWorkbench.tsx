@@ -3,6 +3,8 @@
 import { useState, useMemo, useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
+import { ConfirmModal } from '../modals/ConfirmModal'
+import { hasPendingQueryWork, useQuerySessionWork } from '../../state/querySessionWork'
 import { SqlConsole, ERDiagram } from '../dbviews'
 import { CreateObjectModal } from '../dbviews/CreateObjectModal'
 import { ObjectAdminModal } from '../dbviews/ObjectAdminModal'
@@ -20,6 +22,7 @@ import type { Connection, Schema, SchemaNamespace } from '../../services/types'
 
 export interface DbWorkbenchProps {
   conn: Connection
+  workspaceTabId?: string
   density?: 'comfortable' | 'compact'
   /**
    * True when this workbench is the currently-shown App tab. Workbenches stay
@@ -59,9 +62,13 @@ const tabIdOf = {
   compare: () => 'compare',
 }
 
-export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbenchProps) {
+export function DbWorkbench({ conn, density, active: shown = true, workspaceTabId }: DbWorkbenchProps) {
   const { t } = useTranslation()
   const D = useData()
+  const workbenchId=workspaceTabId??conn.id
+  const sessionWork=useQuerySessionWork()
+  const [queryCloseAction,setQueryCloseAction]=useState<(()=>void)|null>(null)
+  const pendingQueryTab=(id:string)=>hasPendingQueryWork({ownerId:workbenchId+':'+id})
 
   // Resolve the active live connection (if any): the first one whose profileId matches conn.id.
   // When present (Tauri + connected) we drive the grid from the backend; otherwise we keep the
@@ -259,7 +266,8 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
   }
   /** 关闭 tab;若关的是当前 tab,激活右侧相邻(无则左侧),全关后为空状态。
    *  全函数式更新:批量/程序化连续关闭也不会用陈旧 tabs 覆盖。 */
-  function closeTab(id: string) {
+  function closeTab(id: string, confirmed = false) {
+    if(confirmed!==true&&pendingQueryTab(id)){setQueryCloseAction(()=>()=>closeTab(id,true));return}
     setTabs(prev => {
       const idx = prev.findIndex(x => x.id === id)
       if (idx < 0) return prev
@@ -269,12 +277,14 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
     })
   }
   /** 关闭除 id 外的其余 tab,并激活该 id。 */
-  function closeOthers(id: string) {
+  function closeOthers(id: string, confirmed = false) {
+    if(confirmed!==true&&tabs.some(tab=>tab.id!==id&&pendingQueryTab(tab.id))){setQueryCloseAction(()=>()=>closeOthers(id,true));return}
     setTabs(prev => prev.filter(x => x.id === id))
     setActiveId(id)
   }
   /** 关闭全部 tab,进入空状态。 */
-  function closeAll() {
+  function closeAll(confirmed = false) {
+    if(confirmed!==true&&tabs.some(tab=>pendingQueryTab(tab.id))){setQueryCloseAction(()=>()=>closeAll(true));return}
     setTabs([])
     setActiveId(null)
   }
@@ -383,6 +393,7 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
             <div ref={tabStripRef} className="row" style={{ gap: 6, flex: 1, minWidth: 0, overflowX: 'auto' }}>
               {tabs.map(tb => {
                 const isActive = tb.id === activeId
+                const sessionState=sessionWork.find(item=>item.ownerId===workbenchId+':'+tb.id)?.info.transactionState
                 const icon = tb.kind === 'table' ? 'table-2'
                   : tb.kind === 'sql' ? 'file-code'
                   : tb.kind === 'er' ? 'network'
@@ -399,7 +410,7 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
                     className="row gap6" title={label}
                     style={{ flex: 'none', alignItems: 'center', height: 26, padding: '0 6px 0 10px', borderRadius: 8, cursor: 'pointer', fontSize: 12,
                       background: isActive ? 'var(--accent-soft)' : 'var(--surface-sunken)', color: isActive ? 'var(--accent-primary)' : 'var(--text-secondary)' }}>
-                    <Icon name={icon} size={12} /> <span className="ell mono" style={{ maxWidth: 140 }}>{label}</span>
+                    <Icon name={icon} size={12} /> {sessionState && sessionState!=='idle' && <span className="dot" title={t(`dbviews.txState.${sessionState}`)} style={{background:sessionState==='failed'?'var(--danger-fg)':'var(--signal-amber)'}}/>} <span className="ell mono" style={{ maxWidth: 140 }}>{label}</span>
                     <button className="icon-btn bare" data-testid={`wbtab-close-${tb.id}`} style={{ width: 18, height: 18 }} title={t('shell.close')} onClick={e => { e.stopPropagation(); closeTab(tb.id) }}><Icon name="x" size={11} /></button>
                   </div>
                 )
@@ -449,6 +460,7 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
               )}
               {tb.kind === 'sql' && (
                 <SqlConsole density={density} fresh queryN={tb.qid} writable={caps.writable} connId={connId ?? undefined}
+                  querySessions={!!caps.querySessions} workbenchId={workbenchId} sessionOwnerId={workbenchId+':'+tb.id}
                   initialCode={queryInitialCode[tb.qid]} initialDefaultSchema={tb.defaultSchema} autoRun={autoRunByTab[tb.id]}
                   onFullscreenChange={(fs) => setFsByTab(m => (m[tb.id] === fs ? m : { ...m, [tb.id]: fs }))}
                   active={shown && tb.id === activeId} engine={conn.engine} connName={conn.name} profileId={conn.id} />
@@ -469,6 +481,9 @@ export function DbWorkbench({ conn, density, active: shown = true }: DbWorkbench
             </div>
           )}
         </div>
+        {queryCloseAction && <ConfirmModal title={t('dbviews.sessionCloseTitle')} message={t('dbviews.sessionCloseWarning')}
+          confirmLabel={t('dbviews.sessionCloseConfirm')} danger confirmIcon="x"
+          onCancel={()=>setQueryCloseAction(null)} onConfirm={()=>{const action=queryCloseAction;setQueryCloseAction(null);action()}}/>}
         {/* CREATE TABLE / VIEW form modal — only with a live connection. */}
         {createObj && connId && (
           <CreateObjectModal
