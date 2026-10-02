@@ -105,8 +105,8 @@ async fn jdbc_h2_metadata_types_and_atomic_edits() {
     assert_eq!(r.rows[0][0], json!("9007199254740993"));
     assert_eq!(r.rows[0][1], json!("12345678901234567890.123456789012"));
     let edits = vec![
-        catio_lib::db::driver::EditRequest { schema: Some("PUBLIC".into()), table: "child".into(), kind: "update".into(), pk: vec![("id".into(), json!(1))], cells: vec![("note".into(), json!("changed"))] },
-        catio_lib::db::driver::EditRequest { schema: Some("PUBLIC".into()), table: "child".into(), kind: "insert".into(), pk: vec![], cells: vec![("id".into(), json!(1))] },
+        catio_lib::db::driver::EditRequest { schema: Some("PUBLIC".into()), table: "child".into(), kind: "update".into(), pk: vec![("id".into(), json!(1))], cells: vec![("note".into(), json!("changed"))], ..Default::default() },
+        catio_lib::db::driver::EditRequest { schema: Some("PUBLIC".into()), table: "child".into(), kind: "insert".into(), pk: vec![], cells: vec![("id".into(), json!(1))], ..Default::default() },
     ];
     assert!(catio_lib::db::write_ops::apply_edits(drv.as_ref(), &edits).await.is_err());
     assert_eq!(drv.query(r#"SELECT "note" FROM "child" WHERE "id"=1"#, 1).await.unwrap().rows[0][0], json!("original"));

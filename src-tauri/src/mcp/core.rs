@@ -492,6 +492,7 @@ fn build_insert_row_batches(
     args: &InsertRowsArgs,
 ) -> Result<Vec<ImportSqlBatch>, String> {
     let data = ParsedImportFile {
+        binary_cells: None,
         columns: args.columns.clone(),
         rows: args.rows.clone(),
         total_rows: args.rows.len(),

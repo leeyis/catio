@@ -148,13 +148,13 @@ pub fn to_query_result(value: RedisValue, max_rows: usize) -> QueryResult {
                         vec![o["field"].clone(), o["value"].clone()]
                     })
                     .collect();
-                QueryResult { columns: vec![col("field"), col("value")], rows, rows_affected: None, truncated }
+                QueryResult { binary_cells: Vec::new(), columns: vec![col("field"), col("value")], rows, rows_affected: None, truncated }
             } else {
                 let rows: Vec<Vec<Json>> = items.into_iter().take(max_rows).map(|v| vec![v]).collect();
-                QueryResult { columns: vec![col("value")], rows, rows_affected: None, truncated }
+                QueryResult { binary_cells: Vec::new(), columns: vec![col("value")], rows, rows_affected: None, truncated }
             }
         }
-        other => QueryResult { columns: vec![col("result")], rows: vec![vec![other]], rows_affected: None, truncated: false },
+        other => QueryResult { binary_cells: Vec::new(), columns: vec![col("result")], rows: vec![vec![other]], rows_affected: None, truncated: false },
     }
 }
 

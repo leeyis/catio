@@ -3,7 +3,7 @@ use crate::db::driver::{self, ConnectArgs, EditRequest, TableInfo, TableStructur
 use crate::db::manager::ConnManager;
 use crate::db::result::QueryResult;
 use crate::db::capabilities::Capabilities;
-use crate::db::dml::{self, CellEdit};
+
 use crate::db::query_explain_sql;
 use crate::db::db_admin_sql::{
     self, DatabaseObjectType, DropObjectSqlOptions, DropTableChildObjectSqlOptions,
@@ -289,7 +289,7 @@ pub async fn db_er_model(conn_id: String, schema: String,
 /// gating instead of duplicating it.
 pub(crate) fn build_sql(db: crate::db::DatabaseType, req: &EditRequest) -> Result<String, DbError> {
     if req.table.is_empty() { return Err(DbError::Unsupported("An explicit target table is required".into())); }
-    if req.kind != "insert" && req.pk.iter().any(|(_, value)| value.as_str().is_some_and(|text|
+    if req.kind != "insert" && req.binary_pk_columns.is_none() && req.pk.iter().any(|(_, value)| value.as_str().is_some_and(|text|
         text.strip_prefix("0x").is_some_and(|hex| hex.len() % 2 == 0 && hex.bytes().all(|b| b.is_ascii_hexdigit())))) {
         return Err(DbError::Unsupported("Hex-encoded row keys require type-aware binary binding; use explicit SQL to avoid updating a different row".into()));
     }
@@ -299,29 +299,27 @@ pub(crate) fn build_sql(db: crate::db::DatabaseType, req: &EditRequest) -> Resul
     if db == crate::db::DatabaseType::Clickhouse && req.kind != "insert" {
         return Err(DbError::Unsupported("ClickHouse primary keys are sorting keys, not unique row identities; use an explicit mutation query".into()));
     }
-    let cells: Vec<CellEdit> = req.cells.iter()
-        .map(|(c, v)| CellEdit { column: c.clone(), new_value: v.clone() }).collect();
     Ok(match req.kind.as_str() {
         "update" => {
             if req.cells.is_empty() || req.pk.is_empty() {
                 return Err(DbError::Unsupported(
                     "update requires changed cells and a primary key".into()));
             }
-            dml::build_update(db, req.schema.as_deref(), &req.table, &req.pk, &cells)
+            crate::db::typed_value::edit_sql(db, req)?
         }
         "insert" => {
             if req.cells.is_empty() {
                 return Err(DbError::Unsupported(
                     "insert requires at least one cell".into()));
             }
-            dml::build_insert(db, req.schema.as_deref(), &req.table, &cells)
+            crate::db::typed_value::edit_sql(db, req)?
         }
         "delete" => {
             if req.pk.is_empty() {
                 return Err(DbError::Unsupported(
                     "delete requires a primary key".into()));
             }
-            dml::build_delete(db, req.schema.as_deref(), &req.table, &req.pk)
+            crate::db::typed_value::edit_sql(db, req)?
         }
         other => return Err(DbError::Unsupported(format!("edit kind {other}"))),
     })
@@ -642,6 +640,7 @@ pub(crate) async fn export_database_core(
         let name = &info.name;
         let has_locator = drv.table_has_row_identity(schema_opt, name).await?;
         let (mut columns, mut rows, mut truncated) = (Vec::new(), Vec::new(), false);
+        let mut binary_cells=Vec::new();
 
         if include_data {
             // 分页取数，逐批累计到内存。cap=None 时导出全部行（无上限）；cap=Some(n)
@@ -664,6 +663,10 @@ pub(crate) async fn export_database_core(
                 }
                 let ctid_idx = if has_locator { res.columns.iter().position(|c| c.name == "__ctid") } else { None };
                 let got = res.rows.len();
+                let base=rows.len();
+                binary_cells.extend(res.binary_cells.into_iter().filter_map(|[r,c]| {
+                    if ctid_idx==Some(c) { None } else { Some([base+r,c-usize::from(ctid_idx.is_some_and(|i|i<c))]) }
+                }));
                 for row in res.rows {
                     let row: Vec<serde_json::Value> = match ctid_idx {
                         Some(i) => row.into_iter().enumerate()
@@ -684,16 +687,17 @@ pub(crate) async fn export_database_core(
             ddl: table_ddls.get(name).cloned(),
             columns,
             rows,
+            binary_cells,
             truncated,
         });
     }
 
     // chrono 此处未启用 clock feature；用既有 now_stamp()（unix 秒）作时间戳即可。
     let exported_at = now_stamp();
-    Ok(crate::db::export::build_database_sql_export(
+    crate::db::export::build_database_sql_export(
         drv.db_type(), has_schemas, &database, &exported_at, &export_tables,
         include_structure, include_data, batch,
-    ))
+    )
 }
 
 // ── 表数据导入（CSV/TSV/JSON → 批量 INSERT）────────────────────────────────────
@@ -703,6 +707,7 @@ pub(crate) async fn export_database_core(
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportPreview {
+    pub binary_cells: Option<Vec<[usize; 2]>>,
     pub file_name: String,
     pub file_type: String,
     pub size_bytes: u64,
@@ -731,6 +736,7 @@ pub async fn db_import_preview(file_path: String) -> Result<ImportPreview, DbErr
         .to_string();
     let truncated = parsed.total_rows > parsed.rows.len();
     Ok(ImportPreview {
+        binary_cells: parsed.binary_cells,
         file_name,
         file_type: kind.label().to_string(),
         size_bytes,

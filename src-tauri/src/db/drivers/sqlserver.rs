@@ -57,6 +57,25 @@ pub struct SqlServerDriver {
     client: Arc<Mutex<Client<Compat<TcpStream>>>>,
 }
 
+// Adapted from DBX's SQL Server transport decision: RPC sp_executesql must not
+// change @@TRANCOUNT or own a #temp table that must survive into a later query.
+async fn sqlserver_control(client: &mut Client<Compat<TcpStream>>, sql: &str) -> Result<(),DbError> {
+    client.simple_query(sql).await.map_err(|e|DbError::QueryFailed(e.to_string()))?
+        .into_results().await.map_err(|e|DbError::QueryFailed(e.to_string()))?;
+    Ok(())
+}
+fn needs_session_batch(sql: &str) -> bool {
+    let Ok(words)=crate::db::pagination::statement_words(DatabaseType::Sqlserver,sql) else { return true; };
+    // A # inside a CREATE statement may be a quoted temp-table name. Routing an
+    // ordinary CREATE conservatively as a batch has no affected-row ambiguity.
+    if words.first().is_some_and(|w|w=="CREATE") && sql.contains('#') {return true;}
+    if words.first().is_some_and(|w|matches!(w.as_str(),"SET"|"USE"|"DECLARE"|"PRINT")) { return true; }
+    if words.iter().any(|w|matches!(w.as_str(),"COMMIT"|"ROLLBACK")) { return true; }
+    if words.windows(2).any(|pair|pair[0]=="BEGIN" && matches!(pair[1].as_str(),"TRAN"|"TRANSACTION"|"DISTRIBUTED")) { return true; }
+    words.first().is_some_and(|w|matches!(w.as_str(),"CREATE"|"ALTER")) &&
+        words.iter().take(4).any(|w|matches!(w.as_str(),"SCHEMA"|"VIEW"|"FUNCTION"|"PROCEDURE"|"TRIGGER"))
+}
+
 /// Hold the exclusive client until rollback completes, even if the caller drops its future.
 struct PendingTransaction {
     client: Option<tokio::sync::OwnedMutexGuard<Client<Compat<TcpStream>>>>,
@@ -67,7 +86,7 @@ impl Drop for PendingTransaction {
         if let Some(mut client) = self.client.take() {
             if let Ok(runtime) = tokio::runtime::Handle::try_current() {
                 runtime.spawn(async move {
-                    let _ = client.execute("IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION", &[]).await;
+                    let _ = sqlserver_control(&mut client, "IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION").await;
                 });
             }
         }
@@ -309,14 +328,14 @@ impl Driver for SqlServerDriver {
     async fn exec_statement_batch(&self, statements: crate::db::driver::StatementBatch) -> Result<u64, DbError> {
         let mut pending = PendingTransaction { client: Some(self.client.clone().lock_owned().await) };
         let client = pending.client.as_mut().expect("transaction owns client");
-        client.execute("BEGIN TRANSACTION", &[]).await.map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        sqlserver_control(client, "BEGIN TRANSACTION").await?;
         let mut affected = 0u64;
         for statement in statements {
             let result = client.execute(statement?.as_str(), &[]).await
                 .map_err(|e| DbError::QueryFailed(e.to_string()))?;
             affected += result.rows_affected().iter().sum::<u64>();
         }
-        client.execute("COMMIT TRANSACTION", &[]).await.map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        sqlserver_control(client, "COMMIT TRANSACTION").await?;
         pending.client.take(); // commit succeeded; release without scheduling a rollback
         Ok(affected)
     }
@@ -324,10 +343,10 @@ impl Driver for SqlServerDriver {
     async fn query(&self, sql: &str, max_rows: u32) -> Result<QueryResult, DbError> {
         let mut client = self.client.lock().await;
 
-        if is_row_returning(sql) {
+        if is_row_returning(sql) || needs_session_batch(sql) {
             // SELECT / WITH / EXEC — stream rows, honour max_rows
             let mut stream = client
-                .query(sql, &[])
+                .simple_query(sql)
                 .await
                 .map_err(|e| DbError::QueryFailed(e.to_string()))?;
 
@@ -366,12 +385,13 @@ impl Driver for SqlServerDriver {
                 }
             }
 
-            Ok(QueryResult {
+            Ok(crate::db::typed_value::mark_binary_columns(QueryResult {
+                binary_cells: Vec::new(),
                 columns,
                 rows,
                 rows_affected: None,
                 truncated,
-            })
+            }))
         } else {
             // INSERT / UPDATE / DELETE / DDL — use execute for rows_affected
             let result = client
@@ -379,12 +399,13 @@ impl Driver for SqlServerDriver {
                 .await
                 .map_err(|e| DbError::QueryFailed(e.to_string()))?;
             let affected: u64 = result.rows_affected().iter().sum();
-            Ok(QueryResult {
+            Ok(crate::db::typed_value::mark_binary_columns(QueryResult {
+                binary_cells: Vec::new(),
                 columns: vec![],
                 rows: vec![],
                 rows_affected: Some(affected),
                 truncated: false,
-            })
+            }))
         }
     }
 

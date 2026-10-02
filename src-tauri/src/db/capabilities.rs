@@ -30,7 +30,11 @@ pub fn capabilities_for(db: DatabaseType) -> Capabilities {
             sql_console: true, er: true, structure_edit: true,
             views: true, functions: db != Sqlite,
         },
-        Clickhouse | Rqlite => Capabilities {
+        Rqlite => Capabilities {
+            writable: true, transactions: true, schemas: false,
+            sql_console: true, er: false, structure_edit: false, views: true, functions: false,
+        },
+        Clickhouse => Capabilities {
             writable: true, transactions: false, schemas: false,
             sql_console: true, er: false, structure_edit: false,
             // ClickHouse 有视图+UDF；Rqlite 基于 SQLite，有视图但无存储函数。

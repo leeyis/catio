@@ -17,6 +17,9 @@ pub struct ColumnInfo {
 pub struct QueryResult {
     pub columns: Vec<ColumnInfo>,
     pub rows: Vec<Vec<Value>>,
+    /// Actual binary storage, not inferred from display text; coordinates are page-local.
+    /// Out-of-band metadata cannot collide with genuine JSON objects or hex-looking text.
+    pub binary_cells: Vec<[usize; 2]>,
     pub rows_affected: Option<u64>,
     pub truncated: bool,
 }

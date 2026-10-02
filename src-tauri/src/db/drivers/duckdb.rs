@@ -125,7 +125,7 @@ fn resolve_catalog(conn: &Connection, database: &str) -> Result<String, DbError>
 fn duckdb_query_on_conn(conn: &Connection, sql: &str, max_rows: u32) -> Result<QueryResult, DbError> {
     if !crate::db::pagination::returns_rows(DatabaseType::Duckdb, sql) {
         let affected = conn.execute(sql, []).map_err(|e| DbError::QueryFailed(e.to_string()))?;
-        return Ok(QueryResult { columns: vec![], rows: vec![], rows_affected: Some(affected as u64), truncated: false });
+        return Ok(crate::db::typed_value::mark_binary_columns(QueryResult { binary_cells: Vec::new(), columns: vec![], rows: vec![], rows_affected: Some(affected as u64), truncated: false }));
     }
     let mut stmt = conn.prepare(sql).map_err(|e| DbError::QueryFailed(e.to_string()))?;
     let arrow = stmt.query_arrow([]).map_err(|e| DbError::QueryFailed(e.to_string()))?;
@@ -145,7 +145,7 @@ fn duckdb_query_on_conn(conn: &Connection, sql: &str, max_rows: u32) -> Result<Q
                 .collect::<Result<Vec<_>, _>>()?);
         }
     }
-    Ok(QueryResult { columns, rows, rows_affected: None, truncated })
+    Ok(crate::db::typed_value::mark_binary_columns(QueryResult { binary_cells: Vec::new(), columns, rows, rows_affected: None, truncated }))
 }
 
 #[async_trait]

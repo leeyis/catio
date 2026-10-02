@@ -150,7 +150,7 @@ pub struct ErRelation {
 }
 
 /// 前端传来的单行编辑请求。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct EditRequest {
     pub schema: Option<String>,
@@ -158,6 +158,11 @@ pub struct EditRequest {
     pub kind: String, // "update" | "insert" | "delete"
     pub pk: Vec<(String, serde_json::Value)>,
     pub cells: Vec<(String, serde_json::Value)>,
+    #[serde(default)]
+    pub binary_columns: Vec<String>,
+    /// None is a legacy request; Some(empty) explicitly identifies text/numeric keys.
+    #[serde(default)]
+    pub binary_pk_columns: Option<Vec<String>>,
 }
 
 /// A lazy, fallible statement source. Allows disk-spooled transfers to hold one physical

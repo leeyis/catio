@@ -42,6 +42,7 @@ pub fn import_preview(file_name: &str, bytes: &[u8]) -> Result<ImportPreview, Db
     let kind = ti::import_file_kind(file_name).map_err(DbError::QueryFailed)?;
     let parsed = ti::parse_import_bytes(kind, bytes, ti::DEFAULT_PREVIEW_LIMIT).map_err(DbError::QueryFailed)?;
     Ok(ImportPreview {
+        binary_cells: parsed.binary_cells,
         file_name: file_name.rsplit(['/', '\\']).next().unwrap_or(file_name).to_string(),
         file_type: kind.label().to_string(), size_bytes: bytes.len() as u64,
         truncated: parsed.rows.len() < parsed.total_rows,
@@ -148,16 +149,20 @@ pub async fn transfer_table(
                 expected_columns = Some(columns);
             }
             let count = result.rows.len();
+            let binary_cells: Vec<_> = result.binary_cells.into_iter().filter_map(|[r,c]| {
+                if locator==Some(c) { None } else { Some([r,c-usize::from(locator.is_some_and(|i|i<c))]) }
+            }).collect();
             let rows = result.rows.into_iter().map(|row| row.into_iter().enumerate()
                 .filter(|(i, _)| Some(*i) != locator).map(|(_, value)| value).collect::<Vec<_>>()).collect::<Vec<_>>();
-            if rows.iter().any(|row| mapped.iter().any(|(index, _)| row.get(*index).is_some_and(ambiguous_binary))) {
-                // The result DTO uses the same string for raw bytes and literal hex text.
-                // Without typed binding, either interpretation can corrupt an overwrite.
-                return Err(DbError::Unsupported("Transfer contains ambiguous hex/binary values; skip those columns or use a native typed transfer. Target unchanged".into()));
-            }
+            // Scalar bytes are now tagged. Nested binary needs a recursive typed serializer;
+            // never reinterpret JSON text just because it happens to contain a hex string.
+            if result.columns.iter().any(|c| {
+                let ty=c.type_name.to_ascii_lowercase();
+                (ty.contains("list") || ty.contains("struct") || ty.contains("map")) && (ty.contains("binary") || ty.contains("blob"))
+            }) { return Err(DbError::Unsupported("Nested binary collection transfer requires a recursive typed serializer".into())); }
             if count > 0 {
-                let sql = tr::build_transfer_write_sql(mode, target.db_type(), true, target_schema,
-                    target_table, &mapped, &rows, upsert_keys);
+                let sql = tr::build_transfer_write_sql_typed(mode, target.db_type(), true, target_schema,
+                    target_table, &mapped, &rows, upsert_keys, &binary_cells)?;
                 written += write_record(&mut out, &sql, MAX_SPOOL_BYTES - written)?;
                 transferred += count;
             }
@@ -185,16 +190,6 @@ pub async fn transfer_table(
     }
     progress(transferred as u64, true);
     Ok(TransferSummary { rows_transferred: transferred })
-}
-
-fn ambiguous_binary(value: &serde_json::Value) -> bool {
-    match value {
-        serde_json::Value::String(text) => text.strip_prefix("0x")
-            .is_some_and(|hex| hex.len() % 2 == 0 && hex.bytes().all(|b| b.is_ascii_hexdigit())),
-        serde_json::Value::Array(values) => values.iter().any(ambiguous_binary),
-        serde_json::Value::Object(values) => values.values().any(ambiguous_binary),
-        _ => false,
-    }
 }
 
 fn write_record(writer: &mut impl Write, sql: &str, remaining: u64) -> Result<u64, DbError> {
@@ -226,11 +221,4 @@ mod tests {
         assert_eq!(serde_json::from_slice::<String>(&output).unwrap(), sql);
     }
 
-    #[test]
-    fn binary_guard_is_conservative_and_checks_nested_values() {
-        for value in [serde_json::json!("0x"), serde_json::json!("0xff00"), serde_json::json!(["0xdead"]),
-            serde_json::json!({"payload": "0xbeef"})] { assert!(ambiguous_binary(&value)); }
-        for value in [serde_json::json!(null), serde_json::json!(12), serde_json::json!("0xyz"),
-            serde_json::json!("normal text")] { assert!(!ambiguous_binary(&value)); }
-    }
 }

@@ -206,7 +206,7 @@ fn docs_to_result(mut docs: Vec<Document>, max_rows: u32) -> QueryResult {
             None => serde_json::Value::Null,
         }).collect()
     }).collect();
-    QueryResult { columns, rows, rows_affected: None, truncated }
+    QueryResult { binary_cells: Vec::new(), columns, rows, rows_affected: None, truncated }
 }
 
 #[async_trait]
@@ -259,7 +259,7 @@ impl Driver for MongoDriver {
 
         // 写命令的统一回执:空表格 + rows_affected。
         fn affected(n: u64) -> QueryResult {
-            QueryResult { columns: vec![], rows: vec![], rows_affected: Some(n), truncated: false }
+            QueryResult { binary_cells: Vec::new(), columns: vec![], rows: vec![], rows_affected: Some(n), truncated: false }
         }
 
         match cmd {
@@ -292,6 +292,7 @@ impl Driver for MongoDriver {
                 let filter = mongo_shell::json_filter_to_doc(&filter).map_err(DbError::QueryFailed)?;
                 let n = coll.count_documents(filter).await.map_err(map_err)?;
                 Ok(QueryResult {
+                    binary_cells: Vec::new(),
                     columns: vec![ColumnInfo { name: "count".into(), type_name: "int64".into(), pk: false }],
                     rows: vec![vec![safe_i64_to_json(n as i64)]],
                     rows_affected: None,

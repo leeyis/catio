@@ -288,7 +288,7 @@ fn map_query_result(v: &Value, max_rows: u32) -> QueryResult {
 
     let affected = v.get("affected_rows").and_then(|a| a.as_u64());
     let rows_affected = if columns.is_empty() { affected.or(Some(0)) } else { None };
-    QueryResult { columns, rows, rows_affected, truncated }
+    crate::db::typed_value::mark_binary_columns(QueryResult { binary_cells: Vec::new(), columns, rows, rows_affected, truncated })
 }
 
 /// Map the plugin's getColumns result → catio ColumnDef list.

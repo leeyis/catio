@@ -83,7 +83,7 @@ pub fn parse_es_response(body: Value, max_rows: u32) -> QueryResult {
         let has_cursor = body.get("cursor").and_then(|c| c.as_str()).map_or(false, |c| !c.is_empty());
         let truncated = has_cursor || out.len() > max_rows as usize;
         out.truncate(max_rows as usize);
-        return QueryResult { columns, rows: out, rows_affected: None, truncated };
+        return QueryResult { binary_cells: Vec::new(), columns, rows: out, rows_affected: None, truncated };
     }
     // 2) hits.hits
     if let Some(hits) = body.pointer("/hits/hits").and_then(|v| v.as_array()) {
@@ -97,6 +97,7 @@ pub fn parse_es_response(body: Value, max_rows: u32) -> QueryResult {
     }
     // 4) 任意 JSON(_cat 文本已被包成 Value::String)→ status | response
     QueryResult {
+        binary_cells: Vec::new(),
         columns: vec![
             ColumnInfo { name: "status".into(), type_name: String::new(), pk: false },
             ColumnInfo { name: "response".into(), type_name: String::new(), pk: false },
@@ -138,7 +139,7 @@ fn flatten_hits(hits: &[Value], max_rows: u32) -> QueryResult {
         Some(v) => v.clone(),
         None => Value::Null,
     }).collect()).collect();
-    QueryResult { columns, rows, rows_affected: None, truncated }
+    QueryResult { binary_cells: Vec::new(), columns, rows, rows_affected: None, truncated }
 }
 
 /// 聚合响应:bucket 聚合每桶一行(子对象取 .value);metric 聚合一行多列。
@@ -168,7 +169,7 @@ fn parse_aggregations(aggs: &Value) -> Option<QueryResult> {
         }).collect();
         let rows = rows_maps.iter().map(|r| keys.iter()
             .map(|k| r.get(k).cloned().unwrap_or(Value::Null)).collect()).collect();
-        return Some(QueryResult { columns, rows, rows_affected: None, truncated: false });
+        return Some(QueryResult { binary_cells: Vec::new(), columns, rows, rows_affected: None, truncated: false });
     }
     let mut columns = Vec::new();
     let mut row = Vec::new();
@@ -177,7 +178,7 @@ fn parse_aggregations(aggs: &Value) -> Option<QueryResult> {
         row.push(sub.get("value").cloned().unwrap_or_else(|| Value::String(sub.to_string())));
     }
     if columns.is_empty() { return None; }
-    Some(QueryResult { columns, rows: vec![row], rows_affected: None, truncated: false })
+    Some(QueryResult { binary_cells: Vec::new(), columns, rows: vec![row], rows_affected: None, truncated: false })
 }
 
 #[cfg(test)]

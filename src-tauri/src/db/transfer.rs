@@ -169,11 +169,33 @@ pub fn build_transfer_write_sql(
     if mapped.is_empty() || rows.is_empty() {
         return String::new();
     }
+    let source_indexes = mapped.iter().map(|(i, _)| *i).collect::<Vec<_>>();
+    let values=value_rows(db,rows,&source_indexes);
+    build_transfer_sql_values(mode,db,has_schemas,schema,table,mapped,upsert_keys,&values)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_transfer_write_sql_typed(mode: TransferMode, db: DatabaseType, has_schemas: bool,
+    schema: Option<&str>, table: &str, mapped: &[(usize,String)], rows: &[Vec<Value>],
+    upsert_keys: &[String], binary_cells: &[[usize;2]]) -> Result<String,crate::db::DbError> {
+    if mapped.is_empty() || rows.is_empty() { return Ok(String::new()); }
+    let binary: HashSet<_> = binary_cells.iter().copied().collect();
+    let values=rows.iter().enumerate().map(|(r,row)| {
+        let values=mapped.iter().map(|(c,_)| {
+            let value=row.get(*c).ok_or_else(||crate::db::DbError::QueryFailed("Transfer row is missing a mapped column".into()))?;
+            crate::db::typed_value::sql_value(db,value,binary.contains(&[r,*c]))
+        }).collect::<Result<Vec<_>,_>>()?;
+        Ok(format!("({})",values.join(", ")))
+    }).collect::<Result<Vec<_>,crate::db::DbError>>()?.join(", ");
+    Ok(build_transfer_sql_values(mode,db,has_schemas,schema,table,mapped,upsert_keys,&values))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_transfer_sql_values(mode: TransferMode, db: DatabaseType, has_schemas: bool,
+    schema: Option<&str>, table: &str, mapped: &[(usize,String)], upsert_keys: &[String], values: &str) -> String {
     let tbl = qualified_table(db, has_schemas, schema, table);
     let target_columns = mapped.iter().map(|(_, t)| t.clone()).collect::<Vec<_>>();
-    let source_indexes = mapped.iter().map(|(i, _)| *i).collect::<Vec<_>>();
     let col_list = target_columns.iter().map(|c| quote_ident(db, c)).collect::<Vec<_>>().join(", ");
-    let values = value_rows(db, rows, &source_indexes);
 
     let base_insert = format!("INSERT INTO {tbl} ({col_list}) VALUES {values}");
 

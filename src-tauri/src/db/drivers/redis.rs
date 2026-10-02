@@ -646,7 +646,7 @@ impl Driver for RedisDriver {
             }
         }
         self.maybe_select(&mut *conn, self.default_db).await;
-        Ok(QueryResult { columns, rows, rows_affected: None, truncated })
+        Ok(QueryResult { binary_cells: Vec::new(), columns, rows, rows_affected: None, truncated })
     }
 
     /// Redis has no table structure concept.

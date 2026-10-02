@@ -59,7 +59,7 @@ pwsh tests/database-lab/run.ps1 -EnvFile .worktrees/database-lab.env
 pwsh tests/database-lab/run.ps1 -EnvFile .worktrees/database-lab.env -Server <sandbox> -RemoteHttpRelays -SqlServerPort 51434
 ```
 
-脚本明确设置所有服务的 env gate，不打印密码，执行 `--lib` 以及明确列出的 integration test targets。**不要用裸 `cargo test` 代替。** 未启用夹具时，单独运行 env-gated test 所得到的 `ok` 不能计作真实服务验收。
+脚本明确设置所有服务的 env gate，不打印密码，执行 `--lib` 以及明确列出的 integration test targets。可用 `-OnlyTargets @('db_typed_values','db_binary_engines')` 选择已登记的目标；省略时运行完整矩阵。Windows 默认限制两个 Cargo 并发任务，避免多个 debug linker 吞掉内存；显式 `CARGO_BUILD_JOBS` 优先。**不要用裸 `cargo test` 代替。** 未启用夹具时，单独运行 env-gated test 所得到的 `ok` 不能计作真实服务验收。
 
 前端与类型检查：
 
@@ -92,7 +92,7 @@ pwsh tests/database-lab/New-LabCertificate.ps1 -ServerAddress <sandbox> -OutputD
 - 分页 N+1：满页、最后一页、已有 LIMIT、尾分号、零页尺寸、多语句/写语句拒绝重放。
 - 网格：同名列不串值；脏编辑不跨页；错误不丢失旧页；NULL/空串区分；没有稳定键时不生成无 WHERE 的 UPDATE。
 - 写入：预先校验全部编辑；SQL 错误整批回滚；覆盖导入用 DELETE 而非 MySQL TRUNCATE；MyISAM 等非事务表不可冒充可回滚目标。
-- 迁移：先完成源数据暂存，再写目标；同连接复制不死锁；暂存或目标失败不清空原数据。暂存预算包含 JSON 转义与换行开销；映射列含歧义 hex/BLOB 值时，在写目标前拒绝，不把字节静默写成文本。
+- 迁移：先完成源数据暂存，再写目标；同连接复制不死锁；暂存或目标失败不清空原数据。暂存预算包含 JSON 转义与换行开销；顶层 BLOB 使用逐单元格类型元数据，不按 hex 外观猜类型；SQLite 混合 storage class 不会把字节静默写成文本。
 - 类型：PostgreSQL UUID/NUMERIC/微秒时间；SQL Server GUID/高 scale DECIMAL；DuckDB Arrow DECIMAL(38,s)/嵌套集合；JDBC 大整数与高精度数值。
 - 会话与取消：临时表及显式事务状态跨查询保留；运行中的原生查询被实际中断；早到的取消不能漏执行；超时/断开清理登记；忙碌 JDBC sidecar 可断开。
 - Web：按字节导入，不读取客户端指定的服务器路径；迁移同时验证源/目标连接所有权。
@@ -106,7 +106,9 @@ pwsh tests/database-lab/New-LabCertificate.ps1 -ServerAddress <sandbox> -OutputD
 - 原生中断与 timeout 覆盖 PostgreSQL、MySQL、SQLite、DuckDB。其他引擎不得把停止等待描述为已中断；JDBC 可通过断开连接终止 sidecar。
 - 事务回滚证明针对 SQL/约束失败。**提交时断网的结果可能不确定，不自动重试写入，应先核对数据。**
 - 跨库迁移要求准备期间源表保持稳定；这不是跨数据库一致性快照。暂存上限为 1 GiB。
-- 二进制/复杂类型的通用 SQL 写回、完整原生备份恢复、更多引擎的 DDL/执行计划、按标签隔离事务等仍需专项实现，不能用引擎名称数量冒充能力。
+- 顶层 BLOB 已覆盖 SQLite、DuckDB、PostgreSQL、MySQL、SQL Server、JDBC/H2、rqlite 的键/值编辑、迁移、SQL 恢复；JSON 的无损往返使用 `catio-table-v1`（含 `binaryCells`），普通 CSV/TSV 不携带类型信息。嵌套二进制和长尾 JDBC 方言仍未算完整验收。
+- rqlite 使用单请求原子事务（实际 JSON 请求最多 8 MiB），不是跨 HTTP 请求的手动事务。SQL Server 使用普通 batch 保留事务与临时表作用域，不用 RPC 承载独立 BEGIN/COMMIT。
+- 完整原生备份恢复、更多引擎的 DDL/执行计划、按标签隔离事务等仍需专项实现，不能用引擎名称数量冒充能力。
 - Web 部署允许执行数据库 SQL，不构成操作系统级 SQL 沙箱；只向可信用户开放，尤其是本地嵌入式数据库及 JDBC 驱动。
 
 停止夹具优先使用 `docker compose ... stop`，保留容器和数据。只有明确要重置本实验室时才使用 `down -v`，不要对生产项目执行该命令。

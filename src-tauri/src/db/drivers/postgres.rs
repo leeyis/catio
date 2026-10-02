@@ -281,20 +281,24 @@ async fn pg_query_on_client(
     let stream = client.simple_query_raw(sql).await.map_err(|e| pg_query_err(&e))?;
     pin_mut!(stream);
     let mut rows = Vec::new();
+    let mut binary_cells = Vec::new();
     let mut affected = None;
     let mut truncated = false;
     while let Some(message) = stream.next().await {
         match message.map_err(|e| pg_query_err(&e))? {
             SimpleQueryMessage::Row(row) => {
                 if rows.len() >= max_rows as usize { truncated = true; continue; }
+                for (i, col) in stmt.columns().iter().enumerate() {
+                    if pg_base_type(col.type_()) == &tokio_postgres::types::Type::BYTEA && row.get(i).is_some() { binary_cells.push([rows.len(),i]); }
+                }
                 rows.push(stmt.columns().iter().enumerate().map(|(i, col)|
-                    pg_text_value(row.get(i), col.type_())).collect());
+                    pg_text_value(row.get(i), col.type_())).collect::<Result<Vec<_>,_>>()?);
             }
             SimpleQueryMessage::CommandComplete(count) if columns.is_empty() => affected = Some(count),
             _ => {}
         }
     }
-    Ok(QueryResult { columns, rows, rows_affected: affected, truncated })
+    Ok(QueryResult { binary_cells, columns, rows, rows_affected: affected, truncated })
 }
 
 /// 协议族默认库名（照搬 dbx models/connection.rs default_database）。
@@ -616,23 +620,27 @@ mod default_db_tests {
     }
 }
 
+fn pg_base_type(ty: &tokio_postgres::types::Type) -> &tokio_postgres::types::Type {
+    if let tokio_postgres::types::Kind::Domain(base) = ty.kind() { pg_base_type(base) } else { ty }
+}
+
 /// Map a single PG column value to serde_json::Value.
 /// Type branches adapted from dbx crates/dbx-core/src/db/postgres.rs execute_query, Apache-2.0.
-fn pg_text_value(text: Option<&str>, ty: &tokio_postgres::types::Type) -> serde_json::Value {
+fn pg_text_value(text: Option<&str>, ty: &tokio_postgres::types::Type) -> Result<serde_json::Value,DbError> {
     use serde_json::Value;
     use tokio_postgres::types::Type;
-    let Some(text) = text else { return Value::Null; };
-    match *ty {
+    let Some(text) = text else { return Ok(Value::Null); };
+    Ok(match *pg_base_type(ty) {
         Type::BOOL => Value::Bool(text == "t" || text == "true"),
         Type::INT2 | Type::INT4 | Type::INT8 | Type::OID => text.parse::<i64>()
             .map(crate::db::result::safe_i64_to_json).unwrap_or_else(|_| Value::String(text.into())),
         Type::FLOAT4 | Type::FLOAT8 => text.parse::<f64>().ok().and_then(serde_json::Number::from_f64)
             .map(Value::Number).unwrap_or_else(|| Value::String(text.into())),
-        Type::BYTEA => Value::String(text.strip_prefix("\\x").map(|hex| format!("0x{hex}")).unwrap_or_else(|| text.into())),
+        Type::BYTEA => crate::db::typed_value::pg_binary(text)?,
         // JSON is returned as lossless text too: JavaScript JSON.parse would silently
         // round nested big integers and decimals. Column metadata still identifies JSON.
         _ => Value::String(text.into()),
-    }
+    })
 }
 
 #[async_trait]

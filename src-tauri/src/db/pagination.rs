@@ -98,6 +98,11 @@ fn shape(db: DatabaseType, sql: &str) -> Result<(String, Vec<Word>), DbError> {
     Ok((sql[..last].trim().to_string(), words))
 }
 
+/// Shared lexical view for choosing a session-preserving transport; not a SQL authorization gate.
+pub(crate) fn statement_words(db: DatabaseType, sql: &str) -> Result<Vec<String>,DbError> {
+    shape(db,sql).map(|(_,words)|words.into_iter().map(|word|word.text).collect())
+}
+
 pub fn read_query(db: DatabaseType, sql: &str) -> Result<String, DbError> {
     let (source, words) = shape(db, sql)?;
     if !matches!(words.first().map(|w| w.text.as_str()), Some("SELECT" | "WITH" | "TABLE" | "VALUES")) {
@@ -182,11 +187,12 @@ pub fn build_page_plan(db: DatabaseType, sql: &str, limit: u32, offset: u32) -> 
 }
 
 pub fn finish_page(mut result: crate::db::result::QueryResult, plan: &PagePlan, limit: u32) -> crate::db::result::QueryResult {
-    if plan.skip_rows > 0 {
-        result.rows.drain(..plan.skip_rows.min(result.rows.len()));
-    }
+    let skipped = plan.skip_rows.min(result.rows.len());
+    if skipped > 0 { result.rows.drain(..skipped); }
     result.truncated = result.truncated || result.rows.len() > limit as usize;
     result.rows.truncate(limit as usize);
+    result.binary_cells = result.binary_cells.into_iter().filter_map(|[r,c]|
+        (r >= skipped && r - skipped < result.rows.len()).then(|| [r - skipped,c])).collect();
     result
 }
 

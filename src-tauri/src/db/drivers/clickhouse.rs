@@ -132,7 +132,7 @@ impl Driver for ClickhouseDriver {
         let columns = result.meta.into_iter().map(|m| ColumnInfo { name: m.name, type_name: m.type_name, pk: false }).collect();
         let mut rows = result.data; let truncated = rows.len() > max_rows as usize;
         rows.truncate(max_rows as usize);
-        Ok(QueryResult { columns, rows, rows_affected: None, truncated })
+        Ok(QueryResult { binary_cells: Vec::new(), columns, rows, rows_affected: None, truncated })
     }
 
     async fn list_schemas(&self) -> Result<Vec<String>, DbError> {

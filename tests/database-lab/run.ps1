@@ -3,7 +3,8 @@ param(
   [string]$Server = '127.0.0.1',
   [int]$SqlServerPort = 51433,
   [switch]$RemoteHttpRelays,
-  [string]$CaCert = ''
+  [string]$CaCert = '',
+  [string[]]$OnlyTargets = @()
 )
 # Explicit one-shot test runner, not a scheduler. Never prints fixture credentials.
 $ErrorActionPreference = 'Stop'
@@ -36,7 +37,13 @@ Write-Host 'Enabled fixtures: PostgreSQL, MySQL, SQL Server, ClickHouse, MongoDB
 Write-Host ('TLS fixture enabled: ' + [bool]$CaCert)
 $targets = @('db_postgres','db_mysql','db_sqlserver','db_clickhouse','db_mongo','db_redis','db_elasticsearch','db_rqlite',
   'db_sqlite','db_duckdb','db_dml_roundtrip','db_jdbc_h2','db_parity','db_extended_parity','db_query_control',
-  'db_duckdb_transaction_regression','db_http_parity','server_db','server_database_workflows','server_isolation','server_mcp')
+  'db_duckdb_transaction_regression','db_http_parity','server_db','server_database_workflows','server_isolation','server_mcp','db_typed_values','db_binary_engines')
+if ($OnlyTargets.Count -gt 0) {
+  foreach ($target in $OnlyTargets) { if ($target -notin $targets) { throw "Unknown matrix target: $target" } }
+  $targets = $OnlyTargets
+}
+# Concurrent Windows debug linkers each consume several GiB; avoid paging the machine.
+if ($IsWindows -and -not $env:CARGO_BUILD_JOBS) { $env:CARGO_BUILD_JOBS = '2' }
 $arguments = @('test','--manifest-path',(Join-Path $repo 'src-tauri/Cargo.toml'),'--lib','--no-fail-fast')
 foreach ($target in $targets) { $arguments += @('--test', $target) }
 # Windows PowerShell 5 wraps native stderr (including Cargo progress) as error

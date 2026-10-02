@@ -32,6 +32,8 @@ struct RqliteResult {
     #[serde(default)]
     columns: Vec<String>,
     #[serde(default)]
+    types: Vec<String>,
+    #[serde(default)]
     values: Vec<Vec<serde_json::Value>>,
     #[serde(default)]
     rows_affected: Option<u64>,
@@ -46,7 +48,7 @@ fn is_read(sql: &str) -> bool {
 async fn rqlite_query(http: &HttpClient, sql: &str) -> Result<RqliteResult, DbError> {
     let body = serde_json::json!([sql]);
     let resp = http
-        .post("/db/query")
+        .post("/db/query?blob_array")
         .json(&body)
         .send()
         .await
@@ -106,6 +108,31 @@ fn sqlite_ident(value: &str) -> String {
 impl Driver for RqliteDriver {
     fn db_type(&self) -> DatabaseType { DatabaseType::Rqlite }
 
+    async fn exec_statement_batch(&self, statements: crate::db::driver::StatementBatch) -> Result<u64,DbError> {
+        // One HTTP request is one actual rqlite transaction. Never simulate it with
+        // separate BEGIN/COMMIT requests (there is no pinned HTTP SQL session).
+        const MAX_TRANSACTION_BYTES:usize=8*1024*1024;
+        let mut body=vec![b'['];let mut count=0;
+        for statement in statements {
+            let encoded=serde_json::to_vec(&statement?).map_err(|e|DbError::QueryFailed(e.to_string()))?;
+            if body.len()+encoded.len()+2>MAX_TRANSACTION_BYTES { return Err(DbError::Unsupported("rqlite atomic batch exceeds 8 MiB; target unchanged".into())); }
+            if count>0 {body.push(b',');} body.extend_from_slice(&encoded);count+=1;
+        }
+        if count==0 {return Ok(0);}
+        body.push(b']');
+        let response=self.http.post("/db/execute?transaction").header(reqwest::header::CONTENT_TYPE,"application/json")
+            .body(body).send().await.map_err(|e|DbError::QueryFailed(format!("rqlite transaction request failed; verify outcome before retry: {e}")))?;
+        let response=check_response_query(response).await?;
+        let response:RqliteResponse=response.json().await.map_err(|e|DbError::QueryFailed(format!("Invalid rqlite transaction receipt: {e}")))?;
+        let mut affected=0;
+        for result in &response.results {
+            if let Some(error)=result.error.as_deref().filter(|e|!e.is_empty()) {return Err(DbError::QueryFailed(error.into()));}
+            affected+=result.rows_affected.unwrap_or(0);
+        }
+        if response.results.len()!=count {return Err(DbError::QueryFailed("Incomplete rqlite transaction receipt; verify outcome before retry".into()));}
+        Ok(affected)
+    }
+
     async fn test(&self) -> Result<String, DbError> {
         // Validate with SELECT 1 via /db/query
         let result = rqlite_query(&self.http, "SELECT 1 AS n").await
@@ -120,9 +147,9 @@ impl Driver for RqliteDriver {
     async fn query(&self, sql: &str, max_rows: u32) -> Result<QueryResult, DbError> {
         if is_read(sql) {
             let result = rqlite_query(&self.http, sql).await?;
-            let columns: Vec<ColumnInfo> = result.columns.iter().map(|c| ColumnInfo {
+            let columns: Vec<ColumnInfo> = result.columns.iter().enumerate().map(|(index,c)| ColumnInfo {
                 name: c.clone(),
-                type_name: String::new(),
+                type_name: result.types.get(index).cloned().unwrap_or_default(),
                 pk: false,
             }).collect();
             let mut rows = result.values;
@@ -130,10 +157,24 @@ impl Driver for RqliteDriver {
             if truncated {
                 rows.truncate(max_rows as usize);
             }
-            Ok(QueryResult { columns, rows, rows_affected: None, truncated })
+            // With blob_array, the API represents BLOB as a byte array; SQL text,
+            // including JSON and base64-looking strings, remains a JSON string.
+            let mut binary_cells=Vec::new();
+            for (r,row) in rows.iter_mut().enumerate() {
+                for (c,value) in row.iter_mut().enumerate() {
+                    if let Some(array)=value.as_array() {
+                        let bytes=array.iter().map(|v|v.as_u64().and_then(|n|u8::try_from(n).ok())
+                            .ok_or_else(||DbError::QueryFailed("Invalid rqlite BLOB byte array".into())))
+                            .collect::<Result<Vec<_>,_>>()?;
+                        *value=crate::db::result::binary_to_json(&bytes);binary_cells.push([r,c]);
+                    }
+                }
+            }
+            Ok(QueryResult { binary_cells, columns, rows, rows_affected: None, truncated })
         } else {
             let result = rqlite_execute(&self.http, sql).await?;
             Ok(QueryResult {
+                binary_cells: Vec::new(),
                 columns: vec![],
                 rows: vec![],
                 rows_affected: result.rows_affected,
@@ -188,6 +229,7 @@ impl Driver for RqliteDriver {
             &self.http,
             &format!("PRAGMA index_list({})", sqlite_ident(table)),
         ).await.unwrap_or_else(|_| RqliteResult {
+            types: Vec::new(),
             columns: vec![], values: vec![], rows_affected: None, error: None
         });
 
@@ -205,6 +247,7 @@ impl Driver for RqliteDriver {
                 &self.http,
                 &format!("PRAGMA index_info({})", sqlite_ident(&idx_name)),
             ).await.unwrap_or_else(|_| RqliteResult {
+                types: Vec::new(),
                 columns: vec![], values: vec![], rows_affected: None, error: None
             });
             let idx_cols: Vec<String> = idx_info.values.iter()
@@ -224,6 +267,7 @@ impl Driver for RqliteDriver {
             &self.http,
             &format!("PRAGMA foreign_key_list({})", sqlite_ident(table)),
         ).await.unwrap_or_else(|_| RqliteResult {
+            types: Vec::new(),
             columns: vec![], values: vec![], rows_affected: None, error: None
         });
 
@@ -252,6 +296,7 @@ impl Driver for RqliteDriver {
                 table.replace('\'', "''"),
             ),
         ).await.unwrap_or_else(|_| RqliteResult {
+            types: Vec::new(),
             columns: vec![], values: vec![], rows_affected: None, error: None
         });
         let triggers: Vec<TriggerDef> = trg.values.iter()
@@ -274,6 +319,7 @@ impl Driver for RqliteDriver {
                 &self.http,
                 &format!("PRAGMA foreign_key_list({})", sqlite_ident(&tbl.name)),
             ).await.unwrap_or_else(|_| RqliteResult {
+                types: Vec::new(),
                 columns: vec![], values: vec![], rows_affected: None, error: None
             });
 

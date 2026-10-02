@@ -352,12 +352,13 @@ async fn mysql_query_on_conn(
         let affected = result.affected_rows();
         result.drop_result().await
             .map_err(|e| DbError::QueryFailed(e.to_string()))?;
-        return Ok(QueryResult {
+        return Ok(crate::db::typed_value::mark_binary_columns(QueryResult {
+            binary_cells: Vec::new(),
             columns: vec![],
             rows: vec![],
             rows_affected: Some(affected),
             truncated: false,
-        });
+        }));
     }
 
     let columns: Vec<ColumnInfo> = col_names.iter().zip(col_types.iter()).map(|(name, type_name)| {
@@ -392,7 +393,7 @@ async fn mysql_query_on_conn(
 
     }
     result.drop_result().await.map_err(|e| DbError::QueryFailed(e.to_string()))?;
-    Ok(QueryResult { columns, rows, rows_affected: None, truncated })
+    Ok(crate::db::typed_value::mark_binary_columns(QueryResult { binary_cells: Vec::new(), columns, rows, rows_affected: None, truncated }))
 }
 
 fn quote_mysql_ident(s: &str) -> String {

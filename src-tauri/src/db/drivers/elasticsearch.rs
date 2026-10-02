@@ -179,7 +179,7 @@ impl Driver for ElasticsearchDriver {
         let rows: Vec<Vec<serde_json::Value>> = docs.iter().map(|doc| {
             all_keys.iter().map(|k| doc.get(k).cloned().unwrap_or(serde_json::Value::Null)).collect()
         }).collect();
-        Ok(QueryResult { columns, rows, rows_affected: None, truncated })
+        Ok(QueryResult { binary_cells: Vec::new(), columns, rows, rows_affected: None, truncated })
     }
 
     async fn list_schemas(&self) -> Result<Vec<String>, DbError> {

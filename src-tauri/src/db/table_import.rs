@@ -14,7 +14,6 @@ use calamine::{open_workbook_auto_from_rs, Data, Reader};
 
 use crate::db::DatabaseType;
 use crate::db::dialect::{quote_ident, qualified_table};
-use crate::db::dml::value_to_sql_for;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -73,6 +72,7 @@ pub struct ParsedImportFile {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<Value>>,
     pub total_rows: usize,
+    pub binary_cells: Option<Vec<[usize; 2]>>,
 }
 
 /// 一批 INSERT 语句及其覆盖的行数。
@@ -176,7 +176,7 @@ pub fn parse_delimited_bytes(bytes: &[u8], delimiter: u8, preview_limit: usize) 
         rows.push(row);
     }
 
-    Ok(ParsedImportFile { columns, rows, total_rows })
+    Ok(ParsedImportFile { binary_cells: None, columns, rows, total_rows })
 }
 
 pub fn parse_csv_bytes(bytes: &[u8], preview_limit: usize) -> Result<ParsedImportFile, String> {
@@ -186,6 +186,25 @@ pub fn parse_csv_bytes(bytes: &[u8], preview_limit: usize) -> Result<ParsedImpor
 /// 解析 JSON：对象数组（按并集取列）或二维数组（列名 column_N）。单个对象视为单行。
 pub fn parse_json_bytes(bytes: &[u8], preview_limit: usize) -> Result<ParsedImportFile, String> {
     let value: Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    if value.get("format").and_then(Value::as_str) == Some("catio-table-v1") {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct TypedFile { columns: Vec<String>, rows: Vec<Vec<Value>>, binary_cells: Vec<[usize;2]> }
+        let mut data: TypedFile = serde_json::from_value(value).map_err(|e|format!("Invalid Catio typed JSON: {e}"))?;
+        let names: std::collections::HashSet<_> = data.columns.iter().collect();
+        if data.columns.is_empty() || names.len()!=data.columns.len() || data.columns.iter().any(|n|n.is_empty()) || data.rows.iter().any(|r|r.len()!=data.columns.len()) {
+            return Err("Invalid typed JSON column names or row width".into());
+        }
+        let mut seen=std::collections::HashSet::new();
+        for [r,c] in &data.binary_cells {
+            if *r>=data.rows.len() || *c>=data.columns.len() || !seen.insert([*r,*c]) { return Err("Invalid typed JSON binary coordinates".into()); }
+            if !data.rows[*r][*c].is_null() { crate::db::typed_value::binary_hex(&data.rows[*r][*c]).map_err(|e|e.to_string())?; }
+        }
+        let total_rows=data.rows.len();
+        data.rows.truncate(preview_limit);
+        data.binary_cells.retain(|[r,_]|*r<data.rows.len());
+        return Ok(ParsedImportFile { columns:data.columns,rows:data.rows,total_rows,binary_cells:Some(data.binary_cells) });
+    }
     let items = match value {
         Value::Array(items) => items,
         Value::Object(_) => vec![value],
@@ -217,7 +236,7 @@ pub fn parse_json_bytes(bytes: &[u8], preview_limit: usize) -> Result<ParsedImpo
                 columns.iter().map(|column| obj.get(column).cloned().unwrap_or(Value::Null)).collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        return Ok(ParsedImportFile { columns, rows, total_rows: items.len() });
+        return Ok(ParsedImportFile { binary_cells: None, columns, rows, total_rows: items.len() });
     }
 
     if items.iter().all(|item| item.is_array()) {
@@ -234,7 +253,7 @@ pub fn parse_json_bytes(bytes: &[u8], preview_limit: usize) -> Result<ParsedImpo
                 (0..max_cols).map(|index| arr.get(index).cloned().unwrap_or(Value::Null)).collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        return Ok(ParsedImportFile { columns, rows, total_rows: items.len() });
+        return Ok(ParsedImportFile { binary_cells: None, columns, rows, total_rows: items.len() });
     }
 
     Err("JSON 行必须全为对象或全为数组".to_string())
@@ -311,7 +330,7 @@ pub fn parse_xlsx_bytes(bytes: &[u8], preview_limit: usize) -> Result<ParsedImpo
         rows.push(row);
     }
 
-    Ok(ParsedImportFile { columns, rows, total_rows })
+    Ok(ParsedImportFile { binary_cells: None, columns, rows, total_rows })
 }
 
 /// 按文件类型解析字节（CSV/TSV/JSON/Xlsx）。文件读取在 commands.rs 接线。
@@ -376,30 +395,17 @@ pub fn build_import_insert_batches(
     let cols = columns.iter().map(|c| quote_ident(db, c)).collect::<Vec<_>>().join(", ");
     let batch = batch_size.max(1);
 
-    let batches = data
-        .rows
-        .chunks(batch)
-        .map(|chunk| {
-            let values = chunk
-                .iter()
-                .map(|row| {
-                    let cells = mapped
-                        .iter()
-                        .map(|(source_index, _)| {
-                            value_to_sql_for(db, row.get(*source_index).unwrap_or(&Value::Null))
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!("({cells})")
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            ImportSqlBatch {
-                sql: format!("INSERT INTO {tbl} ({cols}) VALUES {values};"),
-                row_count: chunk.len(),
-            }
-        })
-        .collect::<Vec<_>>();
+    let binary: std::collections::HashSet<_> = data.binary_cells.as_deref().unwrap_or(&[]).iter().copied().collect();
+    let batches = data.rows.chunks(batch).enumerate().map(|(batch_index,chunk)| {
+        let values=chunk.iter().enumerate().map(|(r,row)| {
+            let cells=mapped.iter().map(|(source_index,_)| {
+                crate::db::typed_value::sql_value(db,row.get(*source_index).unwrap_or(&Value::Null),
+                    binary.contains(&[batch_index*batch+r,*source_index])).map_err(|e|e.to_string())
+            }).collect::<Result<Vec<_>,String>>()?;
+            Ok(format!("({})",cells.join(", ")))
+        }).collect::<Result<Vec<_>,String>>()?.join(", ");
+        Ok(ImportSqlBatch { sql:format!("INSERT INTO {tbl} ({cols}) VALUES {values};"),row_count:chunk.len() })
+    }).collect::<Result<Vec<_>,String>>()?;
 
     Ok(batches)
 }
@@ -601,6 +607,7 @@ mod tests {
     #[test]
     fn mapping_skips_empty_targets_and_reorders() {
         let data = ParsedImportFile {
+            binary_cells: None,
             columns: vec!["id".into(), "name".into(), "junk".into()],
             rows: vec![],
             total_rows: 0,
@@ -616,7 +623,7 @@ mod tests {
 
     #[test]
     fn mapping_rejects_unknown_source_and_duplicate_target() {
-        let data = ParsedImportFile { columns: vec!["a".into(), "b".into()], rows: vec![], total_rows: 0 };
+        let data = ParsedImportFile { binary_cells: None, columns: vec!["a".into(), "b".into()], rows: vec![], total_rows: 0 };
         assert!(mapping_indexes(
             &data,
             &[ImportColumnMapping { source_column: "nope".into(), target_column: "x".into() }]
@@ -634,7 +641,7 @@ mod tests {
 
     #[test]
     fn mapping_all_skipped_errors() {
-        let data = ParsedImportFile { columns: vec!["a".into()], rows: vec![], total_rows: 0 };
+        let data = ParsedImportFile { binary_cells: None, columns: vec!["a".into()], rows: vec![], total_rows: 0 };
         assert!(mapping_indexes(
             &data,
             &[ImportColumnMapping { source_column: "a".into(), target_column: "".into() }]
@@ -645,6 +652,7 @@ mod tests {
     #[test]
     fn builds_batched_inserts_from_mapped_columns() {
         let data = ParsedImportFile {
+            binary_cells: None,
             columns: vec!["id".into(), "name".into(), "ignored".into()],
             rows: vec![
                 vec![json!("1"), json!("Ada"), json!("x")],
@@ -685,6 +693,7 @@ mod tests {
     #[test]
     fn mysql_inserts_use_backtick_quoting() {
         let data = ParsedImportFile {
+            binary_cells: None,
             columns: vec!["id".into()],
             rows: vec![vec![json!("1")]],
             total_rows: 1,
@@ -698,6 +707,7 @@ mod tests {
     #[test]
     fn zero_batch_size_falls_back_to_one_per_statement() {
         let data = ParsedImportFile {
+            binary_cells: None,
             columns: vec!["id".into()],
             rows: vec![vec![json!("1")], vec![json!("2")]],
             total_rows: 2,
@@ -719,6 +729,7 @@ mod tests {
         // 防注入回归：目标列名含反引号/双引号/分号时，quote_ident 必须转义，
         // 生成的 SQL 不能因此被截断或注入额外语句。
         let data = ParsedImportFile {
+            binary_cells: None,
             columns: vec!["id".into()],
             rows: vec![vec![json!("1")]],
             total_rows: 1,

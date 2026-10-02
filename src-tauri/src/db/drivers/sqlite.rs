@@ -71,6 +71,7 @@ fn sqlite_query_on_conn(conn: &Connection, sql: &str, max_rows: u32) -> Result<Q
             let affected = stmt.execute([])
                 .map_err(|e| DbError::QueryFailed(e.to_string()))?;
             return Ok(QueryResult {
+                binary_cells: Vec::new(),
                 columns: vec![],
                 rows: vec![],
                 rows_affected: Some(affected as u64),
@@ -86,6 +87,7 @@ fn sqlite_query_on_conn(conn: &Connection, sql: &str, max_rows: u32) -> Result<Q
         }).collect();
 
         let mut rows: Vec<Vec<serde_json::Value>> = Vec::new();
+        let mut binary_cells = Vec::new();
         let mut truncated = false;
 
         let mut query_rows = stmt.query([])
@@ -100,15 +102,15 @@ fn sqlite_query_on_conn(conn: &Connection, sql: &str, max_rows: u32) -> Result<Q
             }
             let mut out = Vec::with_capacity(col_count);
             for i in 0..col_count {
-                let val = row.get_ref(i)
-                    .map(value_ref_to_json)
-                    .unwrap_or(serde_json::Value::Null);
+                let raw = row.get_ref(i).map_err(|e| DbError::QueryFailed(e.to_string()))?;
+                if matches!(raw, ValueRef::Blob(_)) { binary_cells.push([rows.len(), i]); }
+                let val = value_ref_to_json(raw);
                 out.push(val);
             }
             rows.push(out);
         }
 
-        Ok(QueryResult { columns, rows, rows_affected: None, truncated })
+        Ok(QueryResult { binary_cells, columns, rows, rows_affected: None, truncated })
 }
 
 #[async_trait]

@@ -138,7 +138,7 @@ async fn staged_same_connection_transfer_rolls_back_on_target_failure() {
 }
 
 #[tokio::test]
-async fn transfer_rejects_ambiguous_binary_values_before_replacing_the_target() {
+async fn transfer_preserves_binary_values_when_replacing_the_target() {
     use catio_lib::db::{write_ops, transfer::{TransferColumnMapping, TransferMode}};
     let d = connect(&args(DatabaseType::Sqlite)).await.unwrap();
     // SQLite can store a BLOB in a TEXT-declared column, even after a text-only first page.
@@ -150,9 +150,9 @@ async fn transfer_rejects_ambiguous_binary_values_before_replacing_the_target() 
         TransferColumnMapping { source_column: "v".into(), target_column: "v".into() }];
     let result = write_ops::transfer_table(d.as_ref(), None, "binary_source", d.as_ref(), None,
         "binary_target", &mapping, TransferMode::Overwrite, &[], 1, true, &|_, _| {}).await;
-    assert!(result.is_err(), "display hex must not silently replace raw bytes with text");
-    assert_eq!(d.query("SELECT id,v FROM binary_target", 10).await.unwrap().rows,
-        vec![vec![json!(9),json!("original")]]);
+    result.expect("typed metadata now permits a safe binary transfer");
+    assert_eq!(d.query("SELECT id,typeof(v),v FROM binary_target ORDER BY id", 10).await.unwrap().rows,
+        vec![vec![json!(1),json!("text"),json!("first")],vec![json!(2),json!("blob"),json!("0xff00")]]);
     // Unmapped binary data does not block a deliberate ID-only copy.
     write_ops::transfer_table(d.as_ref(), None, "binary_source", d.as_ref(), None, "binary_target",
         &mapping[..1], TransferMode::Overwrite, &[], 1, true, &|_, _| {}).await.unwrap();

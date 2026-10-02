@@ -29,6 +29,8 @@ pub struct ExportTable {
     #[serde(default)]
     pub rows: Vec<Vec<Value>>,
     #[serde(default)]
+    pub binary_cells: Vec<[usize; 2]>,
+    #[serde(default)]
     pub truncated: bool,
 }
 
@@ -67,6 +69,28 @@ pub fn build_insert_statements(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn build_insert_statements_typed(db: DatabaseType, has_schemas: bool, schema: Option<&str>, table: &str,
+    columns: &[String], rows: &[Vec<Value>], batch_size: usize, binary_cells: &[[usize;2]]) -> Result<Vec<String>, crate::db::DbError> {
+    use crate::db::{typed_value::sql_value, DbError};
+    if columns.is_empty() || rows.is_empty() { return Ok(Vec::new()); }
+    if rows.iter().any(|row| row.len()!=columns.len()) || binary_cells.iter().any(|[r,c]| *r>=rows.len() || *c>=columns.len()) {
+        return Err(DbError::QueryFailed("Invalid export row/column metadata".into()));
+    }
+    let binary: std::collections::HashSet<_> = binary_cells.iter().copied().collect();
+    let target=qualified_table(db,has_schemas,schema,table);
+    let names=columns.iter().map(|c|quote_ident(db,c)).collect::<Vec<_>>().join(", ");
+    let batch=batch_size.max(1);
+    rows.chunks(batch).enumerate().map(|(chunk_index,chunk)| {
+        let values=chunk.iter().enumerate().map(|(r,row)| {
+            let cells=row.iter().enumerate().map(|(c,value)|sql_value(db,value,binary.contains(&[chunk_index*batch+r,c])))
+                .collect::<Result<Vec<_>,_>>()?;
+            Ok(format!("({})",cells.join(", ")))
+        }).collect::<Result<Vec<_>,DbError>>()?;
+        Ok(format!("INSERT INTO {target} ({names}) VALUES {};", values.join(", ")))
+    }).collect()
+}
+
 /// 拼装整库导出脚本：头注释 → 各表（DDL + 数据 INSERT 批）。
 ///
 /// `include_structure` 写出 DDL（自动补一个结尾分号），`include_data` 写出 INSERT 批。
@@ -82,7 +106,7 @@ pub fn build_database_sql_export(
     include_structure: bool,
     include_data: bool,
     batch_size: usize,
-) -> String {
+) -> Result<String, crate::db::DbError> {
     let mut lines = vec![
         format!("-- Catio database export: {database_name}"),
         format!("-- Exported at: {exported_at}"),
@@ -110,7 +134,7 @@ pub fn build_database_sql_export(
             } else {
                 lines.push(format!("-- Exported rows: {}", table.rows.len()));
             }
-            let inserts = build_insert_statements(
+            let inserts = build_insert_statements_typed(
                 db,
                 has_schemas,
                 table.schema.as_deref(),
@@ -118,7 +142,8 @@ pub fn build_database_sql_export(
                 &table.columns,
                 &table.rows,
                 batch_size,
-            );
+                &table.binary_cells,
+            )?;
             if inserts.is_empty() {
                 lines.push("-- No rows".to_string());
             } else {
@@ -132,7 +157,7 @@ pub fn build_database_sql_export(
         lines.push("SET FOREIGN_KEY_CHECKS = 1;".to_string());
     }
 
-    lines.join("\n")
+    Ok(lines.join("\n"))
 }
 
 #[cfg(test)]
@@ -227,11 +252,12 @@ mod tests {
                 columns: vec!["id".into()],
                 rows: vec![vec![json!(1)]],
                 truncated: false,
+                ..Default::default()
             }],
             true,
             true,
             DEFAULT_INSERT_BATCH_SIZE,
-        );
+        ).unwrap();
         assert_eq!(
             sql,
             [
@@ -265,11 +291,12 @@ mod tests {
                 columns: vec!["id".into()],
                 rows: vec![vec![json!(1)]],
                 truncated: false,
+                ..Default::default()
             }],
             true,
             true,
             DEFAULT_INSERT_BATCH_SIZE,
-        );
+        ).unwrap();
         assert!(sql.contains("SET FOREIGN_KEY_CHECKS = 0;"));
         assert!(sql.trim_end().ends_with("SET FOREIGN_KEY_CHECKS = 1;"));
     }
@@ -289,11 +316,12 @@ mod tests {
                 columns: vec!["id".into()],
                 rows: vec![vec![json!(1)]],
                 truncated: false,
+                ..Default::default()
             }],
             true,
             false,
             DEFAULT_INSERT_BATCH_SIZE,
-        );
+        ).unwrap();
         assert!(sql.contains("CREATE TABLE t (id int);"));
         assert!(!sql.contains("INSERT INTO"));
         assert!(!sql.contains("-- Data for"));
@@ -314,11 +342,12 @@ mod tests {
                 columns: vec!["id".into()],
                 rows: vec![vec![json!(1)]],
                 truncated: false,
+                ..Default::default()
             }],
             false,
             true,
             DEFAULT_INSERT_BATCH_SIZE,
-        );
+        ).unwrap();
         assert!(!sql.contains("CREATE TABLE"));
         assert!(sql.contains("INSERT INTO \"t\" (\"id\") VALUES (1);"));
     }
@@ -338,11 +367,12 @@ mod tests {
                 columns: vec!["id".into()],
                 rows: vec![],
                 truncated: false,
+                ..Default::default()
             }],
             true,
             true,
             DEFAULT_INSERT_BATCH_SIZE,
-        );
+        ).unwrap();
         assert!(sql.contains("-- No rows"));
     }
 }
