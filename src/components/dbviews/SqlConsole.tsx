@@ -178,7 +178,7 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
   const redisKeysRef = useRef<string[]>([])
 
   useEffect(()=>{
-    if(!connId||!supportsDefaultNamespace){setLiveSchema(null);return}
+    if(!connId||(plain&&!supportsDefaultNamespace)){setLiveSchema(null);return}
     let alive=true,request=0
     setLiveSchema(null);setSchemaError(null);setCompletionErrors({})
     const load=()=>{const current=++request;void getSchema(connId,{lazy:true}).then(value=>{
@@ -192,7 +192,7 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
     }
     window.addEventListener(SCHEMA_INVALIDATED_EVENT,changed)
     return()=>{alive=false;clearTimeout(timer);window.removeEventListener(SCHEMA_INVALIDATED_EVENT,changed)}
-  },[connId,supportsDefaultNamespace])
+  },[connId,supportsDefaultNamespace,plain])
 
   // Plain-mode (redis) key-name sample for argument completion. SCAN-based
   // preview of the connected default DB (the pseudo-table "keys"); best-effort.
@@ -231,9 +231,12 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
 
   // Stable identity of the schema namespaces (names only) so the column fetch
   // re-runs when connId or the schema list changes, but NOT on every keystroke.
+  const completionNamespace = supportsDefaultNamespace
+    ? defaultNamespace || initialDefaultSchema || liveSchema?.defaultNamespace
+    : liveSchema?.defaultNamespace
   const namespaceNames = useMemo(
-    () => (liveSchema ? referencedNamespaces(code,liveSchema.schemas.map(ns=>ns.name),defaultNamespace||initialDefaultSchema) : []),
-    [liveSchema,code,defaultNamespace,initialDefaultSchema],
+    () => (liveSchema ? referencedNamespaces(plain ? '' : code, liveSchema.schemas.map(ns => ns.name), completionNamespace, engineId ?? engine) : []),
+    [liveSchema, code, completionNamespace, engineId, engine, plain],
   )
   const namespaceKey = JSON.stringify(namespaceNames)
   const metadataScopeKey=namespaceNames.map(name=>liveSchema?.schemas.find(ns=>ns.name===name)?.status??'loaded').join(',')
@@ -662,7 +665,7 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
           width: '100%',
           borderBottom: !hasResults ? 'none' : '1px solid var(--border-hairline)',
         }}>
-          <SqlEditor ref={editorRef} code={code} onChange={setCode} schema={editorSchema} engine={engineId ?? engine} defaultSchema={defaultNamespace || liveSchema?.defaultNamespace} onRun={run} onRunSelection={run} placeholder={editorPlaceholder} plain={plain} completion={completion} lintSource={lintSource} extraCompletion={advancedCompletion} />
+          <SqlEditor ref={editorRef} code={code} onChange={setCode} schema={editorSchema} engine={engineId ?? engine} defaultSchema={completionNamespace} onRun={run} onRunSelection={run} placeholder={editorPlaceholder} plain={plain} completion={completion} lintSource={lintSource} extraCompletion={advancedCompletion} />
         </div>
       )}
       {/* 功能#5:编辑区与结果区之间的水平拖动分隔条。仅在 split 态且有结果区时显示。 */}

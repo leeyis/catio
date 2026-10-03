@@ -29,7 +29,7 @@ describe('live SQL dialect and namespace completion', () => {
   it.each([
     ['mysql', MySQL], ['tidb', MySQL], ['sqlite', SQLite], ['rqlite', SQLite],
     ['duckdb', PostgreSQL], ['sqlserver', MSSQL], ['oracle', PLSQL], ['jdbc', StandardSQL],
-  ])('selects an explicit parser for %s', (engine, dialect) => expect(dialectFor(engine)).toBe(dialect))
+  ])('selects an explicit parser for %s', (engine, dialect) => expect(dialectFor(engine).spec).toMatchObject(dialect.spec))
 
   it('actually mounts the MySQL parser for backtick identifiers', () => {
     const { view } = mount('SELECT `order details`', { engine: 'mysql' })
@@ -47,6 +47,10 @@ describe('live SQL dialect and namespace completion', () => {
   })
   it.each(["SELECT 'ord|", 'SELECT 1 -- ord|', 'SELECT /* ord|', 'SELECT $tag$ord|'])('suppresses even explicit SQL suggestions inside literals and comments: %s', async text => {
     const { view } = mount(text, { engine: 'postgres', defaultSchema: 'app', extraCompletion: c => ({ from: c.pos, options: [{ label: 'SHOULD_NOT_APPEAR' }] }) })
+    expect(await candidates(view)).toEqual([])
+  })
+  it.each(['mysql', 'mariadb'])('keeps backslash-escaped quotes inside a default %s string', async engine => {
+    const { view } = mount("SELECT 'it\\'s ord|", { engine, defaultSchema: 'app' })
     expect(await candidates(view)).toEqual([])
   })
   it('reconfigures schema and dialect without replacing the document, selection or undo history', async () => {

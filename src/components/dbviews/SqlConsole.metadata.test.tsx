@@ -30,6 +30,18 @@ it('loads completion only for the current and explicitly referenced namespaces',
   expect(screen.getByTestId('sql-default-schema')).toHaveValue('APP')
   expect(api.editor.mock.calls.at(-1)?.[0]).toMatchObject({ engine: 'postgres', defaultSchema: 'APP' })
 })
+it('loads the actual namespace even when the engine has no session-schema selector', async () => {
+  render(<LanguageProvider><DataProvider><SqlConsole connId="c" engine="sqlserver" fresh/></DataProvider></LanguageProvider>)
+  await waitFor(() => expect(api.schemaColumnCatalog).toHaveBeenCalledWith('c','APP'))
+  expect(api.editor.mock.calls.at(-1)?.[0]).toMatchObject({ engine: 'sqlserver', defaultSchema: 'APP' })
+})
+it('does not request metadata for a schema mentioned only in a comment or literal', async () => {
+  render(<LanguageProvider><DataProvider><SqlConsole connId="c" engine="postgres" fresh initialCode="SELECT 'OTHER.secret' /* UNUSED.table */"/></DataProvider></LanguageProvider>)
+  await waitFor(() => expect(api.schemaColumnCatalog).toHaveBeenCalledWith('c','APP'))
+  for (const method of [api.loadSchemaNamespace, api.schemaColumnCatalog, api.erRelations]) {
+    expect(method.mock.calls.every(([, name]) => name === 'APP')).toBe(true)
+  }
+})
 it('shows completion truncation and permission errors rather than claiming complete suggestions', async () => {
   api.schemaColumnCatalog.mockResolvedValue({ tables: [['items',['id']]], errors: [{ schema: 'APP.private', message: 'permission denied' }], truncated: true })
   render(<LanguageProvider><DataProvider><SqlConsole connId="c" engine="postgres" fresh/></DataProvider></LanguageProvider>)

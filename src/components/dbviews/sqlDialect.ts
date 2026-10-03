@@ -1,16 +1,21 @@
-import { MSSQL, MariaSQL, MySQL, PLSQL, PostgreSQL, SQLite, StandardSQL, type SQLDialect } from '@codemirror/lang-sql'
+import { MSSQL, MariaSQL, MySQL, PLSQL, PostgreSQL, SQLite, StandardSQL, SQLDialect } from '@codemirror/lang-sql'
 import { DB_ENGINES } from '../../services/dbEngines'
+
+// lang-sql disables backslash string escapes by default, unlike a default MySQL/MariaDB session.
+// Per-session SQL_MODE changes (e.g. NO_BACKSLASH_ESCAPES/ANSI_QUOTES) remain a separate capability gate.
+const mysqlDefault = SQLDialect.define({ ...MySQL.spec, backslashEscapes: true })
+const mariaDefault = SQLDialect.define({ ...MariaSQL.spec, backslashEscapes: true })
 
 /** Editor parsing only. Never use this fallback to authorize an operation or generate DDL. */
 export function dialectFor(engine?: string): SQLDialect {
   const id = engine?.toLowerCase()
   if (id === 'oracle' || id === 'oceanbase-oracle') return PLSQL
-  if (id === 'mariadb') return MariaSQL
+  if (id === 'mariadb') return mariaDefault
   if (id === 'rqlite') return SQLite
   if (id === 'mssql') return MSSQL
   const family = DB_ENGINES.find(item => item.id === id)?.dbType ?? id
   switch (family) {
-    case 'mysql': return MySQL
+    case 'mysql': return mysqlDefault
     case 'sqlite': return SQLite
     case 'duckdb': case 'postgres': return PostgreSQL
     case 'sqlserver': return MSSQL
