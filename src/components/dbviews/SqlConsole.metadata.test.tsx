@@ -4,6 +4,8 @@ import { LanguageProvider } from '../../state/LanguageContext'
 import { DataProvider } from '../../state/DataContext'
 import i18n from '../../i18n'
 import { SqlConsole } from './SqlConsole'
+import { EditorState } from '@codemirror/state'
+import { CompletionContext } from '@codemirror/autocomplete'
 import { invalidateSchemaCache } from '../../services/dbMetadata'
 const api = vi.hoisted(() => ({ getSchema: vi.fn(), loadSchemaNamespace: vi.fn(), schemaColumnCatalog: vi.fn(), erRelations: vi.fn(), editor: vi.fn() }))
 vi.mock('../../services/db', async original => ({ ...await original<typeof import('../../services/db')>(), ...api }))
@@ -41,6 +43,14 @@ it('does not request metadata for a schema mentioned only in a comment or litera
   for (const method of [api.loadSchemaNamespace, api.schemaColumnCatalog, api.erRelations]) {
     expect(method.mock.calls.every(([, name]) => name === 'APP')).toBe(true)
   }
+})
+it('uses the JDBC profile rather than the transport name for function completion', async () => {
+  const sql = 'SELECT NV'
+  render(<LanguageProvider><DataProvider><SqlConsole connId="c" engine="jdbc" engineId="oracle" fresh initialCode={sql}/></DataProvider></LanguageProvider>)
+  await waitFor(() => expect(api.schemaColumnCatalog).toHaveBeenCalledWith('c','APP'))
+  const props = api.editor.mock.calls.at(-1)?.[0]
+  const result = props.extraCompletion(new CompletionContext(EditorState.create({ doc: sql }), sql.length, true))
+  expect(result.options).toEqual(expect.arrayContaining([expect.objectContaining({ label: 'NVL' })]))
 })
 it('shows completion truncation and permission errors rather than claiming complete suggestions', async () => {
   api.schemaColumnCatalog.mockResolvedValue({ tables: [['items',['id']]], errors: [{ schema: 'APP.private', message: 'permission denied' }], truncated: true })

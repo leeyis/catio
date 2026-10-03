@@ -8,6 +8,8 @@
  * editorSchema 负责,这里不重复实现,避免与之冲突。
  */
 import type { CompletionContext, CompletionResult, Completion } from '@codemirror/autocomplete'
+import { dialectFor } from './sqlDialect'
+import { completionIdentifier } from './sqlCompletionSchema'
 
 // ---- 函数签名库(通用 + 按引擎方言扩充) ----
 // 参数名仅用于展示与占位模板,不做类型校验。
@@ -128,24 +130,49 @@ const SQLSERVER_FUNCTION_SIGNATURES: Record<string, string[]> = {
   ISNULL: ['expression', 'fallback'],
 }
 
-/** 把后端引擎名收敛到方言桶。Postgres-first(缺省按 postgres)。 */
-function dialectBucket(engine?: string): 'mysql' | 'postgres' | 'sqlite' | 'sqlserver' {
-  const e = (engine ?? '').toLowerCase()
-  if (e.includes('mysql') || e.includes('maria') || e.includes('tidb') || e.includes('doris') || e.includes('starrocks') || e.includes('oceanbase') || e.includes('goldendb') || e.includes('greatsql') || e.includes('polardb') || e.includes('tdsql')) return 'mysql'
-  if (e.includes('sqlite') || e.includes('rqlite') || e.includes('duckdb')) return 'sqlite'
-  if (e.includes('sqlserver') || e.includes('mssql')) return 'sqlserver'
-  return 'postgres'
-}
-
-/** 合并通用 + 方言专属函数签名表(方言项可覆盖通用项)。 */
+/** Conservative built-in catalog, not a guarantee of server-version/extension availability. */
 function functionSignatures(engine?: string): Record<string, string[]> {
-  const bucket = dialectBucket(engine)
-  const extra =
-    bucket === 'mysql' ? MYSQL_FUNCTION_SIGNATURES
-    : bucket === 'sqlite' ? SQLITE_FUNCTION_SIGNATURES
-    : bucket === 'sqlserver' ? SQLSERVER_FUNCTION_SIGNATURES
-    : POSTGRES_FUNCTION_SIGNATURES
-  return { ...COMMON_FUNCTION_SIGNATURES, ...extra }
+  const id = engine?.toLowerCase() ?? 'postgres'
+  const syntax = dialectFor(id)
+  const family = id === 'duckdb' || id === 'h2' ? id
+    : syntax === dialectFor('oracle') ? 'oracle'
+    : syntax === dialectFor('postgres') ? 'postgres'
+    : syntax === dialectFor('mysql') || syntax === dialectFor('mariadb') ? 'mysql'
+    : syntax === dialectFor('sqlite') ? 'sqlite'
+    : syntax === dialectFor('sqlserver') ? 'sqlserver' : 'standard'
+  const core = 'COUNT SUM AVG MIN MAX COALESCE NULLIF ABS ROUND UPPER LOWER'
+  const families: Record<string, string> = {
+    postgres: 'STRING_AGG ARRAY_AGG CONCAT CONCAT_WS SUBSTRING SUBSTR REPLACE TRIM LTRIM RTRIM LENGTH CHAR_LENGTH LPAD RPAD REVERSE REPEAT REGEXP_REPLACE NOW FLOOR CEIL CEILING MOD POWER SQRT SIGN GREATEST LEAST MD5 ROW_NUMBER RANK DENSE_RANK LAG LEAD NTILE',
+    mysql: 'GROUP_CONCAT CONCAT CONCAT_WS SUBSTRING SUBSTR REPLACE TRIM LTRIM RTRIM LENGTH CHAR_LENGTH LPAD RPAD INSTR LOCATE REVERSE REPEAT FORMAT REGEXP_REPLACE DATE_FORMAT DATEDIFF TIMESTAMPDIFF YEAR MONTH DAY HOUR MINUTE SECOND STR_TO_DATE NOW CURDATE CURTIME FLOOR CEIL CEILING MOD POWER SQRT SIGN IFNULL GREATEST LEAST MD5 SHA1 SHA2 UUID JSON_EXTRACT JSON_OBJECT JSON_ARRAY JSON_SET JSON_REMOVE JSON_CONTAINS JSON_LENGTH JSON_KEYS ROW_NUMBER RANK DENSE_RANK LAG LEAD NTILE',
+    sqlite: 'GROUP_CONCAT SUBSTR SUBSTRING REPLACE TRIM LTRIM RTRIM LENGTH INSTR IFNULL IIF JSON_EXTRACT JSON_OBJECT JSON_ARRAY JSON_SET JSON_REMOVE ROW_NUMBER RANK DENSE_RANK LAG LEAD NTILE',
+    sqlserver: 'STRING_AGG CONCAT CONCAT_WS SUBSTRING REPLACE TRIM LTRIM RTRIM REVERSE FLOOR CEILING POWER SQRT SIGN IIF JSON_VALUE JSON_QUERY ROW_NUMBER RANK DENSE_RANK LAG LEAD NTILE',
+    oracle: 'SUBSTR REPLACE TRIM LTRIM RTRIM LENGTH LPAD RPAD INSTR REGEXP_REPLACE FLOOR CEIL MOD POWER SQRT SIGN GREATEST LEAST ROW_NUMBER RANK DENSE_RANK LAG LEAD NTILE',
+    duckdb: 'STRING_AGG ARRAY_AGG GROUP_CONCAT CONCAT CONCAT_WS SUBSTRING SUBSTR REPLACE TRIM LTRIM RTRIM LENGTH CHAR_LENGTH LPAD RPAD REVERSE REPEAT REGEXP_REPLACE NOW FLOOR CEIL CEILING MOD POWER SQRT SIGN GREATEST LEAST IFNULL MD5 JSON_EXTRACT JSON_OBJECT JSON_ARRAY ROW_NUMBER RANK DENSE_RANK LAG LEAD NTILE',
+    h2: 'CONCAT CONCAT_WS SUBSTRING SUBSTR REPLACE TRIM LTRIM RTRIM LENGTH CHAR_LENGTH LPAD RPAD INSTR FLOOR CEIL CEILING MOD POWER SQRT SIGN GREATEST LEAST IFNULL ROW_NUMBER RANK DENSE_RANK LAG LEAD NTILE',
+  }
+  const extra: Record<string, Record<string, string[]>> = {
+    postgres: {
+      // Avoid advertising PG-only JSONB/UUID extensions on every wire-compatible vendor.
+      ...(id === 'postgres' ? POSTGRES_FUNCTION_SIGNATURES : {}),
+      DATE_TRUNC: ['field', 'source'], SPLIT_PART: ['string', 'delimiter', 'field'], ARRAY_LENGTH: ['array', 'dimension'],
+    },
+    mysql: { ...MYSQL_FUNCTION_SIGNATURES, DATE_ADD: ['date', 'INTERVAL value unit'], DATE_SUB: ['date', 'INTERVAL value unit'], CONVERT: ['expression', 'type'] },
+    sqlite: { ...SQLITE_FUNCTION_SIGNATURES, JSON_ARRAY_LENGTH: ['json'], TYPEOF: ['value'], DATE: ['timevalue'], TIME: ['timevalue'], DATETIME: ['timevalue'], JULIANDAY: ['timevalue'] },
+    sqlserver: {
+      ...SQLSERVER_FUNCTION_SIGNATURES, LEN: ['string'], GETDATE: [], SYSDATETIME: [],
+      DATEDIFF: ['datepart', 'startdate', 'enddate'], DATEADD: ['datepart', 'number', 'date'],
+      CONVERT: ['type', 'expression'], FORMAT: ['value', 'format'],
+    },
+    oracle: { NVL: ['expression', 'fallback'], NVL2: ['expression', 'not_null', 'is_null'], CONCAT: ['left', 'right'], TO_CHAR: ['value', 'format'], TO_DATE: ['string', 'format'], TO_NUMBER: ['string'], SYS_GUID: [] },
+    duckdb: { DATE_TRUNC: ['part', 'timestamp'], STRFTIME: ['timestamp', 'format'], LIST_VALUE: ['...values'], STRING_SPLIT: ['string', 'separator'], DATE_DIFF: ['part', 'startdate', 'enddate'] },
+    h2: { RANDOM_UUID: [], CURRENT_SCHEMA: [], },
+  }
+  const names = (core + ' ' + (families[family] ?? '')).trim().split(/\s+/)
+  const functions = Object.fromEntries(names.map(name => [name, COMMON_FUNCTION_SIGNATURES[name]]))
+  return {
+    ...functions, ...extra[family], CAST: ['expression AS type'],
+    ...(['postgres','mysql','oracle','duckdb','h2'].includes(family) ? { EXTRACT: ['field FROM source'] } : {}),
+  }
 }
 
 export interface SqlFunctionSignatureHelp {
@@ -276,12 +303,8 @@ export interface JoinSuggestionItem {
   detail: string
 }
 
-/** 引擎方言的标识符引用(与 structureDdl.quoteIdent 对齐:mysql 反引号,其余双引号)。 */
-function quoteIdent(name: string, engine?: string): string {
-  const bucket = dialectBucket(engine)
-  if (bucket === 'mysql') return '`' + name.replace(/`/g, '``') + '`'
-  return '"' + name.replace(/"/g, '""') + '"'
-}
+/** Use the same profile-aware quoting as editor identifier completion. */
+const quoteIdent = completionIdentifier
 
 /** 抽取当前语句中已被 FROM/JOIN 引用的表名(小写)。 */
 function referencedTableNames(before: string): string[] {

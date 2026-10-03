@@ -385,7 +385,7 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
 
   // 引擎也以 ref 暴露给补全源,避免方言变化重建编辑器扩展。
   const engineRef = useRef(engine)
-  engineRef.current = engine
+  engineRef.current = engineId ?? engine
   // 高级 SQL 补全源(函数签名补全 + 外键 JOIN 建议)。plain 引擎不挂(无 SQL 语义)。
   // 标识稳定:惰性读取 engine/joinTables,故 schema/外键加载不触发编辑器重建。
   const advancedCompletion = useMemo(
