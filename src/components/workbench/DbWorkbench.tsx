@@ -427,14 +427,14 @@ export function DbWorkbench({ conn, density, active: shown = true, workspaceTabI
                 <TablePane conn={conn} connId={connId} caps={caps} schema={tb.schema} table={tb.table} density={density} />
               )}
               {tb.kind === 'object' && (
-                <ObjectPane connId={connId} schema={tb.schema} name={tb.name} objKind={tb.objKind} />
+                <ObjectPane connId={connId} schema={tb.schema} name={tb.name} objKind={tb.objKind} engine={conn.engineId ?? conn.engine} />
               )}
               {tb.kind === 'sql' && (
                 <SqlConsole density={density} fresh queryN={tb.qid} writable={caps.writable} connId={connId ?? undefined}
                   querySessions={!!caps.querySessions} workbenchId={workbenchId} sessionOwnerId={workbenchId+':'+tb.id}
                   initialCode={queryInitialCode[tb.qid]} initialDefaultSchema={tb.defaultSchema} autoRun={autoRunByTab[tb.id]}
                   onFullscreenChange={(fs) => setFsByTab(m => (m[tb.id] === fs ? m : { ...m, [tb.id]: fs }))}
-                  active={shown && tb.id === activeId} engine={conn.engine} connName={conn.name} profileId={conn.id} />
+                  active={shown && tb.id === activeId} engine={conn.engine} engineId={conn.engineId} connName={conn.name} profileId={conn.id} />
               )}
               {tb.kind === 'er' && (
                 <ERDiagram connId={connId ?? undefined} schema={tb.schema} onOpenTable={tname => pickTable(tb.schema, tname)} />

@@ -5,9 +5,12 @@ import { DataProvider } from '../../state/DataContext'
 import i18n from '../../i18n'
 import { SqlConsole } from './SqlConsole'
 import { invalidateSchemaCache } from '../../services/dbMetadata'
-const api = vi.hoisted(() => ({ getSchema: vi.fn(), loadSchemaNamespace: vi.fn(), schemaColumnCatalog: vi.fn(), erRelations: vi.fn() }))
+const api = vi.hoisted(() => ({ getSchema: vi.fn(), loadSchemaNamespace: vi.fn(), schemaColumnCatalog: vi.fn(), erRelations: vi.fn(), editor: vi.fn() }))
 vi.mock('../../services/db', async original => ({ ...await original<typeof import('../../services/db')>(), ...api }))
-vi.mock('./SqlEditor', () => ({ SqlEditor: () => <div/> }))
+vi.mock('./SqlEditor', async () => {
+  const { forwardRef } = await import('react')
+  return { SqlEditor: forwardRef((_props, _ref) => { api.editor(_props); return <div/> }) }
+})
 const ns = (name: string) => ({ name, status: 'unloaded', tables: [], views: [], functions: [] })
 beforeEach(async () => {
   vi.resetAllMocks(); invalidateSchemaCache()
@@ -25,6 +28,7 @@ it('loads completion only for the current and explicitly referenced namespaces',
     expect(method.mock.calls.every(([, name]) => ['APP','OTHER'].includes(name))).toBe(true)
   }
   expect(screen.getByTestId('sql-default-schema')).toHaveValue('APP')
+  expect(api.editor.mock.calls.at(-1)?.[0]).toMatchObject({ engine: 'postgres', defaultSchema: 'APP' })
 })
 it('shows completion truncation and permission errors rather than claiming complete suggestions', async () => {
   api.schemaColumnCatalog.mockResolvedValue({ tables: [['items',['id']]], errors: [{ schema: 'APP.private', message: 'permission denied' }], truncated: true })

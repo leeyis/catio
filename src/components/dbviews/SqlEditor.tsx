@@ -6,12 +6,15 @@
 import React, { useEffect, useImperativeHandle, useRef, useState, forwardRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { EditorView, keymap, placeholder as cmPlaceholder, lineNumbers, highlightActiveLineGutter } from '@codemirror/view'
-import { EditorState, Compartment, type Extension } from '@codemirror/state'
+import { EditorState, Compartment, Prec, type Extension } from '@codemirror/state'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
-import { autocompletion, completionKeymap, closeBrackets, closeBracketsKeymap, type CompletionSource } from '@codemirror/autocomplete'
+import { autocompletion, completionKeymap, closeBrackets, closeBracketsKeymap, acceptCompletion, ifNotIn, type CompletionSource } from '@codemirror/autocomplete'
 import { linter, lintGutter, type Diagnostic } from '@codemirror/lint'
 import { syntaxHighlighting, bracketMatching, indentOnInput } from '@codemirror/language'
-import { sql, PostgreSQL, MySQL, SQLite, MSSQL, type SQLDialect, type SQLNamespace } from '@codemirror/lang-sql'
+import { sql, type SQLNamespace } from '@codemirror/lang-sql'
+import { scopedSchemaCompletion } from './sqlScopeCompletion'
+import { dialectFor } from './sqlDialect'
+export { dialectFor } from './sqlDialect'
 import { catioTheme, catioHighlight } from '../editor/editorTheme'
 import { Icon } from '../Icon'
 import { editorStats, type EditorStats } from './editorStats'
@@ -25,6 +28,10 @@ export interface SqlEditorProps {
    * tables → columns). The nesting lets lang-sql assign distinct completion
    * types/icons to schemas, tables, and columns. */
   schema?: SQLNamespace
+  /** Actual engine/profile for parsing; not the query transport family. */
+  engine?: string
+  /** Resolve unqualified table names in this namespace. */
+  defaultSchema?: string
   /** Invoked on Alt+Enter (the "run query" shortcut). */
   onRun?: () => void
   /** Run just the currently-selected SQL (from the selection toolbar or Alt+Enter with a selection). */
@@ -65,18 +72,8 @@ export interface SqlEditorHandle {
   getSelectedText: () => string
 }
 
-/** Map a backend engine name to a lang-sql dialect (default PostgreSQL). */
-export function dialectFor(dbType?: string): SQLDialect {
-  switch (dbType) {
-    case 'mysql': return MySQL
-    case 'sqlite': case 'duckdb': return SQLite
-    case 'sqlserver': return MSSQL
-    default: return PostgreSQL
-  }
-}
-
 export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function SqlEditor(
-  { code, onChange, minHeight, target = 'prod-orders', schema, onRun, onRunSelection, placeholder, plain, completion, lintSource, extraCompletion },
+  { code, onChange, minHeight, target = 'prod-orders', schema, engine, defaultSchema, onRun, onRunSelection, placeholder, plain, completion, lintSource, extraCompletion },
   ref,
 ) {
   const { t: tr } = useTranslation()
@@ -94,15 +91,24 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
       if (lintSource) exts.push(linter(view => lintSource(view)), lintGutter())
       return exts
     }
-    const exts: Extension[] = [sql({ dialect: PostgreSQL, schema, upperCaseKeywords: true }), autocompletion()]
+    const dialect = dialectFor(engine)
+    const exts: Extension[] = [sql({ dialect, upperCaseKeywords: true }), autocompletion()]
+    // lang-sql's schema source is not suppressed in comments/literals on explicit invocation.
+    // Wrap it ourselves while retaining its alias and quoted-identifier support.
+    if (schema) exts.push(dialect.language.data.of({ autocomplete: ifNotIn(
+      ['String', 'LineComment', 'BlockComment'], scopedSchemaCompletion(schema, defaultSchema, engine),
+    ) }))
     // 追加的 SQL 补全源(函数签名补全 / 外键 JOIN 建议)。通过 languageData 注册,
     // 与 lang-sql 内置的表/列/关键字补全合并显示(不 override,故现有补全不退化)。
-    if (extraCompletion) exts.push(EditorState.languageData.of(() => [{ autocomplete: extraCompletion }]))
+    if (extraCompletion) exts.push(dialect.language.data.of({ autocomplete: ifNotIn(
+      ['String', 'LineComment', 'BlockComment', 'QuotedIdentifier', 'CompositeIdentifier', '.'], extraCompletion,
+    ) }))
     // SQL 诊断(未闭合括号/字符串、未知表名)+ gutter 标记,与 redis 控制台一致。
     if (lintSource) exts.push(linter(view => lintSource(view)), lintGutter())
     return exts
   }
   // Keep the latest callbacks without re-running the mount effect.
+  const imeKey = useRef(false)
   const onChangeRef = useRef(onChange)
   onChangeRef.current = onChange
   const onRunRef = useRef(onRun)
@@ -125,10 +131,16 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
       syntaxHighlighting(catioHighlight),
       catioTheme,
       ...(placeholder ? [cmPlaceholder(placeholder)] : []),
+      // Observe without consuming the event: native IME candidate confirmation must keep working.
+      Prec.highest(EditorView.domEventHandlers({ keydown: event => {
+        imeKey.current = event.isComposing || event.keyCode === 229
+        return false
+      } })),
       keymap.of([
         {
           key: 'Alt-Enter',
           run: view => {
+            if (imeKey.current || view.composing || view.compositionStarted) return false
             const sel = view.state.selection.main
             if (!sel.empty && onRunSelectionRef.current) {
               const text = view.state.sliceDoc(sel.from, sel.to).trim()
@@ -142,8 +154,8 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
             setSelBar(null)
             return true
           },
-          preventDefault: true,
         },
+        { key: 'Tab', run: view => !imeKey.current && !view.composing && !view.compositionStarted && acceptCompletion(view) },
         ...closeBracketsKeymap,
         ...completionKeymap,
         ...historyKeymap,
@@ -193,7 +205,7 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
     if (!view) return
     view.dispatch({ effects: sqlCompartment.current.reconfigure(langExt()) })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [schema, plain, completion, lintSource, extraCompletion])
+  }, [schema, engine, defaultSchema, plain, completion, lintSource, extraCompletion])
 
   // Sync external `code` changes (e.g. AI-inserted SQL, Clear button) into the
   // doc without clobbering the cursor while the user types locally.

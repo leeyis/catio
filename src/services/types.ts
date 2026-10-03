@@ -48,7 +48,7 @@ export interface Connection {
    *  family (e.g. "mysql"), not a catalog variant id, so dialect selection stays
    *  correct for MySQL-wire engines (TiDB, GoldenDB, …). */
   engine?: string
-  /** Engine-catalog id (e.g. "cockroachdb") — drives the brand logo/glyph only.
+  /** Engine-catalog id (e.g. "cockroachdb") — drives branding and editor syntax, not protocol dispatch.
    *  Falls back to `engine` when absent. */
   engineId?: string
   tunnel?: string

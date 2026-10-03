@@ -20,6 +20,7 @@ import { useQuerySession } from './useQuerySession'
 import { QuerySessionToolbar } from './QuerySessionToolbar'
 import { cacheMetadataRequest } from '../../services/dbMetadata'
 import { referencedNamespaces } from './metadataReferences'
+import { completionSchema } from './sqlCompletionSchema'
 import { ExplainPlanViewer } from './ExplainPlanViewer'
 import { SqlFileDialog } from './SqlFileDialog'
 import { parseExplainResult, supportsExplainPlan, type ParsedExplainPlan } from './explainPlan'
@@ -57,6 +58,8 @@ export interface SqlConsoleProps {
   active?: boolean
   /** 连接引擎(conn.engine = dbType)。mongodb/elasticsearch → plain 模式(Task 10 实装)。 */
   engine?: string
+  /** Specific catalog profile for editor syntax; transport and capabilities still use engine. */
+  engineId?: string
   /** 连接名,用于"正在 X 上执行…"提示。缺省回落到当前默认命名空间。 */
   connName?: string
   /** 保存档 profile id — 随历史记录持久化,使历史可按连接删除/友好显示。 */
@@ -70,7 +73,7 @@ export interface SqlConsoleProps {
 
 interface CompletedStatement { querySessionId?: string; sql: string; defaultNamespace?: string; result?: QueryResult; error?: string }
 
-export function SqlConsole({ density, fresh, connId, initialCode, initialDefaultSchema, autoRun, active, engine, connName, profileId, onFullscreenChange, querySessions = false, workbenchId, sessionOwnerId }: SqlConsoleProps) {
+export function SqlConsole({ density, fresh, connId, initialCode, initialDefaultSchema, autoRun, active, engine, engineId, connName, profileId, onFullscreenChange, querySessions = false, workbenchId, sessionOwnerId }: SqlConsoleProps) {
   const { t } = useTranslation()
   const session = useQuerySession(connId, querySessions, {profileId,workbenchId,ownerId:sessionOwnerId})
   const runBusy = useRef(false)
@@ -335,57 +338,14 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connId, plain, namespaceKey, metadataRevision])
 
-  /**
-   * Nested completion schema for the SQL editor, in @codemirror/lang-sql's
-   * `SQLNamespace` shape so schemas, tables, and columns render with DISTINCT
-   * autocomplete icons:
-   *   - schema  → `{ self: { type: 'class' }, children: { …tables } }`
-   *   - table   → `{ self: { type: 'type' }, children: [ …columns ] }`
-   *   - column  → string entries, which lang-sql completes with type `'property'`
-   *
-   * Without explicit `self` completions lang-sql gives every nested key the same
-   * `'type'` icon (schemas and tables become indistinguishable); the `self` tag
-   * overrides that per level so the icons differ.
-   *
-   * Tables are exposed both schema-qualified (under their schema's `children`, so
-   * `ads.orders` → its columns) and bare at the top level (so `orders` completes
-   * unqualified). Schema names stay top-level keys, now with the `class` icon.
-   *
-   * Connected (live) path: columns come from the REAL backend via
-   * `schemaColumns` (stored in `liveColumns`), merged across namespaces. A table
-   * still in flight (columns not yet fetched, or the fetch failed) falls back to
-   * an empty list — table-name completion still works.
-   *
-   * Mock path: columns come from `tableStructures` when known (best-effort).
-   */
+  // Keep per-schema identity; unqualified names resolve through the editor's actual defaultSchema.
   const editorSchema = useMemo<SQLNamespace>(() => {
-    const top: Record<string, SQLNamespace> = {}
-    const mockColsFor = (table: string): string[] =>
-      D.tableStructures[table]?.columns.map(c => c.name) ?? []
-    const tableNode = (label: string, cols: readonly string[]): SQLNamespace => ({
-      self: { label, type: 'type' },
-      children: cols,
-    })
     const namespaces = (liveSchema ?? (connId ? { db: connId, schemas: [] } : D.schema)).schemas
-    for (const ns of namespaces) {
-      const realCols = connId ? liveColumns[ns.name] : undefined
-      const tables: Record<string, SQLNamespace> = {}
-      for (const tbl of [...ns.tables, ...ns.views]) {
-        const cols = connId ? (realCols?.[tbl.name] ?? []) : mockColsFor(tbl.name)
-        const node = tableNode(tbl.name, cols)
-        // Schema-qualified (ads.orders → columns) and bare (orders → columns).
-        tables[tbl.name] = node
-        if (!(tbl.name in top)) top[tbl.name] = node
-      }
-      // Schema name itself: a `class`-typed completion whose children are tables.
-      top[ns.name] = { self: { label: ns.name, type: 'class' }, children: tables }
-    }
-    // Feed the SQL linter's "unknown table" check (read lazily via sqlTablesRef).
-    // 已连接但 liveSchema 未加载完成时,linterTableNames 会返回 []，避免拿 demo 表名
-    // 对真实库里的表误报"未知的表"。autocomplete 的 editorSchema 仍可用 demo 表名兜底。
     sqlTablesRef.current = linterTableNames(connId, liveSchema, D.schema)
-    return top
-  }, [connId, liveSchema, liveColumns, D.schema, D.tableStructures])
+    return completionSchema(namespaces, (ns, table) => connId
+      ? liveColumns[ns]?.[table] ?? []
+      : D.tableStructures[table]?.columns.map(c => c.name) ?? [], engineId ?? engine)
+  }, [connId, liveSchema, liveColumns, D.schema, D.tableStructures, engineId, engine])
 
   // S3:JOIN 建议用的 JoinTable[]（表名 + 列 + 外键)。跨所有库聚合;外键来自
   // liveRelations(已连接) / D.erModel(mock)。外键以 from.fromCol → to.toCol 表示。
@@ -702,7 +662,7 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
           width: '100%',
           borderBottom: !hasResults ? 'none' : '1px solid var(--border-hairline)',
         }}>
-          <SqlEditor ref={editorRef} code={code} onChange={setCode} schema={editorSchema} onRun={run} onRunSelection={run} placeholder={editorPlaceholder} plain={plain} completion={completion} lintSource={lintSource} extraCompletion={advancedCompletion} />
+          <SqlEditor ref={editorRef} code={code} onChange={setCode} schema={editorSchema} engine={engineId ?? engine} defaultSchema={defaultNamespace || liveSchema?.defaultNamespace} onRun={run} onRunSelection={run} placeholder={editorPlaceholder} plain={plain} completion={completion} lintSource={lintSource} extraCompletion={advancedCompletion} />
         </div>
       )}
       {/* 功能#5:编辑区与结果区之间的水平拖动分隔条。仅在 split 态且有结果区时显示。 */}

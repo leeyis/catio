@@ -12,9 +12,10 @@ export interface ObjectPaneProps {
   schema: string
   name: string
   objKind: 'view' | 'function' | 'procedure'
+  engine?: string
 }
 
-export function ObjectPane({ connId, schema, name, objKind }: ObjectPaneProps) {
+export function ObjectPane({ connId, schema, name, objKind, engine }: ObjectPaneProps) {
   const { t } = useTranslation()
   const [src, setSrc] = useState('')
   const [loading, setLoading] = useState(false)
@@ -113,7 +114,7 @@ export function ObjectPane({ connId, schema, name, objKind }: ObjectPaneProps) {
           : err
             ? <div className="grow" style={{ display: 'grid', placeItems: 'center', color: 'var(--signal-red)', fontSize: 12, padding: 16, textAlign: 'center' }}>{t('dbviews.loadError', { message: err })}</div>
             : src
-              ? <SqlEditor code={src} onChange={v => { setSrc(v); setIsDirty(true); if (saveErr) setSaveErr(null); if (saved) setSaved(false) }} />
+              ? <SqlEditor code={src} engine={engine} defaultSchema={schema} onChange={v => { setSrc(v); setIsDirty(true); if (saveErr) setSaveErr(null); if (saved) setSaved(false) }} />
               : <div className="grow" style={{ display: 'grid', placeItems: 'center', color: 'var(--text-faint)', fontSize: 12 }}>{t('dbviews.noDefinition')}</div>}
       </div>
     </>
