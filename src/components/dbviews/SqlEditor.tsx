@@ -73,7 +73,7 @@ export interface SqlEditorHandle {
 }
 
 export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function SqlEditor(
-  { code, onChange, minHeight, target = 'prod-orders', schema, engine, defaultSchema, onRun, onRunSelection, placeholder, plain, completion, lintSource, extraCompletion },
+  { code, onChange, minHeight, target = 'SQL', schema, engine, defaultSchema, onRun, onRunSelection, placeholder, plain, completion, lintSource, extraCompletion },
   ref,
 ) {
   const { t: tr } = useTranslation()

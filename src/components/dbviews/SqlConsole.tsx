@@ -665,7 +665,7 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
           width: '100%',
           borderBottom: !hasResults ? 'none' : '1px solid var(--border-hairline)',
         }}>
-          <SqlEditor ref={editorRef} code={code} onChange={setCode} schema={editorSchema} engine={engineId ?? engine} defaultSchema={completionNamespace} onRun={run} onRunSelection={run} placeholder={editorPlaceholder} plain={plain} completion={completion} lintSource={lintSource} extraCompletion={advancedCompletion} />
+          <SqlEditor ref={editorRef} target={connName || connId || 'SQL'} code={code} onChange={setCode} schema={editorSchema} engine={engineId ?? engine} defaultSchema={completionNamespace} onRun={run} onRunSelection={run} placeholder={editorPlaceholder} plain={plain} completion={completion} lintSource={lintSource} extraCompletion={advancedCompletion} />
         </div>
       )}
       {/* 功能#5:编辑区与结果区之间的水平拖动分隔条。仅在 split 态且有结果区时显示。 */}

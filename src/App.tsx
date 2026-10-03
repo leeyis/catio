@@ -2081,12 +2081,13 @@ export default function App() {
       // so the model answers in the connection's real query syntax (mongo shell /
       // ES REST+DSL / SQL dialect) — runnable directly in the editor, not a CLI.
       const agentMode = tab.kind === 'terminal' ? 'shell' : 'sql'
-      const tabEngine = vaultConns.find(c => c.id === tab.connId)?.engine
-        ?? liveConns[tab.connId]?.engine ?? D.byId[tab.connId]?.engine
+      const promptConnection = vaultConns.find(c => c.id === tab.connId)
+        ?? liveConns[tab.connId] ?? D.byId[tab.connId]
+      const tabEngine = promptConnection?.engine
       // Subscribe BEFORE start so the ordered stream is never lost.
       await ensureAgentSubscription()
 
-      const systemPrompt = `${buildAgentSystemPrompt(agentMode, hostName, tabEngine, executionMode, config.singleLineCommands, true)}${sysinfoBlock}${termBlock}`
+      const systemPrompt = `${buildAgentSystemPrompt(agentMode, hostName, tabEngine, executionMode, config.singleLineCommands, true, promptConnection?.engineId)}${sysinfoBlock}${termBlock}`
       // P0: prior history enters as text snapshots; this Turn's tool blocks stay typed.
       const priorMessages: AgentTurnRequest['messages'] = prior.map(m => ({
         role: m.role === 'assistant' ? 'assistant' : 'user',

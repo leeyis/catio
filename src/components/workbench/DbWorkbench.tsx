@@ -427,7 +427,7 @@ export function DbWorkbench({ conn, density, active: shown = true, workspaceTabI
                 <TablePane conn={conn} connId={connId} caps={caps} schema={tb.schema} table={tb.table} density={density} />
               )}
               {tb.kind === 'object' && (
-                <ObjectPane connId={connId} schema={tb.schema} name={tb.name} objKind={tb.objKind} engine={conn.engineId ?? conn.engine} />
+                <ObjectPane connId={connId} connName={conn.name} schema={tb.schema} name={tb.name} objKind={tb.objKind} engine={conn.engineId ?? conn.engine} />
               )}
               {tb.kind === 'sql' && (
                 <SqlConsole density={density} fresh queryN={tb.qid} writable={caps.writable} connId={connId ?? undefined}

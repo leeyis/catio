@@ -23,14 +23,14 @@ beforeEach(async () => {
   await i18n.changeLanguage('en')
 })
 it('loads completion only for the current and explicitly referenced namespaces', async () => {
-  render(<LanguageProvider><DataProvider><SqlConsole connId="c" engine="postgres" fresh initialCode="SELECT * FROM OTHER.items"/></DataProvider></LanguageProvider>)
+  render(<LanguageProvider><DataProvider><SqlConsole connId="c" connName="Reporting replica" engine="postgres" fresh initialCode="SELECT * FROM OTHER.items"/></DataProvider></LanguageProvider>)
   await waitFor(() => expect(api.schemaColumnCatalog).toHaveBeenCalledWith('c','APP'))
   expect(api.schemaColumnCatalog).toHaveBeenCalledWith('c','OTHER')
   for (const method of [api.loadSchemaNamespace, api.schemaColumnCatalog, api.erRelations]) {
     expect(method.mock.calls.every(([, name]) => ['APP','OTHER'].includes(name))).toBe(true)
   }
   expect(screen.getByTestId('sql-default-schema')).toHaveValue('APP')
-  expect(api.editor.mock.calls.at(-1)?.[0]).toMatchObject({ engine: 'postgres', defaultSchema: 'APP' })
+  expect(api.editor.mock.calls.at(-1)?.[0]).toMatchObject({ engine: 'postgres', defaultSchema: 'APP', target: 'Reporting replica' })
 })
 it('loads the actual namespace even when the engine has no session-schema selector', async () => {
   render(<LanguageProvider><DataProvider><SqlConsole connId="c" engine="sqlserver" fresh/></DataProvider></LanguageProvider>)
