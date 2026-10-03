@@ -1,5 +1,5 @@
 /* ported from ref-ui/_extract/blob9.txt — controlled per-tab conversation view (P2) */
-import React, { useState, useRef, useEffect, useMemo } from 'react'
+import React, { useState, useRef, useEffect, useLayoutEffect, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import ReactMarkdown from 'react-markdown'
@@ -28,6 +28,8 @@ export interface Attachment {
 
 export interface AIPanelProps {
   visible?: boolean
+  /** Stable workbench tab identity, including different tabs on the same connection. */
+  contextKey?: string
   fileActivity?: AgentFileActivity[]
   onClose: () => void
   mode?: 'sql' | 'shell'
@@ -487,7 +489,7 @@ interface MentionTable {
   kind: 'table' | 'view'
 }
 
-export function AIPanel({ visible = true, onClose, mode = 'sql', conn, connId, engine, attachment, onClearAttachment, onInsert, canInsert, onOpenSettings, conversation, busy = false, history = [], onSend, onAbort, onNewConversation, onRestoreConversation, onDeleteConversation, fileActivity = [] }: AIPanelProps) {
+export function AIPanel({ visible = true, contextKey, onClose, mode = 'sql', conn, connId, engine, attachment, onClearAttachment, onInsert, canInsert, onOpenSettings, conversation, busy = false, history = [], onSend, onAbort, onNewConversation, onRestoreConversation, onDeleteConversation, fileActivity = [] }: AIPanelProps) {
   const workspace = useAgentWorkspace()
   const { t } = useTranslation()
   const { config: cfg, update: updateAgentConfig } = useAgentConfig()
@@ -517,6 +519,29 @@ export function AIPanel({ visible = true, onClose, mode = 'sql', conn, connId, e
   const [selectedTables, setSelectedTables] = useState<{ schema: string; table: string; kind: 'table' | 'view' }[]>([])
   // null = mention dropdown closed; otherwise the current filter text after '@'.
   const [mentionFilter, setMentionFilter] = useState<string | null>(null)
+
+  const [tableListLoading, setTableListLoading] = useState(false)
+  const [tableListFailed, setTableListFailed] = useState(false)
+  const [tableListRevision, setTableListRevision] = useState(0)
+  const [preparing, setPreparing] = useState(false)
+  const [sendError, setSendError] = useState<string | null>(null)
+  const pendingPreparation = useRef<{ timer: ReturnType<typeof setTimeout> } | null>(null)
+  function invalidatePreparation() {
+    if (pendingPreparation.current) clearTimeout(pendingPreparation.current.timer)
+    pendingPreparation.current = null
+  }
+  function cancelPreparation() {
+    invalidatePreparation()
+    setPreparing(false)
+  }
+  // Invalidate before a late async continuation can send to an obsolete target.
+  // The draft is intentionally retained; no automatic replay on the new target.
+  useLayoutEffect(() => {
+    invalidatePreparation()
+    setPreparing(false)
+    setSendError(null)
+    return invalidatePreparation
+  }, [contextKey, mode, conn?.id, connId, conversation?.id, visible, attachment, busy])
 
   const msgs = conversation?.messages ?? []
 
@@ -590,11 +615,16 @@ export function AIPanel({ visible = true, onClose, mode = 'sql', conn, connId, e
     }
   }, [executionMenuOpen])
 
-  // Fetch the table/view list for the @ picker when the SQL-mode connection changes.
+  // Enumerate only when the user opens @, not whenever the Agent panel is shown.
+  const pickerOpen = visible && isSql && mentionFilter !== null && !!connId
   useEffect(() => {
-    if (!visible || !isSql || !connId) { setTableList([]); return }
-    let alive = true
+    setTableList([])
+    setTableListLoading(false)
+    setTableListFailed(false)
     setTableMetadataWarning(null)
+    if (!pickerOpen || !connId) return
+    let alive = true
+    setTableListLoading(true)
     getSchema(connId)
       .then(s => {
         if (!alive) return
@@ -607,12 +637,13 @@ export function AIPanel({ visible = true, onClose, mode = 'sql', conn, connId, e
         }
         setTableList(list)
       })
-      .catch(() => { if (alive) setTableList([]) })
+      .catch(() => { if (alive) { setTableList([]); setTableListFailed(true) } })
+      .finally(() => { if (alive) setTableListLoading(false) })
     return () => { alive = false }
-  }, [visible, isSql, connId])
+  }, [pickerOpen, connId, tableListRevision])
 
-  // Reset @ state when leaving SQL mode or switching connection.
-  useEffect(() => { setSelectedTables([]); setMentionFilter(null) }, [isSql, connId])
+  // Never reuse table selections in another tab or conversation, even on the same connection.
+  useEffect(() => { setSelectedTables([]); setMentionFilter(null) }, [contextKey, isSql, conn?.id, connId, conversation?.id])
 
   // Tables matching the current '@' filter (case-insensitive, name or schema).
   const mentionMatches = useMemo(() => {
@@ -623,7 +654,9 @@ export function AIPanel({ visible = true, onClose, mode = 'sql', conn, connId, e
 
   // Detect an in-progress '@token' at the caret (end of draft) and open the picker.
   function onDraftChange(value: string) {
+    if (pendingPreparation.current) return
     setDraft(value)
+    setSendError(null)
     if (!isSql || !connId) { setMentionFilter(null); return }
     const m = /(^|\s)@(\S*)$/.exec(value)
     setMentionFilter(m ? m[2] : null)
@@ -631,6 +664,9 @@ export function AIPanel({ visible = true, onClose, mode = 'sql', conn, connId, e
 
   // Pick a table from the dropdown: add a chip and strip the '@token' from the draft.
   function pickTable(item: MentionTable) {
+    if (pendingPreparation.current) return
+    if (selectedTables.length >= 12) { setSendError(t('panels.contextTooLarge')); return }
+    setSendError(null)
     setSelectedTables(prev =>
       prev.some(s => s.schema === item.schema && s.table === item.name)
         ? prev
@@ -641,34 +677,58 @@ export function AIPanel({ visible = true, onClose, mode = 'sql', conn, connId, e
 
   async function send() {
     const text = draft.trim()
-    if (!text || !cfg.model || busy) return
-
-    let userContent = text
-    const hasSelection = !!attachment
-    if (attachment) {
-      userContent += `\n\n---\n${attachment.text}`
-      onClearAttachment()
+    if (!text || !cfg.model || busy || !onSend || !hasTarget || !visible || pendingPreparation.current) return
+    const token = { timer: setTimeout(() => {
+      if (pendingPreparation.current !== token) return
+      cancelPreparation()
+      setSendError(t('panels.contextTimeout'))
+    }, 20_000) }
+    pendingPreparation.current = token
+    setPreparing(true)
+    setSendError(null)
+    const isCurrent = () => pendingPreparation.current === token
+    const withinBudget = (content: string) => {
+      if (!isSql || new TextEncoder().encode(content).byteLength <= 65_536) return true
+      setSendError(t('panels.contextTooLarge'))
+      return false
     }
-    // Inject the selected tables' structure as one-time context (best-effort:
-    // a failed fetch skips that table rather than blocking the send).
-    if (isSql && connId && selectedTables.length > 0) {
-      for (const s of selectedTables) {
-        try {
-          const struct = await tableStructure(connId, s.schema, s.table)
-          userContent += `\n\n---\n${buildTableContext(engine, s.schema, s.table, struct)}`
-        } catch { /* skip this table */ }
+    try {
+      let userContent = text
+      const hasSelection = !!attachment
+      if (attachment) {
+        const source = attachment.kind === 'sql'
+          ? t('panels.sqlSelectionContext', { target: JSON.stringify(attachment.target) }) + '\n' : ''
+        userContent += `\n\n---\n${source}${attachment.text}`
       }
+      if (!withinBudget(userContent)) return
+      if (isSql && selectedTables.length > 0) {
+        if (!connId) { setSendError(t('panels.contextLoadFailed')); return }
+        for (const s of selectedTables) {
+          const struct = await tableStructure(connId, s.schema, s.table)
+          if (!isCurrent()) return
+          userContent += `\n\n---\n${t('panels.tableContextSummary')}\n${buildTableContext(engine, s.schema, s.table, struct)}`
+          if (!withinBudget(userContent)) return
+        }
+      }
+      if (!isCurrent()) return
+      onSend(userContent, { hasSelection })
+      // Only consume the snapshot after every explicitly requested table is available.
+      // Failures keep the entire draft/context intact and never reach the model.
+      if (attachment) onClearAttachment()
       setSelectedTables([])
+      setHistOpen(false)
+      setDraft('')
+    } catch {
+      if (isCurrent()) setSendError(t('panels.contextLoadFailed'))
+    } finally {
+      if (isCurrent()) cancelPreparation()
     }
-    setHistOpen(false)
-    onSend?.(userContent, { hasSelection })
-    setDraft('')
   }
 
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
       e.preventDefault()
-      send()
+      void send()
     }
   }
 
@@ -679,9 +739,9 @@ export function AIPanel({ visible = true, onClose, mode = 'sql', conn, connId, e
       actions={hasTarget
         ? (
           <>
-            <IconBtn name="plus" size={15} variant="bare" title={t('panels.newConversation')} disabled={busy} onClick={() => onNewConversation?.()} />
+            <IconBtn name="plus" size={15} variant="bare" title={t('panels.newConversation')} disabled={busy || preparing} onClick={() => onNewConversation?.()} />
             <div style={{ position: 'relative' }}>
-              <IconBtn name="history" size={15} variant="bare" title={t('panels.conversationHistory')} active={histOpen} disabled={busy} onClick={() => setHistOpen(o => !o)} />
+              <IconBtn name="history" size={15} variant="bare" title={t('panels.conversationHistory')} active={histOpen} disabled={busy || preparing} onClick={() => setHistOpen(o => !o)} />
               {histOpen && (
                 <HistoryDropdown history={history} currentId={conversation?.id} onClose={() => setHistOpen(false)}
                   onRestore={onRestoreConversation} onDelete={onDeleteConversation} />
@@ -733,7 +793,7 @@ export function AIPanel({ visible = true, onClose, mode = 'sql', conn, connId, e
       ) : (
         <div ref={scrollRef} className="grow" style={{ overflowY: 'auto', padding: '14px 12px', display: 'flex', flexDirection: 'column', gap: 14 }}>
           {msgs.map((m, i) => m.role === 'user'
-            ? <UserMessage key={i} text={m.content} busy={busy}
+            ? <UserMessage key={i} text={m.content} busy={busy || preparing}
                 onAskAgain={onSend ? text => onSend(text, { hasSelection: false }) : undefined} />
             : <AssistantMessage key={i} text={m.content} mode={mode} conn={conn} onInsert={onInsert} canInsert={canInsert}
                 isStreaming={busy && i === msgs.length - 1} />)}
@@ -746,11 +806,17 @@ export function AIPanel({ visible = true, onClose, mode = 'sql', conn, connId, e
       )}
       {/* composer */}
       <div style={{ padding: 10, borderTop: '1px solid var(--border-hairline)', position: 'relative' }}>
+        {sendError && <div role="alert" style={{ fontSize: 12, color: 'var(--signal-red)', padding: '4px 2px 8px' }}>{sendError}</div>}
+        {preparing && <div role="status" style={{ fontSize: 12, color: 'var(--text-tertiary)', padding: '4px 2px 8px' }}>{t('panels.contextPreparing')}</div>}
         {/* @ 选表下拉 — anchored above the composer (SQL mode only). */}
         {isSql && mentionFilter != null && tableMetadataWarning && <div role="status" style={{fontSize:11,color:'var(--signal-amber)'}}>{t('workbench.searchMetadataErrors',{count:tableMetadataWarning.split(', ').length})}: {tableMetadataWarning}</div>}
         {isSql && mentionFilter != null && (
           <div className="pop-in" style={{ position: 'absolute', left: 10, right: 10, bottom: '100%', marginBottom: 6, zIndex: 50, background: 'var(--surface-elevated)', border: '1px solid var(--border-hairline-alt)', borderRadius: 10, boxShadow: 'var(--shadow-dropdown)', maxHeight: 220, overflowY: 'auto', padding: 5 }}>
-            {mentionMatches.length === 0
+            {tableListLoading ? <div role="status" style={{ padding: '10px 8px', fontSize: 12 }}>{t('panels.contextPreparing')}</div>
+              : tableListFailed ? <div role="alert" style={{ padding: '10px 8px', fontSize: 12, color: 'var(--signal-red)' }}>
+                {t('panels.tableListFailed')} <button className="btn sm" onClick={() => setTableListRevision(n => n + 1)}>{t('workbench.metadataRetry')}</button>
+              </div>
+              : mentionMatches.length === 0
               ? <div style={{ padding: '10px 8px', fontSize: 12, color: 'var(--text-faint)' }}>{t('panels.mentionNoTables')}</div>
               : mentionMatches.map((item, i) => (
                 <button key={`${item.schema}.${item.name}.${i}`} className="row gap6" style={{ width: '100%', textAlign: 'left', padding: '6px 8px', borderRadius: 7, background: 'transparent', border: 'none', cursor: 'pointer' }}
@@ -772,7 +838,7 @@ export function AIPanel({ visible = true, onClose, mode = 'sql', conn, connId, e
               <span key={`${s.schema}.${s.table}.${i}`} className="row gap5 chip" style={{ background: 'var(--accent-soft-alt)', color: 'var(--accent-primary)', fontWeight: 600, paddingRight: 4 }}>
                 <Icon name={s.kind === 'view' ? 'eye' : 'database'} size={11} />
                 {s.table}
-                <button className="icon-btn bare" style={{ width: 16, height: 16 }} title={t('panels.removeTable')}
+                <button className="icon-btn bare" style={{ width: 16, height: 16 }} title={t('panels.removeTable')} disabled={preparing}
                   onClick={() => setSelectedTables(prev => prev.filter((_, j) => j !== i))}>
                   <Icon name="x" size={11} />
                 </button>
@@ -787,13 +853,13 @@ export function AIPanel({ visible = true, onClose, mode = 'sql', conn, connId, e
               <Icon name={attachment.kind === 'sql' ? 'database' : 'terminal'} size={12} style={{ color: 'var(--accent-primary)' }} />
               <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--accent-primary)' }}>{t('panels.attachedOutput', { target: attachment.target })}</span>
               <span className="grow" />
-              <button className="icon-btn bare" style={{ width: 20, height: 20 }} title={t('panels.removeAttachment')} onClick={onClearAttachment}><Icon name="x" size={12} /></button>
+              <button className="icon-btn bare" style={{ width: 20, height: 20 }} title={t('panels.removeAttachment')} disabled={preparing} onClick={onClearAttachment}><Icon name="x" size={12} /></button>
             </div>
             <pre className="mono" style={{ margin: 0, fontSize: 10.8, lineHeight: 1.5, color: 'var(--text-secondary)', whiteSpace: 'pre-wrap', maxHeight: 92, overflowY: 'auto', wordBreak: 'break-all' }}>{attachment.text}</pre>
           </div>
         )}
         <div className="col" style={{ background: 'var(--surface-sunken)', border: `1px solid ${attachment ? 'var(--accent-border)' : 'var(--border-hairline)'}`, borderRadius: 12, padding: 8 }}>
-          <textarea ref={taRef} value={draft} onChange={e => onDraftChange(e.target.value)} onKeyDown={onKeyDown}
+          <textarea ref={taRef} value={draft} readOnly={preparing} onChange={e => onDraftChange(e.target.value)} onKeyDown={onKeyDown}
             placeholder={attachment ? t('panels.composerPlaceholderAttached') : (isSql ? t('panels.composerPlaceholderSql') : t('panels.composerPlaceholderShell', { target }))}
             rows={2} style={{ border: 'none', outline: 'none', background: 'transparent', resize: 'none', fontSize: 13, color: 'var(--text-primary)', fontFamily: 'inherit' }} />
           <div className="row" style={{ gap: 8, marginTop: 4 }}>
@@ -864,9 +930,10 @@ export function AIPanel({ visible = true, onClose, mode = 'sql', conn, connId, e
               <button className="icon-btn bare" style={{ width: 26, height: 26, flex: 'none' }} title={t('panels.selectModel')} onClick={() => onOpenSettings?.()}><Icon name="box" size={14} /></button>
               <span className="ell" title={cfg.model || t('panels.modelInfo')} style={{ flex: 1, minWidth: 0, fontSize: 11, color: 'var(--text-faint)', alignSelf: 'center' }}>{cfg.model || t('panels.modelInfo')}</span>
             </div>
-            {busy
+            {preparing ? <button className="btn sm" title={t('panels.contextCancel')} onClick={cancelPreparation}>{t('panels.contextCancel')}</button>
+              : busy
               ? <button className="btn sm" style={{ width: 32, padding: 0, flex: 'none', background: 'var(--signal-red, #e5484d)', color: '#fff', borderColor: 'var(--signal-red, #e5484d)' }} title={t('panels.stop')} onClick={() => onAbort?.()}><Icon name="square" size={13} /></button>
-              : <button className="btn btn-primary sm" style={{ width: 32, padding: 0, flex: 'none' }} title={t('panels.send')} disabled={!cfg.model || !draft.trim()} onClick={() => void send()}><Icon name="send" size={14} /></button>}
+              : <button className="btn btn-primary sm" style={{ width: 32, padding: 0, flex: 'none' }} title={t('panels.send')} disabled={!cfg.model || !draft.trim() || !onSend} onClick={() => void send()}><Icon name="send" size={14} /></button>}
           </div>
         </div>
       </div>

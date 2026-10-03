@@ -2309,7 +2309,7 @@ export default function App() {
           {/* panel slot */}
           {panelOpen && (aiForm === 'side' || activePanel !== 'ai') && (
             <div className="fade-in" style={{ display: 'flex' }}>
-              {activePanel === 'ai' && <AIPanel visible={panelOpen} onClose={() => setPanelOpen(false)} mode={aiMode} conn={curConn ?? undefined} connId={aiConnId} engine={curConn?.engine} attachment={aiAttachment} onClearAttachment={() => setAiAttachment(null)} onInsert={insertToTerminal} canInsert={canInsert} onOpenSettings={() => goSettings('ai')}
+              {activePanel === 'ai' && <AIPanel contextKey={cur?.id} visible={panelOpen} onClose={() => setPanelOpen(false)} mode={aiMode} conn={curConn ?? undefined} connId={aiConnId} engine={curConn?.engine} attachment={aiAttachment} onClearAttachment={() => setAiAttachment(null)} onInsert={insertToTerminal} canInsert={canInsert} onOpenSettings={() => goSettings('ai')}
                 conversation={activeConversation} busy={activeConvBusy || activeTabBusy} history={agentHistory}
                 fileActivity={activeConversation ? agentFileActivity[activeConversation.id] : undefined}
                 onSend={cur ? ((text, opts) => void sendAgentMessage(cur.id, text, opts)) : undefined}
