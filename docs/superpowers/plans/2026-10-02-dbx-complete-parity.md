@@ -89,3 +89,64 @@
 - 编辑器只加载当前或被引用 namespace 的补全元数据，并避免为拿列名去全量获取索引/外键；显示截断/不可用边界。
 - 结构扩展保持类型长度精度、生成列/identity、复合索引/FK 的顺序和原始名称。旧显示字符串不是可逆结构，不依赖逗号/点号拆分生成 DDL。
 - 随后实现/验证多方言结构变更及 SQLite 原子重建，避免仅开启 structureEdit 开关。
+
+### 第四增量验收检查点（已提交，不是总目标完成）
+
+- 已实现 namespace catalog/按 namespace 加载/跨 namespace 对象搜索/取消及 Web 所有权检查；缓存仅在内存，刷新、DDL 和事务结束时失效，旧响应不得覆盖新数据。
+- 列补全限定当前和 SQL 引用的 namespace；PG/MySQL/SQL Server/DuckDB 走批量列目录查询，SQLite/rqlite 用列 PRAGMA，JDBC 用轻量列 RPC。达到预算、权限失败需明示，不伪装完整或空库。
+- PG、SQL Server、JDBC/H2 的代表性长度、数值精度/scale 和时间精度已回归；不代表所有厂商类型、生成列或全部 DDL 已完成。
+- 真实浏览器发现组件级默认 schema 修复仍被 DbWorkbench 的首项默认覆盖；追加上层 red/green 测试并修复后，H2 新查询下拉及实际 `SELECT CURRENT_SCHEMA` 均为 PUBLIC。未展开 HIDDEN namespace 的对象搜索及结构精度显示也已验证。
+- 数据对比已实现二进制标记重排、区分 BLOB 与同形文本键、目标主键检查、无键/NULL/重复键拒绝、方言分页与安全字面量、过期响应防护。先前原生确认阻塞浏览器验收；2026-10-03 改用既有应用内 ConfirmModal，并补充取消不写入、明确目标、过期确认失效的 red/green 回归。
+- 真实浏览器完成 SQLite 对比 → 预览两条 INSERT/两条 UPDATE/一条 DELETE → 确认实际目标 → 执行影响 5 行 → 再对比零差异。额外查询 typeof(id)/typeof(payload) 及 binaryCells，确认同形文本/BLOB、空 BLOB、NULL、中文均保真。证据 `metadata-compare-browser-accepted.json`、`compare-typed-complete.png`。仍为 5,000 行窗口，不代表大表完整同步。
+- 当前证据：后端未再变化，`metadata-matrix.log/.exit` 为 537 library + 27 targets / 132 integration，退出码 0；最新 `metadata-ui-accepted.log/.exit` 为 137 files / 1,130 tests，退出码 0；`compare-confirm-build.log/.exit` 的 TypeScript 与生产构建通过。仍有既有大 chunk 和 test-only warning；不把 Web 验收当作打包 Tauri GUI 验收。
+- 第四增量提交：`13c99d2`（Rust/Java/重建 JAR 与元数据矩阵）、`692cd66`（前端按需加载、默认 schema、错误可见及 typed compare）。用户 capabilities.json 原始 SHA-256、暂存凭据/私钥及 whitespace 审计通过。
+
+## 用户补充的体验验收口径
+
+- 对齐范围明确为**数据库功能和数据库操作体验**。服务器连接、SSH、SFTP、隧道、MCP/Agent 等保留 Catio 本地已有功能和工作方式，不为仿照 DBX 而替换或削减。
+- 数据库编辑器与智能提示提升为重点：不仅有功能入口，还要检查触发时机、上下文正确性、键盘操作、响应速度、错误和空状态。
+- 对照固定 DBX 源码逐项评估：当前语句与选区执行、多结果和查询标签、快捷键、格式化/诊断、撤销与未保存保护；表别名、CTE、子查询、跨 schema、限定符和引号标识符的补全；列/函数/参数/JOIN 建议及方言差异。
+- 提示接受、取消与光标位置不能互相干扰；不能仅凭“出现了补全弹窗”验收。建立小型 SQL 场景库，在真实数据库和可见浏览器中核验；大 schema 还要检查延迟、重复请求、失效和刷新后的正确性。
+- 对象树、搜索、结果网格、编辑保存、导入导出及错误恢复的常用操作参考 DBX，保留 Catio 的主题和现有优势；不以视觉仿制代替可靠的数据语义。
+
+### 用户再次明确的界面与功能边界
+
+- **保留外部框架，只优化数据库内部工作区。** 不重做应用外层布局、全局导航、连接组织和主机管理页面，不把 Catio 整体换成 DBX 的界面。数据库内页仍沿用现有主题、组件和操作风格，避免与 SSH/服务器/SFTP 等页面割裂。
+- 核心优先级是：编辑器输入区与智能提示 → 元数据加载和展示 → 导入导出。数据库已有功能不得因体验改造而被无故删除；剩余数据库操作门禁继续保留，不因调整优先级而消失。
+- 优先在 DbWorkbench、SqlConsole、数据库网格、结构视图与导入导出流程内改进。公共组件、App 接线或通用状态确需修改时，只做向后兼容扩展，并回归验证主机连接及文件管理等非数据库模块。
+- 数据库 AI/Agent 辅助沿用 Catio 现有 Agent/MCP 入口，不新增一套割裂的外层界面。目标包括理解当前连接和引擎、生成与解释操作代码、排错与优化，以及数据库/表/字段/索引约束/数据的查询和变更辅助。
+- 按不同数据库的实际模型和方言实现：SQL、文档、KV、搜索等不能套用同一种 SQL，也不能把不存在的能力显示为可用。
+- 结构与写入操作明确目标连接和对象、展示语句及影响；破坏性操作需明确确认，执行后核验。按真实引擎能力处理事务，不承诺所有 DDL 均可回滚。AI 上下文只包含授权范围内的必要元数据，不包含连接 secret，也不默认发送整库内容。
+- 参考事实：固定 DBX 版本 README 的 AI SQL Assistant 段落已有自然语言生成、解释、优化、错误修复和执行前安全检查的说明；不能以“DBX 没有 AI”为前提。具体实现深度仍须核验，Catio 可以在保持现有框架的前提下继续深化数据库智能维护能力。
+
+## 第五增量：编辑器真实方言与查询作用域补全
+
+### 已实施的设计与验收
+
+- 修复 `dialectFor` 存在但实际 SqlEditor 始终挂 PostgreSQL 的断线；沿用现有 CodeMirror/主题/输入区结构，从 DbWorkbench 到 SqlConsole/ObjectPane 传入实际 engine profile，仅编辑器语法使用该 profile，连接、事务和 DDL 仍使用协议 family。
+- 编辑器补全不再将各 schema 同名表拍平成“目录中的第一张”。保留 namespace 身份，并用当前实际 defaultSchema 解析未限定表；点号、引号、`__proto__` 等名称通过安全映射保留。
+- 基于现有增量 CST 补充查询作用域，而不是引入另一套编辑器或在整个 SQL 上拼正则：CTE 显式列列表、投影 AS 别名、星号、可解析的递归显式列、链式 CTE、派生表、嵌套同名别名与语句间隔离。只推断可证明的列，不给未知表达式编造列名。
+- 显式 Ctrl+Space 也不在字符串、美元字符串或注释中弹出表/函数；限定列处不混入函数候选。Tab 接受当前候选，未有候选时保留缩进；IME 组合输入的确认键不得触发执行；重配置方言/schema 保留文档、光标和 undo history。
+- 补充 PostgreSQL/H2 未引用标识符大小写折叠回归，避免自动添加引号后指向另一列；未知 JDBC 不擅自套用 PG 折叠规则。
+- TDD 证据：`editor-context-red.log`（15 项失败）、`editor-scope-red.log`（6 项失败）、`editor-case-red.log`（5 项失败）；`editor-scope-final.log` 为定向回归，`editor-build.log` 为 TypeScript/build，最终全量见 `editor-ui-full.log`。
+- 真实 SQLite Web 验证：从当前库元数据构造 CTE，Ctrl+Space 在 `r.` 处只列出 `note` / `public_id`；ArrowDown + Tab 插入候选，Alt+Enter 执行并返回真实 `public_id = 1`。截图 `editor-cte-completion.png`。
+- 最终大小写修复后的 H2 Web 验证：实际默认 PUBLIC；`WITH r AS (SELECT 1 AS PublicID)` 的限定列候选为 `PUBLICID`，Tab 插入 `r."PUBLICID"`，Alt+Enter 实际返回 1。截图 `editor-h2-case-fold.png`。这不代表所有引擎/全部 SQL 语法均已 GUI 实测。
+- 提交 `a74a275`。本检查点前端 138 files / 1,165 tests 及 TypeScript/build 通过；后续附加修复有单独记录，不能混淆检查点。
+
+### 明确保留的下一轮门禁
+
+- 当前作用域分析有 200,000 字符、4,000 个遍历节点和 12 层递归预算；这不是完整 SQL 编译器。尚需补充更多相关子查询、LATERAL/APPLY、函数返回表与厂商扩展、裸列上下文和大脚本性能实测。
+- 静态函数库已在后续提交按方言收紧，但服务器版本/扩展/SQL_MODE 尚未动态同步，函数参数提示还未形成完整输入交互；FK JOIN 建议仍需核验跨 schema、别名和已输入 JOIN 的替换范围。不能把本增量称为“智能提示全部对齐”。
+- `metadataReferences` 已在后续提交排除注释/字符串；仍需处理与 namespace 同名的别名及大脚本解析性能。旧 SQL diagnostics 仍需统一作用域、方言和国际化，避免新增补全与诊断相互矛盾。
+- ERDiagram 的旧列目录消费、流式导入导出/大 SQL 文件、所有结构变更与 SQLite 重建、数据库 AI 维护的预览/授权/执行闭环仍需继续推进。桌面打包 GUI、商业/云实例门禁不变。
+
+### 后续附加修复
+
+- `67c553e`：按实际方言剥离注释/字符串中的 namespace 假引用，包括美元字符串、Oracle q-quotes、MySQL # 注释与默认反斜杠转义；修复 SQL Server 因无默认 schema 选择器而跳过整个补全 catalog 的问题。保留 Redis/ES 原有非 SQL 加载边界。`metadata-lexical-red.log`、`metadata-sqlserver-default-red.log` → `metadata-lexical-green.log`；全量 `metadata-lexical-full.log` 为 138 files / 1,178 tests，build 通过。MySQL 会话修改 SQL_MODE 后的动态解析同步尚待实现。
+- `368874d`：对照 DBX 方言函数测试收紧静态候选；不再跨方言广播 MySQL DATE_FORMAT/IFNULL、PG ARRAY_AGG/JSONB、SQL Server LEN 等专有函数。修正 CAST/EXTRACT/SQL Server DATEDIFF 等模板；JDBC 以具体 profile 提供候选，未知 JDBC 使用保守标准集。`editor-functions-red.log` 33 项先失败，随后 58 项函数定向回归通过。没有据此声称厂商版本/扩展全部实测。
+- `5171211`：网络错误可能丢失提交回执，不能直接声称“已回滚”；同步异常后保留 SQL 预览但禁止原批次再次执行，必须重新对比；已收到写入回执而刷新失败时仍显示已确认的影响行数。`compare-outcome-red.log` 两项失败后修复。`ux-final-full.log` 为 139 files / 1,218 tests，TypeScript/build 通过。
+- `b5a9af9`：SQL 选择上下文不再使用虚构的 prod-orders，查询页/对象页提供真实连接名；数据库 AI 系统提示使用实际 JDBC profile，数据库标签按 JSON 数据编码；明确元数据/注释/结果不可信、缺失事实不得编造、尊重授权、凭执行回执判定结果及不盲目重试。Shell 提示分支和执行授权机制保持原样。这是上下文与提示约束修复，不是完整自主数据库 Agent 的交付，也不是提示词足以替代工具权限边界的声明。
+- `database-ai-context-red.log` 7 项先失败；随后数据库提示/元数据/原 App Agent 流程 45 项定向回归通过。最新 `database-ai-full.log/.exit` 为 **139 files / 1,224 tests，退出码 0**；`database-ai-build.log/.exit` TypeScript/build 通过。未调用真实 LLM 评测生成质量，不把 mock 传输测试当作模型实测。
+- AI 后续仍需修复所选表结构读取失败被跳过、异步发送时连接/选择切换等边界，并完善当前 schema/版本/权限上下文、结构变更预览、审批、执行及结果核验。现有 Agent/MCP 入口不另起新外壳。
+- 非数据库模块未重做；前端全量包含已有 App/终端/文件管理组件回归。当前未重新执行所有真实 SSH/SFTP 后端矩阵，不把单元回归冒充全部主机 GUI 验收。
+- 本地可见浏览器验收证据见 `editor-browser-accepted.json`；测试连接已显式断开，临时 loopback QA 服务和本任务页面已关闭。未操作生产部署，未合并 main/推送远端/发布安装包。隔离沙箱夹具状态未在本轮另作清理声明。

@@ -40,6 +40,12 @@
 
 - 七种路径的顶层 BLOB 读写、键定位、迁移和 SQL/类型化 JSON 往返：SQLite、DuckDB、PostgreSQL、MySQL、SQL Server、JDBC/H2、rqlite。
 - 五种原生物理查询会话、事务状态和关闭回滚：SQLite、DuckDB、PostgreSQL、MySQL、SQL Server。
-- JDBC 同 JVM 多 connection、并发 request-ID 路由与 H2 取消正在追加门禁，不据此宣称所有厂商 JDBC 都通过。
+- JDBC 同 JVM 多 connection、并发 request-ID 路由与 H2 取消已实测；其他 JDBC 厂商继续实例门禁，不据此宣称全部通过。
+- 分层 namespace catalog、按需对象加载、跨未展开 namespace 搜索与轻量列目录已实现并通过现有矩阵；代表性 PG/SQL Server/H2 类型修饰符已回归。H2 新查询实际默认 PUBLIC、未展开对象搜索和精度展示通过 Web 验收，不代表所有结构变更/约束类型已完成。
+- 类型化数据对比已通过 SQLite Web 执行闭环，包含同形文本/BLOB 键、空字节、NULL 和中文；仍受 5,000 行窗口限制，不能声明完整大表同步。
+- 数据库体验对齐优先编辑器、智能提示、元数据展示与导入导出；保留 Catio 整体框架和非数据库能力。编辑器上下文、AI 数据库维护与剩余结构操作继续单独验收。
+- 编辑器已经接入真实方言/profile 和默认 schema，补充 CTE/派生表的限定列与嵌套别名作用域，保留文档/光标/undo，Tab 接受和 IME 执行保护通过回归。SQLite/H2 的候选 → 接受 → 实际执行通过 Web 验收；不代表各厂商全部语法已覆盖。
+- 元数据加载已排除注释/字符串假引用，恢复 SQL Server 无 schema 选择器时的目录加载；静态函数候选和 CAST/EXTRACT 等模板已按方言收紧。版本、扩展、会话 SQL_MODE 和更多复杂查询上下文继续设门禁。
+- AI 本轮仅改正连接来源、JDBC profile 与数据/指令/执行回执边界；尚未进行真实模型生成质量、完整结构维护或自动运维闭环验收。最新前端检查点为 139 files / 1,224 tests，不能拿测试数代替上述操作门禁。
 
 详细过程与日志索引见 `docs/superpowers/plans/2026-10-02-dbx-complete-parity.md`。此清单用于持续实现，不代表已完成用户要求的全面对齐。
