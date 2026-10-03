@@ -219,6 +219,25 @@ pub async fn db_save_snippet(snippet: SnippetEntry, app: tauri::AppHandle) -> Re
 }
 
 #[tauri::command]
+pub async fn db_schema_catalog(conn_id:String,mgr:tauri::State<'_,ConnManager>)->Result<crate::db::metadata::NamespaceCatalog,DbError>{
+    let driver=mgr.get(&conn_id).await.ok_or(DbError::NotFound(conn_id))?;
+    crate::db::metadata::catalog(driver.as_ref()).await
+}
+#[tauri::command]
+pub async fn db_schema_namespace(conn_id:String,schema:String,mgr:tauri::State<'_,ConnManager>)->Result<crate::db::metadata::NamespaceObjects,DbError>{
+    let driver=mgr.get(&conn_id).await.ok_or(DbError::NotFound(conn_id))?;
+    crate::db::metadata::namespace(driver.as_ref(),&schema).await
+}
+#[tauri::command]
+pub async fn db_search_objects(conn_id:String,pattern:String,limit:Option<usize>,execution_id:String,mgr:tauri::State<'_,ConnManager>)->Result<crate::db::metadata::ObjectSearch,DbError>{
+    mgr.search_metadata(&conn_id,&pattern,limit.unwrap_or(200),&execution_id).await
+}
+#[tauri::command]
+pub async fn db_cancel_metadata(conn_id:String,execution_id:String,mgr:tauri::State<'_,ConnManager>)->Result<(),DbError>{
+    mgr.cancel_metadata(&conn_id,&execution_id).await
+}
+
+#[tauri::command]
 pub async fn db_schema(conn_id: String, mgr: tauri::State<'_, ConnManager>)
     -> Result<Vec<(String, Vec<TableInfo>)>, DbError> {
     let drv = mgr.get(&conn_id).await.ok_or(DbError::NotFound(conn_id))?;
@@ -249,6 +268,14 @@ pub async fn db_object_source(conn_id: String, schema: String, name: String, kin
     mgr: tauri::State<'_, ConnManager>) -> Result<String, DbError> {
     let drv = mgr.get(&conn_id).await.ok_or(DbError::NotFound(conn_id))?;
     drv.object_source(&schema, &name, &kind).await
+}
+
+/// Bounded completion metadata with explicit truncation and per-table errors.
+#[tauri::command]
+pub async fn db_column_catalog(conn_id: String, schema: String,
+    mgr: tauri::State<'_, ConnManager>) -> Result<crate::db::metadata::ColumnCatalog, DbError> {
+    let driver = mgr.get(&conn_id).await.ok_or(DbError::NotFound(conn_id))?;
+    crate::db::metadata::columns(driver.as_ref(), &schema).await
 }
 
 /// Bulk column names for autocomplete: for each table in `schema`, its column

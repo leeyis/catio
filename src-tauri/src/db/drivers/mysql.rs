@@ -570,6 +570,11 @@ impl Driver for MySqlDriver {
     // via the same mysql_async connection — branch by driver_profile.
     // SQL adapted from dbx crates/dbx-core/src/db/mysql.rs + ob_oracle.rs, Apache-2.0.
 
+    async fn default_namespace(&self)->Result<Option<String>,DbError> {
+        if !self.database.is_empty(){return Ok(Some(self.database.clone()));}
+        let result=self.query("SELECT DATABASE()",1).await?;
+        Ok(result.rows.first().and_then(|r|r.first()).and_then(|v|v.as_str()).map(str::to_string))
+    }
     async fn list_schemas(&self) -> Result<Vec<String>, DbError> {
         if self.profile.as_deref() == Some("oceanbase-oracle") {
             // OceanBase-Oracle: schemas = users/owners

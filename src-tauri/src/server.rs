@@ -813,6 +813,16 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
         }
 
         // ── Schema / structure introspection ────────────────────────────────────
+        "db_schema_catalog" => {
+            let driver=conns.get(require(&args,"connId")?).await.ok_or("connection not found")?;
+            serde_json::to_value(crate::db::metadata::catalog(driver.as_ref()).await.map_err(estr)?).map_err(estr)
+        }
+        "db_schema_namespace" => {
+            let driver=conns.get(require(&args,"connId")?).await.ok_or("connection not found")?;
+            serde_json::to_value(crate::db::metadata::namespace(driver.as_ref(),require(&args,"schema")?).await.map_err(estr)?).map_err(estr)
+        }
+        "db_search_objects" => serde_json::to_value(conns.search_metadata(require(&args,"connId")?,require(&args,"pattern")?,u32_or(&args,"limit",200) as usize,require(&args,"executionId")?).await.map_err(estr)?).map_err(estr),
+        "db_cancel_metadata" => {conns.cancel_metadata(require(&args,"connId")?,require(&args,"executionId")?).await.map_err(estr)?;Ok(Value::Null)}
         "db_schema" => {
             let drv = conns.get(require(&args, "connId")?).await.ok_or("connection not found")?;
             let mut out = Vec::new();
@@ -826,6 +836,10 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
             let drv = conns.get(require(&args, "connId")?).await.ok_or("connection not found")?;
             let schema = opt_str(&args, "schema").unwrap_or("");
             serde_json::to_value(drv.table_structure(schema, require(&args, "table")?).await.map_err(estr)?).map_err(estr)
+        }
+        "db_column_catalog" => {
+            let drv = conns.get(require(&args, "connId")?).await.ok_or("connection not found")?;
+            serde_json::to_value(crate::db::metadata::columns(drv.as_ref(), require(&args, "schema")?).await.map_err(estr)?).map_err(estr)
         }
         "db_schema_columns" => {
             let drv = conns.get(require(&args, "connId")?).await.ok_or("connection not found")?;

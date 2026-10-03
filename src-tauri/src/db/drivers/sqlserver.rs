@@ -17,7 +17,7 @@ use crate::db::result::{binary_to_json, safe_i64_to_json, ColumnInfo, QueryResul
 /// Column 5 (0-based) is the column comment from sys.extended_properties (MS_Description, class=1).
 fn sqlserver_columns_sql(s: &str, t: &str) -> String {
     format!(
-        "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, \
+        "SELECT c.COLUMN_NAME, CASE WHEN c.DATA_TYPE IN ('char','varchar','nchar','nvarchar','binary','varbinary') THEN c.DATA_TYPE+'('+CASE WHEN c.CHARACTER_MAXIMUM_LENGTH=-1 THEN 'max' ELSE CAST(c.CHARACTER_MAXIMUM_LENGTH AS varchar(20)) END+')' WHEN c.DATA_TYPE IN ('decimal','numeric') THEN c.DATA_TYPE+'('+CAST(c.NUMERIC_PRECISION AS varchar(20))+','+CAST(c.NUMERIC_SCALE AS varchar(20))+')' WHEN c.DATA_TYPE IN ('datetime2','datetimeoffset','time') THEN c.DATA_TYPE+'('+CAST(c.DATETIME_PRECISION AS varchar(20))+')' ELSE c.DATA_TYPE END, c.IS_NULLABLE, c.COLUMN_DEFAULT, \
          CASE WHEN kcu.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS IS_PK, \
          CAST(( \
            SELECT ep.value FROM sys.extended_properties ep \
@@ -438,6 +438,10 @@ impl Driver for SqlServerDriver {
         }
     }
 
+    async fn default_namespace(&self)->Result<Option<String>,DbError> {
+        let result=self.query("SELECT SCHEMA_NAME()",1).await?;
+        Ok(result.rows.first().and_then(|r|r.first()).and_then(|v|v.as_str()).filter(|s|!s.is_empty()).map(str::to_string))
+    }
     async fn list_schemas(&self) -> Result<Vec<String>, DbError> {
         let mut client = self.client.lock().await;
         // Query sys.schemas; exclude system schemas; dbo first.

@@ -178,6 +178,7 @@ impl Driver for SqliteDriver {
         }).await.map_err(|e| DbError::QueryFailed(e.to_string()))?
     }
 
+    async fn default_namespace(&self)->Result<Option<String>,DbError>{Ok(Some("main".into()))}
     async fn list_schemas(&self) -> Result<Vec<String>, DbError> {
         Ok(vec!["main".to_string()])
     }

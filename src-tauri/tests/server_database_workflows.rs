@@ -102,6 +102,28 @@ async fn web_transfer_works_and_both_connection_owners_are_checked() {
 }
 
 #[tokio::test]
+async fn metadata_catalog_scoped_load_search_and_owner_gate() {
+    let (rig,admin)=Rig::start().await;let conn=rig.connection(&admin).await;
+    rig.sql(&admin,&conn,"CREATE TABLE metadata_needle(id INT)").await;
+    let (status,catalog)=rig.call(&admin,"db_schema_catalog",json!({"connId":conn})).await;
+    assert_eq!(status,200,"{catalog}");assert_eq!(catalog["defaultNamespace"],"main");assert!(catalog.get("tables").is_none());
+    let (status,objects)=rig.call(&admin,"db_schema_namespace",json!({"connId":conn,"schema":"main"})).await;
+    assert_eq!(status,200,"{objects}");assert_eq!(objects["tables"][0]["name"],"metadata_needle");
+    let (status,columns)=rig.call(&admin,"db_column_catalog",json!({"connId":conn,"schema":"main"})).await;
+    assert_eq!(status,200,"{columns}");assert_eq!(columns["tables"][0],json!(["metadata_needle",["id"]]));
+    let search=json!({"connId":conn,"pattern":"needle","executionId":"metadata-one","limit":20});
+    let (status,result)=rig.call(&admin,"db_search_objects",search.clone()).await;
+    assert_eq!(status,200,"{result}");assert_eq!(result["objects"][0]["schema"],"main");
+    rig.call(&admin,"db_cancel_metadata",json!({"connId":conn,"executionId":"metadata-early"})).await;
+    let (_,cancelled)=rig.call(&admin,"db_search_objects",json!({"connId":conn,"pattern":"needle","executionId":"metadata-early"})).await;
+    assert_eq!(cancelled["cancelled"],true);
+    let bob=Rig::client();rig.call(&bob,"auth_register",json!({"username":"meta-bob","password":"fixture-only-123"})).await;
+    for command in ["db_schema_catalog","db_schema_namespace","db_search_objects","db_cancel_metadata","db_column_catalog"] {
+        let mut args=search.clone();args["schema"]=json!("main");assert_eq!(rig.call(&bob,command,args).await.0,400,"{command}");
+    }
+}
+
+#[tokio::test]
 async fn http_query_session_transaction_paging_and_close_rollback() {
     let (rig,client)=Rig::start().await;let conn=rig.connection(&client).await;
     rig.sql(&client,&conn,"CREATE TABLE scoped_rows(id INTEGER)").await;

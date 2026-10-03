@@ -40,6 +40,13 @@ class CatioJdbcParityTest {
         return call("executeQuery", JSON.createObjectNode().put("sql", sql).put("maxRows", 100));
     }
 
+    @Test void actualExecutionContextDoesNotChooseASystemSchema() throws Exception {
+        JsonNode context=call("getExecutionContext",JSON.createObjectNode());
+        assertEquals("PUBLIC",context.path("default_namespace").asText());
+        sql("CREATE SCHEMA WORKSPACE");sql("SET SCHEMA WORKSPACE");
+        assertEquals("WORKSPACE",call("getExecutionContext",JSON.createObjectNode()).path("default_namespace").asText());
+    }
+
     @Test void jdbcValuesAndTypesAreLossless() throws Exception {
         JsonNode result = sql("SELECT CAST(9007199254740993 AS BIGINT) AS ID, CAST(12345678901234567890.123456789012 AS DECIMAL(38,12)) AS AMOUNT");
         assertTrue(result.path("rows").get(0).get(0).isTextual(), "unsafe integer must be a string");

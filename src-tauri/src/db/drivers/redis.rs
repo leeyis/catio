@@ -549,6 +549,7 @@ impl Driver for RedisDriver {
 
     /// Returns logical DBs as ["db0", "db1", ...].
     /// Count determined via CONFIG GET databases; falls back to 16.
+    async fn default_namespace(&self)->Result<Option<String>,DbError>{Ok(Some(format!("db{}",if self.is_cluster {0} else {self.default_db})))}
     async fn list_schemas(&self) -> Result<Vec<String>, DbError> {
         // Cluster 只有 db0(集群模式不支持多逻辑库),直接返回单元素。
         if self.is_cluster {

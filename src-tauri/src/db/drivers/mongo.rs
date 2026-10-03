@@ -221,6 +221,7 @@ impl Driver for MongoDriver {
         Ok(version)
     }
 
+    async fn default_namespace(&self)->Result<Option<String>,DbError>{Ok(Some(self.default_db.clone()))}
     async fn list_schemas(&self) -> Result<Vec<String>, DbError> {
         self.client.list_database_names().await
             .map_err(|e| DbError::QueryFailed(e.to_string()))

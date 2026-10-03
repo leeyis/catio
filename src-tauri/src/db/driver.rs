@@ -286,10 +286,17 @@ pub trait Driver: Send + Sync {
     }
     /// schema 浏览：库下的 schema 名（无 schema 概念的引擎返回单元素如 ["default"]）。
     async fn list_schemas(&self) -> Result<Vec<String>, DbError>;
+    /// The engine's actual current/default namespace, not the first alphabetic system schema.
+    async fn default_namespace(&self) -> Result<Option<String>,DbError> { Ok(None) }
     async fn list_tables(&self, schema: &str) -> Result<Vec<TableInfo>, DbError>;
     async fn table_structure(&self, schema: &str, table: &str) -> Result<TableStructure, DbError>;
     /// ER：该 schema 下所有 FK 关系。不支持的引擎返回 Unsupported。
     async fn er_relations(&self, schema: &str) -> Result<Vec<ErRelation>, DbError>;
+
+    /// Lightweight column metadata; drivers with native catalogs avoid loading indexes/FKs.
+    async fn column_names(&self, schema: &str, table: &str) -> Result<Vec<String>, DbError> {
+        Ok(self.table_structure(schema, table).await?.columns.into_iter().map(|c| c.name).collect())
+    }
 
     /// 批量列名：为 schema 下每张表收集列名，供编辑器补全用。
     ///

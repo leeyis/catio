@@ -265,6 +265,10 @@ impl Driver for DuckDbDriver {
         result
     }
 
+    async fn default_namespace(&self)->Result<Option<String>,DbError> {
+        let result=self.query("SELECT current_schema()",1).await?;
+        Ok(result.rows.first().and_then(|r|r.first()).and_then(|v|v.as_str()).filter(|s|!s.is_empty()).map(str::to_string))
+    }
     async fn list_schemas(&self) -> Result<Vec<String>, DbError> {
         // adapted from dbx crates/dbx-core/src/schema.rs duckdb_list_schemas, Apache-2.0
         // Query information_schema.schemata, excluding system schemas.

@@ -183,6 +183,7 @@ impl Driver for RqliteDriver {
         }
     }
 
+    async fn default_namespace(&self)->Result<Option<String>,DbError>{Ok(Some("main".into()))}
     async fn list_schemas(&self) -> Result<Vec<String>, DbError> {
         Ok(vec!["main".to_string()])
     }

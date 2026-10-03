@@ -135,6 +135,10 @@ impl Driver for ClickhouseDriver {
         Ok(QueryResult { binary_cells: Vec::new(), columns, rows, rows_affected: None, truncated })
     }
 
+    async fn default_namespace(&self)->Result<Option<String>,DbError> {
+        let result=self.query("SELECT currentDatabase()",1).await?;
+        Ok(result.rows.first().and_then(|r|r.first()).and_then(|v|v.as_str()).filter(|s|!s.is_empty()).map(str::to_string))
+    }
     async fn list_schemas(&self) -> Result<Vec<String>, DbError> {
         let result = ch_query(
             &self.http,

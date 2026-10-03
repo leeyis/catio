@@ -284,13 +284,38 @@ fn map_query_result(v: &Value, max_rows: u32) -> QueryResult {
 /// Map the plugin's getColumns result → catio ColumnDef list.
 /// Column comments come from each entry's `comment` (sidecar maps it from the
 /// DatabaseMetaData.getColumns() REMARKS column).
+fn column_type_name(column: &Value) -> String {
+    let name = column["data_type"].as_str().unwrap_or_default();
+    if name.contains('(') { return name.into(); }
+    let kind = name.to_ascii_uppercase();
+    if matches!(kind.as_str(), "DECIMAL" | "NUMERIC") {
+        if let Some(precision) = column["numeric_precision"].as_i64().filter(|p| *p > 0) {
+            return match column["numeric_scale"].as_i64() {
+                Some(scale) => format!("{name}({precision},{scale})"), None => format!("{name}({precision})"),
+            };
+        }
+    }
+    if matches!(kind.as_str(), "CHAR" | "VARCHAR" | "NCHAR" | "NVARCHAR" | "CHARACTER" | "CHARACTER VARYING" | "BINARY" | "VARBINARY" | "BINARY VARYING") {
+        if let Some(length) = column["character_maximum_length"].as_i64().filter(|length| *length > 0 && *length < i32::MAX as i64) {
+            return format!("{name}({length})");
+        }
+    }
+    if matches!(kind.as_str(), "TIMESTAMP" | "TIME" | "TIMESTAMP WITH TIME ZONE" | "TIME WITH TIME ZONE" | "TIMESTAMP WITHOUT TIME ZONE" | "TIME WITHOUT TIME ZONE") {
+        if let Some(scale) = column["numeric_scale"].as_i64().filter(|scale| (0..=9).contains(scale)) {
+            let (base, suffix) = name.split_once(' ').map(|(base, suffix)| (base, format!(" {suffix}"))).unwrap_or((name, String::new()));
+            return format!("{base}({scale}){suffix}");
+        }
+    }
+    name.into()
+}
+
 fn map_column_defs(v: &Value) -> Vec<ColumnDef> {
     v.as_array().map(|arr| {
         arr.iter().map(|c| {
             let is_pk = c.get("is_primary_key").and_then(|x| x.as_bool()).unwrap_or(false);
             ColumnDef {
                 name: c.get("name").and_then(|n| n.as_str()).unwrap_or_default().to_string(),
-                type_name: c.get("data_type").and_then(|n| n.as_str()).unwrap_or_default().to_string(),
+                type_name: column_type_name(c),
                 nullable: c.get("is_nullable").and_then(|n| n.as_bool()).unwrap_or(true),
                 default: c.get("column_default").and_then(|n| n.as_str()).map(str::to_string),
                 key: if is_pk { "PK".into() } else { String::new() },
@@ -389,6 +414,10 @@ impl Driver for JdbcDriver {
         self.execute_query(&plan.sql,limit,namespace,offset,cancel).await
     }
 
+    async fn default_namespace(&self)->Result<Option<String>,DbError> {
+        let result=self.rpc("getExecutionContext",json!({})).await?;
+        Ok(result.get("default_namespace").and_then(Value::as_str).filter(|s|!s.trim().is_empty()).map(str::to_string))
+    }
     async fn list_schemas(&self) -> Result<Vec<String>, DbError> {
         let r = self.rpc("listSchemas", self.meta_params("")).await?;
         let mut out: Vec<String> = r.as_array().map(|arr| {
@@ -464,6 +493,12 @@ impl Driver for JdbcDriver {
             }
         }
         Ok(relations)
+    }
+
+    async fn column_names(&self, schema: &str, table: &str) -> Result<Vec<String>, DbError> {
+        let mut params = self.meta_params(schema); params["table"] = json!(table);
+        let columns = self.rpc("getColumns", params).await?;
+        Ok(map_column_defs(&columns).into_iter().map(|c| c.name).collect())
     }
 
     async fn schema_columns(&self, schema: &str) -> Result<Vec<(String, Vec<String>)>, DbError> {

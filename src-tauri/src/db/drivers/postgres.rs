@@ -320,7 +320,7 @@ fn default_database(profile: Option<&str>) -> Option<String> {
 /// col_description(table oid, attnum), resolved through pg_attribute for accuracy.
 fn pg_columns_sql() -> &'static str {
     "SELECT c.column_name, \
-     CASE WHEN c.data_type = 'USER-DEFINED' THEN c.udt_name ELSE c.data_type END AS full_type, \
+     COALESCE((SELECT pg_catalog.format_type(a.atttypid,a.atttypmod) FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class cl ON cl.oid=a.attrelid JOIN pg_catalog.pg_namespace ns ON ns.oid=cl.relnamespace WHERE ns.nspname=c.table_schema AND cl.relname=c.table_name AND a.attname=c.column_name AND a.attnum>0 AND NOT a.attisdropped), CASE WHEN c.data_type='USER-DEFINED' THEN c.udt_name ELSE c.data_type END) AS full_type, \
      c.is_nullable = 'YES' AS is_nullable, \
      c.column_default, \
      EXISTS ( \
@@ -788,6 +788,10 @@ impl Driver for PostgresDriver {
     // ---- A7: schema / structure / ER introspection ----
     // SQL adapted from dbx crates/dbx-core/src/db/postgres.rs, Apache-2.0
 
+    async fn default_namespace(&self)->Result<Option<String>,DbError> {
+        let result=self.query("SELECT current_schema()",1).await?;
+        Ok(result.rows.first().and_then(|r|r.first()).and_then(|v|v.as_str()).filter(|s|!s.is_empty()).map(str::to_string))
+    }
     async fn list_schemas(&self) -> Result<Vec<String>, DbError> {
         let client = self.pool.get().await
             .map_err(|e| DbError::ConnectFailed(e.to_string()))?;

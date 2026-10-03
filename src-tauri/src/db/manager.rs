@@ -22,7 +22,7 @@ impl ConnManager {
     pub async fn get(&self,id:&str)->Option<Arc<dyn Driver>>{self.conns.lock().await.get(id).cloned()}
     pub async fn remove(&self,id:&str)->bool {
         let driver={let mut connections=self.conns.lock().await;
-            let driver=connections.remove(id);self.running.cancel_connection(id);driver};
+            let driver=connections.remove(id);self.running.cancel_connection(id);self.running.cancel_connection(&format!("metadata:{id}"));driver};
         self.sessions.close_parent(id).await;
         if let Some(driver)=driver {driver.close();true}else{false}
     }
@@ -126,4 +126,16 @@ impl ConnManager {
         let state=driver.transaction_state().await.unwrap_or(TransactionState::Unknown);
         Ok(QuerySessionInfo{id:session.into(),transaction_state:state,busy:false,can_cancel:driver.supports_query_cancel(),supports_transactions:driver.capabilities().transactions,lease_seconds:SESSION_LEASE_SECONDS})
     }
+    pub async fn search_metadata(&self,connection:&str,pattern:&str,limit:usize,execution:&str)->Result<crate::db::metadata::ObjectSearch,DbError>{
+        let (driver,guard)={let connections=self.conns.lock().await;
+            let driver=connections.get(connection).cloned().ok_or_else(||DbError::NotFound(connection.into()))?;
+            (driver,self.running.register(&format!("metadata:{connection}"),execution)?)};
+        crate::db::metadata::search(driver,pattern,limit,guard.token.clone()).await
+    }
+    pub async fn cancel_metadata(&self,connection:&str,execution:&str)->Result<(),DbError>{
+        let connections=self.conns.lock().await;
+        if !connections.contains_key(connection){return Err(DbError::NotFound(connection.into()));}
+        self.running.cancel(&format!("metadata:{connection}"),execution)
+    }
+
 }

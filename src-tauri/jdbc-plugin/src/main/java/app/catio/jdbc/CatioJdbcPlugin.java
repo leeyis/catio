@@ -171,6 +171,18 @@ public final class CatioJdbcPlugin {
                 }
                 yield result;
             }
+            case "getExecutionContext" -> {
+                Connection conn=openConnection(connection);String schema=null,catalog=null;
+                try{schema=conn.getSchema();}catch(Throwable ignored){}
+                try{catalog=conn.getCatalog();}catch(Throwable ignored){}
+                if((schema==null||schema.isBlank())&&driverQuirks(connection).useOracleMetadata()) {
+                    try(Statement statement=conn.createStatement();ResultSet rows=statement.executeQuery("SELECT SYS_CONTEXT('USERENV','CURRENT_SCHEMA') FROM DUAL")) {
+                        if(rows.next())schema=rows.getString(1);
+                    }catch(SQLException ignored){}
+                }
+                String preferred=driverQuirks(connection).useCatalogFallbackSql()?catalog:(schema==null||schema.isBlank()?catalog:schema);
+                yield MAPPER.createObjectNode().put("schema",schema).put("catalog",catalog).put("default_namespace",preferred);
+            }
             case "sessionStatus" -> {
                 Connection conn=openConnection(connection);
                 boolean auto=conn.getAutoCommit();

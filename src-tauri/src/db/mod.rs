@@ -9,6 +9,7 @@ pub mod pagination;
 pub mod driver;
 pub mod drivers;
 pub mod manager;
+pub mod metadata;
 pub mod query_control;
 pub mod query_session;
 pub mod query_session_registry;
