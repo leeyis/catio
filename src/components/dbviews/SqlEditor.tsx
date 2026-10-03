@@ -13,6 +13,7 @@ import { linter, lintGutter, type Diagnostic } from '@codemirror/lint'
 import { syntaxHighlighting, bracketMatching, indentOnInput } from '@codemirror/language'
 import { sql, type SQLNamespace } from '@codemirror/lang-sql'
 import { scopedSchemaCompletion } from './sqlScopeCompletion'
+import { sqlSignatureTooltip } from './sqlSignatureTooltip'
 import { dialectFor } from './sqlDialect'
 export { dialectFor } from './sqlDialect'
 import { catioTheme, catioHighlight } from '../editor/editorTheme'
@@ -92,7 +93,8 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
       return exts
     }
     const dialect = dialectFor(engine)
-    const exts: Extension[] = [sql({ dialect, upperCaseKeywords: true }), autocompletion()]
+    const exts: Extension[] = [sql({ dialect, upperCaseKeywords: true }), autocompletion(),
+      sqlSignatureTooltip(engine, tr('dbviews.functionParameters'), tr('dbviews.functionSignatureHint'))]
     // lang-sql's schema source is not suppressed in comments/literals on explicit invocation.
     // Wrap it ourselves while retaining its alias and quoted-identifier support.
     if (schema) exts.push(dialect.language.data.of({ autocomplete: ifNotIn(
@@ -205,7 +207,7 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
     if (!view) return
     view.dispatch({ effects: sqlCompartment.current.reconfigure(langExt()) })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [schema, engine, defaultSchema, plain, completion, lintSource, extraCompletion])
+  }, [schema, engine, defaultSchema, plain, completion, lintSource, extraCompletion, tr])
 
   // Sync external `code` changes (e.g. AI-inserted SQL, Clear button) into the
   // doc without clobbering the cursor while the user types locally.

@@ -149,6 +149,8 @@
     "needsAuthHint": "自动扫描识别到此连接但未验证凭证，首次连接需手动输入密码"
   },
   "dbviews": {
+    "functionParameters": "函数参数",
+    "functionSignatureHint": "本地函数模板，实际签名取决于服务端版本与扩展。Esc 隐藏，Ctrl/Cmd+Shift+Space 再次显示。",
     "maximizeEditor": "最大化编辑区",
     "maximizeResults": "最大化结果区",
     "restorePane": "恢复大小",

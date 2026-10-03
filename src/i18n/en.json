@@ -149,6 +149,8 @@
     "needsAuthHint": "Auto-scan identified this connection but did not verify a credential — first connect will prompt for the password"
   },
   "dbviews": {
+    "functionParameters": "Function parameters",
+    "functionSignatureHint": "Local function template; actual signatures depend on server version and extensions. Esc hides; Ctrl/Cmd+Shift+Space shows again.",
     "maximizeEditor": "Maximize editor",
     "maximizeResults": "Maximize results",
     "restorePane": "Restore size",

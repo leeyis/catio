@@ -10,6 +10,8 @@
 import type { CompletionContext, CompletionResult, Completion } from '@codemirror/autocomplete'
 import { dialectFor } from './sqlDialect'
 import { completionIdentifier } from './sqlCompletionSchema'
+import type { EditorState } from '@codemirror/state'
+import { sqlCallContext, sqlCallContextAt, type SqlCallContext } from './sqlSignatureContext'
 
 // ---- 函数签名库(通用 + 按引擎方言扩充) ----
 // 参数名仅用于展示与占位模板,不做类型校验。
@@ -182,72 +184,26 @@ export interface SqlFunctionSignatureHelp {
   /** 当前光标所在参数下标(0-based),封顶在 parameters.length-1。 */
   activeParameter: number
   parameters: string[]
+  separator: string
+  from: number
 }
 
-/** 从光标向前找最近的、未闭合的函数调用左括号位置;无则返回 null。 */
-function findActiveFunctionOpenParen(before: string): number | null {
-  let depth = 0
-  let inSingle = false
-  let inDouble = false
-  for (let i = before.length - 1; i >= 0; i--) {
-    const ch = before[i]
-    if (ch === "'" && !inDouble) { inSingle = !inSingle; continue }
-    if (ch === '"' && !inSingle) { inDouble = !inDouble; continue }
-    if (inSingle || inDouble) continue
-    if (ch === ')') depth++
-    else if (ch === '(') {
-      if (depth === 0) return i
-      depth--
-    }
-  }
-  return null
+function signatureFor(call: SqlCallContext | null, engine?: string): SqlFunctionSignatureHelp | null {
+  if (!call) return null
+  const raw = functionSignatures(engine)[call.name]
+  if (!raw) return null
+  const separator = /^(?:TRY_)?CAST$/.test(call.name) ? ' AS ' : call.name === 'EXTRACT' ? ' FROM ' : ', '
+  const parameters = separator === ', ' ? raw : raw[0].split(separator)
+  return { name: call.name, signature: call.name + '(' + raw.join(', ') + ')', parameters, separator, from: call.from,
+    activeParameter: Math.min(separator === ', ' ? call.argument : call.namedArgument, Math.max(0, parameters.length - 1)) }
 }
 
-/** 数顶层逗号(括号 / 字符串内的逗号不计)。 */
-function countTopLevelCommas(text: string): number {
-  let count = 0
-  let depth = 0
-  let inSingle = false
-  let inDouble = false
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i]
-    if (ch === "'" && !inDouble) { inSingle = !inSingle; continue }
-    if (ch === '"' && !inSingle) { inDouble = !inDouble; continue }
-    if (inSingle || inDouble) continue
-    if (ch === '(') depth++
-    else if (ch === ')') depth = Math.max(0, depth - 1)
-    else if (ch === ',' && depth === 0) count++
-  }
-  return count
+export function sqlFunctionSignatureHelp(sql: string, cursor: number, engine?: string): SqlFunctionSignatureHelp | null {
+  return signatureFor(sqlCallContext(sql, cursor, engine), engine)
 }
 
-/**
- * 函数签名提示:光标处于某个函数调用的参数区时,返回函数名/签名/当前参数下标。
- * 对标 dbx 的 getSqlFunctionSignatureHelp。
- */
-export function sqlFunctionSignatureHelp(
-  sql: string,
-  cursor: number,
-  engine?: string,
-): SqlFunctionSignatureHelp | null {
-  const before = sql.slice(0, cursor)
-  const openParen = findActiveFunctionOpenParen(before)
-  if (openParen == null) return null
-
-  const beforeParen = before.slice(0, openParen).trimEnd()
-  const name = /([A-Za-z_][\w$]*)$/.exec(beforeParen)?.[1]?.toUpperCase()
-  if (!name) return null
-
-  const parameters = functionSignatures(engine)[name]
-  if (!parameters) return null
-
-  const activeParameter = countTopLevelCommas(before.slice(openParen + 1))
-  return {
-    name,
-    signature: `${name}(${parameters.join(', ')})`,
-    activeParameter: Math.min(activeParameter, Math.max(0, parameters.length - 1)),
-    parameters,
-  }
+export function sqlFunctionSignatureHelpAt(state: EditorState, engine?: string): SqlFunctionSignatureHelp | null {
+  return signatureFor(sqlCallContextAt(state), engine)
 }
 
 export interface FunctionCompletionItem {
