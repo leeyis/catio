@@ -86,15 +86,18 @@ export function DataTransferDialog({
   useEffect(() => {
     let alive = true
     if (!targetConnId) { setTargetNamespaces([]); setTargetSchema(''); setTargetTable(''); return }
+    setErr(null)
     getSchema(targetConnId)
       .then(s => {
         if (!alive) return
+        const errors=s.schemas.filter(ns=>ns.error).map(ns=>ns.name+': '+ns.error)
+        if(errors.length)setErr(errors.join('; '))
         const ns = s.schemas.map(x => ({ name: x.name, tables: x.tables.map(t => t.name) }))
         setTargetNamespaces(ns)
         setTargetSchema(ns.length === 1 ? ns[0].name : '')
         setTargetTable('')
       })
-      .catch(() => { if (alive) setTargetNamespaces([]) })
+      .catch(e => { if (alive) {setTargetNamespaces([]);setErr(dbErrMsg(e))} })
     return () => { alive = false }
   }, [targetConnId])
 

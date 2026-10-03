@@ -163,6 +163,19 @@ describe('DbWorkbench capability-gating', () => {
     expect(await screen.findByTestId('seg-structure')).not.toBeDisabled()
   })
 
+  it('creates a toolbar query in the actual default namespace, not the first catalog entry', async () => {
+    h.list.mockReturnValue([{ connId: 'h2-default', profileId: CONN.id, dbType: 'jdbc', name: 'H2',
+      capabilities: { writable: true, transactions: true, schemas: true, sqlConsole: true, er: true, structureEdit: false, views: true, functions: true } }])
+    h.getSchema.mockResolvedValue({ db: 'h2-default', defaultNamespace: 'PUBLIC', schemas: [
+      { name: 'INFORMATION_SCHEMA', status: 'unloaded', tables: [], views: [], functions: [] },
+      { name: 'PUBLIC', status: 'unloaded', tables: [], views: [], functions: [] },
+    ] })
+    wrap(<DbWorkbench conn={CONN} />)
+    await screen.findByTestId('schema-node:PUBLIC')
+    fireEvent.click(screen.getByTestId('wb-new-query'))
+    await waitFor(() => expect(screen.getByTestId('sql-default-schema')).toHaveValue('PUBLIC'))
+  })
+
   it('all tabs enabled when all capabilities are true', async () => {
     h.list.mockReturnValue([
       {

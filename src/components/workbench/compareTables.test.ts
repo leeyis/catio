@@ -99,13 +99,13 @@ describe('qval escaping', () => {
   it('escapes single quotes for all engines', () => {
     expect(qval("O'Brien", 'postgres')).toBe("'O''Brien'")
   })
-  it('escapes backslash for MySQL-likes only', () => {
-    expect(qval('a\\b', 'mysql')).toBe("'a\\\\b'")
-    expect(qval('a\\b', 'postgres')).toBe("'a\\b'")
+  it('escapes backslashes independently of SQL string modes', () => {
+    expect(qval('a\\b', 'mysql')).toBe("CONVERT(X'615c62' USING utf8mb4)")
+    expect(qval('a\\b', 'postgres')).toBe("E'a\\\\b'")
   })
-  it('quotes scientific-notation numbers, NULLs non-finite', () => {
+  it('quotes scientific-notation and non-finite numbers without inventing NULL', () => {
     expect(qval(1e21)).toBe("'1e+21'")
-    expect(qval(NaN)).toBe('NULL')
+    expect(qval(NaN)).toBe("'NaN'")
     expect(qval(42)).toBe('42')
   })
   it('serializes object cells (JSON/JSONB) as JSON, not [object Object]', () => {

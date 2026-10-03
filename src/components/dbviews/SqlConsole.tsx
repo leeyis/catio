@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn } from '../atoms'
 import { useData } from '../../state/DataContext'
-import { runQuery, splitQuery, cancelQuery, runExplain, getSchema, schemaColumns, tablePreview, erRelations, dbErrMsg } from '../../services/db'
+import { runQuery, splitQuery, cancelQuery, runExplain, getSchema, loadSchemaNamespace, preferredNamespace, SCHEMA_INVALIDATED_EVENT, schemaColumnCatalog, tablePreview, erRelations, dbErrMsg } from '../../services/db'
 import type { QueryResult, Schema, ErRelation } from '../../services/types'
 import { classifyAiSqlExecution } from '../../services/aiSqlExecutionPolicy'
 import { sqlAdvancedCompletion, type JoinTable } from './sqlAdvancedCompletion'
@@ -18,6 +18,8 @@ import type { SQLNamespace } from '@codemirror/lang-sql'
 import { DataGrid } from './DataGrid'
 import { useQuerySession } from './useQuerySession'
 import { QuerySessionToolbar } from './QuerySessionToolbar'
+import { cacheMetadataRequest } from '../../services/dbMetadata'
+import { referencedNamespaces } from './metadataReferences'
 import { ExplainPlanViewer } from './ExplainPlanViewer'
 import { SqlFileDialog } from './SqlFileDialog'
 import { parseExplainResult, supportsExplainPlan, type ParsedExplainPlan } from './explainPlan'
@@ -119,6 +121,8 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
   const [liveSchema, setLiveSchema] = useState<Schema | null>(null)
   const [defaultNamespace, setDefaultNamespace] = useState(initialDefaultSchema ?? '')
   const [schemaError, setSchemaError] = useState<string | null>(null)
+  const [metadataRevision,setMetadataRevision]=useState(0)
+  const [completionErrors,setCompletionErrors]=useState<Record<string,string>>({})
   // Live columns per schema namespace: { [schemaName]: { [table]: columns } }.
   const [liveColumns, setLiveColumns] = useState<Record<string, Record<string, string[]>>>({})
   // Live foreign-key relations per schema namespace (S3 外键 JOIN 建议的数据源)。
@@ -170,35 +174,22 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
   // Sampled Redis key names for the plain-mode redis completion source (key args).
   const redisKeysRef = useRef<string[]>([])
 
-  useEffect(() => {
-    if (!connId || !supportsDefaultNamespace) { setLiveSchema(null); return }
-    let alive = true
-    setLiveSchema(null); setSchemaError(null)
-    getSchema(connId).then(s => { if (alive) setLiveSchema(s) }).catch(e => {
-      if (alive) { setLiveSchema({ db: connId, schemas: [] }); setSchemaError(dbErrMsg(e)) }
-    })
-    return () => { alive = false }
-  }, [connId, supportsDefaultNamespace])
-
-  // Plain-mode (mongo) collection names for autocompletion — union of every
-  // database's collections/views. Best-effort: a failed fetch leaves the list
-  // empty (completion degrades to methods/chains only).
-  useEffect(() => {
-    if (!connId || engine !== 'mongodb') { collectionsRef.current = []; return }
-    let alive = true
-    getSchema(connId)
-      .then(s => {
-        if (!alive) return
-        const names = new Set<string>()
-        for (const ns of s.schemas) {
-          for (const tbl of ns.tables) names.add(tbl.name)
-          for (const v of ns.views) names.add(v.name)
-        }
-        collectionsRef.current = [...names]
-      })
-      .catch(() => { if (alive) collectionsRef.current = [] })
-    return () => { alive = false }
-  }, [connId, engine])
+  useEffect(()=>{
+    if(!connId||!supportsDefaultNamespace){setLiveSchema(null);return}
+    let alive=true,request=0
+    setLiveSchema(null);setSchemaError(null);setCompletionErrors({})
+    const load=()=>{const current=++request;void getSchema(connId,{lazy:true}).then(value=>{
+      if(alive&&current===request){setLiveSchema(value);setSchemaError(value.defaultNamespaceError??null)}
+    }).catch(e=>{if(alive&&current===request)setSchemaError(dbErrMsg(e))})}
+    load()
+    let timer:ReturnType<typeof setTimeout>|undefined
+    const changed=(event:Event)=>{const detail=(event as CustomEvent<{connId?:string}>).detail
+      if(detail?.connId&&detail.connId!==connId)return
+      clearTimeout(timer);timer=setTimeout(()=>{setCompletionErrors({});setMetadataRevision(v=>v+1);load()},100)
+    }
+    window.addEventListener(SCHEMA_INVALIDATED_EVENT,changed)
+    return()=>{alive=false;clearTimeout(timer);window.removeEventListener(SCHEMA_INVALIDATED_EVENT,changed)}
+  },[connId,supportsDefaultNamespace])
 
   // Plain-mode (redis) key-name sample for argument completion. SCAN-based
   // preview of the connected default DB (the pseudo-table "keys"); best-effort.
@@ -238,10 +229,29 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
   // Stable identity of the schema namespaces (names only) so the column fetch
   // re-runs when connId or the schema list changes, but NOT on every keystroke.
   const namespaceNames = useMemo(
-    () => (liveSchema ? liveSchema.schemas.map(ns => ns.name) : []),
-    [liveSchema],
+    () => (liveSchema ? referencedNamespaces(code,liveSchema.schemas.map(ns=>ns.name),defaultNamespace||initialDefaultSchema) : []),
+    [liveSchema,code,defaultNamespace,initialDefaultSchema],
   )
-  const namespaceKey = namespaceNames.join(',')
+  const namespaceKey = JSON.stringify(namespaceNames)
+  const metadataScopeKey=namespaceNames.map(name=>liveSchema?.schemas.find(ns=>ns.name===name)?.status??'loaded').join(',')
+  useEffect(()=>{
+    if(!connId||namespaceNames.length===0)return
+    let alive=true
+    for(const name of namespaceNames){
+      const ns=liveSchema?.schemas.find(item=>item.name===name)
+      if(!ns||ns.status!=='unloaded')continue
+      void loadSchemaNamespace(connId,name).then(value=>{if(alive)setLiveSchema(current=>current?{...current,schemas:current.schemas.map(item=>item.name===name?value:item)}:current)})
+        .catch(e=>{if(alive)setCompletionErrors(current=>({...current,['objects:'+name]:name+': '+dbErrMsg(e)}))})
+    }
+    return()=>{alive=false}
+    // Namespace identity and invalidation, not object identity, drive the request.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[connId,namespaceKey,metadataScopeKey,metadataRevision])
+  useEffect(()=>{
+    if(engine!=='mongodb'){collectionsRef.current=[];return}
+    const ns=liveSchema?.schemas.find(item=>item.name===defaultNamespace)
+    collectionsRef.current=ns?[...ns.tables,...ns.views].map(item=>item.name):[]
+  },[engine,liveSchema,defaultNamespace])
 
   // 结构面板漏斗筛掉的库/Schema,这里也只保留筛选后的(联动)。key 与 SchemaBrowser 一致
   // (conn.id 即此处的 profileId);监听变更事件,做到切换漏斗时库下拉实时刷新。
@@ -267,12 +277,12 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
     setDefaultNamespace(cur => {
       if (cur && schemaOptions.includes(cur)) return cur
       if (initialDefaultSchema && schemaOptions.includes(initialDefaultSchema)) return initialDefaultSchema
-      return schemaOptions[0] ?? ''
+      return preferredNamespace(schemaOptions,initialDefaultSchema,liveSchema?.defaultNamespace)
     })
     // schemaOptionsKey captures option identity; avoid re-running just because
     // the memoized array identity changed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [supportsDefaultNamespace, schemaOptionsKey, initialDefaultSchema])
+  }, [supportsDefaultNamespace, schemaOptionsKey, initialDefaultSchema, liveSchema?.defaultNamespace])
 
   // Fetch REAL column names for each schema namespace from the live backend.
   // Best-effort: on rejection we leave that namespace out (editor falls back to
@@ -282,9 +292,19 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
     let alive = true
     Promise.all(
       namespaceNames.map(name =>
-        schemaColumns(connId, name)
-          .then(pairs => [name, Object.fromEntries(pairs)] as const)
-          .catch(() => [name, {} as Record<string, string[]>] as const),
+        schemaColumnCatalog(connId, name)
+          .then(catalog => {
+            if (alive) setCompletionErrors(current => {
+              const next = { ...current }
+              const errors = catalog.errors.map(error => error.schema + ': ' + error.message)
+              if (catalog.truncated) errors.push(t('workbench.columnMetadataTruncated', { schema: name }))
+              if (errors.length) next['columns:' + name] = errors.join('; ')
+              else delete next['columns:' + name]
+              return next
+            })
+            return [name, Object.fromEntries(catalog.tables)] as const
+          })
+          .catch(e => {if(alive)setCompletionErrors(current=>({...current,['columns:'+name]:name+': '+dbErrMsg(e)}));return [name, {} as Record<string, string[]>] as const}),
       ),
     )
       .then(entries => { if (alive) setLiveColumns(Object.fromEntries(entries)) })
@@ -292,7 +312,7 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
     return () => { alive = false }
     // namespaceKey captures the namespace-name identity; intentionally not on liveSchema object.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connId, plain, namespaceKey])
+  }, [connId, plain, namespaceKey, metadataRevision])
 
   // S3:每个库/Schema 的外键关系(JOIN 建议数据源)。复用 ER 图的 erRelations
   // (每库一次调用,廉价)。best-effort:失败的库留空,JOIN 建议对其降级为无候选。
@@ -301,16 +321,19 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
     let alive = true
     Promise.all(
       namespaceNames.map(name =>
-        erRelations(connId, name)
-          .then(rels => [name, rels] as const)
-          .catch(() => [name, [] as ErRelation[]] as const),
+        cacheMetadataRequest(connId,`relations:${name}`,()=>erRelations(connId,name))
+          .then(rels => {
+            if (alive) setCompletionErrors(current => { const next = { ...current }; delete next['relations:' + name]; return next })
+            return [name, rels] as const
+          })
+          .catch(e => {if(alive)setCompletionErrors(current=>({...current,['relations:'+name]:name+': '+dbErrMsg(e)}));return [name, [] as ErRelation[]] as const}),
       ),
     )
       .then(entries => { if (alive) setLiveRelations(Object.fromEntries(entries)) })
       .catch(() => { if (alive) setLiveRelations({}) })
     return () => { alive = false }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connId, plain, namespaceKey])
+  }, [connId, plain, namespaceKey, metadataRevision])
 
   /**
    * Nested completion schema for the SQL editor, in @codemirror/lang-sql's
@@ -590,6 +613,10 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
 
   return (
     <div ref={splitContainerRef} className="col" style={{ height: '100%', width: '100%', minHeight: 0, minWidth: 0 }}>
+      {Object.keys(completionErrors).length>0&&<details style={{padding:'5px 12px',fontSize:11.5,color:'var(--signal-amber)'}}>
+        <summary>{t('workbench.completionMetadataNotices',{count:Object.keys(completionErrors).length})}</summary>
+        {Object.entries(completionErrors).map(([key,message])=><div key={key}>{message}</div>)}
+      </details>}
       {schemaError && <div role="alert" style={{ padding: '6px 12px', color: 'var(--danger-fg)', fontSize: 12 }}>{t('dbviews.loadError', { message: schemaError })}</div>}
       {querySessions && connId && <QuerySessionToolbar info={session.info} loading={session.loading}
         busy={phase==='running'||session.actionBusy||!!explain?.loading} error={session.error}

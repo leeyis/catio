@@ -1,5 +1,9 @@
 import { DATA } from './mockData'
-import type { ErRelation, HistoryItem, QueryResult, ResultColumn, Schema, Snippet, TableStructure } from './types'
+import { invalidateSchemaCache } from './dbMetadata'
+import { classifyAiSqlExecution } from './aiSqlExecutionPolicy'
+export { getSchema, loadSchemaNamespace, preferredNamespace, searchSchemaObjects, cancelMetadataSearch, schemaColumnCatalog, invalidateSchemaCache, SCHEMA_INVALIDATED_EVENT } from './dbMetadata'
+export type { MetadataSearchResult } from './dbMetadata'
+import type { ErRelation, HistoryItem, QueryResult, ResultColumn, Snippet, TableStructure } from './types'
 import type { RedisEdit } from '../components/dbviews/redisEdit'
 
 // Transport: rpc() routes to Tauri invoke (desktop) or POST /api/invoke (server head);
@@ -7,21 +11,7 @@ import type { RedisEdit } from '../components/dbviews/redisEdit'
 // set neither flag) keep their mock path unchanged.
 import { rpc, isTauri, isServer } from './transport'
 
-/**
- * Extract a human-readable message from a thrown/rejected value. Tauri rejects a
- * Rust `DbError` as a plain object `{ kind, message }`, so `String(e)` yields the
- * useless "[object Object]" — pull `.message` (or stringify) instead.
- */
-export function dbErrMsg(e: unknown): string {
-  if (e instanceof Error) return e.message
-  if (typeof e === 'string') return e
-  if (e && typeof e === 'object') {
-    const o = e as Record<string, unknown>
-    if (typeof o.message === 'string' && o.message) return o.message
-    try { return JSON.stringify(e) } catch { return String(e) }
-  }
-  return String(e)
-}
+export { dbErrMsg } from './dbError'
 
 // ---- DB engine types ----
 
@@ -80,7 +70,8 @@ export interface DbConnectResult {
 // desktop ignores the extra kwarg; callers (sidebar/home/modal connect) pass the display name.
 export async function dbConnect(args: DbConnectArgs, name?: string): Promise<DbConnectResult> {
   if (!isTauri() && !isServer()) throw new Error('dbConnect requires the Tauri runtime')
-  return rpc<DbConnectResult>('db_connect', { args, name })
+  const result=await rpc<DbConnectResult>('db_connect', { args, name })
+  invalidateSchemaCache(result.connId,{announce:false});return result
 }
 
 /** The non-secret subset of DbConnectArgs a saved profile carries (id/name etc. omitted). */
@@ -128,7 +119,7 @@ export async function testConnection(args: DbConnectArgs): Promise<TestConnResul
 
 export async function dbDisconnect(connId: string): Promise<void> {
   if (!isTauri() && !isServer()) throw new Error('dbDisconnect requires the Tauri runtime')
-  return rpc('db_disconnect', { connId })
+  try {return await rpc('db_disconnect', { connId })} finally {invalidateSchemaCache(connId)}
 }
 
 // ---- Query ----
@@ -163,7 +154,9 @@ export async function runQuery(connId: string, sql: string, defaultNamespace?: s
   if (maxRows != null) args.maxRows = maxRows
   if (execution?.querySessionId) args.querySessionId = execution.querySessionId
   if (execution) { args.executionId = execution.executionId; if (execution.timeoutMs != null) args.timeoutMs = execution.timeoutMs }
-  return rpc<QueryResult>('db_query', args)
+  const result=await rpc<QueryResult>('db_query', args)
+  if(['schema_change','dangerous'].includes(classifyAiSqlExecution(sql).category))invalidateSchemaCache(connId)
+  return result
 }
 
 /** Split using the backend's tested dialect parser (quotes, comments, dollar bodies). */
@@ -551,24 +544,6 @@ export async function saveSnippet(snippet: Snippet): Promise<void> {
 
 // ---- Schema introspection ----
 
-export async function getSchema(connId: string): Promise<Schema> {
-  if (!isTauri() && !isServer()) return DATA.schema
-  // Backend returns [schemaName, tables][] — adapt to frontend Schema shape
-  const raw = await rpc<Array<[string, Array<{ name: string; kind: string }>]>>('db_schema', { connId })
-  const schemas = raw.map(([name, tables]) => ({
-    name,
-    open: false,
-    tables: tables.filter(t => t.kind === 'table').map(t => ({ name: t.name, rows: '', cols: 0 })),
-    views: tables.filter(t => t.kind === 'view').map(t => ({ name: t.name })),
-    functions: [] as { name: string }[],
-  }))
-  // Best-effort: fetch stored functions/procedures per schema in parallel. A
-  // failed fetch leaves that schema's functions empty rather than throwing.
-  await Promise.all(schemas.map(async ns => {
-    ns.functions = (await schemaFunctions(connId, ns.name).catch(() => [])).map(name => ({ name }))
-  }))
-  return { db: connId, schemas }
-}
 
 /**
  * Real structure of a single table: columns, indexes, foreign keys (and a
@@ -701,5 +676,7 @@ export async function pingQuerySession(connId: string, querySessionId: string): 
   return rpc('db_query_session_ping',{connId,querySessionId})
 }
 export async function querySessionTransaction(connId: string, querySessionId: string, action: TransactionAction): Promise<QuerySessionInfo> {
-  return rpc('db_query_session_transaction',{connId,querySessionId,action})
+  const result=await rpc<QuerySessionInfo>('db_query_session_transaction',{connId,querySessionId,action})
+  if(action!=='begin')invalidateSchemaCache(connId)
+  return result
 }

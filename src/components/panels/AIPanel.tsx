@@ -27,6 +27,7 @@ export interface Attachment {
 }
 
 export interface AIPanelProps {
+  visible?: boolean
   fileActivity?: AgentFileActivity[]
   onClose: () => void
   mode?: 'sql' | 'shell'
@@ -486,7 +487,7 @@ interface MentionTable {
   kind: 'table' | 'view'
 }
 
-export function AIPanel({ onClose, mode = 'sql', conn, connId, engine, attachment, onClearAttachment, onInsert, canInsert, onOpenSettings, conversation, busy = false, history = [], onSend, onAbort, onNewConversation, onRestoreConversation, onDeleteConversation, fileActivity = [] }: AIPanelProps) {
+export function AIPanel({ visible = true, onClose, mode = 'sql', conn, connId, engine, attachment, onClearAttachment, onInsert, canInsert, onOpenSettings, conversation, busy = false, history = [], onSend, onAbort, onNewConversation, onRestoreConversation, onDeleteConversation, fileActivity = [] }: AIPanelProps) {
   const workspace = useAgentWorkspace()
   const { t } = useTranslation()
   const { config: cfg, update: updateAgentConfig } = useAgentConfig()
@@ -512,6 +513,7 @@ export function AIPanel({ onClose, mode = 'sql', conn, connId, engine, attachmen
   const executionMenuRef = useRef<HTMLDivElement>(null)
   // "@ 选表" state — only meaningful in SQL mode with a live connId.
   const [tableList, setTableList] = useState<MentionTable[]>([])
+  const [tableMetadataWarning,setTableMetadataWarning]=useState<string|null>(null)
   const [selectedTables, setSelectedTables] = useState<{ schema: string; table: string; kind: 'table' | 'view' }[]>([])
   // null = mention dropdown closed; otherwise the current filter text after '@'.
   const [mentionFilter, setMentionFilter] = useState<string | null>(null)
@@ -590,11 +592,14 @@ export function AIPanel({ onClose, mode = 'sql', conn, connId, engine, attachmen
 
   // Fetch the table/view list for the @ picker when the SQL-mode connection changes.
   useEffect(() => {
-    if (!isSql || !connId) { setTableList([]); return }
+    if (!visible || !isSql || !connId) { setTableList([]); return }
     let alive = true
+    setTableMetadataWarning(null)
     getSchema(connId)
       .then(s => {
         if (!alive) return
+        const unavailable=s.schemas.filter(ns=>ns.error).map(ns=>ns.name)
+        if(unavailable.length)setTableMetadataWarning(unavailable.join(', '))
         const list: MentionTable[] = []
         for (const ns of s.schemas) {
           for (const tbl of ns.tables) list.push({ schema: ns.name, name: tbl.name, kind: 'table' })
@@ -604,7 +609,7 @@ export function AIPanel({ onClose, mode = 'sql', conn, connId, engine, attachmen
       })
       .catch(() => { if (alive) setTableList([]) })
     return () => { alive = false }
-  }, [isSql, connId])
+  }, [visible, isSql, connId])
 
   // Reset @ state when leaving SQL mode or switching connection.
   useEffect(() => { setSelectedTables([]); setMentionFilter(null) }, [isSql, connId])
@@ -742,6 +747,7 @@ export function AIPanel({ onClose, mode = 'sql', conn, connId, engine, attachmen
       {/* composer */}
       <div style={{ padding: 10, borderTop: '1px solid var(--border-hairline)', position: 'relative' }}>
         {/* @ 选表下拉 — anchored above the composer (SQL mode only). */}
+        {isSql && mentionFilter != null && tableMetadataWarning && <div role="status" style={{fontSize:11,color:'var(--signal-amber)'}}>{t('workbench.searchMetadataErrors',{count:tableMetadataWarning.split(', ').length})}: {tableMetadataWarning}</div>}
         {isSql && mentionFilter != null && (
           <div className="pop-in" style={{ position: 'absolute', left: 10, right: 10, bottom: '100%', marginBottom: 6, zIndex: 50, background: 'var(--surface-elevated)', border: '1px solid var(--border-hairline-alt)', borderRadius: 10, boxShadow: 'var(--shadow-dropdown)', maxHeight: 220, overflowY: 'auto', padding: 5 }}>
             {mentionMatches.length === 0

@@ -12,13 +12,14 @@ import { DatabaseExportDialog, type DatabaseExportRequest } from '../dbviews/Dat
 import { DataTransferDialog, type TransferConnectionOption } from '../dbviews/DataTransferDialog'
 import { buildCreateTableDDL, dialectFor, qualifiedTable, supportsDdlExport } from '../dbviews/structureDdl'
 import { SchemaBrowser } from './SchemaBrowser'
+import { useMetadataTree } from './useMetadataTree'
 import { ComparePane } from './ComparePane'
 import { TablePane } from './TablePane'
 import { ObjectPane } from './ObjectPane'
 import { useData } from '../../state/DataContext'
 import { listActiveDbConnections, useActiveDbConnections } from '../../state/dbConnections'
-import { getSchema, runQuery, dropObject, renameObject, truncateTable, duplicateTableStructure, tableStructure, exportDatabaseSql, exportFile, dbErrMsg, type DbCapabilities } from '../../services/db'
-import type { Connection, Schema, SchemaNamespace } from '../../services/types'
+import { runQuery, dropObject, renameObject, truncateTable, duplicateTableStructure, tableStructure, exportDatabaseSql, exportFile, dbErrMsg, preferredNamespace, type DbCapabilities } from '../../services/db'
+import type { Connection, SchemaNamespace } from '../../services/types'
 
 export interface DbWorkbenchProps {
   conn: Connection
@@ -134,42 +135,10 @@ export function DbWorkbench({ conn, density, active: shown = true, workspaceTabI
   const tabStripRef = useRef<HTMLDivElement>(null)
   const scrollTabs = (dx: number) => tabStripRef.current?.scrollBy({ left: dx, behavior: 'smooth' })
 
-  // ---- Real schema tree (only when connected) ----
-  // `liveSchema` holds the backend-introspected schema; null means "use the mock schema".
-  const [liveSchema, setLiveSchema] = useState<Schema | null>(null)
-  // Surface introspection failures instead of swallowing them — a swallowed error
-  // used to fall back to the mock demo tree, which then let the user query tables
-  // the real database doesn't have.
-  const [schemaErr, setSchemaErr] = useState<string | null>(null)
-  // True while the backend is introspecting — drives the tree's skeleton placeholder
-  // so a freshly-connected DB shows a loading state, not a blank/empty tree.
-  const [schemaLoading, setSchemaLoading] = useState(false)
-  useEffect(() => {
-    if (!connId) { setLiveSchema(null); setSchemaErr(null); setSchemaLoading(false); return }
-    let cancelled = false
-    setSchemaErr(null)
-    setLiveSchema(null)
-    setSchemaLoading(true)
-    getSchema(connId)
-      .then(sc => { if (!cancelled) { setLiveSchema(sc); setSchemaErr(null) } })
-      .catch(e => { if (!cancelled) { setLiveSchema(null); setSchemaErr(dbErrMsg(e)) } })
-      .finally(() => { if (!cancelled) setSchemaLoading(false) })
-    return () => { cancelled = true }
-  }, [connId])
-
-  // Re-introspect the live schema on demand (schema "刷新" action). No-op on the mock path.
-  // refreshing 驱动刷新按钮转圈;失败不再吞错,refreshErr 以 toast 显示。
-  const [refreshing, setRefreshing] = useState(false)
-  const [refreshErr, setRefreshErr] = useState<string | null>(null)
-  function refreshSchema() {
-    if (!connId || refreshing) return
-    setRefreshing(true)
-    setRefreshErr(null)
-    getSchema(connId)
-      .then(sc => setLiveSchema(sc))
-      .catch(e => setRefreshErr(dbErrMsg(e)))
-      .finally(() => setRefreshing(false))
-  }
+  const metadata=useMetadataTree(connId??undefined)
+  const liveSchema=metadata.schema, schemaErr=metadata.error, schemaLoading=metadata.loading
+  const refreshing=metadata.refreshing, refreshErr=metadata.refreshError
+  const refreshSchema=metadata.refresh
 
   // All schema namespaces to render. A real connection renders the backend's
   // schema ONLY — never the mock/demo tree (showing fake tables a user could click
@@ -294,7 +263,7 @@ export function DbWorkbench({ conn, density, active: shown = true, workspaceTabI
   useEffect(() => {
     if (!connId || !liveSchema || !liveSchema.schemas.length) return
     const exists = (s: string, tname: string) => liveSchema.schemas.some(
-      n => n.name === s && (n.tables.some(x => x.name === tname) || n.views.some(v => v.name === tname)),
+      n => n.name === s && ((n.status && n.status!=='loaded') || n.tables.some(x => x.name === tname) || n.views.some(v => v.name === tname)),
     )
     setTabs(prev => {
       const kept = prev.filter(tb => tb.kind !== 'table' || exists(tb.schema, tb.table))
@@ -322,9 +291,11 @@ export function DbWorkbench({ conn, density, active: shown = true, workspaceTabI
 
   // The namespace currently being viewed (drives namespace-level operations like ER/new-object).
   const namespace: SchemaNamespace = useMemo(() => {
-    return namespaces.find(n => n.name === (activeTab?.kind === 'table' ? activeTab.schema : ''))
-      ?? namespaces[0]
-  }, [namespaces, activeTab])
+    const explicit = activeTab?.kind === 'sql' ? activeTab.defaultSchema
+      : activeTab && 'schema' in activeTab ? activeTab.schema : undefined
+    const name = preferredNamespace(namespaces.map(ns => ns.name), explicit, liveSchema?.defaultNamespace)
+    return namespaces.find(ns => ns.name === name) ?? namespaces[0]
+  }, [namespaces, activeTab, liveSchema?.defaultNamespace])
 
   // ---- 功能#3:历史「执行」无窗口兜底 ----
   // catio-run 全局派发。激活 tab 为 SQL 控制台时由 SqlConsole 自行处理(行为不变);
@@ -384,7 +355,7 @@ export function DbWorkbench({ conn, density, active: shown = true, workspaceTabI
         canSqlConsole={caps.sqlConsole} canEr={caps.er} canStructureEdit={caps.structureEdit}
         canViews={caps.views} canFunctions={caps.functions}
         collapsed={effectiveCollapsed} onToggleCollapse={() => setSidebarCollapsed(c => !c)}
-        schemas={connId ? namespaces : undefined} conn={connId ? conn : undefined} live={!!connId} loading={schemaLoading} />
+        schemas={connId ? namespaces : undefined} connId={connId??undefined} onLoadNamespace={metadata.loadNamespace} conn={connId ? conn : undefined} live={!!connId} loading={schemaLoading} />
       <div className="col grow" style={{ minWidth: 0, minHeight: 0, overflow: 'hidden', position: 'relative' }}>
         {/* 统一 tab strip:表 / 对象 / 查询 / ER 平级,身份复用,全部保持 mounted。 */}
         {tabs.length > 0 && (
@@ -571,7 +542,7 @@ export function DbWorkbench({ conn, density, active: shown = true, workspaceTabI
           <div className="row gap6" style={{ position: 'absolute', left: 12, bottom: createErr ? 58 : 12, zIndex: 80, maxWidth: 420, padding: '9px 12px', borderRadius: 10, border: '1px solid var(--danger-border)', background: 'var(--danger-soft)', color: 'var(--danger-fg)', fontSize: 12, boxShadow: 'var(--shadow-window)' }}>
             <Icon name="alert-triangle" size={14} style={{ flex: 'none' }} />
             <span>{t('workbench.refreshFailed', { message: refreshErr })}</span>
-            <button className="icon-btn bare" style={{ width: 20, height: 20, marginLeft: 'auto' }} onClick={() => setRefreshErr(null)}><Icon name="x" size={12} /></button>
+            <button className="icon-btn bare" style={{ width: 20, height: 20, marginLeft: 'auto' }} onClick={() => metadata.clearRefreshError()}><Icon name="x" size={12} /></button>
           </div>
         )}
         {schemaErr && (
@@ -579,7 +550,7 @@ export function DbWorkbench({ conn, density, active: shown = true, workspaceTabI
           <div className="row gap6" style={{ position: 'absolute', left: 12, bottom: 12 + (createErr ? 46 : 0) + (refreshErr ? 46 : 0), zIndex: 80, maxWidth: 460, padding: '9px 12px', borderRadius: 10, border: '1px solid var(--danger-border)', background: 'var(--danger-soft)', color: 'var(--danger-fg)', fontSize: 12, boxShadow: 'var(--shadow-window)' }}>
             <Icon name="alert-triangle" size={14} style={{ flex: 'none' }} />
             <span>{t('workbench.schemaLoadFailed', { message: schemaErr })}</span>
-            <button className="icon-btn bare" style={{ width: 20, height: 20, marginLeft: 'auto' }} onClick={() => setSchemaErr(null)}><Icon name="x" size={12} /></button>
+            <button className="icon-btn bare" style={{ width: 20, height: 20, marginLeft: 'auto' }} onClick={() => metadata.clearError()}><Icon name="x" size={12} /></button>
           </div>
         )}
       </div>

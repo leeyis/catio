@@ -39,9 +39,10 @@ const runExplainMock = vi.fn(() =>
 )
 // 可按用例覆盖的 getSchema(用于「库/Schema 下拉联动漏斗筛选」测试)。
 type StubNs = { name: string; tables: unknown[]; views: unknown[]; functions: unknown[] }
-const getSchemaMock = vi.fn(() => Promise.resolve({ schemas: [] as StubNs[] }))
+const getSchemaMock = vi.fn((): Promise<{schemas:StubNs[];defaultNamespace?:string}> => Promise.resolve({ schemas: [] }))
 
-vi.mock('../../services/db', () => ({
+vi.mock('../../services/db', async original => ({
+  ...await original<typeof import('../../services/db')>(),
   runQuery: vi.fn(),
   splitQuery: vi.fn((_id: string, sql: string) => Promise.resolve([sql])),
   cancelQuery: vi.fn(() => Promise.resolve()),
@@ -201,6 +202,16 @@ describe('SqlConsole 库/Schema 下拉联动漏斗筛选', () => {
   beforeEach(() => {
     localStorage.clear()
     getSchemaMock.mockReset()
+  })
+
+  it('prefers the actual user namespace over the first system namespace', async () => {
+    getSchemaMock.mockResolvedValue({defaultNamespace:'PUBLIC',schemas:[
+      {name:'INFORMATION_SCHEMA',tables:[],views:[],functions:[]},
+      {name:'PUBLIC',tables:[],views:[],functions:[]},
+    ]})
+    wrap(<SqlConsole connId="c1" engine="jdbc" fresh />)
+    const select=await screen.findByTestId('sql-default-schema')
+    await waitFor(()=>expect(select).toHaveValue('PUBLIC'))
   })
 
   it('被漏斗隐藏的 schema 不出现在默认库/Schema 下拉中', async () => {

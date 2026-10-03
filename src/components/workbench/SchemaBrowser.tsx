@@ -1,3 +1,4 @@
+import { MetadataSearch } from './MetadataSearch'
 /* ported from ref-ui/_extract/blob7.txt — verbatim per plan T1-T7; live multi-schema tree wired in E-series */
 import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -8,6 +9,8 @@ import { readHiddenSchemas, writeHiddenSchemas } from '../../state/schemaFilter'
 import type { Connection, SchemaNamespace, SchemaTable } from '../../services/types'
 
 export interface SchemaBrowserProps {
+  connId?: string
+  onLoadNamespace?: (name:string,force?:boolean)=>void
   /** Pick a table/view — carries BOTH the schema namespace and the object name (names are ambiguous across schemas). */
   onPick: (schema: string, name: string) => void
   /** Pick a view / function / procedure to show its definition (DDL/source) in the main panel. */
@@ -73,13 +76,14 @@ export interface SchemaBrowserProps {
   onToggleCollapse?: () => void
 }
 
-export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpenER, onOpenCompare, onNewObjectTemplate, onRefresh, onObjectAdmin, onTransferData, onExportDatabase, schemas, conn, live, refreshing, loading, collapsed, onToggleCollapse, sqlActive, canSqlConsole = true, canEr = true, canStructureEdit = true, canViews = true, canFunctions = true }: SchemaBrowserProps) {
+export function SchemaBrowser({ connId, onLoadNamespace, onPick, onPickObject, active, onNewQuery, onOpenER, onOpenCompare, onNewObjectTemplate, onRefresh, onObjectAdmin, onTransferData, onExportDatabase, schemas, conn, live, refreshing, loading, collapsed, onToggleCollapse, sqlActive, canSqlConsole = true, canEr = true, canStructureEdit = true, canViews = true, canFunctions = true }: SchemaBrowserProps) {
   const { t } = useTranslation()
   const D = useData()
   // Live path: render every supplied namespace; mock path: the single seeded schema (pixel-identical).
   const namespaces: SchemaNamespace[] = schemas ?? D.schema.schemas
   const [q, setQ] = useState('')
   const query = q.toLowerCase()
+  const globalSearch = !!live && !!connId && !!q.trim()
 
   // Schema/database visibility filter (persisted per connection). Default = show all.
   // Users hide schemas they don't care about; the choice survives reconnects.
@@ -199,6 +203,8 @@ export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpen
           Live connection: skeleton while introspecting, empty-state when it returns
           nothing, otherwise the real tree. Mock path always has namespaces. */}
       <div className="grow scrollon" style={{ overflowY: 'auto', padding: '0 6px 10px' }}>
+        {globalSearch && connId && <MetadataSearch connId={connId} query={q} onPick={onPick} onPickObject={onPickObject}/>}
+        <div style={{display:globalSearch?'none':undefined}}>
         {loading && namespaces.length === 0 ? (
           <div className="col" style={{ gap: 9, padding: '8px 6px' }} aria-busy="true" data-testid="schema-skeleton">
             {[0, 1, 2, 3, 4, 5, 6].map(i => (
@@ -224,8 +230,9 @@ export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpen
           <SchemaNode key={ns.name} ns={ns} query={query} active={active} onPick={onPick} onPickObject={onPickObject} live={!!live}
             onNewQuery={onNewQuery} onOpenER={onOpenER} onNewObjectTemplate={onNewObjectTemplate} onRefresh={onRefresh} onObjectAdmin={onObjectAdmin} onTransferData={onTransferData} onExportDatabase={onExportDatabase}
             sqlActive={sqlActive} canSqlConsole={canSqlConsole} canEr={canEr} canStructureEdit={canStructureEdit}
-            canViews={canViews} canFunctions={canFunctions} />
+            canViews={canViews} canFunctions={canFunctions} onLoadNamespace={onLoadNamespace} />
         ))}
+        </div>
       </div>
       {/* footer */}
       <div className="row gap8" style={{ padding: '8px 12px', borderTop: '1px solid var(--border-hairline)' }}>
@@ -239,6 +246,7 @@ export function SchemaBrowser({ onPick, onPickObject, active, onNewQuery, onOpen
 }
 
 interface SchemaNodeProps {
+  onLoadNamespace?: (name:string,force?:boolean)=>void
   ns: SchemaNamespace
   query: string
   active: { schema: string; table: string } | null
@@ -261,7 +269,7 @@ interface SchemaNodeProps {
 }
 
 /** One schema namespace rendered as a collapsible DB tree node (Tables / Views / Functions). */
-function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, onObjectAdmin, onTransferData, onExportDatabase, sqlActive, canSqlConsole, canEr, canStructureEdit, canViews, canFunctions }: SchemaNodeProps) {
+function SchemaNode({ onLoadNamespace, ns, query, active, onPick, onPickObject, live, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, onObjectAdmin, onTransferData, onExportDatabase, sqlActive, canSqlConsole, canEr, canStructureEdit, canViews, canFunctions }: SchemaNodeProps) {
   const { t } = useTranslation()
   const D = useData()
   // Schemas start COLLAPSED — a freshly-connected DB shows nothing expanded until the
@@ -269,6 +277,8 @@ function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery,
   // `tables` is pre-opened so that expanding a schema reveals its tables in one click.
   const [open, setOpen] = useState({ schema: false, tables: true, views: false, fns: false })
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+  useEffect(()=>{if(open.schema && ns.status==='unloaded')onLoadNamespace?.(ns.name)},[open.schema,ns.status,ns.name,onLoadNamespace])
+  const countLabel=ns.status==='unloaded'?t('workbench.metadataNotLoaded'):ns.status==='loading'?t('workbench.metadataLoading'):ns.status==='error'?t('workbench.metadataUnavailable'):ns.tables.length+' tables'
   // Hover reveals the "..." action button; the schema-management dropdown opens from it.
   const [hover, setHover] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
@@ -305,7 +315,7 @@ function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery,
       { icon: 'eye', label: t('workbench.newView'), action: () => onNewObjectTemplate(ns.name, 'view') },
     ] : []),
     ...(onExportDatabase ? [{ icon: 'download', label: t('dbexport.title'), action: () => onExportDatabase(ns.name) }] : []),
-    ...(onRefresh ? [{ icon: 'refresh-cw', label: t('workbench.refresh'), action: () => onRefresh() }] : []),
+    ...((onRefresh||onLoadNamespace) ? [{ icon: 'refresh-cw', label: t('workbench.refresh'), action: () => onLoadNamespace ? onLoadNamespace(ns.name,true) : onRefresh?.() }] : []),
   ]
 
   // 单叶节点(表/视图)的对象管理"..."菜单:删除/重命名/清空表/复制表结构。
@@ -408,7 +418,7 @@ function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery,
       <div className="row" style={{ position: 'relative', alignItems: 'center' }}
         onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <TreeNode icon="database" iconColor="var(--signal-blue)" label={ns.name} count={ns.tables.length + ' tables'} open={open.schema} onToggle={() => setOpen(o => ({ ...o, schema: !o.schema }))} depth={0} testId={`schema-node:${ns.name}`} />
+          <TreeNode icon="database" iconColor="var(--signal-blue)" label={ns.name} count={countLabel} open={open.schema} onToggle={() => setOpen(o => ({ ...o, schema: !o.schema }))} depth={0} testId={`schema-node:${ns.name}`} />
         </div>
         <button className="icon-btn bare" title={t('workbench.schemaMenu')} aria-label={t('workbench.schemaMenu')}
           onClick={e => { e.stopPropagation(); setMenuOpen(o => !o) }}
@@ -435,6 +445,11 @@ function SchemaNode({ ns, query, active, onPick, onPickObject, live, onNewQuery,
         )}
       </div>
       {open.schema && <>
+        {ns.status==='loading'&&<div role="status" style={{padding:'8px 18px',fontSize:11.5,color:'var(--text-tertiary)'}}>{t('workbench.metadataLoading')}</div>}
+        {(ns.error||ns.routineError)&&<div role="alert" style={{padding:'8px 18px',fontSize:11.5,color:'var(--danger-fg)',overflowWrap:'anywhere'}}>
+          <div>{ns.error??ns.routineError}</div>
+          {onLoadNamespace&&<button className="btn ghost sm" onClick={()=>onLoadNamespace(ns.name,true)}>{t('workbench.metadataRetry')}</button>}
+        </div>}
         <TreeNode icon="folder" label={t('workbench.tables')} count={tables.length} open={open.tables} onToggle={() => setOpen(o => ({ ...o, tables: !o.tables }))} depth={1} />
         {open.tables && tables.map(tbl => {
           const st = D.tableStructures[tbl.name]

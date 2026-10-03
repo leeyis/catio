@@ -3,10 +3,11 @@
  * SQL that makes the target match the source. The diff + SQL generation live in the pure,
  * unit-tested compareTables module. When the row window is truncated, DELETE generation is
  * suppressed so a partial source set can never delete real target rows. */
-import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
-import { runQuery, tableStructure, getSchema, execSyncBatch } from '../../services/db'
+import { ConfirmModal } from '../modals/ConfirmModal'
+import { queryPage, tableStructure, getSchema, execSyncBatch, preferredNamespace, dbErrMsg } from '../../services/db'
 import { listActiveDbConnections } from '../../state/dbConnections'
 import { computeDiff, genSyncStatements, qtable, qid } from './compareTables'
 import type { SchemaNamespace } from '../../services/types'
@@ -23,10 +24,10 @@ const ROW_LIMIT = 5000
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="col" style={{ gap: 5, flex: 1, minWidth: 150 }}>
+    <label className="col" style={{ gap: 5, flex: 1, minWidth: 150 }}>
       <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-tertiary)' }}>{label}</span>
       {children}
-    </div>
+    </label>
   )
 }
 
@@ -42,11 +43,19 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
   const { t } = useTranslation()
   const actives = listActiveDbConnections()
 
-  const [srcSchema, setSrcSchema] = useState(schemas[0]?.name ?? '')
+  const [sourceNamespaces, setSourceNamespaces] = useState(schemas)
+  const [sourceDefault, setSourceDefault] = useState<string>()
+  const [sourceMetadataError, setSourceMetadataError] = useState<string | null>(null)
+  const [targetMetadataError, setTargetMetadataError] = useState<string | null>(null)
+  const sourceChosen = useRef(false)
+  const targetChosen = useRef(false)
+  const operation = useRef(0)
+  const metadataError = [sourceMetadataError, targetMetadataError].filter(Boolean).join('; ')
+  const [srcSchema, setSrcSchema] = useState(preferredNamespace(schemas.map(s => s.name)))
   const [srcTable, setSrcTable] = useState('')
   const [tgtConnId, setTgtConnId] = useState(connId)
   const [tgtSchemas, setTgtSchemas] = useState<SchemaNamespace[]>(schemas)
-  const [tgtSchema, setTgtSchema] = useState(schemas[0]?.name ?? '')
+  const [tgtSchema, setTgtSchema] = useState(preferredNamespace(schemas.map(s => s.name)))
   const [tgtTable, setTgtTable] = useState('')
 
   const [busy, setBusy] = useState(false)
@@ -55,51 +64,87 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
   const [sql, setSql] = useState('')
   const [statements, setStatements] = useState<string[]>([])
   const [executing, setExecuting] = useState(false)
+  const [confirmVersion, setConfirmVersion] = useState<number | null>(null)
   const [execMsg, setExecMsg] = useState<{ ok: boolean; text: string } | null>(null)
 
-  const srcTables = useMemo(() => schemas.find(s => s.name === srcSchema)?.tables ?? [], [schemas, srcSchema])
+  const srcTables = useMemo(() => sourceNamespaces.find(s => s.name === srcSchema)?.tables ?? [], [sourceNamespaces, srcSchema])
   const tgtTables = useMemo(() => tgtSchemas.find(s => s.name === tgtSchema)?.tables ?? [], [tgtSchemas, tgtSchema])
   const tgtEngine = actives.find(a => a.connId === tgtConnId)?.dbType ?? engine
 
   // Any selection change invalidates the generated SQL, so a stale batch can never be
   // executed against a switched connection/table.
-  useEffect(() => {
-    setSql(''); setStatements([]); setSummary(null); setExecMsg(null)
-  }, [srcSchema, srcTable, tgtConnId, tgtSchema, tgtTable])
+  useLayoutEffect(() => {
+    operation.current++
+    setSql(''); setStatements([]); setSummary(null); setExecMsg(null); setError(null); setBusy(false); setConfirmVersion(null)
+    return () => { operation.current++ }
+  }, [connId, srcSchema, srcTable, tgtConnId, tgtSchema, tgtTable])
 
-  // Load the target connection's schemas when it changes.
+  useEffect(() => {
+    let alive = true
+    setSourceMetadataError(null)
+    if (!schemas.some(ns => ns.status && ns.status !== 'loaded')) { setSourceNamespaces(schemas); return }
+    void getSchema(connId).then(result => {
+      if (!alive) return
+      setSourceNamespaces(result.schemas)
+      setSourceDefault(result.defaultNamespace)
+      setSrcSchema(current => preferredNamespace(result.schemas.map(ns => ns.name), sourceChosen.current ? current : undefined, result.defaultNamespace))
+      const errors = result.schemas.filter(ns => ns.error).map(ns => ns.name + ': ' + ns.error)
+      setSourceMetadataError(errors.length ? errors.join('; ') : null)
+    }).catch(e => { if (alive) setSourceMetadataError(dbErrMsg(e)) })
+    return () => { alive = false }
+  }, [connId, schemas])
+
+  // Full table pickers remain explicit consumers even when the sidebar tree is lazy.
   useEffect(() => {
     let cancelled = false
-    if (tgtConnId === connId) { setTgtSchemas(schemas); return }
-    getSchema(tgtConnId).then(s => { if (!cancelled) { setTgtSchemas(s.schemas); setTgtSchema(s.schemas[0]?.name ?? '') } }).catch(() => { if (!cancelled) setTgtSchemas([]) })
+    setTargetMetadataError(null)
+    if (tgtConnId === connId) {
+      setTgtSchemas(sourceNamespaces)
+      setTgtSchema(current => preferredNamespace(sourceNamespaces.map(ns => ns.name), targetChosen.current ? current : undefined, sourceDefault))
+      return
+    }
+    getSchema(tgtConnId).then(result => {
+      if (cancelled) return
+      setTgtSchemas(result.schemas)
+      setTgtSchema(current => preferredNamespace(result.schemas.map(ns => ns.name), targetChosen.current ? current : undefined, result.defaultNamespace))
+      const errors = result.schemas.filter(ns => ns.error).map(ns => ns.name + ': ' + ns.error)
+      setTargetMetadataError(errors.length ? errors.join('; ') : null)
+    }).catch(e => { if (!cancelled) { setTgtSchemas([]); setTargetMetadataError(dbErrMsg(e)) } })
     return () => { cancelled = true }
-  }, [tgtConnId, connId, schemas])
+  }, [tgtConnId, connId, sourceNamespaces, sourceDefault])
 
   async function compare() {
     if (!srcTable || !tgtTable || busy) return
+    const version = ++operation.current
     setBusy(true); setError(null); setSummary(null); setSql(''); setStatements([]); setExecMsg(null)
     try {
       const st = await tableStructure(connId, srcSchema, srcTable)
+      if (version !== operation.current) return
       const pkCols = st.columns.filter(c => c.key === 'PK').map(c => c.name)
       if (pkCols.length === 0) throw new Error(t('compare.noPk'))
+      const target = await tableStructure(tgtConnId, tgtSchema, tgtTable)
+      if (version !== operation.current) return
+      const targetPk = target.columns.filter(c => c.key === 'PK').map(c => c.name)
+      if (targetPk.length !== pkCols.length || pkCols.some(name => !targetPk.includes(name))) throw new Error(t('compare.keyMismatch'))
 
       const srcOrder = pkCols.map(c => qid(c, engine)).join(', ')
       const tgtOrder = pkCols.map(c => qid(c, tgtEngine)).join(', ')
-      // SQL LIMIT is ROW_LIMIT+1 but maxRows caps at ROW_LIMIT: the driver only flags
-      // `truncated` when it actually sees the (ROW_LIMIT+1)-th row, so an over-limit table
-      // is correctly detected (which then suppresses DELETE generation below).
-      const srcQ = await runQuery(connId, `SELECT * FROM ${qtable(srcSchema, srcTable, engine)} ORDER BY ${srcOrder} LIMIT ${ROW_LIMIT + 1}`, undefined, undefined, ROW_LIMIT)
-      const tgtQ = await runQuery(tgtConnId, `SELECT * FROM ${qtable(tgtSchema, tgtTable, tgtEngine)} ORDER BY ${tgtOrder} LIMIT ${ROW_LIMIT + 1}`, undefined, undefined, ROW_LIMIT)
+      // The shared paging contract supplies dialect-aware LIMIT/OFFSET or cursor bounds
+      // and checks the extra row. Never inject a MySQL-style LIMIT into SQL Server/JDBC.
+      const srcQ = await queryPage(connId, `SELECT * FROM ${qtable(srcSchema, srcTable, engine)} ORDER BY ${srcOrder}`, ROW_LIMIT, 0)
+      if (version !== operation.current) return
+      const tgtQ = await queryPage(tgtConnId, `SELECT * FROM ${qtable(tgtSchema, tgtTable, tgtEngine)} ORDER BY ${tgtOrder}`, ROW_LIMIT, 0)
+      if (version !== operation.current) return
 
       const diff = computeDiff({
-        srcColumns: srcQ.columns.map(c => c.name),
-        srcRows: srcQ.rows,
-        tgtColumns: tgtQ.columns.map(c => c.name),
-        tgtRows: tgtQ.rows,
+        srcColumns: srcQ.columns.map(c => c.name), srcRows: srcQ.rows, srcBinaryCells: srcQ.binaryCells,
+        tgtColumns: tgtQ.columns.map(c => c.name), tgtRows: tgtQ.rows, tgtBinaryCells: tgtQ.binaryCells,
         pkNames: pkCols,
       })
-      if (diff.error === 'columns-mismatch') throw new Error(t('compare.colMismatch'))
-      if (diff.error === 'pk-missing') throw new Error(t('compare.pkMissing'))
+      if (diff.error) {
+        const messages = { 'columns-mismatch': 'colMismatch', 'pk-missing': 'pkMissing', 'unsafe-key': 'unsafeKey', 'duplicate-key': 'duplicateKey', 'invalid-binary': 'invalidBinary' }
+        throw new Error(t(`compare.${messages[diff.error]}`))
+      }
 
       const truncated = srcQ.truncated === true || tgtQ.truncated === true
       const deleteSuppressed = truncated && diff.deletes.length > 0
@@ -108,33 +153,38 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
       setStatements(stmts)
       setSql(stmts.join('\n'))
     } catch (e) {
-      setError(String((e as { message?: string } | null)?.message ?? e))
+      if (version === operation.current) setError(dbErrMsg(e))
     } finally {
-      setBusy(false)
+      if (version === operation.current) setBusy(false)
     }
   }
 
   function copySql() { if (sql && navigator.clipboard) navigator.clipboard.writeText(sql).catch(() => {}) }
 
   async function execute() {
-    if (!statements.length || executing) return
-    if (!window.confirm(t('compare.confirmExec', { n: statements.length }))) return
+    if (!statements.length || executing || confirmVersion !== operation.current) return
+    setConfirmVersion(null)
     // Truncation suppressed DELETEs, so this only syncs the INSERT/UPDATE subset.
     const partial = summary?.deleteSuppressed ?? false
+    const version = operation.current
+    let refreshVersion = version
     setExecuting(true); setExecMsg(null)
     try {
       const affected = await execSyncBatch(tgtConnId, statements)
-      await compare() // refresh the diff first (it resets execMsg), then report the result
-      setExecMsg({ ok: true, text: t(partial ? 'compare.executedPartial' : 'compare.executed', { n: affected }) })
+      if (version !== operation.current) return
+      const refresh = compare()
+      refreshVersion = operation.current
+      await refresh
+      if (refreshVersion === operation.current) setExecMsg({ ok: true, text: t(partial ? 'compare.executedPartial' : 'compare.executed', { n: affected }) })
     } catch (e) {
-      setExecMsg({ ok: false, text: t('compare.execFailed', { msg: String((e as { message?: string } | null)?.message ?? e) }) })
+      if (refreshVersion === operation.current) setExecMsg({ ok: false, text: t('compare.execFailed', { msg: dbErrMsg(e) }) })
     } finally {
       setExecuting(false)
     }
   }
 
   const selectStyle: CSSProperties = { height: 32, width: '100%', boxSizing: 'border-box', padding: '0 8px', borderRadius: 8, fontSize: 12.5, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', color: 'var(--text-primary)', outline: 'none', minWidth: 0 }
-  const canCompare = !!srcTable && !!tgtTable && !busy
+  const canCompare = !!srcTable && !!tgtTable && !busy && !executing
 
   return (
     <div className="col" style={{ height: '100%', width: '100%', minHeight: 0, overflow: 'auto', padding: 14, gap: 14 }}>
@@ -143,31 +193,37 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
         <span style={{ fontSize: 14, fontWeight: 700 }}>{t('compare.title')}</span>
       </div>
 
+      {confirmVersion !== null && <div role="dialog" aria-modal="true" aria-label={t('compare.confirmTitle')}>
+        <ConfirmModal title={t('compare.confirmTitle')} confirmLabel={t('compare.execute')} danger confirmIcon="play"
+          message={<><p>{t('compare.confirmExec', { n: statements.length })}</p><p style={{ overflowWrap: 'anywhere' }}>{t('compare.confirmTarget', { connection: actives.find(a => a.connId === tgtConnId)?.name ?? tgtConnId, table: `${tgtSchema}.${tgtTable}` })}</p></>}
+          onConfirm={() => void execute()} onCancel={() => setConfirmVersion(null)} />
+      </div>}
+
       {/* 5 labeled fields: source schema / source table / target conn / target schema / target table */}
       <div className="row" style={{ gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
         <Field label={t('compare.srcSchema')}>
-          <select value={srcSchema} onChange={e => { setSrcSchema(e.target.value); setSrcTable('') }} style={selectStyle}>
-            {schemas.map(s => <option key={s.name} value={s.name}>{s.name}</option>)}
+          <select disabled={busy || executing} value={srcSchema} onChange={e => { sourceChosen.current = true; setSrcSchema(e.target.value); setSrcTable('') }} style={selectStyle}>
+            {sourceNamespaces.map(s => <option key={s.name} value={s.name}>{s.name}</option>)}
           </select>
         </Field>
         <Field label={t('compare.srcTable')}>
-          <select value={srcTable} onChange={e => setSrcTable(e.target.value)} style={selectStyle}>
+          <select disabled={busy || executing} value={srcTable} onChange={e => { sourceChosen.current = true; setSrcTable(e.target.value) }} style={selectStyle}>
             <option value="">{t('compare.pickTable')}</option>
             {srcTables.map(tb => <option key={tb.name} value={tb.name}>{tb.name}</option>)}
           </select>
         </Field>
         <Field label={t('compare.tgtConn')}>
-          <select value={tgtConnId} onChange={e => { setTgtConnId(e.target.value); setTgtTable('') }} style={selectStyle}>
+          <select disabled={busy || executing} value={tgtConnId} onChange={e => { targetChosen.current = false; setTgtConnId(e.target.value); setTgtTable('') }} style={selectStyle}>
             {actives.map(a => <option key={a.connId} value={a.connId}>{a.name}</option>)}
           </select>
         </Field>
         <Field label={t('compare.tgtSchema')}>
-          <select value={tgtSchema} onChange={e => { setTgtSchema(e.target.value); setTgtTable('') }} style={selectStyle}>
+          <select disabled={busy || executing} value={tgtSchema} onChange={e => { targetChosen.current = true; setTgtSchema(e.target.value); setTgtTable('') }} style={selectStyle}>
             {tgtSchemas.map(s => <option key={s.name} value={s.name}>{s.name}</option>)}
           </select>
         </Field>
         <Field label={t('compare.tgtTable')}>
-          <select value={tgtTable} onChange={e => setTgtTable(e.target.value)} style={selectStyle}>
+          <select disabled={busy || executing} value={tgtTable} onChange={e => { targetChosen.current = true; setTgtTable(e.target.value) }} style={selectStyle}>
             <option value="">{t('compare.pickTable')}</option>
             {tgtTables.map(tb => <option key={tb.name} value={tb.name}>{tb.name}</option>)}
           </select>
@@ -187,6 +243,7 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
         )}
       </div>
 
+      {metadataError && <div role="alert" style={{padding:10,color:'var(--danger-fg)',fontSize:12}}>{metadataError}</div>}
       {error && (
         <div className="row gap6" style={{ fontSize: 12, color: 'var(--danger-fg, #e5484d)' }}>
           <Icon name="alert-triangle" size={13} /> <span>{error}</span>
@@ -204,7 +261,7 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
           <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
             <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('compare.syncSql')}</span>
             <div className="row gap6">
-              <button onClick={() => void execute()} disabled={!sql || executing} title={t('compare.executeHint')}
+              <button onClick={() => setConfirmVersion(operation.current)} disabled={!sql || executing} title={t('compare.executeHint')}
                 style={{ height: 26, padding: '0 12px', borderRadius: 7, border: 'none', background: 'var(--accent-primary)', color: '#fff', fontSize: 12, fontWeight: 600, cursor: sql && !executing ? 'pointer' : 'default', opacity: sql && !executing ? 1 : 0.5 }}>
                 <Icon name="play" size={12} /> {executing ? t('compare.executing') : t('compare.execute')}
               </button>
@@ -218,7 +275,7 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
               <Icon name={execMsg.ok ? 'check' : 'alert-triangle'} size={13} /> <span>{execMsg.text}</span>
             </div>
           )}
-          <textarea readOnly value={sql || t('compare.identical')} onFocus={e => sql && e.currentTarget.select()}
+          <textarea aria-label={t('compare.syncSql')} readOnly value={sql || t('compare.identical')} onFocus={e => sql && e.currentTarget.select()}
             style={{ flex: 1, minHeight: 160, width: '100%', boxSizing: 'border-box', padding: 10, borderRadius: 8, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', color: 'var(--text-primary)', fontFamily: 'monospace', fontSize: 11.5, resize: 'vertical' }} />
         </div>
       )}

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { openQuerySession, closeQuerySession, querySessionStatus, pingQuerySession, querySessionTransaction, dbErrMsg,
+import { openQuerySession, closeQuerySession, querySessionStatus, pingQuerySession, querySessionTransaction, invalidateSchemaCache, dbErrMsg,
   type QuerySessionInfo, type TransactionAction } from '../../services/db'
 import { updateQuerySessionWork, removeQuerySessionWork } from '../../state/querySessionWork'
 
@@ -15,7 +15,9 @@ export function useQuerySession(connId: string | undefined, enabled: boolean,
   const opening=useRef<Promise<QuerySessionInfo>|null>(null)
   const actionLock=useRef(false)
   const publish=useCallback((value:QuerySessionInfo)=>{
+    const transactionEnded=current.current&&current.current.transactionState!=='idle'&&value.transactionState==='idle'
     revision.current++;current.current=value;setInfo(value)
+    if(connId&&transactionEnded)invalidateSchemaCache(connId)
     if(connId)updateQuerySessionWork({connectionId:connId,profileId:owner.profileId,workbenchId:owner.workbenchId,ownerId:owner.ownerId,info:value})
   },[connId,owner.profileId,owner.workbenchId,owner.ownerId])
   const ensure=useCallback(async():Promise<QuerySessionInfo|undefined>=>{

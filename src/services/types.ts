@@ -88,6 +88,9 @@ export interface SchemaFunction {
 }
 
 export interface SchemaNamespace {
+  status?: 'unloaded' | 'loading' | 'loaded' | 'error'
+  error?: string
+  routineError?: string
   name: string
   open?: boolean
   tables: SchemaTable[]
@@ -96,6 +99,8 @@ export interface SchemaNamespace {
 }
 
 export interface Schema {
+  defaultNamespace?: string
+  defaultNamespaceError?: string
   db: string
   schemas: SchemaNamespace[]
 }
