@@ -506,7 +506,7 @@
     "confirmExec": "Execute {{n}} sync statement(s) on the target? (transactional — rolls back on error)",
     "executed": "Done — {{n}} row(s) affected",
     "executedPartial": "Ran {{n}} row(s), but DELETEs were skipped due to truncation — the target may still hold extra rows; narrow the range and re-compare to finish syncing",
-    "execFailed": "Failed and rolled back: {{msg}}",
+    "execFailed": "Synchronization failed or its outcome is unconfirmed: {{msg}}. Compare again to verify the target before retrying.",
     "identical": "-- Tables are identical, nothing to sync",
     "noPk": "Source table has no primary key — can't compare by key",
     "pkMissing": "Primary key column missing from the result",

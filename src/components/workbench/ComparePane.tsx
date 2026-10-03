@@ -177,7 +177,11 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
       await refresh
       if (refreshVersion === operation.current) setExecMsg({ ok: true, text: t(partial ? 'compare.executedPartial' : 'compare.executed', { n: affected }) })
     } catch (e) {
-      if (refreshVersion === operation.current) setExecMsg({ ok: false, text: t('compare.execFailed', { msg: dbErrMsg(e) }) })
+      if (refreshVersion === operation.current) {
+        // A transport failure can lose the commit receipt. Never claim rollback or replay this batch.
+        setStatements([])
+        setExecMsg({ ok: false, text: t('compare.execFailed', { msg: dbErrMsg(e) }) })
+      }
     } finally {
       setExecuting(false)
     }
@@ -256,13 +260,18 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
         </div>
       )}
 
+      {execMsg && (
+        <div role={execMsg.ok ? 'status' : 'alert'} className="row gap6" style={{ fontSize: 12, color: execMsg.ok ? 'var(--signal-green)' : 'var(--danger-fg, #e5484d)' }}>
+          <Icon name={execMsg.ok ? 'check' : 'alert-triangle'} size={13} /> <span>{execMsg.text}</span>
+        </div>
+      )}
       {summary && (
         <div className="col" style={{ gap: 6, flex: 1, minHeight: 0 }}>
           <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
             <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('compare.syncSql')}</span>
             <div className="row gap6">
-              <button onClick={() => setConfirmVersion(operation.current)} disabled={!sql || executing} title={t('compare.executeHint')}
-                style={{ height: 26, padding: '0 12px', borderRadius: 7, border: 'none', background: 'var(--accent-primary)', color: '#fff', fontSize: 12, fontWeight: 600, cursor: sql && !executing ? 'pointer' : 'default', opacity: sql && !executing ? 1 : 0.5 }}>
+              <button onClick={() => setConfirmVersion(operation.current)} disabled={!statements.length || executing} title={t('compare.executeHint')}
+                style={{ height: 26, padding: '0 12px', borderRadius: 7, border: 'none', background: 'var(--accent-primary)', color: '#fff', fontSize: 12, fontWeight: 600, cursor: statements.length && !executing ? 'pointer' : 'default', opacity: statements.length && !executing ? 1 : 0.5 }}>
                 <Icon name="play" size={12} /> {executing ? t('compare.executing') : t('compare.execute')}
               </button>
               <button onClick={copySql} disabled={!sql} style={{ height: 26, padding: '0 10px', borderRadius: 7, border: '1px solid var(--border-hairline)', background: 'var(--surface-subtle)', color: 'var(--text-secondary)', fontSize: 12, cursor: sql ? 'pointer' : 'default' }}>
@@ -270,11 +279,6 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
               </button>
             </div>
           </div>
-          {execMsg && (
-            <div className="row gap6" style={{ fontSize: 12, color: execMsg.ok ? 'var(--signal-green)' : 'var(--danger-fg, #e5484d)' }}>
-              <Icon name={execMsg.ok ? 'check' : 'alert-triangle'} size={13} /> <span>{execMsg.text}</span>
-            </div>
-          )}
           <textarea aria-label={t('compare.syncSql')} readOnly value={sql || t('compare.identical')} onFocus={e => sql && e.currentTarget.select()}
             style={{ flex: 1, minHeight: 160, width: '100%', boxSizing: 'border-box', padding: 10, borderRadius: 8, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', color: 'var(--text-primary)', fontFamily: 'monospace', fontSize: 11.5, resize: 'vertical' }} />
         </div>
