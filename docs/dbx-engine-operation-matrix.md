@@ -53,4 +53,13 @@
 
 - 后续 ER 消费轻量列目录，错误/截断可见且可重试，不再将失败伪装为空库或为真实连接展示演示表；FK 目标不猜成 PK。SQLite Web 离线刷新→错误→恢复重试通过。此后检查点为 **144 files / 1,293 tests** 与 TypeScript/build 通过；跨 namespace/复合约束、大图性能、完整键类型元数据和 PNG 导出仍未据此验收。
 
+## 已选工作流的后续检查点（不是全量完成）
+
+- 选择顺序为 **编辑器 → 查询分析 → 导入导出 → 专用工作区 → AI 维护**，具体实施标准见 `docs/dbx-selected-workstreams.md`。
+- 七条真实路径（SQLite/DuckDB/PG/MySQL/SQL Server2019/H2/rqlite）的 FK metadata 保留 namespace、约束身份、列序与完整宽度；前端复合 JOIN、别名、作用域与替换区间已回归，SQLite 候选接受后实际返回正确两行。函数模板 Tab/Shift+Tab 字段跳转与实际执行通过；复杂诊断、版本/SQL_MODE 和更多作用域仍未完整。
+- SQLite/rqlite QUERY PLAN 与 DuckDB JSON 已补齐；EXPLAIN 拒绝脚本、写 CTE、SELECT INTO 等，不使用 ANALYZE。原物理查询会话/事务保留，未知/截断/超预算计划可见。SQL Server/Oracle 等更多计划与字段血缘仍待实施。
+- 此检查点前端 **148 files / 1,348 tests** 和 TypeScript/build 通过；Rust **543 library + 9 targets / 63 integration tests** 通过。Java 11 tests/JAR 重建通过。只对应这些变更，不抵消其他门禁。
+- 已用真实 DeepSeek（deepseek-flash，3 次 / 2,158 tokens）验证手动生成复合读查询、写入确认→一行回执→读回、缺失 metadata 不编造三场景；key 仅在临时进程内存，未写配置或 Git。这不是完整自主维护、全面模型质量或权限安全验收。
+- 大型 SQL 的流式 splitter 边界修复已完成并经 SQLite/PG 实际执行验证；最终 Rust 检查点 **546 library + 10 targets / 65 integration tests**。仅 splitter 的文本 chunk 契约完成；完整 Web 大文件任务、流式导入导出/迁移、复杂类型、专用 Mongo/Redis/ES/DuckDB 工作区和完整 AI 闭环仍未完成。不会将只读代码审查、单元回归或这三次模型调用算作这些方向完成。
+
 详细过程与日志索引见 `docs/superpowers/plans/2026-10-02-dbx-complete-parity.md`。此清单用于持续实现，不代表已完成用户要求的全面对齐。

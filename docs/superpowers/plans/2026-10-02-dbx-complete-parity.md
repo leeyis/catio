@@ -173,4 +173,37 @@
 - 不把 FK 引用目标推断为 PRIMARY KEY（也可能是 UNIQUE）；轻量列目录未提供 PK 身份时不编造标记。缺失列不再将关系误连到第一列，含点号的表/列身份使用二元组区分。
 - `er-metadata-red.log` 先有 8 项失败；缺失列连线的独立 red 另行复现。最终 ER 定向 10 项通过，`er-final-full.log/.exit` **144 files / 1,293 tests，退出码 0**；`er-final-build.log/.exit` TypeScript/build 通过。
 - 前台 Web 使用构建 `index-DicYKt1H.js`：SQLite 创建 er_parent（id 为 PK、code 为 UNIQUE）与引用 code 的 er_child；真实显示两表一关系，code 不冒充 PK。离线刷新明确显示错误且不出现空库文案；恢复网络后点击重试恢复两表一关系。截图 `er-offline-visible-error.png`、`er-retry-restored.png`，网络模拟已恢复。
-- 这不是完整 ER 能力交付：实际 PK/type 的轻量元数据补全、跨 namespace/复合约束身份、大图性能与 PNG 导出仍需单独实现或验收；不会用本轮状态修复代替这些门禁。
+- 这不是完整 ER 能力交付：实际 PK/type 的轻量元数据补全、大图性能与 PNG 导出仍需单独实现或验收；跨 namespace/复合约束契约在下述增量补齐，跨 namespace 的完整 ER 展示仍未交付。
+
+## 第八增量：所选工作流与完整外键 JOIN
+
+用户确认顺序为 **1（编辑器）→ 6（查询分析）→ 5（导入导出）→ 7（专用工作区）→ 8（AI 维护）**。范围与门禁见 `docs/dbx-selected-workstreams.md`，不把这个顺序转成新增持久任务，也不自动扩大到其他专项。
+
+- `8188397`：ErRelation 以兼容的可选字段保留 fromSchema/toSchema、provider constraintId、1-based ordinal、columnCount；身份未知或配对不完整不能编造单列 FK。SQLite 支持显式 namespace 和省略列列表的有序 PK 引用；PG 按 catalog 属性号直接配对；MySQL/SQL Server 保留跨 namespace；DuckDB 不再将复合键笛卡尔积；rqlite 不吞元数据错误；JDBC 保留原生 schema/catalog 与 KEY_SEQ。
+- SQLite、DuckDB、PG16、MySQL8、SQL Server2019、H2、rqlite 七条真实路径通过外键契约；SQLite 附加 namespace、H2/PG/MySQL/SQL Server 跨 namespace 均有场景。无法确定身份的 JDBC FK 不猜测，其他 JDBC 品牌仍须实际驱动验收。
+- Java 11 tests 通过，源码变更后按脚本重建并 vendor JAR，SHA-256 `C54DABB287C2849C3196276993F12F0D73927AC2ED86A52086F1B7DB568FC836`。
+- `e5e77de`：前端按 namespace/table 二元组组织 FK，增量 CST 限定当前查询块与 UNION 分支；保留别名、实际 defaultSchema 和引用大小写；复合约束一个候选含完整 AND，不合并不同约束。已输入 JOIN/LEFT JOIN 不重复关键字，光标在词中替换完整目标并保留现有 alias/ON；未知/缺失/重复 ordinal 不生成可执行建议。
+- `b59eea7`：合并 CST 拆开的转义 namespace/别名；不把同名表函数或显式重命名列当成原物理列。复杂表函数、LATERAL/APPLY 和派生 FK 血缘仍未实现，不用保守不提示冒充完整支持。
+- 实际编辑器 guard/filter/接受键有回归；函数模板提供可跳转字段和末尾退出位置，Tab/Shift+Tab 不改成缩进。仅 SQL 编辑器限制长候选宽度并换行，未重做外层布局或 SFTP 编辑器。
+- 前台 SQLite Web：候选→Tab→实际执行复合 JOIN，返回 12/甲、20/乙；SUBSTR 的 string/start/length 字段逐项替换后实际执行返回 文ab。新构建候选宽度 680px、位于 1500px viewport 内，列表 scrollWidth=clientWidth=678，无横向裁切。证据 `selected-workstreams-browser.json` 和对应截图。
+- 完整编辑器对齐仍未完成：旧 diagnostics、更多相关子查询/裸列、server version/扩展/SQL_MODE、所有厂商函数重载和桌面 GUI 门禁继续保留。
+
+## 第九增量：非执行式计划及真实模型场景
+
+- `a4d63de`：EXPLAIN 不再仅检查首关键字，复用单条保守读查询门禁，拒绝写 CTE、SELECT INTO、多语句和 ANALYZE；MySQL 要求两种反斜杠解释均安全，美元引用/E-string 仅按已知方言识别，避免将 MySQL 标识符当 PG 字符串而隐藏实际语句边界。这不是数据库权限或 OS 沙箱。
+- 扩展 SQLite/rqlite QUERY PLAN、DuckDB JSON 计划；当前 namespace/物理会话保持不变。新增格式的解析有节点/深度预算，异常、循环、重复 ID、截断明确 incomplete，原始结果可检查；不编造 cost/cardinality。MySQL select_id 不再冒充行数，UI 区分估算行数。
+- `selected-final-matrix-2.log/.exit`：543 library + 9 个明确集成 targets / 63 tests 全通过；真实 PG/MySQL/DuckDB/SQLite 查询会话计划保留事务/临时表，rqlite 计划也实际执行。此处不声称重跑所有数据库和 SSH/SFTP 矩阵。先前因编辑工具替换美元 token 引起的编译失败已单独保留，不计成功；修复仅针对经比对确定的本任务变更，没有恢复用户文件。
+- `selected-final-full.log/.exit`：148 files / 1,348 tests，TypeScript/build 通过。构建仍有既有大 chunk 提示，部分测试有 act 提示，不称零 warning。
+- 前台 SQLite：活动事务中的临时表实际显示 SEARCH/INTEGER PRIMARY KEY；拒绝 SELECT 后附 DELETE 的计划请求，再次查询仍返回 保留事务，最后明确回滚到 idle。`sqlite-plan-active-session.png`。最新美元方言边界由后续 Rust 矩阵覆盖，不把此前 GUI 后端冒充包含了该修复。
+- 用户授权真实 DeepSeek；使用官方文档的 `deepseek-flash`，通过临时 loopback OpenAI 协议代理调用，凭据仅在测试进程内存。三次真实 HTTP 200 / 2,158 tokens，模型名与 usage 从真实上游帧记录，无原始 prompt/密钥日志。
+- 三个手动模式场景：选中两表结构生成复合 LEFT JOIN并实际执行；生成 UPDATE 不称已执行，应用弹确认、批准后回执一行，再查询确认 13/20；未见过的表先询问元数据，不编造既有字段。截图和脱敏回执见 `selected-workstreams-browser.json` / `deepseek-live-observed.json`。
+- 这些是样例，不是自主维护、全面模型质量、安全注入覆盖、流中断恢复或直接 provider TLS 栈验收。现有通用 Agent 配置仍会明文存 localStorage；本次仅存 loopback dummy，真实 key 未进入该配置，测试配置已移除。未修改生产或使用生产数据。
+- 查询分析仍有 SQL Server/Oracle 等执行计划、字段血缘、更多优化/诊断与全部入口门禁；AI 维护仍有工具授权、准确目标预览、DDL 依赖、执行回执回馈与完整自主闭环，均不能标为完成。
+
+## 第十增量：大型 SQL 工作流的切分基础
+
+- 开始方向 5 的底层检查：跨 chunk 的注释起始符、美元起止标签会错误切分。保留尚不能确定的词法前缀，在下一 chunk 或 EOF 解析；不靠字符串重放补救已执行操作。
+- 单字符边界、Unicode、注释、美元 body、MySQL DELIMITER 及已有引号/反斜杠回归有 red/green。这里仅补齐 splitter 的文本 chunk 契约；不宣称字节解码、文件 I/O、Web 上传、任务进度/恢复、当前语句取消、快照一致性已完成。
+- `sql-stream-boundary-red-final.log` 两项失败 → `sql-stream-boundary-green.log` 19 项定向通过。SQLite 真正执行单字符 chunk 的 SQL，注释中的额外 INSERT 不被执行；PG 真正执行完整美元 body 并确认两条内部 INSERT。`stream-final-matrix.log/.exit` 最终 **546 library + 10 targets / 65 integration tests，退出码 0**，真实服务 env gate 已启用。前端仍为上述 148 files / 1,348 tests 与 TypeScript/build 检查点，Java 未再变更，不无理由重建 JAR。
+- 模型代理和本任务 loopback QA head/页面已清理，不影响沙箱服务或生产。用户 capabilities.json 内容保持原 hash，日志、模型回执、截图和测试凭据均未进入 Git。
+- 大文件导入/导出/迁移全链路和方向 7 的专用工作区仍须继续实施；方向 8 的完整 AI 维护亦未完成。本轮不结为全量对齐完成。
