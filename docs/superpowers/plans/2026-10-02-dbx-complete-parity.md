@@ -138,7 +138,7 @@
 - 当前作用域分析有 200,000 字符、4,000 个遍历节点和 12 层递归预算；这不是完整 SQL 编译器。尚需补充更多相关子查询、LATERAL/APPLY、函数返回表与厂商扩展、裸列上下文和大脚本性能实测。
 - 静态函数库已在后续提交按方言收紧，但服务器版本/扩展/SQL_MODE 尚未动态同步，函数参数提示基础交互已在下述第六增量完成，但不代表全部重载/版本已验证；FK JOIN 建议仍需核验跨 schema、别名和已输入 JOIN 的替换范围。不能把本增量称为“智能提示全部对齐”。
 - `metadataReferences` 已在后续提交排除注释/字符串；仍需处理与 namespace 同名的别名及大脚本解析性能。旧 SQL diagnostics 仍需统一作用域、方言和国际化，避免新增补全与诊断相互矛盾。
-- ERDiagram 的旧列目录消费、流式导入导出/大 SQL 文件、所有结构变更与 SQLite 重建、数据库 AI 维护的预览/授权/执行闭环仍需继续推进。桌面打包 GUI、商业/云实例门禁不变。
+- ERDiagram 的跨 schema/复合关系展示、流式导入导出/大 SQL 文件、所有结构变更与 SQLite 重建、数据库 AI 维护的预览/授权/执行闭环仍需继续推进。桌面打包 GUI、商业/云实例门禁不变。
 
 ### 后续附加修复
 
@@ -165,3 +165,12 @@
 - `recovery-current-build.log/.exit` TypeScript/build 通过；`recovery-current-full.log/.exit` **143 files / 1,280 tests，退出码 0**。保留用户 capabilities.json 原有改动；提交前逐次运行暂存区密码/私钥/whitespace 审计。
 - 补充修复数据库 AI 的协议族判定：具体 profile 只细化 SQL 方言，不把文档/KV/搜索连接误判为 SQL。三项合成 profile 回归先失败后通过；`ai-model-family-green.log/.exit` 52 项定向测试与 `ai-model-family-tsc.log/.exit` 通过。这是提示分支契约测试，不是新增品牌或外部实例验收。
 - 下一主线仍是跨 namespace/复合外键身份契约与 JOIN 作用域，再继续元数据、导入导出、大结果与真实 AI 维护闭环。ErRelation 当前缺少 schema/constraint/ordinal，不能按裸表名拼接并宣称 JOIN 完整对齐。桌面 GUI、商业/云实例及 SQL Server 2022 门禁保持未完成。
+
+## 第七增量：ER 元数据状态不再伪装为空库
+
+- ERDiagram 迁入轻量列目录，保留 partial errors/truncated；列与关系独立接收成功/失败，关系失败不丢弃已取得的表。错误明确可见并可重试；只有完整成功的空结果才能显示空库文案。
+- 结果绑定连接、namespace 和失效 revision；换目标不展示旧图，尚未确定 schema 的真实连接不回退演示表。监听已有元数据失效事件，并复用目录/关系缓存。
+- 不把 FK 引用目标推断为 PRIMARY KEY（也可能是 UNIQUE）；轻量列目录未提供 PK 身份时不编造标记。缺失列不再将关系误连到第一列，含点号的表/列身份使用二元组区分。
+- `er-metadata-red.log` 先有 8 项失败；缺失列连线的独立 red 另行复现。最终 ER 定向 10 项通过，`er-final-full.log/.exit` **144 files / 1,293 tests，退出码 0**；`er-final-build.log/.exit` TypeScript/build 通过。
+- 前台 Web 使用构建 `index-DicYKt1H.js`：SQLite 创建 er_parent（id 为 PK、code 为 UNIQUE）与引用 code 的 er_child；真实显示两表一关系，code 不冒充 PK。离线刷新明确显示错误且不出现空库文案；恢复网络后点击重试恢复两表一关系。截图 `er-offline-visible-error.png`、`er-retry-restored.png`，网络模拟已恢复。
+- 这不是完整 ER 能力交付：实际 PK/type 的轻量元数据补全、跨 namespace/复合约束身份、大图性能与 PNG 导出仍需单独实现或验收；不会用本轮状态修复代替这些门禁。

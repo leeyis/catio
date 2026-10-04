@@ -4,7 +4,9 @@ import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn } from '../atoms'
 import { useData } from '../../state/DataContext'
-import { erRelations, schemaColumns } from '../../services/db'
+import { erRelations, schemaColumnCatalog } from '../../services/db'
+import { cacheMetadataRequest, invalidateSchemaCache, SCHEMA_INVALIDATED_EVENT } from '../../services/dbMetadata'
+import { dbErrMsg } from '../../services/dbError'
 import type { ErRelation } from '../../services/types'
 
 export interface ERDiagramProps {
@@ -27,23 +29,48 @@ export function ERDiagram({ onOpenTable, connId, schema }: ERDiagramProps) {
   const D = useData()
   const [zoom, setZoom] = useState(1)
 
-  // ---- Live data (only fetched when connected) ----
-  const [liveCols, setLiveCols] = useState<[string, string[]][] | null>(null)
-  const [liveRels, setLiveRels] = useState<ErRelation[] | null>(null)
-  const [loading, setLoading] = useState(false)
-
+  // Bind results to the target and revision: never show old or demo objects
+  // while a connected namespace is still being resolved.
+  const [revision, setRevision] = useState(0)
+  const [model, setModel] = useState<{
+    connId: string; schema: string; revision: number
+    cols: [string, string[]][]; rels: ErRelation[]; errors: string[]; truncated: boolean
+  } | null>(null)
   useEffect(() => {
-    if (!connId || !schema) { setLiveCols(null); setLiveRels(null); setLoading(false); return }
-    let cancelled = false
-    setLoading(true)
-    Promise.all([schemaColumns(connId, schema), erRelations(connId, schema)])
-      .then(([cols, rels]) => { if (!cancelled) { setLiveCols(cols); setLiveRels(rels) } })
-      .catch(() => { if (!cancelled) { setLiveCols([]); setLiveRels([]) } })
-      .finally(() => { if (!cancelled) setLoading(false) })
-    return () => { cancelled = true }
+    const invalidated = (event: Event) => {
+      const detail = (event as CustomEvent<{ connId?: string; schema?: string }>).detail
+      if ((!detail?.connId || detail.connId === connId) && (!detail?.schema || detail.schema === schema)) setRevision(value => value + 1)
+    }
+    window.addEventListener(SCHEMA_INVALIDATED_EVENT, invalidated)
+    return () => window.removeEventListener(SCHEMA_INVALIDATED_EVENT, invalidated)
   }, [connId, schema])
+  useEffect(() => {
+    if (!connId || !schema) return
+    let cancelled = false
+    void Promise.allSettled([
+      schemaColumnCatalog(connId, schema),
+      cacheMetadataRequest(connId, `relations:${schema}`, () => erRelations(connId, schema)),
+    ]).then(([columns, relations]) => {
+      if (cancelled) return
+      const errors: string[] = []
+      if (columns.status === 'rejected') errors.push(dbErrMsg(columns.reason))
+      else errors.push(...columns.value.errors.map(error => `${error.schema}: ${error.message}`))
+      if (relations.status === 'rejected') errors.push(dbErrMsg(relations.reason))
+      setModel({ connId, schema, revision, errors,
+        cols: columns.status === 'fulfilled' ? columns.value.tables : [],
+        rels: relations.status === 'fulfilled' ? relations.value : [],
+        truncated: columns.status === 'fulfilled' && columns.value.truncated,
+      })
+    })
+    return () => { cancelled = true }
+  }, [connId, schema, revision])
 
-  const isLive = !!connId && !!schema
+  const isLive = !!connId
+  const current = model && model.connId === connId && model.schema === schema && model.revision === revision ? model : null
+  const liveCols = current?.cols
+  const liveRels = current?.rels
+  const loading = isLive && !!schema && !current
+  const incomplete = isLive && !!current && (current.errors.length > 0 || current.truncated)
 
   // ---- Build the (table, relation) model + auto-layout for the live path ----
   // Mock path keeps the seeded x/y; live path lays cards out on a grid.
@@ -62,10 +89,9 @@ export function ERDiagram({ onOpenTable, connId, schema }: ERDiagramProps) {
 
     const rels = liveRels ?? []
     const cols = liveCols ?? []
-    // Mark columns that participate in a relation: fromCol → FK, toCol → PK (best effort).
-    const fkCols = new Set<string>()  // `${table}.${col}`
-    const pkCols = new Set<string>()
-    rels.forEach(r => { fkCols.add(`${r.from}.${r.fromCol}`); pkCols.add(`${r.to}.${r.toCol}`) })
+    // A referenced column can be UNIQUE rather than PRIMARY KEY. The lightweight
+    // catalog does not report PK membership, so do not invent that badge.
+    const fkCols = new Set(rels.map(r => JSON.stringify([r.from, r.fromCol])))
 
     // Grid auto-layout: N columns wide, gaps based on the tallest card per row.
     const GRID_COLS = Math.max(1, Math.min(4, Math.ceil(Math.sqrt(cols.length || 1))))
@@ -81,7 +107,7 @@ export function ERDiagram({ onOpenTable, connId, schema }: ERDiagramProps) {
       const ercols: ErCol[] = colNames.map(name => ({
         name,
         type: '',
-        key: fkCols.has(`${table}.${name}`) ? 'FK' : pkCols.has(`${table}.${name}`) ? 'PK' : '',
+        key: fkCols.has(JSON.stringify([table, name])) ? 'FK' : '',
       }))
       const h = cardH(ercols.length)
       rowMaxH = Math.max(rowMaxH, h)
@@ -92,14 +118,15 @@ export function ERDiagram({ onOpenTable, connId, schema }: ERDiagramProps) {
 
   // ---- Geometry derived from the laid-out cards ----
   const geom = useMemo(() => {
-    const g: Record<string, ErCard & { w: number; h: number }> = {}
+    const g: Record<string, ErCard & { w: number; h: number }> = Object.create(null)
     cards.forEach(c => { g[c.name] = { ...c, w: CARD_W, h: HEAD_H + PAD * 2 + c.cols.length * ROW_H } })
     return g
   }, [cards])
 
   function colY(table: string, colName: string) {
-    const c = geom[table]; if (!c) return 0
-    const idx = Math.max(0, c.cols.findIndex(col => col.name === colName))
+    const c = geom[table]; if (!c) return undefined
+    const idx = c.cols.findIndex(col => col.name === colName)
+    if (idx < 0) return undefined
     return c.y + HEAD_H + PAD + idx * ROW_H + ROW_H / 2
   }
 
@@ -107,6 +134,7 @@ export function ERDiagram({ onOpenTable, connId, schema }: ERDiagramProps) {
     const s = geom[rel.from], tt = geom[rel.to]
     if (!s || !tt) return ''
     const sy = colY(rel.from, rel.fromCol), ty = colY(rel.to, rel.toCol)
+    if (sy === undefined || ty === undefined) return ''
     const sLeft = s.x + s.w / 2 > tt.x + tt.w / 2
     const sx = sLeft ? s.x : s.x + s.w
     const tx = sLeft ? tt.x + tt.w : tt.x
@@ -127,13 +155,14 @@ export function ERDiagram({ onOpenTable, connId, schema }: ERDiagramProps) {
     return { W: Math.max(980, maxX + 24), H: Math.max(760, maxY + 24) }
   }, [isLive, cards])
 
-  const showEmpty = isLive && !loading && cards.length === 0
+  const awaitingSchema = isLive && !schema
+  const showEmpty = isLive && !!current && !incomplete && cards.length === 0
   const showLoading = isLive && loading
 
   return (
     <div className="col" style={{ height: '100%', minHeight: 0 }}>
       <div className="row" style={{ padding: '8px 12px', borderBottom: '1px solid var(--border-hairline)', gap: 8, flex: 'none' }}>
-        <span className="chip" style={{ background: 'var(--surface-sunken)' }}><Icon name="network" size={12} /> {isLive ? schema : 'public'} · {cards.length} {t('dbviews.erTables')} · {relations.length} {t('dbviews.erRelations')}</span>
+        <span className="chip" style={{ background: 'var(--surface-sunken)' }}><Icon name="network" size={12} /> {isLive ? schema || '—' : 'public'} · {cards.length} {t('dbviews.erTables')} · {relations.length} {t('dbviews.erRelations')}</span>
         <div className="grow" />
         <div className="row gap4">
           <button className="icon-btn bare" onClick={() => setZoom(z => Math.max(0.5, +(z - 0.1).toFixed(2)))} title={t('dbviews.zoomOut')}><Icon name="minus" size={15} /></button>
@@ -143,11 +172,17 @@ export function ERDiagram({ onOpenTable, connId, schema }: ERDiagramProps) {
         </div>
         <Btn size="sm" variant="secondary" icon="download">{t('dbviews.exportPng')}</Btn>
       </div>
+      {incomplete && <div role="alert" style={{ padding: '8px 12px', color: 'var(--signal-amber)', background: 'var(--surface-sunken)', fontSize: 12, flex: 'none' }}>
+        <div>{t('dbviews.erIncomplete')}</div>
+        {current?.truncated && <div>{t('dbviews.erTruncated')}</div>}
+        {current?.errors.map((error, index) => <div key={index}>{error}</div>)}
+        <Btn size="sm" variant="secondary" onClick={() => invalidateSchemaCache(connId, { schema })}>{t('dbviews.erRetry')}</Btn>
+      </div>}
       <div className="grow" style={{ overflow: 'auto', background: 'var(--surface-subtle)', backgroundImage: 'radial-gradient(var(--border-hairline) 1px, transparent 1px)', backgroundSize: '22px 22px' }}>
-        {(showLoading || showEmpty) ? (
+        {(showLoading || showEmpty || awaitingSchema) ? (
           <div className="col" style={{ height: '100%', alignItems: 'center', justifyContent: 'center', gap: 10, color: 'var(--text-tertiary)' }}>
             <Icon name={showLoading ? 'loader' : 'network'} size={22} style={{ opacity: 0.6 }} />
-            <span style={{ fontSize: 12.5 }}>{showLoading ? t('dbviews.erLoading') : t('dbviews.erEmpty')}</span>
+            <span style={{ fontSize: 12.5 }}>{showLoading ? t('dbviews.erLoading') : awaitingSchema ? t('dbviews.erSelectSchema') : t('dbviews.erEmpty')}</span>
           </div>
         ) : (
           <div style={{ width: W * zoom, height: H * zoom, position: 'relative' }}>

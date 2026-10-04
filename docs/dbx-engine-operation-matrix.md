@@ -51,4 +51,6 @@
 - SQLite Web 断网恢复后自动读取原查询会话状态；事务仍 active，连接局部临时表再次查询返回 17，随后明确回滚到 idle。不得推广为全部驱动断网场景通过。
 - 最新上述检查点为 143 files / 1,280 tests、TypeScript/build 通过，Rust 537 library + 30 项相关 Web 集成通过；这不是全部外部驱动矩阵重跑。真实模型生成质量、完整结构维护和自动运维闭环仍未验收，不能用测试数抵消这些门禁。
 
+- 后续 ER 消费轻量列目录，错误/截断可见且可重试，不再将失败伪装为空库或为真实连接展示演示表；FK 目标不猜成 PK。SQLite Web 离线刷新→错误→恢复重试通过。此后检查点为 **144 files / 1,293 tests** 与 TypeScript/build 通过；跨 namespace/复合约束、大图性能、完整键类型元数据和 PNG 导出仍未据此验收。
+
 详细过程与日志索引见 `docs/superpowers/plans/2026-10-02-dbx-complete-parity.md`。此清单用于持续实现，不代表已完成用户要求的全面对齐。
