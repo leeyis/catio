@@ -136,7 +136,7 @@
 ### 明确保留的下一轮门禁
 
 - 当前作用域分析有 200,000 字符、4,000 个遍历节点和 12 层递归预算；这不是完整 SQL 编译器。尚需补充更多相关子查询、LATERAL/APPLY、函数返回表与厂商扩展、裸列上下文和大脚本性能实测。
-- 静态函数库已在后续提交按方言收紧，但服务器版本/扩展/SQL_MODE 尚未动态同步，函数参数提示还未形成完整输入交互；FK JOIN 建议仍需核验跨 schema、别名和已输入 JOIN 的替换范围。不能把本增量称为“智能提示全部对齐”。
+- 静态函数库已在后续提交按方言收紧，但服务器版本/扩展/SQL_MODE 尚未动态同步，函数参数提示基础交互已在下述第六增量完成，但不代表全部重载/版本已验证；FK JOIN 建议仍需核验跨 schema、别名和已输入 JOIN 的替换范围。不能把本增量称为“智能提示全部对齐”。
 - `metadataReferences` 已在后续提交排除注释/字符串；仍需处理与 namespace 同名的别名及大脚本解析性能。旧 SQL diagnostics 仍需统一作用域、方言和国际化，避免新增补全与诊断相互矛盾。
 - ERDiagram 的旧列目录消费、流式导入导出/大 SQL 文件、所有结构变更与 SQLite 重建、数据库 AI 维护的预览/授权/执行闭环仍需继续推进。桌面打包 GUI、商业/云实例门禁不变。
 
@@ -147,6 +147,21 @@
 - `5171211`：网络错误可能丢失提交回执，不能直接声称“已回滚”；同步异常后保留 SQL 预览但禁止原批次再次执行，必须重新对比；已收到写入回执而刷新失败时仍显示已确认的影响行数。`compare-outcome-red.log` 两项失败后修复。`ux-final-full.log` 为 139 files / 1,218 tests，TypeScript/build 通过。
 - `b5a9af9`：SQL 选择上下文不再使用虚构的 prod-orders，查询页/对象页提供真实连接名；数据库 AI 系统提示使用实际 JDBC profile，数据库标签按 JSON 数据编码；明确元数据/注释/结果不可信、缺失事实不得编造、尊重授权、凭执行回执判定结果及不盲目重试。Shell 提示分支和执行授权机制保持原样。这是上下文与提示约束修复，不是完整自主数据库 Agent 的交付，也不是提示词足以替代工具权限边界的声明。
 - `database-ai-context-red.log` 7 项先失败；随后数据库提示/元数据/原 App Agent 流程 45 项定向回归通过。最新 `database-ai-full.log/.exit` 为 **139 files / 1,224 tests，退出码 0**；`database-ai-build.log/.exit` TypeScript/build 通过。未调用真实 LLM 评测生成质量，不把 mock 传输测试当作模型实测。
-- AI 后续仍需修复所选表结构读取失败被跳过、异步发送时连接/选择切换等边界，并完善当前 schema/版本/权限上下文、结构变更预览、审批、执行及结果核验。现有 Agent/MCP 入口不另起新外壳。
+- 所选表结构失败被跳过、异步发送时连接/选择切换等问题已在下述第六增量修复；当前 schema/版本/权限上下文、结构变更预览、审批、执行及结果核验仍需完善。现有 Agent/MCP 入口不另起新外壳。
 - 非数据库模块未重做；前端全量包含已有 App/终端/文件管理组件回归。当前未重新执行所有真实 SSH/SFTP 后端矩阵，不把单元回归冒充全部主机 GUI 验收。
 - 本地可见浏览器验收证据见 `editor-browser-accepted.json`；测试连接已显式断开，临时 loopback QA 服务和本任务页面已关闭。未操作生产部署，未合并 main/推送远端/发布安装包。隔离沙箱夹具状态未在本轮另作清理声明。
+
+## 第六增量：输入交互、上下文准备与断网恢复
+
+- `2176560`：明确打开 @ 才加载对象；元数据失败保留草稿、表选择和代码附件，不发送缺失结构的请求；准备锁、取消、超时、跨连接/标签/对话失效及卸载保护；SQL 上下文限制 12 表/64 KiB UTF-8。取消只阻止发送并作废迟到结果，不冒称底层元数据 RPC 已被物理取消。
+- `776cd74`：基于 CodeMirror 增量 CST 的方言函数参数提示，活动参数高亮、CAST AS/EXTRACT FROM、嵌套括号/数组、Escape 关闭与 Ctrl/Cmd+Shift+Space 恢复；当前语句解析有字符和节点预算。SQLite Web 实际输入 SUBSTR、观察 start/length 切换并执行 `SELECT SUBSTR('中文abc', 2, 3) AS sample;` 返回 `文ab`。参数来自本地模板，服务器版本/扩展/全部重载仍未验收。
+- `c326b36`：全量压力下发现派生表补全偶发读取未就绪的缓存树；改用有界 ensureSyntaxTree，超出预算不猜测；字符串/注释排除同样以就绪树为准。独立回归模拟 Tree.empty 和预算耗尽，不靠重复运行测试掩盖问题。
+- `13e38f0`：前台 AI 断网恢复实测暴露首批事件丢失。每次 turn 在 HTTP start 前等待服务端真正注册订阅的带 ID 回执；服务端重新验证认证/主题权限。取消、迟到 start、卸载和跨用户消息有隔离；旧 WebSocket 的迟到关闭只清理其自己的请求，不破坏新连接回执。提示约束不是执行授权边界。
+- `548bb0c`：SQL 会话心跳不重叠；断网显示 unknown，恢复后读取原物理会话状态，不自动重开或回滚。SQLite Web 创建连接局部临时表并插入 17，断网后观察 unknown，恢复后自动回到 active，再次执行 SELECT 仍返回 17，最后明确点击回滚并确认 idle。
+- Web 证据：`ux-recovery-browser.json`、`agent-subscription-browser-complete.png`、`query-session-recovered-active.png`。后续使用当前构建 `index-MxMCM1gQ.js`，主动关闭空闲 WebSocket，观察旧连接 CLOSED/新连接 OPEN，并收到第二次完整回复；截图 `agent-reconnect-two-turns.png`。临时浏览器 WebSocket 观测包装已恢复。此项不证明流中途断线具备事件重放。
+- 浏览器始终请求前台。工具曾报告 hidden/0×0 viewport，用户确认页面可见，显式调整到 1500×900 后输入恢复；不把工具截图代替用户可见性的确认。
+- 模型为隔离 loopback 的确定性 Ollama 协议夹具：只验证请求上下文与传输，不执行 SQL，不代表真实 LLM 生成质量、自动维护或生产安全验收。上下文观测仅记录布尔和计数，不记录 secret。
+- `subscription-rust-final.log/.exit`：537 library + server_agent/server_auth/server_isolation/server_mcp/server_ws 共 30 项集成通过，QA example 重建通过。本轮未重新执行全部真实数据库及 SSH/SFTP 矩阵，Java 未变更，不重建 JAR。
+- `recovery-current-build.log/.exit` TypeScript/build 通过；`recovery-current-full.log/.exit` **143 files / 1,280 tests，退出码 0**。保留用户 capabilities.json 原有改动；提交前逐次运行暂存区密码/私钥/whitespace 审计。
+- 补充修复数据库 AI 的协议族判定：具体 profile 只细化 SQL 方言，不把文档/KV/搜索连接误判为 SQL。三项合成 profile 回归先失败后通过；`ai-model-family-green.log/.exit` 52 项定向测试与 `ai-model-family-tsc.log/.exit` 通过。这是提示分支契约测试，不是新增品牌或外部实例验收。
+- 下一主线仍是跨 namespace/复合外键身份契约与 JOIN 作用域，再继续元数据、导入导出、大结果与真实 AI 维护闭环。ErRelation 当前缺少 schema/constraint/ordinal，不能按裸表名拼接并宣称 JOIN 完整对齐。桌面 GUI、商业/云实例及 SQL Server 2022 门禁保持未完成。
