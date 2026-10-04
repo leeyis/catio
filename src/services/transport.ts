@@ -88,9 +88,10 @@ const topicHandlers = new Map<string, Set<Handler>>()
 // briefly and flushed when a handler subscribes, so no early frame is lost. Bounded by the TTL.
 const earlyEvents = new Map<string, { payload: unknown; t: number }[]>()
 const EARLY_EVENT_TTL_MS = 3000
-const pendingReplies = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
+const pendingReplies = new Map<string, { socket: WebSocket; resolve: (v: unknown) => void; reject: (e: Error) => void }>()
 let sock: WebSocket | null = null
 let connecting: Promise<WebSocket> | null = null
+let openingSocket: WebSocket | null = null
 let cmdSeq = 0
 let heartbeat: ReturnType<typeof setInterval> | null = null
 let missedPongs = 0
@@ -107,7 +108,10 @@ function ensureSocket(): Promise<WebSocket> {
   if (connecting) return connecting
   connecting = new Promise<WebSocket>((resolve, reject) => {
     const s = new WebSocket(wsUrl())
+    openingSocket = s
     s.onopen = () => {
+      if (openingSocket !== s) { s.close(); return }
+      openingSocket = null
       sock = s
       connecting = null
       missedPongs = 0
@@ -124,14 +128,19 @@ function ensureSocket(): Promise<WebSocket> {
       }
       resolve(s)
     }
-    s.onerror = () => { if (connecting) { connecting = null; reject(new Error('WebSocket connection failed')) } }
+    s.onerror = () => { if (openingSocket === s) { connecting = null; reject(new Error('WebSocket connection failed')) } }
     s.onclose = () => {
-      sock = null
-      connecting = null
+      // A replacement may already be OPEN when the old socket's close arrives.
+      // Settle only requests owned by this socket; never tear down its successor.
+      reject(new Error('WebSocket closed'))
+      for (const [id, p] of pendingReplies) if (p.socket === s) {
+        pendingReplies.delete(id)
+        p.reject(new Error('WebSocket closed'))
+      }
+      if (sock !== s && openingSocket !== s) return
+      if (sock === s) sock = null
+      if (openingSocket === s) { openingSocket = null; connecting = null }
       if (heartbeat) { clearInterval(heartbeat); heartbeat = null }
-      // Fail any in-flight commands; subscriptions stay registered and re-sent on next connect.
-      for (const [, p] of pendingReplies) p.reject(new Error('WebSocket closed'))
-      pendingReplies.clear()
       // Proactively reconnect when subscriptions are live: a receive-only terminal would not
       // otherwise call ensureSocket again. Small delay avoids a tight reconnect storm.
       if (topicHandlers.size > 0) {
@@ -146,6 +155,9 @@ function ensureSocket(): Promise<WebSocket> {
         if (hs && hs.size) {
           for (const h of hs) h(env.payload)
         } else {
+          // Agent turns cannot start without a registered consumer. Never replay
+          // orphaned owner-scoped messages into a later login's subscription.
+          if (env.topic === 'agent://events') return
           // No handler yet → buffer (pruning expired) so a just-about-to-subscribe pane gets it.
           const now = Date.now()
           const arr = (earlyEvents.get(env.topic) ?? []).filter(e => now - e.t < EARLY_EVENT_TTL_MS)
@@ -154,12 +166,12 @@ function ensureSocket(): Promise<WebSocket> {
         }
       } else if (env.type === 'reply') {
         const p = pendingReplies.get(String(env.id))
-        if (p) {
+        if (p && p.socket === s) {
           pendingReplies.delete(String(env.id))
           if (env.ok) p.resolve(env.result)
           else p.reject(new Error(env.error || 'command failed'))
         }
-      } else if (env.type === 'pong') {
+      } else if (env.type === 'pong' && sock === s) {
         missedPongs = 0
       }
     }
@@ -209,23 +221,56 @@ export async function subscribe(topic: string, handler: Handler): Promise<() => 
  *  `timeoutMs` overrides the default for slow commands (e.g. vnc_connect's TCP+handshake). */
 export async function wsCmd<T>(cmd: string, args: Record<string, unknown>, timeoutMs = WS_CMD_TIMEOUT_MS): Promise<T> {
   const s = await ensureSocket()
+  return socketRequest<T>(s, { type: 'cmd', cmd, args }, timeoutMs, cmd)
+}
+
+function socketRequest<T>(s: WebSocket, frame: Record<string, unknown>, timeoutMs: number, description: string): Promise<T> {
   const id = `c${++cmdSeq}`
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
-      if (pendingReplies.delete(id)) reject(new Error(`命令超时: ${cmd}`))
+      if (pendingReplies.delete(id)) reject(new Error(`命令超时: ${description}`))
     }, timeoutMs)
     pendingReplies.set(id, {
+      socket: s,
       resolve: v => { clearTimeout(timer); resolve(v as T) },
       reject: e => { clearTimeout(timer); reject(e) },
     })
     try {
-      s.send(JSON.stringify({ type: 'cmd', id, cmd, args }))
+      s.send(JSON.stringify({ ...frame, id }))
     } catch (e) {
       clearTimeout(timer)
       pendingReplies.delete(id)
       reject(e instanceof Error ? e : new Error(String(e)))
     }
   })
+}
+
+/** Readiness barrier for HTTP-triggered ordered streams. A local handler or an
+ * OPEN socket is not proof that the server has processed `sub`. Reconfirm on
+ * every turn, including after reconnect, using an authenticated server receipt. */
+export async function ensureSubscription(topic: string, timeoutMs = WS_CMD_TIMEOUT_MS): Promise<void> {
+  if (isTauri() || !isServer()) return
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let readySocket: WebSocket | undefined
+  try {
+    if (!topicHandlers.get(topic)?.size) throw new Error('Event subscriber is not registered')
+    const started = Date.now()
+    const s = await Promise.race([
+      ensureSocket(),
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('Event connection timed out')), timeoutMs) }),
+    ])
+    clearTimeout(timer)
+    readySocket = s
+    if (!topicHandlers.get(topic)?.size) throw new Error('Event subscriber was removed')
+    await socketRequest(s, { type: 'sub', topic }, Math.max(1, timeoutMs - (Date.now() - started)), 'event subscription')
+    if (!topicHandlers.get(topic)?.size) throw new Error('Event subscriber was removed')
+  } catch (error) {
+    // A socket authenticated before logout cannot be reused by a later login.
+    // Do not close shared SSH streams for ordinary timeouts or topic denials.
+    if (error instanceof Error && error.message === 'Subscription session expired' && readySocket === sock) readySocket?.close()
+    // App translates this code; never forward request arguments/credentials.
+    throw Object.assign(new Error(error instanceof Error ? error.message : 'Event subscription failed'), { code: 'eventSubscriptionUnavailable' })
+  } finally { clearTimeout(timer) }
 }
 
 /** Fire-and-forget streaming command (no reply awaited) for high-frequency input like VNC

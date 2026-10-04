@@ -269,6 +269,38 @@ async fn ws_assert_silent(ws: &mut Ws, topic: &str) {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+async fn subscription_receipt_confirms_registration_and_rejects_protected_topics() {
+    let factory = Arc::new(ScriptedFactory { provider: Arc::new(ScriptedProvider::text(&["fast"])) });
+    let (host, cookie) = start_server(factory).await;
+    let mut ws = connect_ws(&host, &cookie).await;
+    for (id, topic, allowed) in [("ready", "agent://events", true), ("denied", "term://someone-else", false)] {
+        ws_send(&mut ws, json!({ "type": "sub", "id": id, "topic": topic })).await;
+        let reply = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next()).await.expect("subscription receipt timeout").unwrap().unwrap();
+        let reply: Value = serde_json::from_str(reply.to_text().unwrap()).unwrap();
+        assert_eq!(reply["type"], "reply");
+        assert_eq!(reply["id"], id);
+        assert_eq!(reply["ok"], allowed);
+    }
+    let (status, _, _) = invoke(&host, &cookie, "agent_start_turn", json!({ "request": valid_request(ExecutionMode::Manual) })).await;
+    assert_eq!(status, 200);
+    let mut expected = 1;
+    loop {
+        let event = ws_recv_event(&mut ws, "agent://events").await;
+        assert_eq!(event["sequence"], expected, "no event may be lost after the receipt");
+        expected += 1;
+        if event["event"]["type"] == "turnFinished" { break; }
+    }
+    let (status, _, _) = invoke(&host, &cookie, "auth_logout", json!({})).await;
+    assert_eq!(status, 200);
+    ws_send(&mut ws, json!({ "type": "sub", "id": "expired", "topic": "agent://events" })).await;
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next()).await.unwrap().unwrap().unwrap();
+    let reply: Value = serde_json::from_str(reply.to_text().unwrap()).unwrap();
+    assert_eq!(reply["ok"], false);
+    assert_eq!(reply["error"], "Subscription session expired");
+    ws.close(None).await.unwrap();
+}
+
+#[tokio::test]
 async fn owner_scoped_ws_delivery_only_reaches_the_owner() {
     let factory = Arc::new(ScriptedFactory {
         provider: Arc::new(ScriptedProvider::text(&["hello ", "world"])),

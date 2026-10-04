@@ -1402,19 +1402,26 @@ async fn handle_ws(socket: WebSocket, st: AppState, token: String, owner_id: Str
                         // AUTHORIZED here (not by client trust): resolve the session and allow only
                         // the owner to sub their OWN id, or an admin to sub `all` / any user's id.
                         // A non-admin thus can't eavesdrop on `mcp-log://all` or another user's id.
-                        if let Some(scope) = topic.strip_prefix("mcp-log://") {
-                            if let Some(actor) = resolve_session(&st, &token) {
-                                if actor.is_admin || scope == actor.id.to_string() {
-                                    st.ws.subscribe(conn_id, topic);
-                                }
+                        let actor = resolve_session(&st, &token);
+                        let authenticated = actor.is_some();
+                        let allowed = actor.is_some_and(|actor| {
+                            if let Some(scope) = topic.strip_prefix("mcp-log://") {
+                                actor.is_admin || scope == actor.id.to_string()
+                            } else {
+                                // Sensitive streams remain server-subscribed by their command handlers.
+                                !is_protected_topic(topic)
                             }
-                        } else if !is_protected_topic(topic) {
-                            // Sensitive streams (terminal output, VNC framebuffer, host monitor, scan
-                            // results incl. hit credentials, command history) are subscribed SERVER-side
-                            // by their cmd handlers for the originating connection only. Refusing
-                            // client-driven `sub` to these prefixes stops one logged-in user from
-                            // eavesdropping on another's session by guessing/replaying a topic id.
-                            st.ws.subscribe(conn_id, topic);
+                        });
+                        if allowed { st.ws.subscribe(conn_id, topic); }
+                        // Optional receipt is backward compatible with fire-and-forget subscribers.
+                        // Emit only AFTER registration so a subsequent HTTP request cannot overtake it.
+                        if let Some(id) = env.get("id") {
+                            let reply = if allowed {
+                                json!({ "type": "reply", "id": id, "ok": true, "result": { "topic": topic } })
+                            } else {
+                                json!({ "type": "reply", "id": id, "ok": false, "error": if authenticated { "Subscription denied" } else { "Subscription session expired" } })
+                            };
+                            let _ = tx.try_send(reply);
                         }
                     },
                     Some("unsub") => if let Some(topic) = env.get("topic").and_then(Value::as_str) {

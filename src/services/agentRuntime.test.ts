@@ -3,9 +3,10 @@ import { describe, expect, it, vi, beforeEach } from 'vitest'
 vi.mock('./transport', () => ({
   rpc: vi.fn(),
   subscribe: vi.fn(),
+  ensureSubscription: vi.fn(),
 }))
 
-import { rpc, subscribe } from './transport'
+import { rpc, subscribe, ensureSubscription } from './transport'
 import {
   cancelAgentTurn,
   isAgentEventEnvelope,
@@ -33,6 +34,33 @@ describe('agent runtime transport client', () => {
     const handle = await startAgentTurn(request as never)
     expect(rpc).toHaveBeenCalledWith('agent_start_turn', { request })
     expect(handle).toEqual({ turnId: 'turn-1' })
+  })
+
+  it('cannot issue HTTP start before the live subscription is acknowledged', async () => {
+    let resolve!: () => void
+    vi.mocked(ensureSubscription).mockReturnValueOnce(new Promise<void>(r => { resolve = r }))
+    const started = startAgentTurn({ conversationId: 'conv' } as never)
+    expect(rpc).not.toHaveBeenCalled()
+    resolve(); await started
+    expect(ensureSubscription).toHaveBeenCalledWith('agent://events')
+    expect(rpc).toHaveBeenCalledOnce()
+  })
+
+  it('does not start a turn when subscription readiness fails', async () => {
+    vi.mocked(ensureSubscription).mockRejectedValueOnce(new Error('offline'))
+    await expect(startAgentTurn({} as never)).rejects.toThrow('offline')
+    expect(rpc).not.toHaveBeenCalled()
+  })
+
+  it('cancel during subscription wait returns immediately and cannot start on a late receipt', async () => {
+    let resolve!: () => void
+    vi.mocked(ensureSubscription).mockReturnValueOnce(new Promise<void>(r => { resolve = r }))
+    const controller = new AbortController()
+    const started = startAgentTurn({} as never, controller.signal)
+    controller.abort()
+    await expect(started).rejects.toMatchObject({ name: 'AbortError' })
+    resolve(); await Promise.resolve()
+    expect(rpc).not.toHaveBeenCalled()
   })
 
   it('responds with the exact wire command and args', async () => {

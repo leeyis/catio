@@ -3,7 +3,7 @@
 //! never holds credentials: the request reference is passed through and the
 //! caller clears it after `startAgentTurn` resolves.
 
-import { rpc, subscribe } from './transport'
+import { rpc, subscribe, ensureSubscription } from './transport'
 
 export const AGENT_EVENTS_TOPIC = 'agent://events'
 
@@ -233,7 +233,19 @@ export function subscribeAgentEvents(handler: (envelope: unknown) => void): Prom
   return subscribe(AGENT_EVENTS_TOPIC, handler)
 }
 
-export function startAgentTurn(request: AgentTurnRequest): Promise<TurnHandle> {
+export async function startAgentTurn(request: AgentTurnRequest, signal?: AbortSignal): Promise<TurnHandle> {
+  if (signal?.aborted) throw new DOMException('Turn cancelled before start', 'AbortError')
+  let onAbort: (() => void) | undefined
+  try {
+    const ready = ensureSubscription(AGENT_EVENTS_TOPIC)
+    if (!signal) await ready
+    else await Promise.race([ready, new Promise<never>((_, reject) => {
+      onAbort = () => reject(new DOMException('Turn cancelled before start', 'AbortError'))
+      signal.addEventListener('abort', onAbort, { once: true })
+      if (signal.aborted) onAbort()
+    })])
+  } finally { if (signal && onAbort) signal.removeEventListener('abort', onAbort) }
+  if (signal?.aborted) throw new DOMException('Turn cancelled before start', 'AbortError')
   return rpc<TurnHandle>('agent_start_turn', { request })
 }
 

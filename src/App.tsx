@@ -220,6 +220,22 @@ export default function App() {
   const pendingAgentEvents = useRef<Record<string, AgentEventEnvelope[]>>({})
   // Serializes agent event handling so ordered envelopes never interleave.
   const agentEventQueue = useRef<Promise<void>>(Promise.resolve())
+  const agentAlive = useRef(true)
+  const agentSubscriptionEpoch = useRef(0)
+  const agentUnsubscribe = useRef<(() => void) | null>(null)
+  useEffect(() => {
+    agentAlive.current = true
+    return () => {
+      agentAlive.current = false
+      agentSubscriptionEpoch.current++
+      agentUnsubscribe.current?.()
+      agentUnsubscribe.current = null
+      agentSubReady.current = null
+      for (const controller of Object.values(agentAborts.current)) controller.abort()
+      for (const turnId of Object.keys(activeAgentTurn.current)) void cancelAgentTurn(turnId).catch(() => {})
+      pendingAgentEvents.current = {}
+    }
+  }, [])
 
   // Upsert into the ref and render state; the store ignores it until it has content.
   function upsertConversation(conv: Conversation) {
@@ -1594,6 +1610,7 @@ export default function App() {
   // render state. Persistence reads from the freshly-computed value, never from
   // a setState updater return (which is unreliable under streaming bursts).
   function patchConversation(convId: string, fn: (c: Conversation) => Conversation) {
+    if (!agentAlive.current) return
     let updated: Conversation | undefined
     const next = conversationsRef.current.map(c => {
       if (c.id !== convId) return c
@@ -1839,7 +1856,9 @@ export default function App() {
 
   function ensureAgentSubscription(): Promise<void> {
     if (!agentSubReady.current) {
+      const epoch = agentSubscriptionEpoch.current
       agentSubReady.current = subscribeAgentEvents(payload => {
+        if (!agentAlive.current || epoch !== agentSubscriptionEpoch.current) return
         if (!isAgentEventEnvelope(payload)) {
           diagnosticLog({
             level: 'warn',
@@ -1849,6 +1868,7 @@ export default function App() {
           })
           return
         }
+        if (isServer() && payload.ownerId !== String(serverAuth.user?.id)) return
         const entry = activeAgentTurn.current[payload.turnId]
         if (!entry) {
           // The start request is still in flight; buffer until registered.
@@ -1858,7 +1878,13 @@ export default function App() {
           return
         }
         enqueueAgentEvent(payload)
-      }).then(() => undefined)
+      }).then(unsubscribe => {
+        if (!agentAlive.current || epoch !== agentSubscriptionEpoch.current) unsubscribe()
+        else agentUnsubscribe.current = unsubscribe
+      }).catch(error => {
+        if (epoch === agentSubscriptionEpoch.current) agentSubReady.current = null
+        throw error
+      })
     }
     return agentSubReady.current
   }
@@ -1886,6 +1912,7 @@ export default function App() {
   }
 
   async function handleAgentEnvelope(envelope: AgentEventEnvelope): Promise<void> {
+    if (!agentAlive.current) return
     const { turnId, conversationId, event } = envelope
     const entry = activeAgentTurn.current[turnId]
     if (!entry) return
@@ -2035,13 +2062,14 @@ export default function App() {
 
   async function sendAgentMessage(tabId: string, text: string, opts?: { hasSelection?: boolean }) {
     const tab = tabs.find(tb => tb.id === tabId)
-    if (!tab || agentAborts.current[tabId]) return
+    if (!agentAlive.current || !tab || agentAborts.current[tabId]) return
     const config = agentCfg
     const executionMode = config.executionMode
     const terminalTarget = tab.kind === 'terminal' ? resolveAgentRunTarget(tabId) : null
     const controller = new AbortController()
     agentAborts.current[tabId] = controller
     const convId = ensureConvId(tab)
+    let startAcknowledged = false
     setBusyConvs(prev => ({ ...prev, [convId]: true }))
     try {
       const tabConn = D.byId[tab.connId] ?? liveConns[tab.connId] ?? null
@@ -2124,7 +2152,8 @@ export default function App() {
         singleLineCommands: config.singleLineCommands,
         roundCap: config.maxShellSteps,
       }
-      const handle = await startAgentTurn(request)
+      const handle = await startAgentTurn(request, controller.signal)
+      startAcknowledged = true
       const turnId = handle.turnId
       // Register routing before any buffered event is flushed; the request
       // reference (and its credential) is not retained past this point.
@@ -2137,6 +2166,8 @@ export default function App() {
         turnId,
       }
       agentProjection.current[turnId] = initialProjectorState
+      // Stop may have been pressed while start's acknowledgement was in flight.
+      if (controller.signal.aborted) void cancelAgentTurn(turnId).catch(() => diagnosticLog({ level: 'warn', area: 'agent', event: 'late-start-cancel', source: 'agent-capture' }))
       const buffered = pendingAgentEvents.current[turnId]
       delete pendingAgentEvents.current[turnId]
       for (const bufferedEvent of buffered ?? []) {
@@ -2145,8 +2176,10 @@ export default function App() {
       // The Turn runs fully event-driven: the terminal event clears busy state
       // via the turnSettled effect, so no await here.
     } catch (err) {
-      if (controller.signal.aborted) return
-      const message = (err as { message?: string } | null)?.message ?? String(err)
+      if (controller.signal.aborted && (err as Error)?.name === 'AbortError') return
+      const message = (err as { code?: string } | null)?.code === 'eventSubscriptionUnavailable'
+        ? t('panels.agentEventSubscriptionFailed')
+        : (err as { message?: string } | null)?.message ?? String(err)
       patchConversation(convId, c => {
         const msgs = [...c.messages]
         const last = msgs.length - 1
@@ -2160,6 +2193,10 @@ export default function App() {
       setBusyConvs(prev => { const n = { ...prev }; delete n[convId]; return n })
     } finally {
       if (controller.signal.aborted) {
+        if (!startAcknowledged) {
+          if (agentAborts.current[tabId] === controller) delete agentAborts.current[tabId]
+          setBusyConvs(prev => { const next = { ...prev }; delete next[convId]; return next })
+        }
         patchConversation(convId, conversation => {
           const messages = [...conversation.messages]
           const last = messages[messages.length - 1]

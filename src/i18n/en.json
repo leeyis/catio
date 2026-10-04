@@ -765,6 +765,7 @@
     "agentThinking": "Thinking…",
     "agentThought": "Reasoning",
     "agentError": "Error: {{message}}",
+    "agentEventSubscriptionFailed": "Could not confirm the event subscription. The request was not started. Check the connection or sign in again, then retry.",
     "agentOutcomeUnknown": "The command may still be running on the target terminal; its result is unknown. Check the terminal manually.",
     "agentEventOrder": "Agent event stream is out of order or incomplete; some output may be missing.",
     "agentRuntimeDisconnected": "The Agent runtime connection was lost; this conversation did not finish.",

@@ -665,6 +665,31 @@ async function openAgentForFileTest() {
   emitAgent(2, { type: 'assistantMessageStarted', messageId: 'm0', round: 0 })
 }
 
+it('cancels a late start acknowledgement when Stop was pressed while the HTTP call was pending', async () => {
+  let resolve!: (value: { turnId: string }) => void
+  agentRuntimeMock.startAgentTurn.mockImplementationOnce(() => new Promise<{ turnId: string }>(r => { resolve = r }))
+  await openAgentForFileTest()
+  fireEvent.click(screen.getByTitle('停止'))
+  resolve({ turnId: 'turn-1' })
+  await waitFor(() => expect(agentRuntimeMock.cancelAgentTurn).toHaveBeenCalledWith('turn-1'))
+  emitAgent(3, { type: 'turnCancelled' })
+  await waitFor(() => expect(screen.queryByTitle('停止')).toBeNull())
+})
+
+it('unmount removes the Agent subscription and cannot repersist old-owner history after a late start', async () => {
+  let resolve!: (value: { turnId: string }) => void
+  agentRuntimeMock.startAgentTurn.mockImplementationOnce(() => new Promise<{ turnId: string }>(r => { resolve = r }))
+  await openAgentForFileTest()
+  // AuthGate removes App on logout. Clearing storage models its owner-data cleanup.
+  const { cleanup } = await import('@testing-library/react')
+  cleanup(); localStorage.clear()
+  const subscribedAfterUnmount = agentEventHandler !== null
+  resolve({ turnId: 'turn-1' })
+  await new Promise(r => setTimeout(r, 30))
+  expect(subscribedAfterUnmount).toBe(false)
+  expect(localStorage.getItem('catio-conversations')).toBeNull()
+})
+
 it('shows actual saved file results and never dispatches file content to the terminal', async () => {
   const capture = await import('../src/services/terminalCapture')
   vi.mocked(capture.runTerminalCommandAndCapture).mockClear()

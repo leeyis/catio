@@ -53,6 +53,140 @@ describe('transport WebSocket client', () => {
     expect(frames(ws).some(m => m.type === 'unsub' && m.topic === 'term://c1')).toBe(true)
   })
 
+  it('ordered consumers wait for a server subscription receipt, not merely socket open', async () => {
+    const { subscribe, ensureSubscription } = await import('./transport')
+    const handler = vi.fn()
+    const unsub = await subscribe('agent://events', handler)
+    const done = vi.fn()
+    const ready = ensureSubscription('agent://events').then(done)
+    const ws = lastWs()
+    expect(done).not.toHaveBeenCalled()
+    ws.fireOpen(); await tick()
+    const request = frames(ws).find(m => m.type === 'sub' && m.id)!
+    expect(request).toBeTruthy()
+    expect(done).not.toHaveBeenCalled()
+    ws.fireMsg({ type: 'reply', id: request.id, ok: true, result: { topic: 'agent://events' } })
+    await ready
+    expect(done).toHaveBeenCalledOnce()
+    ws.fireMsg({ type: 'event', topic: 'agent://events', payload: { sequence: 1 } })
+    expect(handler).toHaveBeenCalledWith({ sequence: 1 })
+    unsub(); ws.close()
+  })
+
+  it('denied subscriptions reject and a later attempt needs its own receipt', async () => {
+    const { subscribe, ensureSubscription } = await import('./transport')
+    const unsub = await subscribe('agent://events', () => {})
+    const ws = lastWs(); ws.fireOpen()
+    const ready = ensureSubscription('agent://events'); const rejected = expect(ready).rejects.toThrow('denied')
+    await tick()
+    const first = frames(ws).find(m => m.type === 'sub' && m.id)!
+    ws.fireMsg({ type: 'reply', id: first.id, ok: false, error: 'denied' }); await rejected
+    const done = vi.fn(), retry = ensureSubscription('agent://events').then(done)
+    await tick()
+    const second = frames(ws).filter(m => m.type === 'sub' && m.id).at(-1)!
+    expect(second.id).not.toBe(first.id)
+    ws.fireMsg({ type: 'reply', id: first.id, ok: true }); await tick()
+    expect(done).not.toHaveBeenCalled()
+    ws.fireMsg({ type: 'reply', id: second.id, ok: true }); await retry
+    unsub(); ws.close()
+  })
+
+  it('reconnect requires a new acknowledged registration before the next HTTP turn', async () => {
+    const { subscribe, ensureSubscription } = await import('./transport')
+    const unsub = await subscribe('agent://events', () => {})
+    const ws = lastWs(); ws.fireOpen()
+    const first = ensureSubscription('agent://events'); await tick()
+    ws.fireMsg({ type: 'reply', id: frames(ws).find(m => m.type === 'sub' && m.id)!.id, ok: true }); await first
+    ws.close()
+    const done = vi.fn(), next = ensureSubscription('agent://events').then(done)
+    const ws2 = lastWs(); expect(ws2).not.toBe(ws); ws2.fireOpen(); await tick()
+    expect(done).not.toHaveBeenCalled()
+    ws2.fireMsg({ type: 'reply', id: frames(ws2).find(m => m.type === 'sub' && m.id)!.id, ok: true }); await next
+    unsub(); ws2.close()
+  })
+
+  it('does not report readiness without a registered consumer', async () => {
+    const { ensureSubscription } = await import('./transport')
+    await expect(ensureSubscription('agent://events')).rejects.toThrow(/subscriber/i)
+    expect(FakeWS.instances).toHaveLength(0)
+  })
+
+  it('bounds connection readiness when WebSocket never opens', async () => {
+    vi.useFakeTimers()
+    const { subscribe, ensureSubscription } = await import('./transport')
+    const unsub = await subscribe('agent://events', () => {})
+    const ready = ensureSubscription('agent://events', 25)
+    const rejected = expect(ready).rejects.toMatchObject({ code: 'eventSubscriptionUnavailable' })
+    await vi.advanceTimersByTimeAsync(26); await rejected
+    unsub(); lastWs().close(); vi.useRealTimers()
+  })
+
+  it('rejects an acknowledgement timeout without letting a late receipt satisfy a new request', async () => {
+    vi.useFakeTimers()
+    const { subscribe, ensureSubscription } = await import('./transport')
+    const unsub = await subscribe('agent://events', () => {})
+    const ws = lastWs(); ws.fireOpen()
+    const ready = ensureSubscription('agent://events', 25)
+    const rejected = expect(ready).rejects.toMatchObject({ code: 'eventSubscriptionUnavailable' })
+    await vi.advanceTimersByTimeAsync(26); await rejected
+    const first = frames(ws).find(f => f.id)!
+    const done = vi.fn(), next = ensureSubscription('agent://events', 25).then(done)
+    await vi.advanceTimersByTimeAsync(0)
+    ws.fireMsg({ type: 'reply', id: first.id, ok: true }); await vi.advanceTimersByTimeAsync(0)
+    expect(done).not.toHaveBeenCalled()
+    ws.fireMsg({ type: 'reply', id: frames(ws).filter(f => f.id).at(-1)!.id, ok: true }); await next
+    unsub(); ws.close(); vi.useRealTimers()
+  })
+
+  it('drops orphaned Agent messages instead of replaying a prior owner into a new consumer', async () => {
+    const { subscribe } = await import('./transport')
+    const warm = await subscribe('warm', () => {})
+    const ws = lastWs(); ws.fireOpen()
+    ws.fireMsg({ type: 'event', topic: 'agent://events', payload: { ownerId: 'old-owner' } })
+    const handler = vi.fn(), unsub = await subscribe('agent://events', handler)
+    expect(handler).not.toHaveBeenCalled()
+    unsub(); warm(); ws.close()
+  })
+
+  it('closes an expired-auth socket so retry can authenticate with the current cookie', async () => {
+    const { subscribe, ensureSubscription } = await import('./transport')
+    const unsub = await subscribe('agent://events', () => {})
+    const ws = lastWs(); ws.fireOpen()
+    const ready = ensureSubscription('agent://events'), rejected = expect(ready).rejects.toMatchObject({ code: 'eventSubscriptionUnavailable' })
+    await tick()
+    ws.fireMsg({ type: 'reply', id: frames(ws).find(f => f.id)!.id, ok: false, error: 'Subscription session expired' })
+    await rejected
+    expect(ws.readyState).toBe(3)
+    unsub()
+  })
+
+  it('wraps a WebSocket DOMException without trying to overwrite its readonly code property', async () => {
+    const { subscribe, ensureSubscription } = await import('./transport')
+    const unsub = await subscribe('agent://events', () => {})
+    const ws = lastWs(); ws.fireOpen(); await tick()
+    vi.spyOn(ws, 'send').mockImplementationOnce(() => { throw new DOMException('closed', 'InvalidStateError') })
+    await expect(ensureSubscription('agent://events')).rejects.toMatchObject({ code: 'eventSubscriptionUnavailable' })
+    unsub(); ws.close()
+  })
+
+  it('a late close from a superseded socket cannot reject the new socket receipt', async () => {
+    const { subscribe, ensureSubscription } = await import('./transport')
+    const unsub = await subscribe('agent://events', () => {})
+    const old = lastWs(); old.fireOpen(); await tick()
+    old.readyState = 2 // closing, but onclose has not fired yet
+    const next = ensureSubscription('agent://events')
+    const ws = lastWs(); expect(ws).not.toBe(old); ws.fireOpen(); await tick()
+    const request = frames(ws).find(frame => frame.id)!
+    old.close()
+    ws.fireMsg({ type: 'reply', id: request.id, ok: true })
+    await expect(next).resolves.toBeUndefined()
+    const again = ensureSubscription('agent://events'); await tick()
+    expect(lastWs()).toBe(ws)
+    ws.fireMsg({ type: 'reply', id: frames(ws).filter(frame => frame.id).at(-1)!.id, ok: true })
+    await again
+    unsub(); ws.close()
+  })
+
   it('wsCmd sends a cmd and resolves with the matching reply result', async () => {
     const { wsCmd } = await import('./transport')
     const pr = wsCmd<{ chanId: string }>('term_open', { sessionId: 's1', cols: 80, rows: 24 })
