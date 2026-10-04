@@ -100,6 +100,22 @@ it('quotes literal dots and embedded quote characters as identifiers, not namesp
   expect(c.joins).toHaveLength(1)
   expect(c.insert()).toContain('JOIN "a.b"."u.s" ON o."x" = "a.b"."u.s"."i""d"')
 })
+it('does not mistake a table-valued function for a same-name physical table', () => {
+  expect(complete('SELECT * FROM app.orders(1) o JOIN |').joins).toHaveLength(0)
+})
+it('does not reuse original column names after an explicit column alias list', () => {
+  expect(complete('SELECT * FROM app.orders AS o(a,b,c) JOIN |').joins).toHaveLength(0)
+})
+it('keeps doubled quotes inside aliases rather than referring to a different alias', () => {
+  const c = complete('SELECT * FROM app.orders AS "o""r" JOIN |')
+  expect(c.joins).toHaveLength(1)
+  expect(c.insert()).toContain('ON "o""r"."tenant" = ')
+})
+it('keeps a quoted namespace split across adjacent CST nodes as one identity', () => {
+  const copy = structuredClone(tables); copy[0].schema = 'a"b'
+  const c = complete('SELECT * FROM "a""b".orders o JOIN |', copy)
+  expect(c.joins).toHaveLength(1)
+})
 it('keeps PostgreSQL quoted-case identities distinct', () => {
   const copy = structuredClone(tables); copy[0].name = 'Orders'
   expect(complete('SELECT * FROM app.orders |', copy).joins).toHaveLength(0)

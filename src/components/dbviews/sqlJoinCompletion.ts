@@ -73,7 +73,7 @@ export function joinCompletion(context: CompletionContext, tables: JoinTable[], 
   const trailingSpace = preceding.length - preceding.trimEnd().length
   const cursorNode = tree.resolveInner(pos - trailingSpace, -1)
   for (let n: SyntaxNode | null = cursorNode; n; n = n.parent) {
-    if (['String', 'LineComment', 'BlockComment'].includes(n.name)) return null
+    if (['String', 'LineComment', 'BlockComment'].includes(n.name) || n.name === 'QuotedIdentifier' && !id(n)) return null
     if (n.name === 'Statement' || n.name === 'Parens' && ['select', 'with'].includes(word(children(n)[0]))) {
       if (!block) block = n
       scopes.push(n)
@@ -125,20 +125,30 @@ export function joinCompletion(context: CompletionContext, tables: JoinTable[], 
     const names = path(node)
     // lang-sql splits doubled identifier quotes into adjacent quoted nodes.
     // Merge only touching tokens with the same delimiter, never spaced aliases.
-    while (names.length && names.at(-1)!.quoted && tokens[i + 1]?.name === 'QuotedIdentifier' && tokens[i].to === tokens[i + 1].from) {
-      const next = id(tokens[i + 1]), last = names.at(-1)!
-      if (!next || next.raw[0] !== last.raw[0]) break
-      const close = last.raw[0] === '[' ? ']' : last.raw[0]
-      const raw = last.raw + next.raw
+    while (names.length && names.at(-1)!.quoted && tokens[i + 1] && tokens[i].to === tokens[i + 1].from) {
+      const parts = path(tokens[i + 1]), next = parts[0], last = names.at(-1)!
+      if (!next?.quoted || last.raw[0] === '[' || next.raw[0] !== last.raw[0]) break
+      const close = last.raw[0], raw = last.raw + next.raw
       names[names.length - 1] = { raw, quoted: true, name: raw.slice(1, -1).split(close + close).join(close) }
+      names.push(...parts.slice(1))
       i++
     }
     // The last, still-typed target is a prefix, not an already bound table.
     if (lastJoin >= 0 && i === tokens.length - 1 && node.to >= pos && !/\s$/.test(state.sliceDoc(node.from, pos))) { pending = node; continue }
-    const table = resolve(names)
+    let table = tokens[i + 1]?.name === 'Parens' ? undefined : resolve(names)
     let alias: Id | undefined
-    if (keyword(tokens[i + 1]) === 'as') { alias = id(tokens[i + 2]); i += 2 }
-    else if (id(tokens[i + 1]) && !modifiers.has(keyword(tokens[i + 1]))) alias = id(tokens[++i])
+    const readAlias = (at: number) => {
+      let value = id(tokens[at])
+      while (value?.quoted && value.raw[0] !== '[' && tokens[at + 1]?.name === 'QuotedIdentifier' && tokens[at].to === tokens[at + 1].from) {
+        const next = id(tokens[at + 1]); if (!next || next.raw[0] !== value.raw[0]) break
+        const close = value.raw[0], raw = value.raw + next.raw
+        value = { raw, quoted: true, name: raw.slice(1, -1).split(close + close).join(close) }; at++
+      }
+      return { value, at }
+    }
+    if (keyword(tokens[i + 1]) === 'as') { const parsed = readAlias(i + 2); alias = parsed.value; i = parsed.at }
+    else if (id(tokens[i + 1]) && !modifiers.has(keyword(tokens[i + 1]))) { const parsed = readAlias(i + 1); alias = parsed.value; i = parsed.at }
+    if (tokens[i + 1]?.name === 'Parens') table = undefined // Explicit column renaming needs its own verified mapping.
     if (table) sources.push({ table, alias })
     else if (lastJoin >= 0) return null // An unresolved joined target must not bind to another physical table.
   }
