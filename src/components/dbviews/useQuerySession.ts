@@ -39,7 +39,7 @@ export function useQuerySession(connId: string | undefined, enabled: boolean,
     const version=generation.current, before=revision.current
     try{
       const value=await querySessionStatus(connId,session.id)
-      if(version===generation.current&&before===revision.current&&current.current?.id===session.id){publish(value);setError(null)}
+      if(version===generation.current&&before===revision.current&&current.current?.id===session.id){publish(value);setError(null);return true}
     }catch(e){
       if(version===generation.current&&before===revision.current&&current.current?.id===session.id){publish({...session,busy:false,transactionState:'unknown'});setError(dbErrMsg(e))}
     }
@@ -77,20 +77,30 @@ export function useQuerySession(connId: string | undefined, enabled: boolean,
     setInfo(null);setError(null);setLoading(false);setActionBusy(false)
     if(!enabled||!connId)return
     void ensure().catch(()=>{})
+    let pingInFlight=false, heartbeatNeedsRefresh=false
     const timer=setInterval(()=>{
-      const session=current.current;if(!session)return
+      const session=current.current;if(!session||pingInFlight)return
       const version=generation.current
-      void pingQuerySession(connId,session.id).catch(e=>{
+      pingInFlight=true
+      void pingQuerySession(connId,session.id).then(async()=>{
+        if(version!==generation.current||current.current?.id!==session.id)return
+        // A successful lease ping does not prove transaction state. Read it back,
+        // preserving the same physical session (never reconnect/rollback implicitly).
+        if(heartbeatNeedsRefresh&&!current.current.busy&&!actionLock.current){
+          heartbeatNeedsRefresh=!(await refresh())
+        }
+      }).catch(e=>{
         if(version===generation.current&&current.current?.id===session.id){
+          heartbeatNeedsRefresh=true
           publish({...current.current,transactionState:'unknown'});setError(dbErrMsg(e))
         }
-      })
+      }).finally(()=>{pingInFlight=false})
     },30_000)
     return()=>{
       clearInterval(timer);generation.current++
       const session=current.current;current.current=null;opening.current=null
       if(session){removeQuerySessionWork(session.id);void closeQuerySession(connId,session.id).catch(()=>{})}
     }
-  },[connId,enabled,ensure,publish])
+  },[connId,enabled,ensure,publish,refresh])
   return {info,loading,actionBusy,error,ensure,refresh,markBusy,transact,reconnect,current}
 }

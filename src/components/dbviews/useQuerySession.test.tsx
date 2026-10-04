@@ -1,0 +1,48 @@
+import { act, renderHook, cleanup } from '@testing-library/react'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { useQuerySession } from './useQuerySession'
+const api = vi.hoisted(() => ({ open: vi.fn(), close: vi.fn(), status: vi.fn(), ping: vi.fn(), transaction: vi.fn(), invalidate: vi.fn() }))
+vi.mock('../../services/db', () => ({ openQuerySession: api.open, closeQuerySession: api.close, querySessionStatus: api.status, pingQuerySession: api.ping, querySessionTransaction: api.transaction, invalidateSchemaCache: api.invalidate, dbErrMsg: (e: Error) => e.message }))
+vi.mock('../../state/querySessionWork', () => ({ updateQuerySessionWork: vi.fn(), removeQuerySessionWork: vi.fn() }))
+const info = { id: 'session-1', transactionState: 'active' as const, busy: false, canCancel: true, supportsTransactions: true, leaseSeconds: 1800 }
+beforeEach(() => {
+  vi.useFakeTimers()
+  for (const mock of Object.values(api)) mock.mockReset()
+  api.open.mockResolvedValue(info); api.close.mockResolvedValue(undefined)
+  api.ping.mockResolvedValue(undefined); api.status.mockResolvedValue(info)
+})
+afterEach(() => { cleanup(); vi.useRealTimers() })
+it('recovers an uncertain status after heartbeat connectivity returns without reopening the transaction', async () => {
+  api.ping.mockRejectedValueOnce(new Error('offline'))
+  const { result } = renderHook(() => useQuerySession('conn', true, {}))
+  await act(async () => {})
+  await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
+  expect(result.current.info?.transactionState).toBe('unknown')
+  expect(result.current.error).toBe('offline')
+  await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
+  expect(api.status).toHaveBeenCalledWith('conn', 'session-1')
+  expect(result.current.info?.transactionState).toBe('active')
+  expect(result.current.error).toBeNull()
+  expect(api.open).toHaveBeenCalledOnce()
+  expect(api.close).not.toHaveBeenCalled()
+  expect(api.transaction).not.toHaveBeenCalled()
+})
+it('does not clear uncertainty merely because ping succeeds when status still fails', async () => {
+  api.ping.mockRejectedValueOnce(new Error('offline'))
+  api.status.mockRejectedValueOnce(new Error('status unavailable'))
+  const { result } = renderHook(() => useQuerySession('conn', true, {}))
+  await act(async () => {})
+  await act(async () => { await vi.advanceTimersByTimeAsync(60_000) })
+  expect(result.current.info?.transactionState).toBe('unknown')
+  expect(result.current.error).toBe('status unavailable')
+  await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
+  expect(result.current.info?.transactionState).toBe('active')
+  expect(result.current.error).toBeNull()
+})
+it('does not pile up heartbeats while a prior ping is pending', async () => {
+  api.ping.mockReturnValue(new Promise(() => {}))
+  renderHook(() => useQuerySession('conn', true, {}))
+  await act(async () => {})
+  await act(async () => { await vi.advanceTimersByTimeAsync(120_000) })
+  expect(api.ping).toHaveBeenCalledOnce()
+})
