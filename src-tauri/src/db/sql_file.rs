@@ -40,6 +40,8 @@ impl SqlParsingOptions {
 #[derive(Default)]
 pub struct SqlStatementSplitter {
     buffer: String,
+    // Incomplete comment openers and dollar-tag prefixes must survive chunk boundaries.
+    pending_input: String,
     in_single_quote: bool,
     in_double_quote: bool,
     in_backtick: bool,
@@ -57,6 +59,13 @@ impl SqlStatementSplitter {
     }
 
     pub fn push_chunk(&mut self, chunk: &str) -> Vec<String> {
+        if self.pending_input.is_empty() { return self.process_chunk(chunk, false); }
+        let mut input = std::mem::take(&mut self.pending_input);
+        input.push_str(chunk);
+        self.process_chunk(&input, false)
+    }
+
+    fn process_chunk(&mut self, chunk: &str, final_chunk: bool) -> Vec<String> {
         let mut statements = Vec::new();
         let chars = chunk.chars().collect::<Vec<_>>();
         let mut i = 0;
@@ -65,6 +74,7 @@ impl SqlStatementSplitter {
             // dollar-quote 体内：原样吞字符，直到遇到收尾 tag。
             if let Some(tag) = &self.dollar_quote_tag {
                 let tag_chars = tag.chars().collect::<Vec<_>>();
+                if !final_chunk && chars.len() - i < tag_chars.len() && tag_chars.starts_with(&chars[i..]) { break; }
                 if starts_with_chars(&chars, i, &tag_chars) {
                     for tag_ch in &tag_chars {
                         self.buffer.push(*tag_ch);
@@ -105,6 +115,10 @@ impl SqlStatementSplitter {
             }
 
             if !self.in_single_quote && !self.in_double_quote && !self.in_backtick {
+                if !final_chunk && i + 1 == chars.len() && matches!(ch, '-' | '/') { break; }
+                if !final_chunk && ch == '$' && self.custom_delimiter.is_none() && !self.on_delimiter_line()
+                    && next.map_or(true, |c| c.is_ascii_alphabetic() || c == '_')
+                    && chars[i + 1..].iter().all(|c| c.is_ascii_alphanumeric() || *c == '_') { break; }
                 if ch == '-' && next == Some('-') {
                     self.in_line_comment = true;
                     self.buffer.push(ch);
@@ -198,11 +212,13 @@ impl SqlStatementSplitter {
             i += 1;
         }
 
+        self.pending_input.extend(chars[i..].iter().copied());
         statements
     }
 
     pub fn finish(mut self) -> Vec<String> {
-        let mut statements = Vec::new();
+        let pending = std::mem::take(&mut self.pending_input);
+        let mut statements = self.process_chunk(&pending, true);
         let trimmed = self.buffer.trim();
         let last_line = trimmed.rsplit('\n').next().unwrap_or(trimmed).trim();
         if parse_delimiter_command(last_line).is_some() {
@@ -510,6 +526,30 @@ mod tests {
         assert_eq!(out[1], "SELECT 3");
     }
 
+    fn fragmented(sql: &str, options: SqlParsingOptions) -> Vec<String> {
+        let mut splitter = SqlStatementSplitter::with_options(options); let mut rows = Vec::new();
+        for ch in sql.chars() { rows.extend(splitter.push_chunk(&ch.to_string())); }
+        rows.extend(splitter.finish()); rows
+    }
+    #[test]
+    fn comment_openers_are_preserved_across_every_chunk_boundary() {
+        for source in ["SELECT 1 -- ; not another statement\n; SELECT 2;", "SELECT 1 /* ; not another statement */; SELECT 2;"] {
+            assert_eq!(fragmented(source, SqlParsingOptions::default()), split(source));
+        }
+    }
+    #[test]
+    fn dollar_open_and_close_tags_are_preserved_across_every_chunk_boundary() {
+        for source in ["DO $$ BEGIN PERFORM 1; END $$; SELECT 2;", "DO $body$ BEGIN PERFORM 1; END $body$; SELECT '中文';"] {
+            let expected = split(source); assert_eq!(expected.len(), 2);
+            assert_eq!(fragmented(source, SqlParsingOptions::default()), expected);
+        }
+    }
+    #[test]
+    fn mysql_custom_delimiters_and_escaped_strings_survive_single_character_chunks() {
+        let source = "DELIMITER //\nCREATE TRIGGER t BEGIN SELECT '中;文'; SELECT 2; END//\nDELIMITER ;\nSELECT 3;";
+        let options = SqlParsingOptions::for_database_type(DatabaseType::Mysql);
+        assert_eq!(fragmented(source, options), split_sql_statements_for_database(source, DatabaseType::Mysql));
+    }
     #[test]
     fn streaming_chunks_join_across_boundaries() {
         let mut s = SqlStatementSplitter::with_options(SqlParsingOptions::default());
