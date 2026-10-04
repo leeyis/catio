@@ -11,6 +11,7 @@ import type { CompletionContext, CompletionResult, Completion } from '@codemirro
 import { dialectFor } from './sqlDialect'
 import { completionIdentifier } from './sqlCompletionSchema'
 import type { EditorState } from '@codemirror/state'
+import { ensureSyntaxTree } from '@codemirror/language'
 import { sqlCallContext, sqlCallContextAt, type SqlCallContext } from './sqlSignatureContext'
 
 // ---- 函数签名库(通用 + 按引擎方言扩充) ----
@@ -368,6 +369,13 @@ export function sqlAdvancedCompletion(
   getJoinTables: () => JoinTable[],
 ) {
   return (context: CompletionContext): CompletionResult | null => {
+    const tree = ensureSyntaxTree(context.state, context.pos, 10)
+    if (!tree) return null
+    for (let node = tree.resolveInner(context.pos, -1); ; ) {
+      if (['String', 'LineComment', 'BlockComment', 'QuotedIdentifier', 'CompositeIdentifier', '.'].includes(node.name)) return null
+      if (!node.parent) break
+      node = node.parent
+    }
     const before = context.state.sliceDoc(0, context.pos)
     const engine = getEngine()
 

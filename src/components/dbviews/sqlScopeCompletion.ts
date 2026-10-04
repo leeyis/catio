@@ -1,4 +1,4 @@
-import { syntaxTree } from '@codemirror/language'
+import { syntaxTree, ensureSyntaxTree } from '@codemirror/language'
 import { schemaCompletionSource, type SQLNamespace } from '@codemirror/lang-sql'
 import type { Completion, CompletionContext, CompletionResult, CompletionSource } from '@codemirror/autocomplete'
 type SyntaxNode = ReturnType<typeof syntaxTree>['topNode']
@@ -77,10 +77,16 @@ export function scopedSchemaCompletion(schema: SQLNamespace, defaultSchema?: str
       return Array.isArray(values) ? values.map(value => typeof value === 'string' ? column(value) : value) : []
     }
     const queryNode = (node: SyntaxNode) => node.name === 'Statement' || node.name === 'Parens' && /^(select|with)$/i.test(word(children(node)[0]))
-    let leaf = syntaxTree(state).resolveInner(pos, -1)
+    // A cached tree may lag just after input (especially under load). Finish a
+    // bounded lookahead before resolving aliases defined AFTER the cursor.
+    const tree = ensureSyntaxTree(state, Math.min(state.doc.length, pos + 20_000), 10)
+    if (!tree) return null
+    let leaf = tree.resolveInner(pos, -1)
+    for (let n: SyntaxNode | null = leaf; n; n = n.parent) if (['String', 'LineComment', 'BlockComment'].includes(n.name)) return null
     const ancestors: SyntaxNode[] = []
     for (let n: SyntaxNode | null = leaf; n; n = n.parent) if (queryNode(n)) ancestors.unshift(n)
     if (!ancestors.length) return fallback(context) as CompletionResult | null
+    if (tree.length < state.doc.length && ancestors[0].to >= tree.length && state.sliceDoc(tree.length - 1, tree.length) !== ';') return null
     if (ancestors[0].to - ancestors[0].from > 200_000) return null
 
     let budget = 4000
