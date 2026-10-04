@@ -76,6 +76,16 @@ describe('buildAgentSystemPrompt', () => {
     expect(p).toMatch(/SQL/)
   })
 
+  it.each([
+    ['mongodb', 'custom-document-profile', 'db.users.find'],
+    ['elasticsearch', 'custom-search-profile', 'Query DSL'],
+    ['redis', 'custom-kv-profile', 'HGETALL'],
+  ])('keeps the %s query model when a profile is supplied', (engine, profile, syntax) => {
+    const p = buildAgentSystemPrompt('sql', 'QA', engine, 'manual', true, false, profile)
+    expect(p).toContain(syntax)
+    expect(p).not.toContain(`${profile} SQL dialect`)
+  })
+
   it('uses the actual JDBC profile for SQL guidance', () => {
     const p = buildAgentSystemPrompt('sql', 'Warehouse', 'jdbc', 'manual', true, false, 'oracle')
     expect(p).toContain('oracle SQL dialect')
