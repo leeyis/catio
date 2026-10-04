@@ -37,7 +37,7 @@ Write-Host 'Enabled fixtures: PostgreSQL, MySQL, SQL Server, ClickHouse, MongoDB
 Write-Host ('TLS fixture enabled: ' + [bool]$CaCert)
 $targets = @('db_postgres','db_mysql','db_sqlserver','db_clickhouse','db_mongo','db_redis','db_elasticsearch','db_rqlite',
   'db_sqlite','db_duckdb','db_dml_roundtrip','db_jdbc_h2','db_parity','db_extended_parity','db_query_control',
-  'db_duckdb_transaction_regression','db_http_parity','server_db','server_database_workflows','server_isolation','server_mcp','db_typed_values','db_binary_engines','db_query_sessions','db_session_registry','db_jdbc_sessions','db_metadata_catalog','db_fk_identity')
+  'db_duckdb_transaction_regression','db_http_parity','server_db','server_database_workflows','server_isolation','server_mcp','db_typed_values','db_binary_engines','db_query_sessions','db_session_registry','db_jdbc_sessions','db_metadata_catalog','db_fk_identity','db_explain_formats')
 if ($OnlyTargets.Count -gt 0) {
   foreach ($target in $OnlyTargets) { if ($target -notin $targets) { throw "Unknown matrix target: $target" } }
   $targets = $OnlyTargets

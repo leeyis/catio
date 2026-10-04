@@ -545,8 +545,8 @@ pub async fn db_query_page(conn_id: String, sql: String, limit: u32, offset: u32
 }
 
 /// 执行计划(EXPLAIN)。按连接的引擎方言拼出 EXPLAIN (FORMAT JSON) / EXPLAIN
-/// FORMAT=JSON,只对只读语句放行,然后执行并把原始计划结果(单行单列 JSON)交给
-/// 前端解析。仅 PG/MySQL 支持;其他引擎或不安全/空 SQL 返回 Unsupported/QueryFailed。
+/// FORMAT=JSON / QUERY PLAN，只对单条保守只读查询放行，保留当前物理会话和 namespace。
+/// PG/MySQL/DuckDB/SQLite/rqlite 支持；其他引擎或不安全/空 SQL 明确返回错误。
 #[tauri::command]
 pub async fn db_explain(conn_id: String, sql: String, default_namespace: Option<String>, query_session_id: Option<String>,
     mgr: tauri::State<'_, ConnManager>) -> Result<QueryResult, DbError> {

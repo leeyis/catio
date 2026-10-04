@@ -24,7 +24,7 @@ import { completionSchema } from './sqlCompletionSchema'
 import { buildJoinTables } from './sqlJoinCatalog'
 import { ExplainPlanViewer } from './ExplainPlanViewer'
 import { SqlFileDialog } from './SqlFileDialog'
-import { parseExplainResult, supportsExplainPlan, type ParsedExplainPlan } from './explainPlan'
+import { parseExplainResult, supportsExplainPlan, type ParsedExplainPlan, type ExplainDatabaseType } from './explainPlan'
 import { readHiddenSchemas, HIDDEN_SCHEMAS_EVENT } from '../../state/schemaFilter'
 import type { DbType } from '../../services/db'
 
@@ -488,7 +488,7 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
       .then(res => {
         if (myToken !== runToken.current) return
         // engine 已被 canExplain 收窄为 PG/MySQL 之一。
-        const plan = parseExplainResult(engine as 'postgres' | 'mysql', res)
+        const plan = parseExplainResult(engine as ExplainDatabaseType, res)
         setExplain({ loading: false, plan })
       })
       .catch(e => {

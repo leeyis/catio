@@ -16,10 +16,10 @@ function singleCell(value: unknown): QueryResult {
 }
 
 describe('supportsExplainPlan', () => {
-  it('is true only for postgres and mysql', () => {
+  it('supports plan formats implemented end-to-end, not arbitrary engines', () => {
     expect(supportsExplainPlan('postgres')).toBe(true)
     expect(supportsExplainPlan('mysql')).toBe(true)
-    expect(supportsExplainPlan('sqlite')).toBe(false)
+    expect(supportsExplainPlan('sqlite')).toBe(true)
     expect(supportsExplainPlan('mongodb')).toBe(false)
     expect(supportsExplainPlan('redis')).toBe(false)
     expect(supportsExplainPlan(undefined)).toBe(false)

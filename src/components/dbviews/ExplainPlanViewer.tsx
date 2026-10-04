@@ -32,6 +32,7 @@ function flatRows(nodes: ExplainPlanNode[]): Array<{ node: ExplainPlanNode; dept
 }
 
 function TreeNode({ node, depth }: { node: ExplainPlanNode; depth: number }) {
+  const { t } = useTranslation()
   return (
     <div style={{ marginLeft: depth === 0 ? 0 : 16 }}>
       <div className="col" style={{
@@ -43,18 +44,18 @@ function TreeNode({ node, depth }: { node: ExplainPlanNode; depth: number }) {
           <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text-primary)' }}>{node.title}</span>
           {node.cost && (
             <span style={{ fontSize: 11, color: 'var(--text-tertiary)', fontFamily: "'Geist Mono', monospace" }}>
-              cost {node.cost}
+              {t('explain.cost')} {node.cost}
             </span>
           )}
           {node.rows && (
             <span style={{ fontSize: 11, color: 'var(--text-tertiary)', fontFamily: "'Geist Mono', monospace" }}>
-              rows {node.rows}
+              {t('explain.rows')} {node.rows}
             </span>
           )}
         </div>
         {(node.index || node.details.length > 0) && (
           <div className="col" style={{ gap: 2, fontSize: 11, color: 'var(--text-tertiary)' }}>
-            {node.index && <span>index {node.index}</span>}
+            {node.index && <span>{t('explain.index')} {node.index}</span>}
             {node.details.map((d, i) => <span key={i}>{d}</span>)}
           </div>
         )}
@@ -126,6 +127,7 @@ export function ExplainPlanViewer({ plan, error, loading, onClose }: ExplainPlan
         )}
       </div>
 
+      {plan?.incomplete && <div role="alert" style={{ padding: '8px 12px', fontSize: 12, color: 'var(--signal-amber)', background: 'var(--surface-sunken)' }}>{t('explain.incomplete')}</div>}
       {/* 主体:loading / error / empty / 三视图 */}
       {loading ? (
         <div className="col" style={{ flex: 1, minHeight: 0, alignItems: 'center', justifyContent: 'center', gap: 10, color: 'var(--text-tertiary)' }}>

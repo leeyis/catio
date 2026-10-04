@@ -2,8 +2,9 @@
 //! 参考 dbx crates/dbx-core/src/query_execution_sql.rs:
 //!   - PG  → `EXPLAIN (FORMAT JSON) <select>`
 //!   - MySQL → `EXPLAIN FORMAT=JSON <select>`
-//! 仅对只读语句(SELECT/WITH/TABLE/VALUES)放行,拒绝 DML/DDL,避免 EXPLAIN ANALYZE
-//! 之外的副作用(本实现用普通 EXPLAIN,本就不执行计划,但仍做来源安全校验)。
+//! SQLite/rqlite 使用 QUERY PLAN，DuckDB 使用 FORMAT JSON。来源必须是一条
+//! 保守判定的读查询，拒绝脚本、写入 CTE、SELECT INTO 和 ANALYZE。
+//! 这是语法门禁，不是数据库授权边界；规划阶段的函数行为仍受数据库权限约束。
 
 use crate::db::DatabaseType;
 
@@ -16,9 +17,9 @@ pub struct ExplainSqlResult {
     pub reason: Option<String>,
 }
 
-/// 该引擎是否支持 JSON 执行计划(目前 PG / MySQL)。
+/// 该引擎是否已实现非执行式计划格式（JSON 或 QUERY PLAN）。
 pub fn supports_explain_plan(db: DatabaseType) -> bool {
-    matches!(db, DatabaseType::Postgres | DatabaseType::Mysql)
+    matches!(db, DatabaseType::Postgres | DatabaseType::Mysql | DatabaseType::Sqlite | DatabaseType::Duckdb | DatabaseType::Rqlite)
 }
 
 /// 为给定 SQL 拼出按方言的 EXPLAIN 语句。
@@ -30,13 +31,15 @@ pub fn build_explain_sql(db: DatabaseType, sql: &str) -> ExplainSqlResult {
     if source.is_empty() {
         return err("empty");
     }
-    if !is_safe_explain_source(&source) {
-        return err("unsafe");
-    }
-    let built = if db == DatabaseType::Postgres {
-        format!("EXPLAIN (FORMAT JSON) {source}")
-    } else {
-        format!("EXPLAIN FORMAT=JSON {source}")
+    let Ok(source) = crate::db::pagination::read_query(db, &source) else { return err("unsafe"); };
+    // A session may have NO_BACKSLASH_ESCAPES enabled. Require the same source
+    // to be a single read under both escape interpretations rather than guessing.
+    if db == DatabaseType::Mysql && crate::db::pagination::read_query(DatabaseType::Sqlite, &source).is_err() { return err("unsafe"); }
+    let built = match db {
+        DatabaseType::Postgres | DatabaseType::Duckdb => format!("EXPLAIN (FORMAT JSON) {source}"),
+        DatabaseType::Sqlite | DatabaseType::Rqlite => format!("EXPLAIN QUERY PLAN {source}"),
+        DatabaseType::Mysql => format!("EXPLAIN FORMAT=JSON {source}"),
+        _ => return err("unsupported"),
     };
     ExplainSqlResult { ok: true, sql: Some(built), reason: None }
 }
@@ -51,61 +54,24 @@ fn strip_trailing_semicolons(sql: &str) -> String {
     sql.trim_end().trim_end_matches(|c| c == ';' || c == ' ' || c == '\t' || c == '\n' || c == '\r').to_string()
 }
 
-/// 只允许只读语句进入 EXPLAIN(去注释后看首关键字)。
-fn is_safe_explain_source(sql: &str) -> bool {
-    let source = strip_sql_comments(sql).trim_start().to_lowercase();
-    ["select", "with", "table", "values"].iter().any(|kw| {
-        source == *kw
-            || source.starts_with(&format!("{kw} "))
-            || source.starts_with(&format!("{kw}\n"))
-            || source.starts_with(&format!("{kw}\t"))
-    })
-}
-
-/// 去掉 SQL 行/块注释(-- … / # … / /* … */),用空格替换以保留分词边界。
-fn strip_sql_comments(sql: &str) -> String {
-    let mut output = String::with_capacity(sql.len());
-    let mut chars = sql.chars().peekable();
-    let mut in_line = false;
-    let mut in_block = false;
-    while let Some(ch) = chars.next() {
-        if in_line {
-            if ch == '\n' {
-                in_line = false;
-                output.push(' ');
-            }
-            continue;
-        }
-        if in_block {
-            if ch == '*' && chars.peek() == Some(&'/') {
-                chars.next();
-                in_block = false;
-                output.push(' ');
-            }
-            continue;
-        }
-        if ch == '-' && chars.peek() == Some(&'-') {
-            chars.next();
-            in_line = true;
-            continue;
-        }
-        if ch == '#' {
-            in_line = true;
-            continue;
-        }
-        if ch == '/' && chars.peek() == Some(&'*') {
-            chars.next();
-            in_block = true;
-            continue;
-        }
-        output.push(ch);
-    }
-    output
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sqlite_duckdb_and_rqlite_use_non_executing_plans() {
+        for (engine, expected) in [
+            (DatabaseType::Sqlite, "EXPLAIN QUERY PLAN SELECT 1"),
+            (DatabaseType::Rqlite, "EXPLAIN QUERY PLAN SELECT 1"),
+            (DatabaseType::Duckdb, "EXPLAIN (FORMAT JSON) SELECT 1"),
+        ] { assert_eq!(build_explain_sql(engine, "SELECT 1;").sql.as_deref(), Some(expected)); }
+    }
+    #[test]
+    fn refuses_scripts_write_ctes_and_select_into() {
+        for sql in ["SELECT 1; DELETE FROM t", "WITH x AS (DELETE FROM t RETURNING id) SELECT * FROM x", "WITH x AS (SELECT 1) UPDATE t SET n=1", "SELECT 1 INTO target", "EXPLAIN ANALYZE SELECT 1", "SELECT 1 /*!; DELETE FROM t */", "SELECT $tag$ FROM t; DELETE FROM t; SELECT $tag$ FROM t"] {
+            assert!(!build_explain_sql(DatabaseType::Mysql, sql).ok, "{sql}");
+        }
+    }
 
     #[test]
     fn postgres_uses_format_json_and_strips_semicolon() {
@@ -160,7 +126,7 @@ mod tests {
     #[test]
     fn unsupported_engine_rejected() {
         assert_eq!(
-            build_explain_sql(DatabaseType::Sqlite, "SELECT 1"),
+            build_explain_sql(DatabaseType::Redis, "SELECT 1"),
             ExplainSqlResult { ok: false, sql: None, reason: Some("unsupported".into()) }
         );
     }

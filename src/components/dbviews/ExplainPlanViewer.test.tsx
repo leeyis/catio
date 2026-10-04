@@ -24,6 +24,13 @@ const wrap = (ui: React.ReactNode) => render(<LanguageProvider>{ui}</LanguagePro
 describe('ExplainPlanViewer', () => {
   beforeAll(async () => { await i18n.changeLanguage('en') })
 
+  it('makes truncation or an unrecognized format explicit without hiding the raw result', () => {
+    wrap(<ExplainPlanViewer plan={{ ...plan, incomplete: true }}/>)
+    expect(screen.getByRole('alert')).toHaveTextContent(/incomplete/i)
+    fireEvent.click(screen.getByTestId('explain-view-json'))
+    expect(screen.getByTestId('explain-json')).toHaveTextContent('Seq Scan')
+  })
+
   it('renders the tree view by default showing node titles', () => {
     wrap(<ExplainPlanViewer plan={plan} />)
     expect(screen.getByText('Seq Scan on users')).toBeInTheDocument()

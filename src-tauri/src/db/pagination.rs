@@ -55,7 +55,7 @@ fn shape(db: DatabaseType, sql: &str) -> Result<(String, Vec<Word>), DbError> {
             let close = if quote == b'[' { b']' } else { quote };
             // PG E'...' uses backslash escapes regardless of standard_conforming_strings.
             let escapes = db == DatabaseType::Mysql
-                || (quote == b'\'' && start > 0 && matches!(b[start-1], b'e' | b'E'));
+                || (matches!(db, DatabaseType::Postgres | DatabaseType::Duckdb) && quote == b'\'' && start > 0 && matches!(b[start-1], b'e' | b'E'));
             i += 1;
             let mut closed = false;
             while i < b.len() {
@@ -70,7 +70,9 @@ fn shape(db: DatabaseType, sql: &str) -> Result<(String, Vec<Word>), DbError> {
             if !closed { return Err(invalid()); }
             last = i; continue;
         }
-        if b[i] == b'$' {
+        // Dollar quoting is a dialect feature, not a universal literal delimiter.
+        // Treating MySQL $ident$ as a PG string can hide actual statement boundaries.
+        if b[i] == b'$' && matches!(db, DatabaseType::Postgres | DatabaseType::Duckdb) {
             let start = i;
             let mut end = i + 1;
             while end < b.len() && (b[end].is_ascii_alphanumeric() || b[end] == b'_') { end += 1; }

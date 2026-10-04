@@ -182,11 +182,10 @@ export async function execSyncBatch(connId: string, statements: string[]): Promi
 }
 
 /**
- * Run EXPLAIN against the live backend and return the raw plan result (a single
- * JSON cell). The backend builds the dialect-correct `EXPLAIN (FORMAT JSON)` /
- * `EXPLAIN FORMAT=JSON`, gates to read-only statements, executes, and returns the
- * result; the frontend parses it via `parseExplainResult`. Only PG/MySQL support
- * this. Throws outside Tauri (no meaningful mock for a real plan).
+ * Return a non-executing plan in the same selected namespace/physical session.
+ * PG/MySQL/DuckDB return JSON; SQLite/rqlite return QUERY PLAN rows. The backend
+ * rejects scripts and mutating sources before building the dialect-specific SQL.
+ * Throws outside Tauri/server (no meaningful mock for a real plan).
  */
 export async function runExplain(connId: string, sql: string, defaultNamespace?: string, querySessionId?: string): Promise<QueryResult> {
   if (!isTauri() && !isServer()) throw new Error('执行计划需要 Tauri 运行时')

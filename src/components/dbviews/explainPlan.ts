@@ -23,22 +23,32 @@ export interface ExplainPlanNode {
 }
 
 /** 解析后的执行计划:引擎 + 原始 JSON + 节点树。 */
+export type ExplainDatabaseType = 'mysql' | 'postgres' | 'sqlite' | 'duckdb' | 'rqlite'
 export interface ParsedExplainPlan {
-  databaseType: 'mysql' | 'postgres'
+  databaseType: ExplainDatabaseType
+  /** Missing/unrecognized rows, truncation or a parser budget must not look complete. */
+  incomplete?: boolean
   raw: unknown
   nodes: ExplainPlanNode[]
 }
 
-/** 该引擎是否支持 JSON 执行计划(目前 PG / MySQL)。与后端 supports_explain_plan 对齐。 */
-export function supportsExplainPlan(databaseType?: DbType): databaseType is 'mysql' | 'postgres' {
-  return databaseType === 'postgres' || databaseType === 'mysql'
+/** 已实现的非执行式计划格式，与后端 supports_explain_plan 对齐。 */
+export function supportsExplainPlan(databaseType?: DbType): databaseType is ExplainDatabaseType {
+  return databaseType === 'postgres' || databaseType === 'mysql' || databaseType === 'sqlite' || databaseType === 'duckdb' || databaseType === 'rqlite'
 }
 
 /** 把后端 db_explain 返回的单行单列 JSON 结果解析成节点树。 */
-export function parseExplainResult(databaseType: 'mysql' | 'postgres', result: QueryResult): ParsedExplainPlan {
-  const raw = parseExplainCell(result.rows[0]?.[0])
-  const nodes = databaseType === 'postgres' ? parsePostgresExplain(raw) : parseMysqlExplain(raw)
-  return { databaseType, raw, nodes }
+export function parseExplainResult(databaseType: ExplainDatabaseType, result: QueryResult): ParsedExplainPlan {
+  const budget = { remaining: 1000, incomplete: !!result.truncated }
+  if (databaseType === 'sqlite' || databaseType === 'rqlite') {
+    const nodes = parseSqliteExplain(result, budget)
+    return { databaseType, raw: { columns: result.columns.map(c => c.name), rows: result.rows }, nodes, incomplete: budget.incomplete || !nodes.length }
+  }
+  const valueColumn = databaseType === 'duckdb' ? result.columns.findIndex(column => column.name.toLowerCase() === 'explain_value') : 0
+  const raw = parseExplainCell(result.rows[0]?.[Math.max(0, valueColumn)])
+  const nodes = databaseType === 'postgres' ? parsePostgresExplain(raw) : databaseType === 'mysql' ? parseMysqlExplain(raw)
+    : (Array.isArray(raw) ? raw : [raw]).map((node, index) => parseDuckdbNode(objectValue(node), String(index), budget, 0)).filter((node): node is ExplainPlanNode => !!node)
+  return { databaseType, raw, nodes, incomplete: budget.incomplete || !nodes.length }
 }
 
 /** 深度优先把树压平成一维数组(供表格视图 / 计数)。 */
@@ -62,6 +72,43 @@ function parseExplainCell(value: unknown): unknown {
   }
 }
 
+interface ParseBudget { remaining: number; incomplete: boolean }
+function parseSqliteExplain(result: QueryResult, budget: ParseBudget): ExplainPlanNode[] {
+  const position = (name: string) => result.columns.findIndex(column => column.name.toLowerCase() === name)
+  const idColumn = position('id'), parentColumn = position('parent'), detailColumn = position('detail')
+  if ([idColumn, parentColumn, detailColumn].some(index => index < 0)) { budget.incomplete = true; return [] }
+  const nodes = new Map<string, { node: ExplainPlanNode; parent: string }>()
+  for (const row of result.rows) {
+    if (--budget.remaining < 0) { budget.incomplete = true; break }
+    const rawId = row[idColumn], rawParent = row[parentColumn], detail = row[detailColumn]
+    if (!Number.isSafeInteger(Number(rawId)) || rawId == null || rawParent == null || !Number.isSafeInteger(Number(rawParent)) || typeof detail !== 'string' || nodes.has(String(rawId))) { budget.incomplete = true; continue }
+    const id = String(rawId)
+    nodes.set(id, { parent: String(rawParent), node: { id, title: detail, nodeType: detail.split(/\s/)[0], index: /USING(?: COVERING)? INDEX (\S+)/i.exec(detail)?.[1], details: [], children: [] } })
+  }
+  const roots: ExplainPlanNode[] = []
+  for (const [id, item] of nodes) {
+    const seen = new Set<string>([id]); let parent = item.parent; let invalid = false
+    while (nodes.has(parent) && !(parent === '0' && nodes.get(parent)!.parent === '0')) {
+      if (seen.has(parent) || seen.size > 64) { invalid = true; break }
+      seen.add(parent); parent = nodes.get(parent)!.parent
+    }
+    if (invalid) { budget.incomplete = true; continue }
+    const owner = nodes.get(item.parent)
+    if (owner && item.parent !== id) owner.node.children.push(item.node)
+    else roots.push(item.node)
+  }
+  return roots
+}
+function parseDuckdbNode(plan: Record<string, unknown> | null, id: string, budget: ParseBudget, depth: number): ExplainPlanNode | null {
+  if (!plan || typeof plan.name !== 'string' || --budget.remaining < 0 || depth > 64) { budget.incomplete = true; return null }
+  const extra = objectValue(plan.extra_info), relation = stringValue(extra?.Table)
+  return { id, nodeType: plan.name, title: relation ? `${plan.name} on ${relation}` : plan.name, relation,
+    rows: numberLike(extra?.['Estimated Cardinality']),
+    details: extra ? Object.entries(extra).filter(([key]) => !['Table', 'Estimated Cardinality'].includes(key)).map(([key, value]) => `${key}: ${typeof value === 'string' ? value : JSON.stringify(value)}`) : [],
+    children: (arrayValue(plan.children) ?? []).map((child, index) => parseDuckdbNode(objectValue(child), `${id}.${index}`, budget, depth + 1)).filter((node): node is ExplainPlanNode => !!node),
+  }
+}
+
 // ---- Postgres ----
 
 function parsePostgresExplain(raw: unknown): ExplainPlanNode[] {
@@ -77,8 +124,8 @@ function parsePostgresExplain(raw: unknown): ExplainPlanNode[] {
 }
 
 function parsePostgresNode(plan: Record<string, unknown> | null, id: string): ExplainPlanNode | null {
-  if (!plan) return null
-  const nodeType = stringValue(plan['Node Type']) || 'Plan'
+  if (!plan || typeof plan['Node Type'] !== 'string') return null
+  const nodeType = plan['Node Type']
   const relation = stringValue(plan['Relation Name'])
   const index = stringValue(plan['Index Name'])
   const startupCost = numberLike(plan['Startup Cost'])
@@ -117,8 +164,8 @@ function parsePostgresNode(plan: Record<string, unknown> | null, id: string): Ex
 function parseMysqlExplain(raw: unknown): ExplainPlanNode[] {
   const root = objectValue(raw)
   if (!root) return []
-  const block = objectValue(root.query_block) || root
-  return [parseMysqlBlock(block, '0', 'query_block')]
+  const block = objectValue(root.query_block)
+  return block ? [parseMysqlBlock(block, '0', 'query_block')] : []
 }
 
 function parseMysqlBlock(block: Record<string, unknown>, id: string, nodeType: string): ExplainPlanNode {
@@ -152,7 +199,8 @@ function parseMysqlBlock(block: Record<string, unknown>, id: string, nodeType: s
     title: nodeType,
     nodeType,
     cost: stringValue(costInfo?.query_cost),
-    rows: numberLike(block.select_id),
+    // select_id identifies a query block; it is not a row estimate.
+    rows: undefined,
     details: [stringValue(block.message)].filter(nonEmptyString),
     children,
   }
