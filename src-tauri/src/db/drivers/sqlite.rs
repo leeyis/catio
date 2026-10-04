@@ -344,48 +344,36 @@ impl Driver for SqliteDriver {
         Ok(TableStructure { comment: String::new(), columns, indexes, fks, triggers })
     }
 
-    async fn er_relations(&self, _schema: &str) -> Result<Vec<ErRelation>, DbError> {
-        // adapted from dbx crates/dbx-core/src/db/sqlite.rs list_foreign_keys (schema-level), Apache-2.0
-        // Iterate all tables and collect their foreign_key_list relations.
-        let conn = self.conn.lock().await;
-
-        let mut tbl_stmt = conn.prepare(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
-        ).map_err(|e| DbError::QueryFailed(e.to_string()))?;
-
-        let tables: Vec<String> = tbl_stmt
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(|e| DbError::QueryFailed(e.to_string()))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
-
-        let mut relations: Vec<ErRelation> = Vec::new();
-        for tbl in tables {
-            let safe_tbl = tbl.replace('"', "\"\"");
-            let fk_sql = format!("PRAGMA foreign_key_list(\"{}\")", safe_tbl);
-            let mut fk_stmt = conn.prepare(&fk_sql)
-                .map_err(|e| DbError::QueryFailed(e.to_string()))?;
-            let fk_rows = fk_stmt
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>("from")?,
-                        row.get::<_, String>("table")?,
-                        row.get::<_, String>("to")?,
-                    ))
-                })
-                .map_err(|e| DbError::QueryFailed(e.to_string()))?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| DbError::QueryFailed(e.to_string()))?;
-            for (from_col, to_tbl, to_col) in fk_rows {
-                relations.push(ErRelation {
-                    from: tbl.clone(),
-                    from_col,
-                    to: to_tbl,
-                    to_col,
-                });
+    async fn er_relations(&self, schema: &str) -> Result<Vec<ErRelation>, DbError> {
+        let conn=self.conn.lock().await;
+        let namespace=if schema.is_empty(){"main"}else{schema};
+        let ns=namespace.replace('"',"\"\"");
+        let mut stmt=conn.prepare(&format!("SELECT name FROM \"{ns}\".sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"))
+            .map_err(|e|DbError::QueryFailed(e.to_string()))?;
+        let tables=stmt.query_map([],|row|row.get::<_,String>(0)).map_err(|e|DbError::QueryFailed(e.to_string()))?
+            .collect::<Result<Vec<_>,_>>().map_err(|e|DbError::QueryFailed(e.to_string()))?;
+        let mut relations=Vec::new();
+        for table in tables {
+            let quoted=table.replace('"',"\"\"");
+            let mut stmt=conn.prepare(&format!("PRAGMA \"{ns}\".foreign_key_list(\"{quoted}\")")).map_err(|e|DbError::QueryFailed(e.to_string()))?;
+            let keys=stmt.query_map([],|row|Ok((row.get::<_,i64>("id")?,row.get::<_,i64>("seq")?,row.get::<_,String>("from")?,row.get::<_,String>("table")?,row.get::<_,Option<String>>("to")?)))
+                .map_err(|e|DbError::QueryFailed(e.to_string()))?.collect::<Result<Vec<_>,_>>().map_err(|e|DbError::QueryFailed(e.to_string()))?;
+            for (id,seq,from_col,target,to_col) in &keys {
+                let width=keys.iter().filter(|k|k.0==*id).count();
+                let to_col=if let Some(col)=to_col{col.clone()}else{
+                    // REFERENCES table with no explicit column list means its ordered PK.
+                    let target_quoted=target.replace('"',"\"\"");
+                    let mut primary=conn.prepare(&format!("PRAGMA \"{ns}\".table_info(\"{target_quoted}\")")).map_err(|e|DbError::QueryFailed(e.to_string()))?;
+                    let mut columns=primary.query_map([],|row|Ok((row.get::<_,i64>("pk")?,row.get::<_,String>("name")?)))
+                        .map_err(|e|DbError::QueryFailed(e.to_string()))?.collect::<Result<Vec<_>,_>>().map_err(|e|DbError::QueryFailed(e.to_string()))?;
+                    columns.retain(|(pk,_)|*pk>0);columns.sort_by_key(|(pk,_)|*pk);
+                    if columns.len()==width{columns.get(*seq as usize).map(|(_,name)|name.clone()).unwrap_or_default()}else{String::new()}
+                };
+                relations.push(ErRelation{from:table.clone(),from_col:from_col.clone(),to:target.clone(),to_col,
+                    from_schema:Some(namespace.into()),to_schema:Some(namespace.into()),constraint_id:Some(format!("sqlite-fk-{id}")),
+                    ordinal:Some(*seq as u32+1),column_count:Some(width as u32)});
             }
         }
-
-        Ok(relations)
+        Ok(ErRelation::complete_groups(relations))
     }
 }

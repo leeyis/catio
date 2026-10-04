@@ -429,48 +429,22 @@ impl Driver for DuckDbDriver {
     }
 
     async fn er_relations(&self, schema: &str) -> Result<Vec<ErRelation>, DbError> {
-        // adapted from dbx crates/dbx-core/src/schema.rs FK introspection approach, Apache-2.0
-        // DuckDB FK/ER introspection is limited; return best-effort or empty Vec.
-        let conn = self.conn.lock().await;
-        let catalog = resolve_catalog(&conn, "main")?;
-        let schema_name = if schema.is_empty() { "main" } else { schema };
-
-        // Get all tables in schema first
-        let mut tbl_stmt = conn.prepare(
-            "SELECT table_name FROM information_schema.tables \
-             WHERE table_catalog = ? AND table_schema = ? AND table_type = 'BASE TABLE' \
-             ORDER BY table_name",
-        ).map_err(|e| DbError::QueryFailed(e.to_string()))?;
-
-        let tables: Vec<String> = tbl_stmt.query_map(
-            [catalog.as_str(), schema_name],
-            |row| row.get::<_, String>(0),
-        ).map_err(|e| DbError::QueryFailed(e.to_string()))?
-        .filter_map(|r| r.ok())
-        .collect();
-
-        let mut relations = Vec::new();
-        for tbl in tables {
-            if let Ok((_, fks)) = query_fks(&conn, &catalog, schema_name, &tbl) {
-                for fk in fks {
-                    // Parse "schema.table.col" from fk.references
-                    let parts: Vec<&str> = fk.references.splitn(3, '.').collect();
-                    let (to_tbl, to_col) = if parts.len() == 3 {
-                        (parts[1].to_string(), parts[2].to_string())
-                    } else {
-                        continue;
-                    };
-                    relations.push(ErRelation {
-                        from: tbl.clone(),
-                        from_col: fk.column,
-                        to: to_tbl,
-                        to_col,
-                    });
-                }
-            }
-        }
-
-        Ok(relations)
+        let conn=self.conn.lock().await;
+        let catalog=resolve_catalog(&conn,"main")?;
+        let namespace=if schema.is_empty(){"main"}else{schema};
+        let mut stmt=conn.prepare("SELECT k.table_name,k.column_name,p.table_name,p.column_name,k.table_schema,p.table_schema,k.constraint_name,k.ordinal_position \
+            FROM information_schema.table_constraints c JOIN information_schema.key_column_usage k \
+            ON c.constraint_catalog=k.constraint_catalog AND c.constraint_schema=k.constraint_schema AND c.constraint_name=k.constraint_name AND c.table_name=k.table_name \
+            JOIN information_schema.referential_constraints r ON c.constraint_catalog=r.constraint_catalog AND c.constraint_schema=r.constraint_schema AND c.constraint_name=r.constraint_name \
+            JOIN information_schema.key_column_usage p ON r.unique_constraint_catalog=p.constraint_catalog AND r.unique_constraint_schema=p.constraint_schema AND r.unique_constraint_name=p.constraint_name \
+            AND p.ordinal_position=k.position_in_unique_constraint \
+            WHERE c.constraint_type='FOREIGN KEY' AND k.table_catalog=? AND k.table_schema=? ORDER BY k.table_name,k.constraint_name,k.ordinal_position")
+            .map_err(|e|DbError::QueryFailed(e.to_string()))?;
+        let rows=stmt.query_map([catalog.as_str(),namespace],|r|Ok(ErRelation{
+            from:r.get(0)?,from_col:r.get(1)?,to:r.get(2)?,to_col:r.get(3)?,from_schema:Some(r.get(4)?),to_schema:Some(r.get(5)?),constraint_id:Some(r.get(6)?),
+            ordinal:Some(r.get::<_,i64>(7)? as u32),column_count:None,
+        })).map_err(|e|DbError::QueryFailed(e.to_string()))?.collect::<Result<Vec<_>,_>>().map_err(|e|DbError::QueryFailed(e.to_string()))?;
+        Ok(ErRelation::complete_groups(rows))
     }
 }
 

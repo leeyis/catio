@@ -480,6 +480,12 @@ public final class CatioJdbcPlugin {
             while (rs.next()) {
                 ObjectNode item = result.addObject();
                 String refSchema = rs.getString("PKTABLE_SCHEM");
+                if (refSchema == null || refSchema.isBlank()) refSchema = rs.getString("PKTABLE_CAT");
+                String fromSchema = rs.getString("FKTABLE_SCHEM");
+                if (fromSchema == null || fromSchema.isBlank()) fromSchema = rs.getString("FKTABLE_CAT");
+                item.put("ref_schema", refSchema);
+                item.put("from_schema", fromSchema);
+                item.put("key_seq", rs.getInt("KEY_SEQ"));
                 item.put("column", rs.getString("FKCOLUMN_NAME"));
                 item.put("references", (refSchema == null || refSchema.isBlank() ? "" : refSchema + ".")
                     + rs.getString("PKTABLE_NAME") + "." + rs.getString("PKCOLUMN_NAME"));

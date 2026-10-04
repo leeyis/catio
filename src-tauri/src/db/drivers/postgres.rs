@@ -930,37 +930,27 @@ impl Driver for PostgresDriver {
     }
 
     async fn er_relations(&self, schema: &str) -> Result<Vec<ErRelation>, DbError> {
-        let client = self.pool.get().await
-            .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
-        // adapted from dbx list_foreign_keys L1646; schema-level (no table filter)
+        let client = self.pool.get().await.map_err(|e| DbError::ConnectFailed(e.to_string()))?;
+        // Catalog attribute numbers pair conkey/confkey directly, including cross-schema
+        // references and unique indexes that information_schema constraint joins can miss.
         let rows = client.query(
-            "SELECT fk.table_name AS from_table, fk.column_name AS from_col, \
-             pk.table_name AS to_table, pk.column_name AS to_col \
-             FROM information_schema.table_constraints tc \
-             JOIN information_schema.key_column_usage fk \
-               ON fk.constraint_name   = tc.constraint_name \
-               AND fk.constraint_schema = tc.constraint_schema \
-               AND fk.table_schema      = tc.table_schema \
-               AND fk.table_name        = tc.table_name \
-             JOIN information_schema.referential_constraints rc \
-               ON rc.constraint_name   = tc.constraint_name \
-               AND rc.constraint_schema = tc.constraint_schema \
-             JOIN information_schema.key_column_usage pk \
-               ON pk.constraint_name   = rc.unique_constraint_name \
-               AND pk.constraint_schema = rc.unique_constraint_schema \
-               AND pk.ordinal_position  = fk.position_in_unique_constraint \
-             WHERE tc.constraint_type = 'FOREIGN KEY' \
-               AND fk.table_schema = $1 \
-               AND pk.table_schema = $1 \
-             ORDER BY fk.table_name, fk.constraint_name, fk.ordinal_position",
-            &[&schema],
+            "SELECT ft.relname, fa.attname, pt.relname, pa.attname, fn.nspname, pn.nspname, \
+             c.oid::text, pairs.n::int, cardinality(c.conkey) \
+             FROM pg_catalog.pg_constraint c \
+             JOIN pg_catalog.pg_class ft ON ft.oid=c.conrelid \
+             JOIN pg_catalog.pg_namespace fn ON fn.oid=ft.relnamespace \
+             JOIN pg_catalog.pg_class pt ON pt.oid=c.confrelid \
+             JOIN pg_catalog.pg_namespace pn ON pn.oid=pt.relnamespace \
+             CROSS JOIN LATERAL unnest(c.conkey,c.confkey) WITH ORDINALITY pairs(f,p,n) \
+             JOIN pg_catalog.pg_attribute fa ON fa.attrelid=ft.oid AND fa.attnum=pairs.f \
+             JOIN pg_catalog.pg_attribute pa ON pa.attrelid=pt.oid AND pa.attnum=pairs.p \
+             WHERE c.contype='f' AND fn.nspname=$1 ORDER BY ft.relname,c.oid,pairs.n", &[&schema]
         ).await.map_err(|e| pg_query_err(&e))?;
-        Ok(rows.iter().map(|r| ErRelation {
-            from: r.get::<_, String>(0),
-            from_col: r.get::<_, String>(1),
-            to: r.get::<_, String>(2),
-            to_col: r.get::<_, String>(3),
-        }).collect())
+        Ok(ErRelation::complete_groups(rows.iter().map(|r| ErRelation {
+            from: r.get(0), from_col: r.get(1), to: r.get(2), to_col: r.get(3),
+            from_schema: Some(r.get(4)), to_schema: Some(r.get(5)), constraint_id: Some(r.get(6)),
+            ordinal: Some(r.get::<_,i32>(7) as u32), column_count: Some(r.get::<_,i32>(8) as u32),
+        }).collect()))
     }
 
     async fn list_functions(&self, schema: &str) -> Result<Vec<String>, DbError> {

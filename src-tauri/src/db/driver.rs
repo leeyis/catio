@@ -140,13 +140,52 @@ pub struct TableStructure {
 }
 
 /// ER 关系（表布局坐标由前端算，后端只给关系）。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ErRelation {
     pub from: String,
     pub from_col: String,
     pub to: String,
     pub to_col: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_schema: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to_schema: Option<String>,
+    /// Provider identity, scoped to the source namespace/table (not necessarily a DDL name).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub constraint_id: Option<String>,
+    /// One-based pair order and total width. Missing identity must not become a guessed JOIN.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ordinal: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column_count: Option<u32>,
+}
+impl ErRelation {
+    /// Complete providers read every pair in a constraint before calling this. Invalid or
+    /// unnamed groups remain visible as relations but are not advertised as complete JOINs.
+    pub(crate) fn complete_groups(mut rows: Vec<Self>) -> Vec<Self> {
+        let mut groups = std::collections::BTreeMap::<(String, String, String), Vec<usize>>::new();
+        for (index, row) in rows.iter().enumerate() {
+            if let (Some(schema), Some(id)) = (&row.from_schema, &row.constraint_id) {
+                if !id.is_empty() { groups.entry((schema.clone(), row.from.clone(), id.clone())).or_default().push(index); }
+            }
+        }
+        for indices in groups.values() {
+            let first = &rows[indices[0]];
+            let n = indices.len() as u32;
+            let mut ordinals: Vec<_> = indices.iter().filter_map(|&i| rows[i].ordinal).collect();
+            ordinals.sort_unstable();
+            let complete = ordinals == (1..=n).collect::<Vec<_>>() && indices.iter().all(|&i| {
+                let r = &rows[i];
+                !r.from_col.is_empty() && !r.to_col.is_empty() && r.to_schema.is_some()
+                    && r.to_schema == first.to_schema && r.to == first.to
+                    && r.column_count.is_none_or(|expected| expected == n)
+            });
+            for &index in indices { rows[index].column_count = complete.then_some(n); }
+        }
+        rows.sort_by(|a, b| (&a.from_schema, &a.from, &a.constraint_id, a.ordinal).cmp(&(&b.from_schema, &b.from, &b.constraint_id, b.ordinal)));
+        rows
+    }
 }
 
 /// 前端传来的单行编辑请求。
@@ -350,6 +389,35 @@ mod tests {
     use super::{ColumnDef, ConnectArgs, Driver, ErRelation, TableInfo, TableStructure};
     use crate::db::{DatabaseType, DbError, result::QueryResult};
     use std::{sync::atomic::{AtomicUsize, Ordering}, time::Duration};
+
+    fn relation(schema: &str, table: &str, ordinal: u32) -> ErRelation {
+        ErRelation { from: table.into(), from_col: format!("x{ordinal}"), to: "parent".into(), to_col: format!("p{ordinal}"),
+            from_schema: Some(schema.into()), to_schema: Some("target".into()), constraint_id: Some("same-name".into()),
+            ordinal: Some(ordinal), column_count: None }
+    }
+    #[test]
+    fn fk_groups_are_scoped_to_source_schema_and_table() {
+        let rows = ErRelation::complete_groups(vec![relation("app", "a", 1), relation("other", "a", 1), relation("app", "b", 1)]);
+        assert!(rows.iter().all(|r| r.column_count == Some(1)));
+    }
+    #[test]
+    fn fk_groups_reject_missing_and_duplicate_ordinals() {
+        for rows in [vec![relation("app", "a", 2)], vec![relation("app", "a", 1), relation("app", "a", 1)]] {
+            assert!(ErRelation::complete_groups(rows).iter().all(|r| r.column_count.is_none()));
+        }
+    }
+    #[test]
+    fn fk_groups_reject_missing_pairs_and_conflicting_targets() {
+        let mut first = relation("app", "a", 1); first.column_count = Some(2);
+        assert!(ErRelation::complete_groups(vec![first]).iter().all(|r| r.column_count.is_none()));
+        let mut second = relation("app", "a", 2); second.to_schema = Some("wrong".into());
+        assert!(ErRelation::complete_groups(vec![relation("app", "a", 1), second]).iter().all(|r| r.column_count.is_none()));
+    }
+    #[test]
+    fn unnamed_fk_groups_are_not_invented() {
+        let mut row = relation("app", "a", 1); row.constraint_id = None;
+        assert!(ErRelation::complete_groups(vec![row])[0].column_count.is_none());
+    }
 
     struct SchemaColumnsDriver {
         active: AtomicUsize,

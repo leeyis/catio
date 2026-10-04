@@ -724,42 +724,21 @@ impl Driver for SqlServerDriver {
     }
 
     async fn er_relations(&self, schema: &str) -> Result<Vec<ErRelation>, DbError> {
-        let mut client = self.client.lock().await;
-        let s = schema.replace('\'', "''");
-        // All FKs in the schema → ErRelation.
-        // Adapted from dbx sqlserver.rs list_foreign_keys (schema-level).
-        let sql = format!(
-            "SELECT \
-               OBJECT_NAME(fk.parent_object_id) AS from_table, \
-               c.name AS from_col, \
-               SCHEMA_NAME(rt.schema_id) AS to_schema, \
-               rt.name AS to_table, \
-               rc.name AS to_col \
-             FROM sys.foreign_keys fk \
-             JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id \
-             JOIN sys.columns c ON fkc.parent_object_id = c.object_id AND fkc.parent_column_id = c.column_id \
-             JOIN sys.tables rt ON fkc.referenced_object_id = rt.object_id \
-             JOIN sys.columns rc ON fkc.referenced_object_id = rc.object_id AND fkc.referenced_column_id = rc.column_id \
-             WHERE SCHEMA_NAME(fk.schema_id) = '{s}' \
-             ORDER BY from_table, fk.name, fkc.constraint_column_id"
-        );
-        let stream = client
-            .query(&*sql, &[])
-            .await
-            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
-        let rows = stream
-            .into_first_result()
-            .await
-            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
-        Ok(rows
-            .iter()
-            .map(|r| ErRelation {
-                from: r.try_get::<&str, _>(0).ok().flatten().unwrap_or("").to_string(),
-                from_col: r.try_get::<&str, _>(1).ok().flatten().unwrap_or("").to_string(),
-                to: r.try_get::<&str, _>(3).ok().flatten().unwrap_or("").to_string(),
-                to_col: r.try_get::<&str, _>(4).ok().flatten().unwrap_or("").to_string(),
-            })
-            .collect())
+        let mut client=self.client.lock().await;
+        let sql="SELECT OBJECT_NAME(fk.parent_object_id),c.name,rt.name,rc.name,SCHEMA_NAME(fk.schema_id),SCHEMA_NAME(rt.schema_id),fk.name,fkc.constraint_column_id, \
+            (SELECT COUNT(*) FROM sys.foreign_key_columns x WHERE x.constraint_object_id=fk.object_id) \
+            FROM sys.foreign_keys fk JOIN sys.foreign_key_columns fkc ON fk.object_id=fkc.constraint_object_id \
+            JOIN sys.columns c ON fkc.parent_object_id=c.object_id AND fkc.parent_column_id=c.column_id \
+            JOIN sys.tables rt ON fkc.referenced_object_id=rt.object_id \
+            JOIN sys.columns rc ON fkc.referenced_object_id=rc.object_id AND fkc.referenced_column_id=rc.column_id \
+            WHERE SCHEMA_NAME(fk.schema_id)=@P1 ORDER BY OBJECT_NAME(fk.parent_object_id),fk.name,fkc.constraint_column_id";
+        let rows=client.query(sql,&[&schema]).await.map_err(|e|DbError::QueryFailed(e.to_string()))?
+            .into_first_result().await.map_err(|e|DbError::QueryFailed(e.to_string()))?;
+        Ok(ErRelation::complete_groups(rows.iter().map(|r|{
+            let text=|i|r.try_get::<&str,_>(i).ok().flatten().unwrap_or("").to_string();
+            ErRelation{from:text(0),from_col:text(1),to:text(2),to_col:text(3),from_schema:Some(text(4)),to_schema:Some(text(5)),constraint_id:Some(text(6)),
+                ordinal:r.try_get::<i32,_>(7).ok().flatten().map(|v|v as u32),column_count:r.try_get::<i32,_>(8).ok().flatten().map(|v|v as u32)}
+        }).collect()))
     }
 }
 

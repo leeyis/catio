@@ -310,34 +310,27 @@ impl Driver for RqliteDriver {
     }
 
     async fn er_relations(&self, _schema: &str) -> Result<Vec<ErRelation>, DbError> {
-        // Enumerate all tables and collect FK relations
-        let tables = self.list_tables("main").await?;
-        let mut relations: Vec<ErRelation> = Vec::new();
-
-        for tbl in &tables {
-            if tbl.kind != "table" { continue; }
-            let fk_list = rqlite_query(
-                &self.http,
-                &format!("PRAGMA foreign_key_list({})", sqlite_ident(&tbl.name)),
-            ).await.unwrap_or_else(|_| RqliteResult {
-                types: Vec::new(),
-                columns: vec![], values: vec![], rows_affected: None, error: None
-            });
-
-            for row in &fk_list.values {
-                let from_col = value_by_column(&fk_list.columns, row, "from").unwrap_or_default();
-                let to_table = value_by_column(&fk_list.columns, row, "table").unwrap_or_default();
-                let to_col = value_by_column(&fk_list.columns, row, "to").unwrap_or_default();
-                if !from_col.is_empty() && !to_table.is_empty() {
-                    relations.push(ErRelation {
-                        from: tbl.name.clone(),
-                        from_col,
-                        to: to_table,
-                        to_col,
-                    });
+        let tables=self.list_tables("main").await?;
+        let mut relations=Vec::new();
+        for table in tables.iter().filter(|t|t.kind=="table"){
+            let keys=rqlite_query(&self.http,&format!("PRAGMA foreign_key_list({})",sqlite_ident(&table.name))).await?;
+            for row in &keys.values{
+                let value=|name|value_by_column(&keys.columns,row,name).unwrap_or_default();
+                let target=value("table");let mut to_col=value("to");
+                let seq=value("seq").parse::<u32>().ok();let id=value("id");
+                if to_col.is_empty(){
+                    let primary=rqlite_query(&self.http,&format!("PRAGMA table_info({})",sqlite_ident(&target))).await?;
+                    let mut columns:Vec<_>=primary.values.iter().filter_map(|r|{
+                        let pos=value_by_column(&primary.columns,r,"pk")?.parse::<u32>().ok()?;
+                        (pos>0).then(||(pos,value_by_column(&primary.columns,r,"name").unwrap_or_default()))
+                    }).collect();columns.sort_by_key(|(pos,_)|*pos);
+                    let width=keys.values.iter().filter(|r|value_by_column(&keys.columns,r,"id").as_deref()==Some(id.as_str())).count();
+                    if columns.len()==width{to_col=seq.and_then(|i|columns.get(i as usize).map(|(_,name)|name.clone())).unwrap_or_default();}
                 }
+                relations.push(ErRelation{from:table.name.clone(),from_col:value("from"),to:target,to_col,
+                    from_schema:Some("main".into()),to_schema:Some("main".into()),constraint_id:Some(format!("sqlite-fk-{id}")),ordinal:seq.map(|v|v+1),column_count:None});
             }
         }
-        Ok(relations)
+        Ok(ErRelation::complete_groups(relations))
     }
 }

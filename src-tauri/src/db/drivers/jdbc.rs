@@ -482,17 +482,18 @@ impl Driver for JdbcDriver {
     }
 
     async fn er_relations(&self, schema: &str) -> Result<Vec<ErRelation>, DbError> {
-        if !self.caps.er { return Err(DbError::Unsupported("JDBC driver does not advertise relational integrity metadata".into())); }
-        let mut relations = Vec::new();
+        if !self.caps.er{return Err(DbError::Unsupported("JDBC driver does not advertise relational integrity metadata".into()));}
+        let mut relations=Vec::new();
         for table in self.list_tables(schema).await? {
-            let mut params = self.meta_params(schema); params["table"] = json!(table.name);
-            let keys = self.rpc("getForeignKeys", params).await?;
-            for key in keys.as_array().into_iter().flatten() {
-                relations.push(ErRelation { from: table.name.clone(), from_col: key["column"].as_str().unwrap_or("").into(),
-                    to: key["ref_table"].as_str().unwrap_or("").into(), to_col: key["ref_column"].as_str().unwrap_or("").into() });
+            let mut params=self.meta_params(schema);params["table"]=json!(table.name);
+            let keys=self.rpc("getForeignKeys",params).await?;
+            for key in keys.as_array().into_iter().flatten(){
+                relations.push(ErRelation{from:table.name.clone(),from_col:key["column"].as_str().unwrap_or("").into(),to:key["ref_table"].as_str().unwrap_or("").into(),to_col:key["ref_column"].as_str().unwrap_or("").into(),
+                    from_schema:key["from_schema"].as_str().map(str::to_string),to_schema:key["ref_schema"].as_str().map(str::to_string),constraint_id:key["constraint_name"].as_str().map(str::to_string),
+                    ordinal:key["key_seq"].as_u64().map(|v|v as u32),column_count:None});
             }
         }
-        Ok(relations)
+        Ok(ErRelation::complete_groups(relations))
     }
 
     async fn column_names(&self, schema: &str, table: &str) -> Result<Vec<String>, DbError> {

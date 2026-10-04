@@ -901,30 +901,21 @@ impl MySqlDriver {
 
     /// er_relations for standard MySQL.
     async fn mysql_er_relations(&self, schema: &str) -> Result<Vec<ErRelation>, DbError> {
-        let mut conn = self.pool.get_conn().await
-            .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
-        // adapted from dbx list_foreign_keys (schema-level, no table filter)
+        let mut conn = self.pool.get_conn().await.map_err(|e| DbError::ConnectFailed(e.to_string()))?;
         let sql = format!(
-            "SELECT kcu.TABLE_NAME, kcu.COLUMN_NAME, \
-             kcu.REFERENCED_TABLE_NAME, kcu.REFERENCED_COLUMN_NAME \
-             FROM information_schema.KEY_COLUMN_USAGE kcu \
-             WHERE kcu.TABLE_SCHEMA = {s} \
-             AND kcu.REFERENCED_TABLE_NAME IS NOT NULL \
-             ORDER BY kcu.TABLE_NAME, kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION",
-            s = quote_value(schema),
-        );
-        let result = conn.query_iter(&sql).await
-            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
-        let rows: Vec<mysql_async::Row> = result
-            .collect_and_drop()
-            .await
-            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
-        Ok(rows.iter().map(|r| ErRelation {
-            from: get_str(r, 0),
-            from_col: get_str(r, 1),
-            to: get_str(r, 2),
-            to_col: get_str(r, 3),
-        }).collect())
+            "SELECT k.TABLE_NAME,k.COLUMN_NAME,k.REFERENCED_TABLE_NAME,k.REFERENCED_COLUMN_NAME, \
+             k.TABLE_SCHEMA,k.REFERENCED_TABLE_SCHEMA,k.CONSTRAINT_NAME,k.ORDINAL_POSITION, \
+             (SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE x \
+              WHERE x.CONSTRAINT_SCHEMA=k.CONSTRAINT_SCHEMA AND x.TABLE_NAME=k.TABLE_NAME AND x.CONSTRAINT_NAME=k.CONSTRAINT_NAME) \
+             FROM information_schema.KEY_COLUMN_USAGE k WHERE k.TABLE_SCHEMA={s} AND k.REFERENCED_TABLE_NAME IS NOT NULL \
+             ORDER BY k.TABLE_NAME,k.CONSTRAINT_NAME,k.ORDINAL_POSITION", s=quote_value(schema));
+        let result = conn.query_iter(&sql).await.map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        let rows: Vec<mysql_async::Row> = result.collect_and_drop().await.map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        Ok(ErRelation::complete_groups(rows.iter().map(|r| ErRelation {
+            from:get_str(r,0),from_col:get_str(r,1),to:get_str(r,2),to_col:get_str(r,3),
+            from_schema:Some(get_str(r,4)),to_schema:Some(get_str(r,5)),constraint_id:Some(get_str(r,6)),
+            ordinal:r.get::<u32,_>(7),column_count:r.get::<u32,_>(8),
+        }).collect()))
     }
 }
 
@@ -1131,35 +1122,18 @@ impl MySqlDriver {
     }
 
     async fn ob_er_relations(&self, schema: &str) -> Result<Vec<ErRelation>, DbError> {
-        let mut conn = self.pool.get_conn().await
-            .map_err(|e| DbError::ConnectFailed(e.to_string()))?;
-        let sql = format!(
-            "SELECT ac.TABLE_NAME, acc.COLUMN_NAME, \
-             ac2.TABLE_NAME AS R_TABLE, acc2.COLUMN_NAME AS R_COLUMN \
-             FROM ALL_CONSTRAINTS ac \
-             JOIN ALL_CONS_COLUMNS acc \
-               ON ac.CONSTRAINT_NAME = acc.CONSTRAINT_NAME AND ac.OWNER = acc.OWNER \
-             JOIN ALL_CONSTRAINTS ac2 \
-               ON ac.R_CONSTRAINT_NAME = ac2.CONSTRAINT_NAME AND ac.R_OWNER = ac2.OWNER \
-             JOIN ALL_CONS_COLUMNS acc2 \
-               ON ac2.CONSTRAINT_NAME = acc2.CONSTRAINT_NAME AND ac2.OWNER = acc2.OWNER \
-               AND acc.POSITION = acc2.POSITION \
-             WHERE ac.CONSTRAINT_TYPE = 'R' AND ac.OWNER = {s} \
-             ORDER BY ac.TABLE_NAME, ac.CONSTRAINT_NAME, acc.POSITION",
-            s = quote_value(schema),
-        );
-        let result = conn.query_iter(&sql).await
-            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
-        let rows: Vec<mysql_async::Row> = result
-            .collect_and_drop()
-            .await
-            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
-        Ok(rows.iter().map(|r| ErRelation {
-            from: get_str(r, 0),
-            from_col: get_str(r, 1),
-            to: get_str(r, 2),
-            to_col: get_str(r, 3),
-        }).collect())
+        let mut conn=self.pool.get_conn().await.map_err(|e|DbError::ConnectFailed(e.to_string()))?;
+        let sql=format!("SELECT ac.TABLE_NAME,acc.COLUMN_NAME,ac2.TABLE_NAME,acc2.COLUMN_NAME,ac.OWNER,ac2.OWNER,ac.CONSTRAINT_NAME,acc.POSITION \
+            FROM ALL_CONSTRAINTS ac JOIN ALL_CONS_COLUMNS acc ON ac.CONSTRAINT_NAME=acc.CONSTRAINT_NAME AND ac.OWNER=acc.OWNER \
+            JOIN ALL_CONSTRAINTS ac2 ON ac.R_CONSTRAINT_NAME=ac2.CONSTRAINT_NAME AND ac.R_OWNER=ac2.OWNER \
+            JOIN ALL_CONS_COLUMNS acc2 ON ac2.CONSTRAINT_NAME=acc2.CONSTRAINT_NAME AND ac2.OWNER=acc2.OWNER AND acc.POSITION=acc2.POSITION \
+            WHERE ac.CONSTRAINT_TYPE='R' AND ac.OWNER={s} ORDER BY ac.TABLE_NAME,ac.CONSTRAINT_NAME,acc.POSITION",s=quote_value(schema));
+        let result=conn.query_iter(&sql).await.map_err(|e|DbError::QueryFailed(e.to_string()))?;
+        let rows:Vec<mysql_async::Row>=result.collect_and_drop().await.map_err(|e|DbError::QueryFailed(e.to_string()))?;
+        Ok(ErRelation::complete_groups(rows.iter().map(|r|ErRelation{
+            from:get_str(r,0),from_col:get_str(r,1),to:get_str(r,2),to_col:get_str(r,3),
+            from_schema:Some(get_str(r,4)),to_schema:Some(get_str(r,5)),constraint_id:Some(get_str(r,6)),ordinal:r.get::<u32,_>(7),column_count:None,
+        }).collect()))
     }
 }
 

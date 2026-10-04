@@ -85,6 +85,21 @@ class CatioJdbcParityTest {
         assertEquals("PUBLIC.P.ID", keys.get(0).path("references").asText());
     }
 
+    @Test void compositeForeignKeyKeepsNamespaceAndPairOrder() throws Exception {
+        sql("CREATE SCHEMA OTHER");
+        sql("CREATE TABLE OTHER.P(B INT, A INT, PRIMARY KEY(B,A))");
+        sql("CREATE TABLE C(X INT, Y INT, CONSTRAINT FK_PAIR FOREIGN KEY(X,Y) REFERENCES OTHER.P(B,A))");
+        JsonNode keys = call("getForeignKeys", JSON.createObjectNode().put("schema", "PUBLIC").put("table", "C"));
+        assertEquals(2, keys.size());
+        assertEquals("PUBLIC", keys.get(0).path("from_schema").asText());
+        assertEquals("OTHER", keys.get(0).path("ref_schema").asText());
+        assertEquals("FK_PAIR", keys.get(0).path("constraint_name").asText());
+        assertEquals(1, keys.get(0).path("key_seq").asInt());
+        assertEquals("B", keys.get(0).path("ref_column").asText());
+        assertEquals(2, keys.get(1).path("key_seq").asInt());
+        assertEquals("A", keys.get(1).path("ref_column").asText());
+    }
+
     @Test void failedTransactionCanRollbackWithoutLosingOriginalRows() throws Exception {
         assertTrue(call("testConnection", JSON.createObjectNode()).path("transactions").asBoolean());
         sql("CREATE TABLE T(ID INT PRIMARY KEY, V VARCHAR)");
