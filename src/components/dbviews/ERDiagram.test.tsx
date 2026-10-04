@@ -74,9 +74,17 @@ it('shows a genuinely empty schema only after successful complete reads', async 
   expect(await screen.findByText('No tables to display in this schema')).toBeInTheDocument()
   expect(screen.queryByRole('alert')).not.toBeInTheDocument()
 })
+it('does not connect a cross-schema target to a same-name local table', async () => {
+  api.schemaColumnCatalog.mockResolvedValue({ tables: [['child', ['code']], ['parent', ['id']]], errors: [], truncated: false })
+  api.erRelations.mockResolvedValue([{ from: 'child', fromCol: 'code', to: 'parent', toCol: 'id', fromSchema: 'main', toSchema: 'other' }])
+  const view = render(<ERDiagram connId="c" schema="main"/>)
+  await screen.findByText('parent')
+  expect(view.container.querySelector('path')?.getAttribute('d')).toBe('')
+  expect(screen.getByText(/not drawn in this namespace/)).toBeInTheDocument()
+})
 it('does not draw a missing-column relation onto the first available column', async () => {
   api.schemaColumnCatalog.mockResolvedValue({ tables: [['child', ['actual']], ['parent', ['id']]], errors: [], truncated: false })
-  api.erRelations.mockResolvedValue([{ from: 'child', fromCol: 'missing', to: 'parent', toCol: 'id' }])
+  api.erRelations.mockResolvedValue([{ from: 'child', fromCol: 'missing', to: 'parent', toCol: 'id', fromSchema: 'main', toSchema: 'main' }])
   const view = render(<ERDiagram connId="c" schema="main"/>)
   await screen.findByText('parent')
   expect(view.container.querySelector('path')?.getAttribute('d')).toBe('')
@@ -85,7 +93,7 @@ it('does not infer a primary key merely from the target of a foreign key', async
   const tables: [string, string[]][] = [['child', ['parent_code']], ['parent', ['code']]]
   api.schemaColumnCatalog.mockResolvedValue({ tables, errors: [], truncated: false })
   api.schemaColumns.mockResolvedValue(tables)
-  api.erRelations.mockResolvedValue([{ from: 'child', fromCol: 'parent_code', to: 'parent', toCol: 'code' }])
+  api.erRelations.mockResolvedValue([{ from: 'child', fromCol: 'parent_code', to: 'parent', toCol: 'code', fromSchema: 'main', toSchema: 'main' }])
   const view = render(<ERDiagram connId="c" schema="main"/>)
   await screen.findByText('parent')
   expect(view.container.querySelector('[data-icon="key"]')).toBeNull()

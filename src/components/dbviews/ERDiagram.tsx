@@ -91,7 +91,7 @@ export function ERDiagram({ onOpenTable, connId, schema }: ERDiagramProps) {
     const cols = liveCols ?? []
     // A referenced column can be UNIQUE rather than PRIMARY KEY. The lightweight
     // catalog does not report PK membership, so do not invent that badge.
-    const fkCols = new Set(rels.map(r => JSON.stringify([r.from, r.fromCol])))
+    const fkCols = new Set(rels.filter(r => r.fromSchema === schema).map(r => JSON.stringify([r.from, r.fromCol])))
 
     // Grid auto-layout: N columns wide, gaps based on the tallest card per row.
     const GRID_COLS = Math.max(1, Math.min(4, Math.ceil(Math.sqrt(cols.length || 1))))
@@ -114,7 +114,7 @@ export function ERDiagram({ onOpenTable, connId, schema }: ERDiagramProps) {
       cs.push({ name: table, x: ORIGIN + c * (CARD_W + GAP_X), y: rowTop, cols: ercols })
     })
     return { cards: cs, relations: rels }
-  }, [isLive, liveCols, liveRels, D.erModel, D.tableStructures])
+  }, [isLive, liveCols, liveRels, schema, D.erModel, D.tableStructures])
 
   // ---- Geometry derived from the laid-out cards ----
   const geom = useMemo(() => {
@@ -131,6 +131,7 @@ export function ERDiagram({ onOpenTable, connId, schema }: ERDiagramProps) {
   }
 
   function path(rel: ErRelation) {
+    if (isLive && (rel.fromSchema !== schema || rel.toSchema !== schema)) return ''
     const s = geom[rel.from], tt = geom[rel.to]
     if (!s || !tt) return ''
     const sy = colY(rel.from, rel.fromCol), ty = colY(rel.to, rel.toCol)
@@ -155,6 +156,7 @@ export function ERDiagram({ onOpenTable, connId, schema }: ERDiagramProps) {
     return { W: Math.max(980, maxX + 24), H: Math.max(760, maxY + 24) }
   }, [isLive, cards])
 
+  const externalRelations = isLive ? relations.filter(r => r.fromSchema !== schema || r.toSchema !== schema).length : 0
   const awaitingSchema = isLive && !schema
   const showEmpty = isLive && !!current && !incomplete && cards.length === 0
   const showLoading = isLive && loading
@@ -172,6 +174,7 @@ export function ERDiagram({ onOpenTable, connId, schema }: ERDiagramProps) {
         </div>
         <Btn size="sm" variant="secondary" icon="download">{t('dbviews.exportPng')}</Btn>
       </div>
+      {externalRelations > 0 && <div role="status" style={{ padding: '6px 12px', color: 'var(--text-secondary)', fontSize: 12 }}>{t('dbviews.erOutsideNamespace', { count: externalRelations })}</div>}
       {incomplete && <div role="alert" style={{ padding: '8px 12px', color: 'var(--signal-amber)', background: 'var(--surface-sunken)', fontSize: 12, flex: 'none' }}>
         <div>{t('dbviews.erIncomplete')}</div>
         {current?.truncated && <div>{t('dbviews.erTruncated')}</div>}

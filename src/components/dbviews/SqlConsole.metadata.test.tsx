@@ -54,6 +54,19 @@ it('uses the JDBC profile rather than the transport name for function completion
   const result = props.extraCompletion(new CompletionContext(EditorState.create({ doc: sql, extensions: [sqlLanguage({ dialect: dialectFor('oracle') })] }), sql.length, true))
   expect(result.options).toEqual(expect.arrayContaining([expect.objectContaining({ label: 'NVL' })]))
 })
+it('wires full foreign-key identities and the actual default schema into JOIN completion', async () => {
+  api.erRelations.mockImplementation((_id, schema) => Promise.resolve(schema === 'APP' ? [
+    { from: 'orders', fromCol: 'owner_id', to: 'users', toCol: 'id', fromSchema: 'APP', toSchema: 'OTHER', constraintId: 'fk_owner', ordinal: 1, columnCount: 1 },
+  ] : []))
+  render(<LanguageProvider><DataProvider><SqlConsole connId="c" engine="postgres" fresh/></DataProvider></LanguageProvider>)
+  const code = 'SELECT * FROM orders o JOIN '
+  await waitFor(() => {
+    const props = api.editor.mock.calls.at(-1)?.[0]
+    const state = EditorState.create({ doc: code, extensions: [sqlLanguage({ dialect: dialectFor('postgres') })] })
+    const result = props.extraCompletion(new CompletionContext(state, code.length, true))
+    expect(result?.options).toEqual(expect.arrayContaining([expect.objectContaining({ apply: '"OTHER"."users" ON o."owner_id" = "OTHER"."users"."id"' })]))
+  })
+})
 it('shows completion truncation and permission errors rather than claiming complete suggestions', async () => {
   api.schemaColumnCatalog.mockResolvedValue({ tables: [['items',['id']]], errors: [{ schema: 'APP.private', message: 'permission denied' }], truncated: true })
   render(<LanguageProvider><DataProvider><SqlConsole connId="c" engine="postgres" fresh/></DataProvider></LanguageProvider>)

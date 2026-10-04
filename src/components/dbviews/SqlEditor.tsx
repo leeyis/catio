@@ -94,6 +94,10 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
     }
     const dialect = dialectFor(engine)
     const exts: Extension[] = [sql({ dialect, upperCaseKeywords: true }), autocompletion(),
+      EditorView.theme({
+        '.cm-tooltip-autocomplete, .cm-tooltip-autocomplete > ul': { maxWidth: 'min(680px, calc(100vw - 32px))' },
+        '.cm-tooltip-autocomplete > ul > li': { whiteSpace: 'normal', overflowWrap: 'anywhere' },
+      }),
       sqlSignatureTooltip(engine, tr('dbviews.functionParameters'), tr('dbviews.functionSignatureHint'))]
     // lang-sql's schema source is not suppressed in comments/literals on explicit invocation.
     // Wrap it ourselves while retaining its alias and quoted-identifier support.
@@ -103,7 +107,7 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
     // 追加的 SQL 补全源(函数签名补全 / 外键 JOIN 建议)。通过 languageData 注册,
     // 与 lang-sql 内置的表/列/关键字补全合并显示(不 override,故现有补全不退化)。
     if (extraCompletion) exts.push(dialect.language.data.of({ autocomplete: ifNotIn(
-      ['String', 'LineComment', 'BlockComment', 'QuotedIdentifier', 'CompositeIdentifier', '.'], extraCompletion,
+      ['String', 'LineComment', 'BlockComment'], extraCompletion,
     ) }))
     // SQL 诊断(未闭合括号/字符串、未知表名)+ gutter 标记,与 redis 控制台一致。
     if (lintSource) exts.push(linter(view => lintSource(view)), lintGutter())

@@ -7,9 +7,11 @@
  * (b) 基于已加载 schema 外键关系的 JOIN 建议。表/列补全仍由现有 lang-sql +
  * editorSchema 负责,这里不重复实现,避免与之冲突。
  */
-import type { CompletionContext, CompletionResult, Completion } from '@codemirror/autocomplete'
+import { snippetCompletion, type CompletionContext, type CompletionResult, type Completion } from '@codemirror/autocomplete'
 import { dialectFor } from './sqlDialect'
-import { completionIdentifier } from './sqlCompletionSchema'
+import { joinCompletion, type JoinTable } from './sqlJoinCompletion'
+export { joinSuggestions } from './sqlJoinCompletion'
+export type { JoinTable, JoinForeignKey, JoinSuggestionItem } from './sqlJoinCompletion'
 import type { EditorState } from '@codemirror/state'
 import { ensureSyntaxTree } from '@codemirror/language'
 import { sqlCallContext, sqlCallContextAt, type SqlCallContext } from './sqlSignatureContext'
@@ -211,6 +213,8 @@ export interface FunctionCompletionItem {
   label: string
   /** 插入文本,携带占位参数(无参函数只带空括号)。 */
   apply: string
+  /** Live editor template; placeholders are navigable without changing keyword separators. */
+  template: string
   /** 悬浮明细:函数签名。 */
   detail: string
 }
@@ -222,7 +226,7 @@ function matchesPrefix(name: string, prefix: string): boolean {
 
 /**
  * 函数名补全候选:按前缀(大小写不敏感)给出函数,apply 携带占位参数模板。
- * 占位参数是裸名(非 CodeMirror snippet 占位),保证插入后仍是可编辑的可见模板。
+ * apply 保留纯文本接口；template 给实际编辑器提供可跳转的 CodeMirror 字段。
  */
 export function functionCompletions(prefix: string, engine?: string): FunctionCompletionItem[] {
   const sigs = functionSignatures(engine)
@@ -231,126 +235,11 @@ export function functionCompletions(prefix: string, engine?: string): FunctionCo
     if (!matchesPrefix(name, prefix)) continue
     const params = sigs[name]
     const signature = `${name}(${params.join(', ')})`
-    items.push({ label: name, apply: signature, detail: signature })
+    const fields = params.map(param => param.split(/( AS | FROM )/).map(part => /^( AS | FROM )$/.test(part) ? part : '${' + part + '}').join('')).join(', ')
+    items.push({ label: name, apply: signature, template: `${name}(${fields})${params.length ? '${}' : ''}`, detail: signature })
   }
   // 稳定排序:与前缀完全匹配/更短者优先,其余按字母序。
   items.sort((a, b) => a.label.length - b.label.length || a.label.localeCompare(b.label))
-  return items
-}
-
-// ---- 外键 JOIN 建议 ----
-
-export interface JoinForeignKey {
-  column: string
-  refTable: string
-  refColumn: string
-}
-
-export interface JoinTable {
-  name: string
-  columns: string[]
-  foreignKeys: JoinForeignKey[]
-}
-
-export interface JoinSuggestionItem {
-  /** 形如 `JOIN users ON orders.user_id = users.id`。 */
-  label: string
-  /** 插入文本(标识符按方言加引用)。 */
-  apply: string
-  detail: string
-}
-
-/** Use the same profile-aware quoting as editor identifier completion. */
-const quoteIdent = completionIdentifier
-
-/** 抽取当前语句中已被 FROM/JOIN 引用的表名(小写)。 */
-function referencedTableNames(before: string): string[] {
-  const cleaned = before.replace(/'[^']*'/g, "''").replace(/"[^"]*"/g, '""')
-  const names: string[] = []
-  const re = /\b(?:from|join)\s+([A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)?)/gi
-  let m: RegExpExecArray | null
-  while ((m = re.exec(cleaned)) !== null) {
-    const raw = m[1]
-    const bare = raw.includes('.') ? raw.split('.').pop()! : raw
-    names.push(bare.toLowerCase())
-  }
-  return names
-}
-
-// 子句关键字:出现在已有 FROM/JOIN 之后则离开了表名上下文(进入 WHERE/SELECT 等)。
-const CLAUSE_AFTER_TABLE = /\b(?:where|group\s+by|order\s+by|having|limit|offset|union|intersect|except|set|values|returning)\b/i
-
-/**
- * 是否处于 FROM/JOIN 表名上下文(可给 JOIN 建议)。
- *
- * 命中条件:语句已出现 FROM(进入了表区),且在最后一个 FROM/JOIN 之后没有出现
- * WHERE/GROUP BY 等离开表区的子句关键字。这样 `FROM orders `、`FROM orders JOIN `、
- * `LEFT JOIN ` 都算表上下文,而 `FROM orders WHERE ` 不算。
- */
-function inFromOrJoinContext(before: string): boolean {
-  const cleaned = before.replace(/'[^']*'/g, "''").replace(/"[^"]*"/g, '""')
-  const lastFromOrJoin = Math.max(
-    cleaned.toLowerCase().lastIndexOf(' from '),
-    cleaned.toLowerCase().lastIndexOf(' join '),
-  )
-  // 也接受句首 "FROM "(无前导空格,实际罕见,语句多以 SELECT 开头)。
-  const fromIdx = lastFromOrJoin >= 0 ? lastFromOrJoin : (/^\s*from\b/i.test(cleaned) ? 0 : -1)
-  if (fromIdx < 0) return false
-  // 最后一个 from/join 之后若出现离开表区的子句关键字,则不在表上下文。
-  const after = cleaned.slice(fromIdx)
-  return !CLAUSE_AFTER_TABLE.test(after)
-}
-
-/**
- * 外键 JOIN 建议:基于已加载 schema 的外键关系,在 FROM/JOIN 上下文给出
- * `JOIN b ON a.fk = b.pk` 候选。以语句中已引用的表为锚,找与之有外键关系
- * (任一方向)且尚未被引用的表,生成 JOIN 候选。对标 dbx 的 buildJoinConditionItems
- * 中的外键路径(此处只取确切外键,不做列名启发式,避免误报)。
- */
-export function joinSuggestions(before: string, tables: JoinTable[], engine?: string): JoinSuggestionItem[] {
-  if (!inFromOrJoinContext(before)) return []
-  const referenced = referencedTableNames(before)
-  if (referenced.length === 0) return []
-  const referencedSet = new Set(referenced)
-
-  const byName = new Map<string, JoinTable>()
-  for (const t of tables) byName.set(t.name.toLowerCase(), t)
-
-  const items: JoinSuggestionItem[] = []
-  const seen = new Set<string>()
-
-  const push = (joinTable: string, ownerTable: string, ownerCol: string, refTable: string, refCol: string) => {
-    // owner.col = ref.col,其中 joinTable 是被 JOIN 进来的新表。
-    const label = `JOIN ${joinTable} ON ${ownerTable}.${ownerCol} = ${refTable}.${refCol}`
-    if (seen.has(label)) return
-    seen.add(label)
-    const apply = `JOIN ${quoteIdent(joinTable, engine)} ON ${quoteIdent(ownerTable, engine)}.${quoteIdent(ownerCol, engine)} = ${quoteIdent(refTable, engine)}.${quoteIdent(refCol, engine)}`
-    items.push({ label, apply, detail: 'FK JOIN' })
-  }
-
-  for (const anchorName of referencedSet) {
-    const anchor = byName.get(anchorName)
-    if (!anchor) continue
-
-    // 方向 1:锚表的外键指向另一张表 → JOIN 被指向的表。
-    for (const fk of anchor.foreignKeys) {
-      const target = fk.refTable.toLowerCase()
-      if (referencedSet.has(target)) continue
-      if (!byName.has(target)) continue
-      push(byName.get(target)!.name, anchor.name, fk.column, byName.get(target)!.name, fk.refColumn)
-    }
-
-    // 方向 2:其它表的外键指向锚表 → JOIN 那张持有外键的表。
-    for (const other of tables) {
-      const otherName = other.name.toLowerCase()
-      if (otherName === anchorName || referencedSet.has(otherName)) continue
-      for (const fk of other.foreignKeys) {
-        if (fk.refTable.toLowerCase() !== anchorName) continue
-        push(other.name, other.name, fk.column, anchor.name, fk.refColumn)
-      }
-    }
-  }
-
   return items
 }
 
@@ -367,33 +256,28 @@ export function joinSuggestions(before: string, tables: JoinTable[], engine?: st
 export function sqlAdvancedCompletion(
   getEngine: () => string | undefined,
   getJoinTables: () => JoinTable[],
+  getDefaultSchema: () => string | undefined = () => undefined,
 ) {
   return (context: CompletionContext): CompletionResult | null => {
     const tree = ensureSyntaxTree(context.state, context.pos, 10)
     if (!tree) return null
+    const joins = joinCompletion(context, getJoinTables(), getEngine(), getDefaultSchema())
+    if (joins) return joins
     for (let node = tree.resolveInner(context.pos, -1); ; ) {
       if (['String', 'LineComment', 'BlockComment', 'QuotedIdentifier', 'CompositeIdentifier', '.'].includes(node.name)) return null
       if (!node.parent) break
       node = node.parent
     }
-    const before = context.state.sliceDoc(0, context.pos)
     const engine = getEngine()
 
     // 末尾的裸标识符(函数前缀)。`word` 为 null 且非显式触发时不弹窗。
     const word = context.matchBefore(/[A-Za-z_][\w$]*/)
     const options: Completion[] = []
 
-    // 外键 JOIN 建议(在 FROM/JOIN 上下文)。from 取当前已输入的 word 起点(若有),
-    // 否则取光标处——JOIN 候选整体替换从词首到光标的文本。
-    const joins = joinSuggestions(before, getJoinTables(), engine)
-    for (const j of joins) {
-      options.push({ label: j.label, apply: j.apply, detail: j.detail, type: 'snippet', boost: 50 })
-    }
-
     // 函数名补全:仅当正在输入一个裸标识符(有前缀)时给,避免空白处刷出整库函数。
     if (word && word.text) {
       for (const f of functionCompletions(word.text, engine)) {
-        options.push({ label: f.label, apply: f.apply, detail: f.detail, type: 'function' })
+        options.push(snippetCompletion(f.template, { label: f.label, detail: f.detail, type: 'function' }))
       }
     }
 

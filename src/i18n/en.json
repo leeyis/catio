@@ -281,6 +281,7 @@
     "erIncomplete": "Diagram metadata is incomplete. Missing objects or relations do not imply they do not exist.",
     "erTruncated": "The metadata result was truncated; this diagram is not a complete schema view.",
     "erRetry": "Retry",
+    "erOutsideNamespace": "{{count}} relation(s) are not drawn in this namespace: the target is external or its namespace is unknown.",
     "zoomOut": "Zoom out",
     "zoomIn": "Zoom in",
     "zoomReset": "Reset zoom",

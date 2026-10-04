@@ -104,7 +104,7 @@ const tables: JoinTable[] = [
   {
     name: 'orders',
     columns: ['id', 'user_id', 'total'],
-    foreignKeys: [{ column: 'user_id', refTable: 'users', refColumn: 'id' }],
+    foreignKeys: [{ column: 'user_id', refTable: 'users', refColumn: 'id', constraintId: 'fk_user', ordinal: 1, columnCount: 1 }],
   },
   {
     name: 'users',
@@ -114,7 +114,7 @@ const tables: JoinTable[] = [
   {
     name: 'order_items',
     columns: ['id', 'order_id', 'qty'],
-    foreignKeys: [{ column: 'order_id', refTable: 'orders', refColumn: 'id' }],
+    foreignKeys: [{ column: 'order_id', refTable: 'orders', refColumn: 'id', constraintId: 'fk_order', ordinal: 1, columnCount: 1 }],
   },
 ]
 

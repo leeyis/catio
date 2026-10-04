@@ -21,6 +21,7 @@ import { QuerySessionToolbar } from './QuerySessionToolbar'
 import { cacheMetadataRequest } from '../../services/dbMetadata'
 import { referencedNamespaces } from './metadataReferences'
 import { completionSchema } from './sqlCompletionSchema'
+import { buildJoinTables } from './sqlJoinCatalog'
 import { ExplainPlanViewer } from './ExplainPlanViewer'
 import { SqlFileDialog } from './SqlFileDialog'
 import { parseExplainResult, supportsExplainPlan, type ParsedExplainPlan } from './explainPlan'
@@ -350,38 +351,14 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
       : D.tableStructures[table]?.columns.map(c => c.name) ?? [], engineId ?? engine)
   }, [connId, liveSchema, liveColumns, D.schema, D.tableStructures, engineId, engine])
 
-  // S3:JOIN 建议用的 JoinTable[]（表名 + 列 + 外键)。跨所有库聚合;外键来自
-  // liveRelations(已连接) / D.erModel(mock)。外键以 from.fromCol → to.toCol 表示。
-  // 持有于 ref,使补全源标识稳定(schema/列/外键加载不重建编辑器)。
   const joinTablesRef = useRef<JoinTable[]>([])
-  useEffect(() => {
-    const namespaces = (liveSchema ?? (connId ? { db: connId, schemas: [] } : D.schema)).schemas
-    const byName = new Map<string, JoinTable>()
-    const ensure = (name: string): JoinTable => {
-      const key = name.toLowerCase()
-      let jt = byName.get(key)
-      if (!jt) { jt = { name, columns: [], foreignKeys: [] }; byName.set(key, jt) }
-      return jt
-    }
-    for (const ns of namespaces) {
-      const realCols = connId ? liveColumns[ns.name] : undefined
-      for (const tbl of [...ns.tables, ...ns.views]) {
-        const cols = connId ? (realCols?.[tbl.name] ?? []) : (D.tableStructures[tbl.name]?.columns.map(c => c.name) ?? [])
-        const jt = ensure(tbl.name)
-        if (cols.length && jt.columns.length === 0) jt.columns = cols
-      }
-      // 外键关系:from.fromCol(持有 FK 的表/列) → to.toCol(被引用表/列)。
-      const rels = connId ? (liveRelations[ns.name] ?? []) : D.erModel.relations
-      for (const r of rels) {
-        const owner = ensure(r.from)
-        ensure(r.to)
-        if (!owner.foreignKeys.some(fk => fk.column === r.fromCol && fk.refTable === r.to && fk.refColumn === r.toCol)) {
-          owner.foreignKeys.push({ column: r.fromCol, refTable: r.to, refColumn: r.toCol })
-        }
-      }
-    }
-    joinTablesRef.current = [...byName.values()]
-  }, [connId, liveSchema, liveColumns, liveRelations, D.schema, D.tableStructures, D.erModel])
+  joinTablesRef.current = useMemo(() => buildJoinTables(
+    (liveSchema ?? (connId ? { schemas: [] } : D.schema)).schemas,
+    (ns, table) => connId ? liveColumns[ns]?.[table] ?? [] : D.tableStructures[table]?.columns.map(c => c.name) ?? [],
+    connId ? liveRelations : Object.fromEntries(D.schema.schemas.map(ns => [ns.name, D.erModel.relations])),
+  ), [connId, liveSchema, liveColumns, liveRelations, D.schema, D.tableStructures, D.erModel])
+  const completionNamespaceRef = useRef(completionNamespace)
+  completionNamespaceRef.current = completionNamespace
 
   // 引擎也以 ref 暴露给补全源,避免方言变化重建编辑器扩展。
   const engineRef = useRef(engine)
@@ -389,7 +366,7 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
   // 高级 SQL 补全源(函数签名补全 + 外键 JOIN 建议)。plain 引擎不挂(无 SQL 语义)。
   // 标识稳定:惰性读取 engine/joinTables,故 schema/外键加载不触发编辑器重建。
   const advancedCompletion = useMemo(
-    () => (plain ? undefined : sqlAdvancedCompletion(() => engineRef.current, () => joinTablesRef.current)),
+    () => (plain ? undefined : sqlAdvancedCompletion(() => engineRef.current, () => joinTablesRef.current, () => completionNamespaceRef.current)),
     [plain],
   )
 

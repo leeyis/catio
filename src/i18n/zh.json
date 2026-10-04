@@ -281,6 +281,7 @@
     "erIncomplete": "关系图元数据不完整，未显示的对象或关系不代表不存在。",
     "erTruncated": "元数据结果已截断，此图不是该模式的完整视图。",
     "erRetry": "重试",
+    "erOutsideNamespace": "{{count}} 条关系未在当前模式中绘制：目标位于其他模式或其模式身份不明。",
     "zoomOut": "缩小",
     "zoomIn": "放大",
     "zoomReset": "重置",

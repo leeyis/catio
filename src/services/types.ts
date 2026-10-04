@@ -209,6 +209,12 @@ export interface ErRelation {
   fromCol: string
   to: string
   toCol: string
+  fromSchema?: string
+  toSchema?: string
+  /** Provider grouping identity, not necessarily an ALTER TABLE constraint name. */
+  constraintId?: string
+  ordinal?: number
+  columnCount?: number
 }
 
 export interface ErModel {

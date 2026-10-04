@@ -2,11 +2,12 @@ import { act, fireEvent, render, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { EditorView } from '@codemirror/view'
 import { syntaxTree } from '@codemirror/language'
-import { CompletionContext, type CompletionSource, currentCompletions, startCompletion } from '@codemirror/autocomplete'
+import { CompletionContext, type CompletionSource, currentCompletions, startCompletion, acceptCompletion } from '@codemirror/autocomplete'
 import { undoDepth } from '@codemirror/commands'
 import { MSSQL, MySQL, PostgreSQL, SQLite, StandardSQL, PLSQL } from '@codemirror/lang-sql'
 import { SqlEditor, dialectFor, type SqlEditorProps } from './SqlEditor'
 import { completionSchema } from './sqlCompletionSchema'
+import { sqlAdvancedCompletion } from './sqlAdvancedCompletion'
 import '../../i18n'
 
 const schema = { audit: { orders: ['audit_only'] }, app: { orders: ['app_only', 'note'] } }
@@ -60,6 +61,18 @@ describe('live SQL dialect and namespace completion', () => {
     rerender(<SqlEditor code={code} onChange={() => {}} schema={schema} defaultSchema="audit" engine="sqlserver"/>)
     expect({ doc: view.state.doc.toString(), cursor: view.state.selection.main.head, undo: undoDepth(view.state) }).toEqual(before)
     expect((await candidates(view)).map(c => c.label)).toContain('audit_only')
+  })
+  it('offers and accepts a qualified JOIN target through the actual editor guard and filter', async () => {
+    const extraCompletion = sqlAdvancedCompletion(() => 'postgres', () => [
+      { schema: 'app', name: 'orders', columns: ['owner'], foreignKeys: [{ column: 'owner', refSchema: 'auth', refTable: 'users', refColumn: 'id', constraintId: 'fk', ordinal: 1, columnCount: 1 }] },
+      { schema: 'auth', name: 'users', columns: ['id'], foreignKeys: [] },
+    ], () => 'app')
+    const { view } = mount('SELECT * FROM orders o LEFT JOIN auth.us|', { schema: {}, engine: 'postgres', defaultSchema: 'app', extraCompletion })
+    act(() => { startCompletion(view) })
+    await waitFor(() => expect(currentCompletions(view.state)[0]?.detail).toBe('FK JOIN'))
+    await new Promise(resolve => setTimeout(resolve, 100)) // CodeMirror's normal acceptance guard.
+    act(() => { expect(acceptCompletion(view)).toBe(true) })
+    expect(view.state.doc.toString()).toBe('SELECT * FROM orders o LEFT JOIN "auth"."users" ON o."owner" = "auth"."users"."id"')
   })
   it('accepts a visible completion with Tab rather than inserting indentation', async () => {
     const { view } = mount('SELECT * FROM app.ord|', { defaultSchema: 'app' })
