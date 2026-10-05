@@ -9,10 +9,11 @@ import { EditorView, keymap, placeholder as cmPlaceholder, lineNumbers, highligh
 import { EditorState, Compartment, Prec, type Extension } from '@codemirror/state'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
 import { search,searchKeymap,openSearchPanel,closeSearchPanel,searchPanelOpen } from '@codemirror/search'
-import { autocompletion, completionKeymap, closeBrackets, closeBracketsKeymap, acceptCompletion, ifNotIn, type CompletionSource } from '@codemirror/autocomplete'
+import { autocompletion, completionKeymap, closeBrackets, closeBracketsKeymap, acceptCompletion, type CompletionSource } from '@codemirror/autocomplete'
 import { linter, lintGutter, type Diagnostic } from '@codemirror/lint'
-import { syntaxHighlighting, bracketMatching, indentOnInput } from '@codemirror/language'
-import { sql, type SQLNamespace } from '@codemirror/lang-sql'
+import { LanguageSupport, syntaxHighlighting, bracketMatching, indentOnInput } from '@codemirror/language'
+import { guardedSqlKeywordCompletion, readySqlCompletion } from './sqlKeywordCompletion'
+import type { SQLNamespace } from '@codemirror/lang-sql'
 import { scopedSchemaCompletion } from './sqlScopeCompletion'
 import { sqlSignatureTooltip } from './sqlSignatureTooltip'
 import { dialectFor } from './sqlDialect'
@@ -107,7 +108,8 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
       return exts
     }
     const dialect = dialectFor(engine)
-    const exts: Extension[] = [sql({ dialect, upperCaseKeywords: true }), autocompletion(),
+    const exts: Extension[] = [new LanguageSupport(dialect.language,
+      dialect.language.data.of({autocomplete:guardedSqlKeywordCompletion(dialect)})), autocompletion(),
       EditorView.theme({
         '.cm-tooltip-autocomplete, .cm-tooltip-autocomplete > ul': { maxWidth: 'min(680px, calc(100vw - 32px))' },
         '.cm-tooltip-autocomplete > ul > li': { whiteSpace: 'normal', overflowWrap: 'anywhere' },
@@ -115,13 +117,13 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
       sqlSignatureTooltip(engine, tr('dbviews.functionParameters'), tr('dbviews.functionSignatureHint'))]
     // lang-sql's schema source is not suppressed in comments/literals on explicit invocation.
     // Wrap it ourselves while retaining its alias and quoted-identifier support.
-    if (schema) exts.push(dialect.language.data.of({ autocomplete: ifNotIn(
-      ['String', 'LineComment', 'BlockComment'], scopedSchemaCompletion(schema, defaultSchema, engine),
+    if (schema) exts.push(dialect.language.data.of({ autocomplete: readySqlCompletion(
+      scopedSchemaCompletion(schema, defaultSchema, engine),
     ) }))
     // 追加的 SQL 补全源(函数签名补全 / 外键 JOIN 建议)。通过 languageData 注册,
     // 与 lang-sql 内置的表/列/关键字补全合并显示(不 override,故现有补全不退化)。
-    if (extraCompletion) exts.push(dialect.language.data.of({ autocomplete: ifNotIn(
-      ['String', 'LineComment', 'BlockComment'], extraCompletion,
+    if (extraCompletion) exts.push(dialect.language.data.of({ autocomplete: readySqlCompletion(
+      extraCompletion,
     ) }))
     // SQL 诊断(未闭合括号/字符串、未知表名)+ gutter 标记,与 redis 控制台一致。
     if (lintSource) exts.push(linter(view => lintSource(view)), lintGutter())

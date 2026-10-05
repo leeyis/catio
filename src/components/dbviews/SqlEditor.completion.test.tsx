@@ -21,6 +21,9 @@ function mount(text: string, props: Partial<SqlEditorProps> = {}) {
 }
 async function candidates(view: EditorView) {
   const pos = view.state.selection.main.head
+  // These cases assert scope semantics, not the scheduler's 10 ms parsing slice.
+  // Lagging published trees and exhausted budgets have separate controlled tests.
+  expect(ensureSyntaxTree(view.state,view.state.doc.length,100)).not.toBeNull()
   const context = new CompletionContext(view.state, pos, true)
   const results = await Promise.all(view.state.languageDataAt<CompletionSource>('autocomplete', pos).map(source => source(context)))
   return results.flatMap(result => result?.options ?? [])
