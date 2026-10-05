@@ -129,7 +129,7 @@ export function ExplainPlanViewer({ plan, error, loading, onClose,sourceSql,onLo
         )}
       </div>
 
-      {sourceSql&&<details style={{flex:'none',padding:'6px 12px',fontSize:11.5,borderBottom:'1px solid var(--border-hairline)'}}><summary>{t('explain.sourceSql')}</summary><div className="row gap8" style={{alignItems:'flex-start',paddingTop:6}}><pre className="mono" style={{margin:0,flex:1,maxHeight:120,overflow:'auto',whiteSpace:'pre-wrap',overflowWrap:'anywhere',color:'var(--text-secondary)'}}>{sourceSql}</pre>{onLocateSource&&<button className="btn ghost sm" onClick={onLocateSource}>{t('dbviews.locateSqlSource')}</button>}</div></details>}
+      {sourceSql&&<details style={{flex:'none',padding:'6px 12px',fontSize:11.5,borderBottom:'1px solid var(--border-hairline)'}}><summary>{t('explain.sourceSql')}</summary><div className="row gap8" style={{alignItems:'flex-start',paddingTop:6}}><pre className="mono" style={{margin:0,flex:1,maxHeight:120,overflow:'auto',whiteSpace:'pre-wrap',overflowWrap:'anywhere',color:'var(--text-secondary)'}}>{sourceSql}</pre>{onLocateSource&&<button className="btn btn-ghost sm" onClick={onLocateSource}>{t('dbviews.locateSqlSource')}</button>}</div></details>}
       {plan?.incomplete && <div role="alert" style={{ padding: '8px 12px', fontSize: 12, color: 'var(--signal-amber)', background: 'var(--surface-sunken)' }}>{t('explain.incomplete')}</div>}
       {/* 主体:loading / error / empty / 三视图 */}
       {loading ? (

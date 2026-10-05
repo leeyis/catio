@@ -740,7 +740,7 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
           </div>}
           {/* 功能#6:结果区极简工具条,仅放最大化/恢复入口(控制 maxResults<->split)。视觉克制,右对齐。 */}
           <div className="row" style={{ justifyContent: 'flex-end', flex: 'none', padding: '3px 8px', borderBottom: '1px solid var(--border-hairline)' }}>
-            {statementResults[selectedStatement]?.source&&<button className="btn ghost sm" disabled={statementResults[selectedStatement].source!.document!==code} title={t('dbviews.sourceChangedHint')} onClick={()=>{const range=statementResults[selectedStatement]?.source;if(range)locateSource(range)}}><Icon name="code" size={13}/>{t('dbviews.locateSqlSource')}</button>}
+            {statementResults[selectedStatement]?.source&&<button className="btn btn-ghost sm" disabled={statementResults[selectedStatement].source!.document!==code} title={t('dbviews.sourceChangedHint')} onClick={()=>{const range=statementResults[selectedStatement]?.source;if(range)locateSource(range)}}><Icon name="code" size={13}/>{t('dbviews.locateSqlSource')}</button>}
             {result?.rowsAffected != null && <span role="status" style={{ marginRight: 'auto', color: 'var(--signal-green)', fontSize: 12 }}>{t('dbviews.rowsAffected', { count: result.rowsAffected })}</span>}
             {paneMode === 'maxResults'
               ? <button className="icon-btn bare" title={t('dbviews.restorePane')} onClick={() => setPaneMode('split')}><Icon name="minimize-2" size={15} /></button>

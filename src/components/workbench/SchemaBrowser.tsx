@@ -367,7 +367,7 @@ function SchemaNode({ connId,engine,ownerKey, onLoadNamespace, ns, query, active
         {ns.status==='loading'&&<div role="status" style={{padding:'8px 18px',fontSize:11.5,color:'var(--text-tertiary)'}}>{t('workbench.metadataLoading')}</div>}
         {(ns.error||ns.routineError)&&<div role="alert" style={{padding:'8px 18px',fontSize:11.5,color:'var(--danger-fg)',overflowWrap:'anywhere'}}>
           <div>{ns.error??ns.routineError}</div>
-          {onLoadNamespace&&<button className="btn ghost sm" onClick={()=>onLoadNamespace(ns.name,true)}>{t('workbench.metadataRetry')}</button>}
+          {onLoadNamespace&&<button className="btn btn-ghost sm" onClick={()=>onLoadNamespace(ns.name,true)}>{t('workbench.metadataRetry')}</button>}
         </div>}
         <MetadataNodeActions ownerKey={JSON.stringify([ownerKey,ns.name,'tables'])} items={folderItems('tables')} title={t('workbench.schemaMenu')} className="row" triggerTestId={'folder-menu:tables:'+ns.name}><TreeNode icon="folder" label={t('workbench.tables')} count={tables.length} open={open.tables} onToggle={() => setOpen(o => ({ ...o, tables: !o.tables }))} depth={1} /></MetadataNodeActions>
         {open.tables && tables.map(tbl => {
