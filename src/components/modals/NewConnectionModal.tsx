@@ -6,7 +6,7 @@ import { Btn, IconBtn, Segmented, Toggle, ConnGlyph } from '../atoms'
 import { useData } from '../../state/DataContext'
 import type { AuthMethod, SshConnectArgs, SshTestResult } from '../../services/ssh'
 import { sshTest, serialListPorts } from '../../services/ssh'
-import { isServer } from '../../services/transport'
+import { isServer, isTauri } from '../../services/transport'
 import { dbConnect, testConnection, dbErrMsg } from '../../services/db'
 import { enginesByGroup, findEngine, matchEngineId } from '../../services/dbEngines'
 import { jdbcDriverStatus, downloadJdbcDriver, openJdbcDriversDir, importJdbcDriver, JDBC_DOWNLOADABLE, type JdbcDriverStatus } from '../../services/jdbcDrivers'
@@ -216,6 +216,7 @@ export function NewConnectionModal({
   // JDBC engines need a driver JAR; surface install-status + one-click download.
   const currentEngine = findEngine(engine)
   const isJdbc = currentEngine?.dbType === 'jdbc'
+  const isFileDb = currentEngine?.dbType === 'sqlite' || currentEngine?.dbType === 'duckdb'
   const jdbcProfile = currentEngine?.driverProfile
   const [driverStatus, setDriverStatus] = useState<JdbcDriverStatus | null>(null)
   const [driverBusy, setDriverBusy] = useState(false)
@@ -536,6 +537,7 @@ export function NewConnectionModal({
   // Real, ephemeral connection test (DB kind). Builds the same args as
   // save-and-connect, pings the server, and surfaces version + latency.
   const handleTestConnection = async () => {
+    if(isFileDb&&!dbHost.trim())return
     setDbTested(false)
     setDbTestResult(null)
     setDbTestError(null)
@@ -546,14 +548,14 @@ export function NewConnectionModal({
         dbType: eng?.dbType ?? 'postgres',
         ...(eng?.driverProfile ? { driverProfile: eng.driverProfile } : {}),
         host: dbHost,
-        port: Number(dbPort),
-        user: dbUser,
-        ...(dbDatabase ? { database: dbDatabase } : {}),
-        ...(dbOptions.trim() ? { options: dbOptions.trim() } : {}),
-        ...(dbSsl ? { ssl: true } : {}),
-        ...(dbSsl && dbCaCertPath.trim() ? { caCertPath: dbCaCertPath.trim() } : {}),
-        ...(dbSsl && dbSslNoVerify ? { sslRejectUnauthorized: false } : {}),
-        secret: dbSecret || undefined,
+        port: isFileDb ? 0 : Number(dbPort),
+        user: isFileDb ? '' : dbUser,
+        ...(!isFileDb && dbDatabase ? { database: dbDatabase } : {}),
+        ...(!isFileDb && dbOptions.trim() ? { options: dbOptions.trim() } : {}),
+        ...(!isFileDb && dbSsl ? { ssl: true } : {}),
+        ...(!isFileDb && dbSsl && dbCaCertPath.trim() ? { caCertPath: dbCaCertPath.trim() } : {}),
+        ...(!isFileDb && dbSsl && dbSslNoVerify ? { sslRejectUnauthorized: false } : {}),
+        secret: isFileDb ? undefined : dbSecret || undefined,
       })
       setDbTestResult(result)
       setDbTested(true)
@@ -565,6 +567,7 @@ export function NewConnectionModal({
   }
 
   const handleDbSaveAndConnect = async () => {
+    if(isFileDb&&!dbHost.trim())return
     setDbError(null)
     setDbConnecting(true)
     // EDIT mode reuses the existing profile id so saveDbConnection upserts (updates)
@@ -581,14 +584,14 @@ export function NewConnectionModal({
       engineId: engine,
       ...(eng?.driverProfile ? { driverProfile: eng.driverProfile } : {}),
       host: dbHost,
-      port: Number(dbPort),
-      user: dbUser,
-      ...(dbDatabase ? { database: dbDatabase } : {}),
+      port: isFileDb ? 0 : Number(dbPort),
+      user: isFileDb ? '' : dbUser,
+      ...(!isFileDb && dbDatabase ? { database: dbDatabase } : {}),
       ...(dbNotes.trim() ? { notes: dbNotes.trim() } : {}),
-      ...(dbOptions.trim() ? { options: dbOptions.trim() } : {}),
-      ...(dbSsl ? { ssl: true } : {}),
-      ...(dbSsl && dbCaCertPath.trim() ? { caCertPath: dbCaCertPath.trim() } : {}),
-      ...(dbSsl && dbSslNoVerify ? { sslRejectUnauthorized: false } : {}),
+      ...(!isFileDb && dbOptions.trim() ? { options: dbOptions.trim() } : {}),
+      ...(!isFileDb && dbSsl ? { ssl: true } : {}),
+      ...(!isFileDb && dbSsl && dbCaCertPath.trim() ? { caCertPath: dbCaCertPath.trim() } : {}),
+      ...(!isFileDb && dbSsl && dbSslNoVerify ? { sslRejectUnauthorized: false } : {}),
     }
     // Persist profile WITHOUT secret. Triggers the reactive store's notify(), so the
     // sidebar / home connection list updates immediately — the connection never
@@ -596,10 +599,10 @@ export function NewConnectionModal({
     saveDbConnection(profile)
     // Attempt live connection (only works in Tauri runtime; throws outside)
     try {
-      const result = await dbConnect({ ...profile, secret: dbSecret || undefined }, profile.name)
+      const result = await dbConnect({ ...profile, secret: isFileDb ? undefined : dbSecret || undefined }, profile.name)
       // Store connId + capabilities for D3 (capabilities-gated UI) to consume
       setActiveDbConnection(result, profile)
-      const usedSecret = dbSecret
+      const usedSecret = isFileDb ? '' : dbSecret
       setDbSecret('') // discard secret from memory
       setDbConnecting(false)
       // Success: hand the saved profile (and the secret, so it can be cached) back
@@ -866,19 +869,20 @@ export function NewConnectionModal({
             {(kind === 'db' || (proto !== 'local' && proto !== 'serial')) && (
               <div className="row gap10">
                 {kind === 'db'
-                  ? <Field label={t('modals.fieldHost')} value={dbHost} onChange={setDbHost} placeholder="127.0.0.1" mono w={2} />
+                  ? <Field label={t(isFileDb?'modals.fieldDatabasePath':'modals.fieldHost')} value={dbHost} onChange={setDbHost} placeholder={isFileDb?t('modals.databasePathPlaceholder'):'127.0.0.1'} mono w={2} />
                   : <Field key={`host-${kind}`} label={t('modals.fieldHost')} value={editHost ? editHost.host : ''} mono w={2} inputRef={hostRef} onInput={recomputeCanTest} />}
                 {kind === 'db'
-                  ? <Field label={t('modals.fieldPort')} value={dbPort} onChange={setDbPort} numeric mono w={0.8} />
+                  ? isFileDb ? null : <Field label={t('modals.fieldPort')} value={dbPort} onChange={setDbPort} numeric mono w={0.8} />
                   : proto !== 'mosh'
                     ? <Field key={`port-${kind}`} label={t('modals.fieldPort')} value={editHost ? String(editHost.port) : '22'} numeric mono w={0.8} inputRef={portRef} />
                     : null}
               </div>
             )}
+            {kind==='db'&&isFileDb&&<div className="col gap6" style={{fontSize:11.5,color:'var(--text-tertiary)'}}><span>{t(isServer()?'modals.databasePathServerHint':'modals.databasePathHint')}</span><span>{t('modals.databaseMemoryHint')}</span>{isTauri()&&<button type="button" className="btn btn-secondary sm" style={{alignSelf:'flex-start'}} onClick={async()=>{try{const {open}=await import('@tauri-apps/plugin-dialog');const picked=await open({multiple:false,filters:[{name:'Database',extensions:isFileDb&&currentEngine?.dbType==='duckdb'?['duckdb','db']:['db','sqlite','sqlite3']}]});const path=Array.isArray(picked)?picked[0]:picked;if(path)setDbHost(path)}catch(error){setDbError(dbErrMsg(error))}}}><Icon name="folder-open" size={14}/>{t('modals.chooseDatabaseFile')}</button>}</div>}
             {/* user + password row.
                 DB: 始终显示。Host:local/serial/telnet 无需登录凭据(隐藏);mosh 显示用户名
                 (无密码,mosh 走 SSH 自身认证);ssh/vnc/rdp 显示用户名(+ssh/vnc 密码)。 */}
-            {(kind === 'db' || (proto !== 'local' && proto !== 'serial' && proto !== 'telnet')) && (
+            {(kind === 'db' ? !isFileDb : (proto !== 'local' && proto !== 'serial' && proto !== 'telnet')) && (
               <div className="row gap10">
                 {kind === 'db'
                   ? <Field label={t('modals.fieldUser')} value={dbUser} onChange={setDbUser} placeholder={t('modals.fieldUserPlaceholder')} mono />
@@ -921,7 +925,7 @@ export function NewConnectionModal({
               </div>
             )}
             {/* Database name field — DB kind only */}
-            {!credentialStorageEnabled && (kind === 'db' || (kind === 'host' && (proto === 'ssh' || proto === 'vnc'))) && (
+            {!credentialStorageEnabled && ((kind === 'db' && !isFileDb) || (kind === 'host' && (proto === 'ssh' || proto === 'vnc'))) && (
               <div
                 role="note"
                 className="row gap6"
@@ -949,11 +953,11 @@ export function NewConnectionModal({
                 )}
               </div>
             )}
-            {kind === 'db' && (
+            {kind === 'db' && !isFileDb && (
               <Field label={t('modals.fieldDatabase')} value={dbDatabase} onChange={setDbDatabase} placeholder="e.g. orders" />
             )}
             {/* Advanced connection params — DB kind only */}
-            {kind === 'db' && (
+            {kind === 'db' && !isFileDb && (
               <label className="col" style={{ gap: 5 }}>
                 <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }}>{t('modals.fieldOptions')}</span>
                 <input value={dbOptions} onChange={e => setDbOptions(e.target.value)}
@@ -963,7 +967,7 @@ export function NewConnectionModal({
               </label>
             )}
             {/* SSL/TLS — DB kind only */}
-            {kind === 'db' && (
+            {kind === 'db' && !isFileDb && (
               <div className="col" style={{ gap: 8 }}>
                 <label className="row" style={{ gap: 8, alignItems: 'center', cursor: 'pointer' }}>
                   <input type="checkbox" checked={dbSsl} onChange={e => setDbSsl(e.target.checked)}
@@ -1043,7 +1047,7 @@ export function NewConnectionModal({
           )}
 
           {/* tunnel / proxyjump — SSH host & DB-over-SSH only (irrelevant for VNC/RDP/etc.) */}
-          {(kind === 'db' || proto === 'ssh') && (
+          {(kind === 'db' ? !isFileDb : proto === 'ssh') && (
           <div style={{ border: '1px solid var(--border-hairline)', borderRadius: 14, overflow: 'hidden', marginBottom: 6 }}>
             <div className="row" style={{ justifyContent: 'space-between', padding: '12px 14px', background: tunnel ? 'var(--accent-soft-alt)' : 'var(--surface-subtle)' }}>
               <div className="row gap10">
@@ -1166,7 +1170,7 @@ export function NewConnectionModal({
         <div className="row" style={{ justifyContent: 'space-between', padding: '14px 20px', borderTop: '1px solid var(--border-hairline)' }}>
           {kind === 'db' ? (
             // DB kind: real db_test_connection returning version + latency.
-            <button className="btn btn-secondary" onClick={handleTestConnection} disabled={dbTesting}>
+            <button className="btn btn-secondary" onClick={handleTestConnection} disabled={dbTesting||(isFileDb&&!dbHost.trim())}>
               {dbTesting ? (
                 <><Icon name="zap" size={15} /> {t('modals.testing')}</>
               ) : dbTested && dbTestResult ? (
@@ -1199,7 +1203,7 @@ export function NewConnectionModal({
           <div className="row gap8">
             <Btn variant="ghost" onClick={onClose}>{t('modals.cancel')}</Btn>
             {kind === 'db'
-              ? <Btn variant="primary" icon="check" onClick={handleDbSaveAndConnect} disabled={dbConnecting}>
+              ? <Btn variant="primary" icon="check" onClick={handleDbSaveAndConnect} disabled={dbConnecting||(isFileDb&&!dbHost.trim())}>
                   {dbConnecting ? t('modals.connecting') ?? 'Connecting…' : isEdit ? t('modals.save') : t('modals.saveAndConnect')}
                 </Btn>
               : <Btn variant="primary" icon="check" onClick={handleSave}>{isEdit ? t('modals.save') : (kind === 'host' && proto !== 'ssh' && proto !== 'rdp' && proto !== 'vnc' ? t('modals.connect') : t('modals.saveAndConnect'))}</Btn>}
