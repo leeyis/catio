@@ -20,13 +20,13 @@ function setup(){
 describe('query-tab close protection',()=>{
   it('keeps an uncommitted tab open when closure is cancelled',()=>{
     setup();fireEvent.click(screen.getByTestId('wbtab-close-sql:1'))
-    expect(screen.getByText('Close SQL session?')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button',{name:'Cancel'}))
+    expect(screen.getByText('Close database work?')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button',{name:'Keep working'}))
     expect(screen.getByTestId('wbtab-sql:1')).toBeInTheDocument()
   })
   it('closes only after explicit rollback confirmation',()=>{
     setup();fireEvent.click(screen.getByTestId('wbtab-close-sql:1'))
-    fireEvent.click(screen.getByRole('button',{name:'Close and roll back'}))
+    fireEvent.click(screen.getByRole('button',{name:'Discard drafts and close'}))
     expect(screen.queryByTestId('wbtab-sql:1')).not.toBeInTheDocument()
   })
 })

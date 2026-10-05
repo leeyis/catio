@@ -1,0 +1,9 @@
+import {render,screen,fireEvent} from '@testing-library/react'
+import {beforeAll,expect,it,vi} from 'vitest'
+import {DatabaseCommandPalette} from './DatabaseCommandPalette'
+import {LanguageProvider} from '../../state/LanguageContext'
+import i18n from '../../i18n'
+beforeAll(async()=>{await i18n.changeLanguage('en')})
+it('filters by namespace and executes only the chosen scoped command',()=>{const run=vi.fn(),other=vi.fn(),close=vi.fn();render(<LanguageProvider><DatabaseCommandPalette onClose={close} commands={[{id:'a',label:'orders',detail:'archive',icon:'table-2',run},{id:'b',label:'orders',detail:'main',icon:'table-2',run:other}]}/></LanguageProvider>);const input=screen.getByRole('textbox');expect(input).toHaveFocus();fireEvent.change(input,{target:{value:'archive'}});expect(screen.getAllByRole('option')).toHaveLength(1);fireEvent.keyDown(input,{key:'Enter'});expect(run).toHaveBeenCalledTimes(1);expect(other).not.toHaveBeenCalled();expect(close).toHaveBeenCalledTimes(1)})
+it('does not execute or dismiss while IME is composing',()=>{const run=vi.fn(),close=vi.fn();render(<LanguageProvider><DatabaseCommandPalette onClose={close} commands={[{id:'a',label:'Action',icon:'table-2',run}]}/></LanguageProvider>);fireEvent.keyDown(screen.getByRole('textbox'),{key:'Enter',isComposing:true});fireEvent.keyDown(screen.getByRole('textbox'),{key:'Escape',keyCode:229});expect(run).not.toHaveBeenCalled();expect(close).not.toHaveBeenCalled()})
+it('dismisses on Escape without invoking an operation',()=>{const run=vi.fn(),close=vi.fn();render(<LanguageProvider><DatabaseCommandPalette onClose={close} commands={[{id:'a',label:'Action',icon:'table-2',run}]}/></LanguageProvider>);fireEvent.keyDown(screen.getByRole('textbox'),{key:'Escape'});expect(close).toHaveBeenCalled();expect(run).not.toHaveBeenCalled()})

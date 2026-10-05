@@ -3,8 +3,9 @@ import {useTranslation} from 'react-i18next'
 import {searchSchemaObjects,cancelMetadataSearch,dbErrMsg,type MetadataSearchResult} from '../../services/db'
 import {Icon} from '../Icon'
 
-export function MetadataSearch({connId,query,onPick,onPickObject}:{connId:string;query:string;
-  onPick:(schema:string,name:string)=>void;onPickObject?:(schema:string,name:string,kind:'view'|'function'|'procedure')=>void}){
+export function MetadataSearch({connId,query,onPick,onPickObject,onPin,onPinObject}:{connId:string;query:string;
+  onPick:(schema:string,name:string)=>void;onPickObject?:(schema:string,name:string,kind:'view'|'function'|'procedure')=>void;
+  onPin?:(schema:string,name:string)=>void;onPinObject?:(schema:string,name:string,kind:'view'|'function'|'procedure')=>void}){
   const {t}=useTranslation()
   const [result,setResult]=useState<MetadataSearchResult|null>(null)
   const [loading,setLoading]=useState(false),[error,setError]=useState<string|null>(null)
@@ -30,7 +31,7 @@ export function MetadataSearch({connId,query,onPick,onPickObject}:{connId:string
     </div>
     {error&&<div role="alert" style={{fontSize:11.5,color:'var(--danger-fg)',overflowWrap:'anywhere'}}>{error}</div>}
     {result?.objects.map(object=><button key={JSON.stringify([object.schema,object.kind,object.name])}
-      className="row gap6" title={`${object.schema}.${object.name}`} onClick={()=>{
+      className="row gap6" title={`${object.schema}.${object.name}`} onDoubleClick={()=>{if(object.kind==='table')onPin?.(object.schema,object.name);else onPinObject?.(object.schema,object.name,object.kind as 'view'|'function'|'procedure')}} onClick={()=>{
         if(onPickObject&&['view','function','procedure'].includes(object.kind))onPickObject(object.schema,object.name,object.kind as 'view'|'function'|'procedure')
         else onPick(object.schema,object.name)
       }} style={{textAlign:'left',padding:'7px 8px',background:'var(--surface-subtle)',border:'1px solid var(--border-hairline)',borderRadius:6,color:'var(--text-primary)',fontSize:12}}>

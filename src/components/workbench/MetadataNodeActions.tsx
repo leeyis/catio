@@ -4,7 +4,8 @@ import { Icon } from '../Icon'
 
 export interface MetadataAction { id: string; label: string; icon: string; action: () => void; danger?: boolean; disabled?: boolean; testId?: string }
 /** One menu model and one renderer for pointer, context-menu and keyboard entry. */
-export function MetadataNodeActions({ children, items, ownerKey, title, triggerTestId, className, style }: {
+export function MetadataNodeActions({ children, items, ownerKey, title, triggerTestId, className, style,showTrigger=true,triggerLabel }: {
+  showTrigger?:boolean;triggerLabel?:string;
   children: ReactNode; items: MetadataAction[]; ownerKey: string; title: string; triggerTestId?: string; className?: string; style?: CSSProperties
 }) {
   const [position,setPosition]=useState<{x:number;y:number;owner:string;items:MetadataAction[]}|null>(null)
@@ -39,7 +40,7 @@ export function MetadataNodeActions({ children, items, ownerKey, title, triggerT
     if((event.key==='ContextMenu'||event.shiftKey&&event.key==='F10')&&items.length){event.preventDefault();event.stopPropagation();const rect=root.current?.getBoundingClientRect();setPosition({x:rect?.left??0,y:rect?.bottom??0,owner:effectiveOwner,items:[...items]})}
   }}>
     {children}
-    {!!items.length&&<button ref={trigger} type="button" className="icon-btn bare" data-testid={triggerTestId} title={title} aria-label={title} aria-haspopup="menu" aria-expanded={!!valid} onClick={event=>{if(valid){event.preventDefault();event.stopPropagation();setPosition(null)}else open(event)}} style={{width:22,height:22,flex:'none'}}><Icon name="more-horizontal" size={13}/></button>}
+    {showTrigger&&!!items.length&&<button ref={trigger} type="button" className={triggerLabel?'btn btn-secondary sm':'icon-btn bare'} data-testid={triggerTestId} title={title} aria-label={title} aria-haspopup="menu" aria-expanded={!!valid} onClick={event=>{if(valid){event.preventDefault();event.stopPropagation();setPosition(null)}else open(event)}} style={{width:triggerLabel?undefined:22,height:triggerLabel?undefined:22,flex:'none'}}><Icon name="more-horizontal" size={13}/>{triggerLabel}</button>}
     {valid&&position&&createPortal(<div ref={menu} role="menu" aria-label={title} onClick={event=>event.stopPropagation()} onContextMenu={event=>event.preventDefault()} onKeyDown={event=>{
       if(!['ArrowDown','ArrowUp','Home','End'].includes(event.key))return
       event.preventDefault();const buttons=Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'));const current=buttons.indexOf(document.activeElement as HTMLButtonElement)

@@ -8,6 +8,7 @@ import { useTranslation } from 'react-i18next'
 import { EditorView, keymap, placeholder as cmPlaceholder, lineNumbers, highlightActiveLineGutter } from '@codemirror/view'
 import { EditorState, Compartment, Prec, type Extension } from '@codemirror/state'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
+import { search,searchKeymap,openSearchPanel } from '@codemirror/search'
 import { autocompletion, completionKeymap, closeBrackets, closeBracketsKeymap, acceptCompletion, ifNotIn, type CompletionSource } from '@codemirror/autocomplete'
 import { linter, lintGutter, type Diagnostic } from '@codemirror/lint'
 import { syntaxHighlighting, bracketMatching, indentOnInput } from '@codemirror/language'
@@ -19,8 +20,12 @@ export { dialectFor } from './sqlDialect'
 import { catioTheme, catioHighlight } from '../editor/editorTheme'
 import { Icon } from '../Icon'
 import { editorStats, type EditorStats } from './editorStats'
+import { sqlExecutionTarget, type SqlTargetResult } from './sqlExecutionTarget'
+import { MetadataNodeActions,type MetadataAction } from '../workbench/MetadataNodeActions'
 
 export interface SqlEditorProps {
+  contextActions?:MetadataAction[]
+  contextKey?:string
   code: string
   onChange: (value: string) => void
   minHeight?: number
@@ -35,6 +40,8 @@ export interface SqlEditorProps {
   defaultSchema?: string
   /** Invoked on Alt+Enter (the "run query" shortcut). */
   onRun?: () => void
+  onRunAll?: () => void
+  onTargetChange?: (result: SqlTargetResult) => void
   /** Run just the currently-selected SQL (from the selection toolbar or Alt+Enter with a selection). */
   onRunSelection?: (sql: string) => void
   /** Selection availability only; the caller reads live text at dispatch time. */
@@ -73,10 +80,13 @@ export interface SqlEditorHandle {
    * EXPLAIN — run just the highlighted statement, matching the run() path.
    */
   getSelectedText: () => string
+  getExecutionTarget: (scope: 'current'|'selection'|'all') => SqlTargetResult
+  selectRange: (from: number, to: number) => void
+  openSearch: () => void
 }
 
 export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function SqlEditor(
-  { code, onChange, minHeight, target = 'SQL', schema, engine, defaultSchema, onRun, onRunSelection, onSelectionChange, placeholder, plain, completion, lintSource, extraCompletion },
+  { contextActions,contextKey,code, onChange, minHeight, target = 'SQL', schema, engine, defaultSchema, onRun, onRunAll, onTargetChange, onRunSelection, onSelectionChange, placeholder, plain, completion, lintSource, extraCompletion },
   ref,
 ) {
   const { t: tr } = useTranslation()
@@ -121,6 +131,9 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
   onChangeRef.current = onChange
   const onRunRef = useRef(onRun)
   onRunRef.current = onRun
+  const onRunAllRef=useRef(onRunAll);onRunAllRef.current=onRunAll
+  const targetChangeRef=useRef(onTargetChange);targetChangeRef.current=onTargetChange
+  const plainRef=useRef(plain);plainRef.current=plain
   const onRunSelectionRef = useRef(onRunSelection)
   onRunSelectionRef.current = onRunSelection
   const selectionChangeRef = useRef(onSelectionChange)
@@ -134,7 +147,8 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
     const extensions: Extension[] = [
       lineNumbers(),
       highlightActiveLineGutter(),
-      history(),
+      history(),search({top:true}),
+      EditorView.theme({'.cm-panels':{backgroundColor:'var(--surface-subtle)',color:'var(--text-primary)'},'.cm-search input':{backgroundColor:'var(--surface-card)',color:'var(--text-primary)',border:'1px solid var(--border-hairline)',borderRadius:'5px'},'.cm-search button':{backgroundImage:'none',backgroundColor:'var(--surface-sunken)',color:'var(--text-primary)',border:'1px solid var(--border-hairline)',borderRadius:'5px'}}),
       bracketMatching(),
       closeBrackets(),
       indentOnInput(),
@@ -159,17 +173,19 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
                 setSelBar(null)
                 return true
               }
+              return true // An explicitly empty/whitespace selection must not widen scope.
             }
             onRunRef.current?.()
             setSelBar(null)
             return true
           },
         },
+        { key:'Alt-Shift-Enter', run:view=>{if(imeKey.current||view.composing||view.compositionStarted)return false;onRunAllRef.current?.();return true} },
         { key: 'Tab', run: view => !imeKey.current && !view.composing && !view.compositionStarted && acceptCompletion(view) },
         ...closeBracketsKeymap,
         ...completionKeymap,
         ...historyKeymap,
-        ...defaultKeymap,
+        ...searchKeymap,...defaultKeymap,
         indentWithTab,
       ]),
       sqlCompartment.current.of(langExt()),
@@ -184,6 +200,7 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
           const s = update.state
           const selection = s.selection.main
           selectionChangeRef.current?.(!selection.empty && !!s.sliceDoc(selection.from, selection.to).trim())
+          targetChangeRef.current?.(sqlExecutionTarget(s,selection.empty?'current':'selection',!!plainRef.current))
           setStats(editorStats(s.doc.toString(), s.selection.main.head))
         }
       }),
@@ -193,6 +210,7 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
       parent: hostRef.current,
     })
     viewRef.current = view
+    targetChangeRef.current?.(sqlExecutionTarget(view.state,'current',!!plainRef.current))
     // CodeMirror does not auto-re-measure when its container goes from hidden
     // (display:none / zero width — e.g. an inactive query tab) to visible, which
     // left the editor rendered at a collapsed width. Observe size changes and
@@ -205,6 +223,7 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
     return () => {
       ro?.disconnect()
       selectionChangeRef.current?.(false)
+      targetChangeRef.current?.({target:null,reason:'notReady'})
       view.destroy()
       viewRef.current = null
     }
@@ -267,6 +286,16 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
       try { view.focus() } catch { /* best-effort */ }
       return next
     },
+    openSearch(){const view=viewRef.current;if(view)openSearchPanel(view)},
+    getExecutionTarget(scope) {
+      const view=viewRef.current
+      return view?sqlExecutionTarget(view.state,scope,!!plainRef.current):{target:null,reason:'notReady'}
+    },
+    selectRange(from,to) {
+      const view=viewRef.current
+      if(!view||from<0||to<from||to>view.state.doc.length)return
+      view.dispatch({selection:{anchor:from,head:to},scrollIntoView:true});view.focus()
+    },
     getSelectedText() {
       const view = viewRef.current
       if (!view) return ''
@@ -310,7 +339,7 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
   }
 
   return (
-    <div ref={rootRef} className="col" style={{ position: 'relative', background: 'var(--surface-subtle)', minHeight: minHeight || 0, height: '100%', width: '100%', overflow: 'hidden' }}>
+    <MetadataNodeActions items={contextActions??[]} showTrigger={false} ownerKey={contextKey??target} title={tr('dbviews.moreActions')} style={{height:'100%',minHeight:0}}><div ref={rootRef} className="col" style={{ position: 'relative', background: 'var(--surface-subtle)', minHeight: minHeight || 0, height: '100%', width: '100%', overflow: 'hidden' }}>
       <div ref={hostRef} onMouseUp={onMouseUp} onMouseDown={() => setSelBar(null)} style={{ flex: 1, minHeight: 0, width: '100%', overflow: 'hidden' }} />
       {/* selection toolbar — copy / ask AI / run. Flips below the cursor when there
           isn't room above, and is clamped horizontally, so it's never clipped. */}
@@ -340,6 +369,6 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
       <div className="row" style={{ flex: 'none', justifyContent: 'flex-end', padding: '3px 12px', borderTop: '1px solid var(--border-hairline)', background: 'var(--surface-subtle)', fontSize: 11, color: 'var(--text-faint)', fontFamily: "'Geist Mono', monospace", userSelect: 'none' }}>
         {tr('dbviews.editorStats', { line: stats.line, col: stats.col, lines: stats.lines, chars: stats.chars })}
       </div>
-    </div>
+    </div></MetadataNodeActions>
   )
 })

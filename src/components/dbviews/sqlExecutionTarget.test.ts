@@ -1,0 +1,22 @@
+import { EditorState } from '@codemirror/state'
+import { sql, PostgreSQL, MySQL, SQLite, MSSQL } from '@codemirror/lang-sql'
+import { describe,expect,it } from 'vitest'
+import { sqlExecutionTarget } from './sqlExecutionTarget'
+const state=(doc:string,pos=0,dialect=PostgreSQL)=>EditorState.create({doc,selection:{anchor:pos},extensions:[sql({dialect})]})
+describe('SQL execution target — scope never widens on failure',()=>{
+  it('selects only the statement containing the live caret',()=>{const doc='SELECT 1; SELECT 2; DELETE FROM demo;';const result=sqlExecutionTarget(state(doc,15),'current');expect(result.target?.sql).toBe('SELECT 2;');expect(result.target?.from).toBe(10);expect(result.target?.to).toBe(19)})
+  it.each([PostgreSQL,SQLite,MySQL,MSSQL])('ignores semicolons inside literals and identifiers',dialect=>{const doc=`SELECT '甲;乙' AS "a;b"; SELECT 2;`;expect(sqlExecutionTarget(state(doc,12,dialect),'current').target?.sql).toBe(`SELECT '甲;乙' AS "a;b";`)})
+  it('does not execute from a comment or blank line',()=>{const doc='-- comment SELECT 9;\n\nSELECT 1;\n\nSELECT 2;';expect(sqlExecutionTarget(state(doc,8),'current').target).toBeNull();expect(sqlExecutionTarget(state(doc,32),'current').target).toBeNull()})
+  it('includes the full CTE and nested query, not just an inner SELECT',()=>{const doc='WITH c AS (SELECT 7) SELECT * FROM c; SELECT 2;';expect(sqlExecutionTarget(state(doc,19),'current').target?.sql).toBe('WITH c AS (SELECT 7) SELECT * FROM c;')})
+  it('keeps PG dollar bodies together',()=>{const doc='DO $x$ BEGIN SELECT 1; SELECT 2; END $x$; SELECT 3;';expect(sqlExecutionTarget(state(doc,26),'current').target?.sql).toBe('DO $x$ BEGIN SELECT 1; SELECT 2; END $x$;')})
+  it('does not guess MySQL DELIMITER or generic BEGIN block boundaries',()=>{expect(sqlExecutionTarget(state('DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; END$$',35,MySQL),'current').reason).toBe('unsupported');expect(sqlExecutionTarget(state('BEGIN SELECT 1; SELECT 2; END;',8),'current').reason).toBe('unsupported')})
+  it('refuses a whole-document parse past the explicit budget, but all remains explicit',()=>{const doc='SELECT 1;'+ ' '.repeat(200001);expect(sqlExecutionTarget(state(doc),'current').reason).toBe('notReady');expect(sqlExecutionTarget(state(doc),'all').target?.kind).toBe('all')})
+  it('selection does not fall back when empty or whitespace',()=>{expect(sqlExecutionTarget(state('SELECT 1;'),'selection').target).toBeNull();const s=EditorState.create({doc:'  SELECT 1;',selection:{anchor:0,head:2}});expect(sqlExecutionTarget(s,'selection').target).toBeNull()})
+  it('preserves exact UTF-16 offsets and selection text',()=>{const s=EditorState.create({doc:'-- 😀\nSELECT 甲; SELECT 乙;',selection:{anchor:16,head:25}});const r=sqlExecutionTarget(s,'selection');expect(r.target?.sql).toBe(s.sliceDoc(16,25));expect(r.target?.from).toBe(16)})
+  it('never widens a whitespace selection via the primary current action',()=>{const s=EditorState.create({doc:'SELECT   1;',selection:{anchor:6,head:9},extensions:[sql({dialect:SQLite})]});expect(sqlExecutionTarget(s,'current').target).toBeNull()})
+  it('honors a nonempty live selection through the primary current action',()=>{const s=EditorState.create({doc:'SELECT 1; SELECT 2;',selection:{anchor:10,head:18},extensions:[sql({dialect:SQLite})]});expect(sqlExecutionTarget(s,'current').target?.kind).toBe('selection');expect(sqlExecutionTarget(s,'current').target?.sql).toBe('SELECT 2')})
+  it('does not execute a guessed interior fragment of a procedural block',()=>{const doc='CREATE TRIGGER log AFTER INSERT ON t BEGIN SELECT 1; DELETE FROM t; END;';expect(sqlExecutionTarget(state(doc,doc.indexOf('DELETE'),SQLite),'current').reason).toBe('unsupported')})
+  it('does not treat DELIMITER in a comment or string as a client directive',()=>{const doc="-- DELIMITER $\nSELECT 'DELIMITER' AS value; SELECT 2;";expect(sqlExecutionTarget(state(doc,doc.indexOf('AS')),'current').target?.sql).toBe("SELECT 'DELIMITER' AS value;")})
+  it('refuses unsafe batch inference for SQL Server and anonymous blocks',()=>{for(const doc of ['SELECT 1;\nGO\nDELETE FROM t;', 'DECLARE n INTEGER; BEGIN DELETE FROM t; END;'])expect(sqlExecutionTarget(state(doc,doc.indexOf('DELETE'),MSSQL),'current').reason).toBe('unsupported')})
+  it('treats native-protocol consoles as one command document',()=>{expect(sqlExecutionTarget(state('HGETALL a'), 'current',true).target?.kind).toBe('all')})
+})

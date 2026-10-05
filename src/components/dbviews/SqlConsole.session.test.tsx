@@ -11,7 +11,7 @@ const api=vi.hoisted(()=>({openQuerySession:vi.fn(),closeQuerySession:vi.fn(),qu
 vi.mock('../../services/db',async original=>({...await original<typeof import('../../services/db')>(),...api,
   splitQuery:vi.fn().mockImplementation((_c:string,s:string)=>Promise.resolve([s])),
   getSchema:vi.fn().mockResolvedValue({db:'c',schemas:[]}),schemaColumns:vi.fn().mockResolvedValue([]),erRelations:vi.fn().mockResolvedValue([])}))
-vi.mock('./SqlEditor',()=>({SqlEditor:()=> <div/>}))
+// Exercise the real CodeMirror current-statement seam with the isolated-session backend mock.
 vi.mock('./DataGrid',()=>({DataGrid:(props:DataGridProps)=>{api.grid=props;return <div data-testid="session-result"/>}}))
 const info=(id='sql-a',transactionState:QuerySessionInfo['transactionState']='idle'):QuerySessionInfo=>({id,transactionState,busy:false,canCancel:true,leaseSeconds:1800})
 const wrap=()=>render(<LanguageProvider><DataProvider><SqlConsole fresh connId="c" engine="sqlite" querySessions

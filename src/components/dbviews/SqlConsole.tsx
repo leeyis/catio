@@ -5,11 +5,14 @@ import { Icon } from '../Icon'
 import { Btn } from '../atoms'
 import { ConfirmModal } from '../modals/ConfirmModal'
 import { useData } from '../../state/DataContext'
-import { runQuery, splitQuery, cancelQuery, runExplain, getSchema, loadSchemaNamespace, preferredNamespace, SCHEMA_INVALIDATED_EVENT, schemaColumnCatalog, tablePreview, erRelations, dbErrMsg } from '../../services/db'
+import { isServer } from '../../services/transport'
+import { runQuery, splitQuery, exportFile, cancelQuery, runExplain, getSchema, loadSchemaNamespace, preferredNamespace, SCHEMA_INVALIDATED_EVENT, schemaColumnCatalog, tablePreview, erRelations, dbErrMsg } from '../../services/db'
 import type { QueryResult, Schema, ErRelation } from '../../services/types'
 import { classifyAiSqlExecution } from '../../services/aiSqlExecutionPolicy'
 import { sqlAdvancedCompletion, type JoinTable } from './sqlAdvancedCompletion'
 import { SqlEditor, type SqlEditorHandle } from './SqlEditor'
+import type { SqlExecutionTarget, SqlTargetResult } from './sqlExecutionTarget'
+import { MetadataNodeActions,type MetadataAction } from '../workbench/MetadataNodeActions'
 import { mongoCompletion } from './mongoCompletion'
 import { redisCompletion } from './redisCompletion'
 import { redisLinter } from './redisDiagnostics'
@@ -18,12 +21,14 @@ import { formatSql } from './sqlFormatter'
 import type { SQLNamespace } from '@codemirror/lang-sql'
 import { DataGrid } from './DataGrid'
 import { useQuerySession } from './useQuerySession'
+import { useReportDatabaseWork } from '../../state/databaseDraftWork'
 import { QuerySessionToolbar } from './QuerySessionToolbar'
 import { cacheMetadataRequest } from '../../services/dbMetadata'
 import { referencedNamespaces } from './metadataReferences'
 import { completionSchema } from './sqlCompletionSchema'
 import { buildJoinTables } from './sqlJoinCatalog'
 import { ExplainPlanViewer } from './ExplainPlanViewer'
+import { DatabaseStructurePeek } from './DatabaseStructurePeek'
 import { SqlFileDialog } from './SqlFileDialog'
 import { parseExplainResult, supportsExplainPlan, type ParsedExplainPlan, type ExplainDatabaseType } from './explainPlan'
 import { readHiddenSchemas, HIDDEN_SCHEMAS_EVENT } from '../../state/schemaFilter'
@@ -73,7 +78,7 @@ export interface SqlConsoleProps {
   onFullscreenChange?: (fullscreen: boolean) => void
 }
 
-interface CompletedStatement { querySessionId?: string; sql: string; defaultNamespace?: string; result?: QueryResult; error?: string }
+interface CompletedStatement { source?: { document:string;from:number;to:number }; querySessionId?: string; sql: string; defaultNamespace?: string; result?: QueryResult; error?: string }
 
 export function SqlConsole({ density, fresh, connId, initialCode, initialDefaultSchema, autoRun, active, engine, engineId, connName, profileId, onFullscreenChange, querySessions = false, workbenchId, sessionOwnerId }: SqlConsoleProps) {
   const { t } = useTranslation()
@@ -115,7 +120,7 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
   const nativeCancellation = querySessions && session.info ? session.info.canCancel : ['postgres', 'mysql', 'sqlite', 'duckdb'].includes(engine ?? '')
   // T12 执行计划(EXPLAIN):非空时结果区显示 ExplainPlanViewer(树/表/JSON),关闭后回到普通结果。
   // 仅 PG/MySQL 且已连接(connId)支持(supportsExplainPlan + connId 门控)。
-  const [explain, setExplain] = useState<{ plan?: ParsedExplainPlan; loading: boolean; error?: string } | null>(null)
+  const [explain, setExplain] = useState<{ source?:{document:string;target:SqlExecutionTarget};plan?: ParsedExplainPlan; loading: boolean; error?: string } | null>(null)
   const canExplain = !!connId && supportsExplainPlan(engine as DbType | undefined)
   // 编辑区是否需要让出空间给下方结果区:普通运行(phase!=='idle')或正在/已展示执行计划。
   const hasResults = phase !== 'idle' || !!explain
@@ -136,28 +141,48 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
   // Imperative handle to the CodeMirror editor for cursor-aware insertion.
   const editorRef = useRef<SqlEditorHandle>(null)
   const [hasSelection, setHasSelection] = useState(false)
-  const [actionsOpen, setActionsOpen] = useState(false)
+  const [editorTarget,setEditorTarget]=useState<SqlTargetResult|null>(null)
+  const [scopeError,setScopeError]=useState<string|null>(null)
   const [clearConfirm, setClearConfirm] = useState(false)
-  const actionsRef = useRef<HTMLDivElement>(null)
-  useEffect(() => { setActionsOpen(false); setClearConfirm(false) }, [connId, active, code])
-  useEffect(() => {
-    if (!actionsOpen) return
-    const onDown = (event: MouseEvent) => { if (!actionsRef.current?.contains(event.target as Node)) setActionsOpen(false) }
-    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') { setActionsOpen(false); actionsRef.current?.querySelector('button')?.focus() } }
-    document.addEventListener('mousedown', onDown); document.addEventListener('keydown', onKey)
-    return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey) }
-  }, [actionsOpen])
-  function runSelected() { const selected = editorRef.current?.getSelectedText(); if (selected?.trim()) run(selected) }
+  const [peekOpen,setPeekOpen]=useState(false)
+  useEffect(()=>{setPeekOpen(false)},[connId,active])
+  useEffect(() => {setClearConfirm(false)},[connId,active,code])
+  function targetFor(scope:'current'|'selection'|'all'):SqlExecutionTarget|null {
+    const result=editorRef.current?.getExecutionTarget?.(scope)
+    if(result?.target){setScopeError(null);return result.target}
+    // Whole-document execution is explicit and remains available in max-results mode.
+    if(scope==='all'&&code.trim())return {from:0,to:code.length,sql:code,kind:'all'}
+    setScopeError(t('dbviews.scopeUnavailable.'+(result?.reason??'notReady')));return null
+  }
+  function runScope(scope:'current'|'selection'|'all') {const target=targetFor(scope);if(target)run(target.sql,target)}
+  function runSelected() {runScope('selection')}
+  function runCurrent() {runScope('current')}
   // 编辑区/结果区上下分隔(功能#5):编辑区占比,仅会话内存。
-  const [splitRatio, setSplitRatio] = useState(0.5)
+  const [splitRatio, setSplitRatio] = useState(0.41)
   // 一键最大化(功能#6):'split' 上下分屏 / 'maxEditor' 编辑区占满 / 'maxResults' 结果区占满。
   const [paneMode, setPaneMode] = useState<'split' | 'maxEditor' | 'maxResults'>('split')
+  const [locateRequest,setLocateRequest]=useState<{document:string;from:number;to:number}|null>(null)
+  const locateSource=(source:{document:string;from:number;to:number})=>{if(source.document!==code)return;setLocateRequest(source);setPaneMode('split')}
+  useEffect(()=>{if(!locateRequest||paneMode==='maxResults')return;if(active!==false&&locateRequest.document===code)editorRef.current?.selectRange(locateRequest.from,locateRequest.to);setLocateRequest(null)},[locateRequest,paneMode,code,active])
   // 外层容器引用 — 拖动分隔条时按容器高度把位移换算成比例增量。
   const splitContainerRef = useRef<HTMLDivElement>(null)
   // 分隔条 hover/拖动高亮(不依赖外部 CSS 文件,内联实现,保证主题切换正常)。
   const [splitHot, setSplitHot] = useState(false)
   // T16 SQL 文件批量执行对话框开关。仅已连接(connId)时可用。
   const [sqlFileOpen, setSqlFileOpen] = useState(false)
+  const [savedCode,setSavedCode]=useState(''),[savingQuery,setSavingQuery]=useState(false)
+  useReportDatabaseWork('sql',code!==savedCode,phase==='running'||!!explain?.loading||savingQuery)
+  async function saveQuery(){
+    if(savingQuery)return
+    const text=editorRef.current?.getExecutionTarget?.('all').target?.sql??code
+    if(!text.trim())return
+    setSavingQuery(true)
+    try {
+      if(isServer()){const url=URL.createObjectURL(new Blob([text],{type:'text/plain;charset=utf-8'}));const link=document.createElement('a');link.href=url;link.download=plain?'query.txt':'query.sql';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000)}
+      else {const {save}=await import('@tauri-apps/plugin-dialog');const path=await save({defaultPath:plain?'query.txt':'query.sql'});if(!path)return;await exportFile(path,text)}
+      setSavedCode(text)
+    }catch(error){setScopeError(dbErrMsg(error))}finally{setSavingQuery(false)}
+  }
 
   // 上报最大化态给父级(功能#6 父子契约):非 split 即视为占满,父级据此联动收起侧栏。
   useEffect(() => { onFullscreenChange?.(paneMode !== 'split') }, [paneMode, onFullscreenChange])
@@ -398,20 +423,21 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
     activeExecution.current = null
   }, [connId])
 
-  function run(sqlOverride?: string) {
+  function run(sqlOverride?: string, target?:SqlExecutionTarget) {
     // 运行中不重复触发（避免 Alt↵ 在执行中再起一次）。
     if (phase === 'running' || runBusy.current || session.actionBusy) return
     setRunErr(null)
     // 普通运行接管结果区:清掉可能正在展示的执行计划,回到数据网格。
     setExplain(null)
     // A selection-run passes just the highlighted SQL; otherwise run the whole editor.
-    const sql = sqlOverride && sqlOverride.trim() ? sqlOverride : code
+    const sql = sqlOverride ?? code
     // 空 / 纯空白 SQL 不执行：拦在所有入口（按钮 / Alt+Enter / 片段运行）之前，
     // 避免把空语句发给后端报错，或 mock 路径空转出现"执行中"。
     if (!sql.trim()) return
     const runDefaultNamespace = supportsDefaultNamespace && (defaultNamespace || initialDefaultSchema)
       ? (defaultNamespace || initialDefaultSchema)
       : undefined
+    const sourceDocument=code
     const myToken = ++runToken.current
     runBusy.current=true
     if (connId) {
@@ -426,6 +452,7 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
           session.markBusy(true)
           const statements = plain ? [sql] : await splitQuery(connId, sql)
           const completed: CompletedStatement[] = []
+          let sourceOffset=0
           for (let index = 0; index < statements.length; index++) {
             if (myToken !== runToken.current || stopAfterStatement.current) break
             const executionId = `${runId}-${index}`
@@ -439,6 +466,7 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
               entry = { sql: statements[index], defaultNamespace: runDefaultNamespace, querySessionId:ownedSession?.id, result: res }
             } catch (e) { entry = { sql: statements[index], defaultNamespace: runDefaultNamespace, querySessionId:ownedSession?.id, error: dbErrMsg(e) } }
             if (myToken !== runToken.current) return
+            if(target){const offset=sql.indexOf(statements[index],sourceOffset);if(offset>=0){entry.source={document:sourceDocument,from:target.from+offset,to:target.from+offset+statements[index].length};sourceOffset=offset+statements[index].length}}
             completed.push(entry)
             setStatementResults([...completed]); setSelectedStatement(index)
             setResult(entry.result ? { ...entry.result, sql: entry.sql, defaultNamespace: entry.defaultNamespace, querySessionId: entry.querySessionId } : null)
@@ -483,12 +511,14 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
     if (!canExplain || runBusy.current || session.actionBusy) return
     // 选中优先:与普通 run() 一致 —— 编辑区选中片段时只对选中文本取计划,
     // 避免在多语句编辑区里对整段 code 运行 EXPLAIN(多语句会拼出非法 EXPLAIN)。
-    const selected = editorRef.current?.getSelectedText()
-    const sql = selected && selected.trim() ? selected : code
+    const target=targetFor('current')
+    if(!target)return
+    const sql=target.sql
     if (!sql.trim()) return
     const myToken = ++runToken.current
     setPaneMode('split')
-    setExplain({ loading: true });runBusy.current=true
+    const source={document:code,target}
+    setExplain({ loading: true,source });runBusy.current=true
     // 与普通 run() 一致:把选中的默认库/Schema 传给 EXPLAIN,否则后端落连接默认库报表不存在。
     const explainNamespace = supportsDefaultNamespace && (defaultNamespace || initialDefaultSchema)
       ? (defaultNamespace || initialDefaultSchema)
@@ -503,11 +533,11 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
         if (myToken !== runToken.current) return
         // engine 已被 canExplain 收窄为 PG/MySQL 之一。
         const plan = parseExplainResult(engine as ExplainDatabaseType, res)
-        setExplain({ loading: false, plan })
+        setExplain({ loading: false, plan,source })
       })
       .catch(e => {
         if (myToken !== runToken.current) return
-        setExplain({ loading: false, error: dbErrMsg(e) })
+        setExplain({ loading: false, error: dbErrMsg(e),source })
       }).finally(async()=>{await session.refresh();if(myToken===runToken.current)runBusy.current=false})
   }
 
@@ -565,8 +595,23 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
     }
   }, [active])
 
+  const actionBusy=phase==='running'||session.loading||session.actionBusy||!!explain?.loading
+  const editorMenu:MetadataAction[]=[
+    {id:'current',label:t(plain?'dbviews.runSql':'dbviews.runCurrentSql'),icon:'play',disabled:!code.trim()||actionBusy,action:runCurrent},
+    {id:'selection',label:t('dbviews.runSelectedSql'),icon:'snippet',disabled:!hasSelection||actionBusy,action:runSelected},
+    ...(canExplain?[{id:'analyze',label:t('dbviews.analyze'),icon:'git-branch',disabled:!code.trim()||actionBusy,action:runExplainPlan}]:[]),
+    {id:'all',label:t('dbviews.runEntireScript'),icon:'play',disabled:!code.trim()||actionBusy,action:()=>runScope('all')},
+    {id:'find',label:t('dbviews.findReplace'),icon:'search',action:()=>editorRef.current?.openSearch?.()},
+    ...(!plain&&connId?[{id:'peek',label:t('dbviews.structurePeek'),icon:'columns',disabled:!schemaOptions.length,action:()=>setPeekOpen(true)}]:[]),
+    ...(!plain?[{id:'format',label:t('dbviews.format'),icon:'wrench',disabled:!code.trim()||actionBusy,action:()=>setCode(previous=>formatSql(previous,engineId??engine))}]:[]),
+    {id:'save',label:t('dbviews.saveQuery'),icon:'save',disabled:!code.trim()||savingQuery,action:()=>{void saveQuery()}},
+    ...(connId?[{id:'file',label:t('dbviews.sqlFileRunFile'),icon:'file-code',testId:'sql-run-file',disabled:actionBusy,action:()=>setSqlFileOpen(true)}]:[]),
+    {id:'clear',label:t('dbviews.clearEditor'),icon:'eraser',danger:true,disabled:!code.trim()||actionBusy,action:()=>setClearConfirm(true)},
+  ]
+  const menuOwner=JSON.stringify([connId,active,code,phase,defaultNamespace,engineId??engine,editorTarget?.target?.from,editorTarget?.target?.to])
   return (
-    <div ref={splitContainerRef} className="col" style={{ height: '100%', width: '100%', minHeight: 0, minWidth: 0 }}>
+    <div ref={splitContainerRef} className="col" style={{ position:'relative', height: '100%', width: '100%', minHeight: 0, minWidth: 0 }}>
+      {peekOpen&&active!==false&&connId&&<DatabaseStructurePeek key={connId} connId={connId} schemas={schemaOptions} defaultSchema={completionNamespace} onClose={()=>setPeekOpen(false)}/>}
       {Object.keys(completionErrors).length>0&&<details style={{padding:'5px 12px',fontSize:11.5,color:'var(--signal-amber)'}}>
         <summary>{t('workbench.completionMetadataNotices',{count:Object.keys(completionErrors).length})}</summary>
         {Object.entries(completionErrors).map(([key,message])=><div key={key}>{message}</div>)}
@@ -577,22 +622,23 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
         <strong className="ell" title={connName || connId || t('dbviews.demoTarget')}>{connName || connId || t('dbviews.demoTarget')}</strong>
         {engine && <span className="chip mono" style={{fontSize:10}}>{engineId || engine}</span>}
         {completionNamespace && <span className="mono ell" title={completionNamespace}>{completionNamespace}</span>}
-        <span style={{marginLeft:'auto',color:'var(--text-tertiary)',fontSize:10.5}}>{t('dbviews.scriptRunHint')}</span>
+        <span style={{marginLeft:'auto',color:'var(--text-tertiary)',fontSize:10.5}}>{t(plain?'dbviews.nativeRunHint':'dbviews.currentRunHint')}</span>
       </div>
+      {scopeError&&<div role="alert" style={{padding:'6px 12px',fontSize:12,color:'var(--signal-amber)'}}>{scopeError}</div>}
       {querySessions && connId && <QuerySessionToolbar info={session.info} loading={session.loading}
         busy={phase==='running'||session.actionBusy||!!explain?.loading} error={session.error}
         onAction={action=>{void session.transact(action)}} onReconnect={()=>{void session.reconnect()}}/>}
       {/* console toolbar — the query name lives in the tab strip above, so it's not
           repeated here; just the editor actions, right-aligned. */}
       <div className="row" style={{ justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, padding: '7px 12px', borderBottom: '1px solid var(--border-hairline)', flex: 'none' }}>
-        <div className="row gap6">
+        <div className="row gap6" style={{flexWrap:'wrap',minWidth:0}}>
           {phase === 'running' ? (
             <Btn size="sm" variant="danger" style={{ height: 26, padding: '0 10px', fontSize: 11.5 }} icon="square" disabled={cancelRequested} onClick={stop}>
               {t(cancelRequested ? 'dbviews.cancelling' : 'dbviews.stop')}
             </Btn>
           ) : (
-            <Btn size="sm" variant="primary" testId="sql-run" disabled={!code.trim() || session.loading || session.actionBusy || !!explain?.loading} style={{ height: 26, padding: '0 10px', fontSize: 11.5 }} icon="play" onClick={() => run()}>
-              {t('dbviews.runSql')} <span style={{ opacity: .6, fontSize: 10, marginLeft: 2 }}>Alt↵</span>
+            <Btn size="sm" variant="primary" testId="sql-run" disabled={!code.trim() || session.loading || session.actionBusy || !!explain?.loading} style={{ height: 26, padding: '0 10px', fontSize: 11.5 }} icon="play" onClick={runCurrent}>
+              {t(plain?'dbviews.runSql':'dbviews.runCurrentSql')} <span style={{ opacity: .6, fontSize: 10, marginLeft: 2 }}>Alt↵</span>
             </Btn>
           )}
           <Btn size="sm" icon="snippet" title={t('dbviews.runSelectedSql')} disabled={!hasSelection || phase==='running' || session.loading || session.actionBusy || !!explain?.loading} onClick={runSelected}>{t('dbviews.runSelectedSql')}</Btn>
@@ -607,21 +653,11 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
           <div style={{ width: 1, height: 18, background: 'var(--border-hairline)' }} />
           <button className="btn btn-secondary sm" title={t('dbviews.format')} disabled={plain || !code.trim()}
             onClick={() => setCode(prev => formatSql(prev, engine))}><Icon name="wrench" size={15} /> {t('dbviews.format')}</button>
-          <div ref={actionsRef} style={{position:'relative'}}>
-            <button className="btn btn-secondary sm" aria-haspopup="menu" aria-expanded={actionsOpen} title={t('dbviews.moreActions')} onClick={()=>setActionsOpen(value=>!value)}><Icon name="more-horizontal" size={15}/>{t('dbviews.moreActions')}</button>
-            {actionsOpen && <div role="menu" aria-label={t('dbviews.moreActions')} onKeyDown={event=>{
-              if(!['ArrowDown','ArrowUp','Home','End'].includes(event.key))return
-              event.preventDefault();const items=Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'));const index=items.indexOf(document.activeElement as HTMLButtonElement)
-              const next=event.key==='Home'?0:event.key==='End'?items.length-1:event.key==='ArrowDown'?(index+1)%items.length:(index+items.length-1)%items.length;items[next]?.focus()
-            }} style={{position:'absolute',top:'100%',left:0,zIndex:60,minWidth:190,padding:5,marginTop:4,background:'var(--surface-elevated)',border:'1px solid var(--border-hairline-alt)',borderRadius:9,boxShadow:'var(--shadow-dropdown)'}}>
-              <button role="menuitem" className="row gap8 sel-pill" disabled={!code.trim() || phase==='running' || session.actionBusy || !!explain?.loading} onClick={()=>{setActionsOpen(false);run()}} style={{width:'100%',padding:'8px 10px',fontSize:12}}><Icon name="play" size={14}/>{t('dbviews.runEntireScript')}</button>
-              {connId && <button role="menuitem" className="row gap8 sel-pill" title={t('dbviews.sqlFileRunFile')} data-testid="sql-run-file" disabled={phase==='running' || session.actionBusy || !!explain?.loading} onClick={()=>{setActionsOpen(false);setSqlFileOpen(true)}} style={{width:'100%',padding:'8px 10px',fontSize:12}}><Icon name="file-code" size={14}/>{t('dbviews.sqlFileRunFile')}</button>}
-              <div style={{height:1,background:'var(--border-hairline)',margin:'4px 2px'}} />
-              <button role="menuitem" className="row gap8 sel-pill" disabled={!code.trim() || phase==='running' || !!explain?.loading} onClick={()=>{setActionsOpen(false);setClearConfirm(true)}} style={{width:'100%',padding:'8px 10px',fontSize:12,color:'var(--danger-fg)'}}><Icon name="eraser" size={14}/>{t('dbviews.clearEditor')}</button>
-            </div>}
-          </div>
+          <button className="btn btn-secondary sm" disabled={savingQuery||!code.trim()} onClick={()=>{void saveQuery()}}><Icon name="save" size={14}/>{t('dbviews.saveQuery')}</button>
+          <MetadataNodeActions ownerKey={menuOwner} items={editorMenu.filter(item=>!['current','selection','analyze','format','save'].includes(item.id))} title={t('dbviews.moreActions')} triggerLabel={t('dbviews.moreActions')}><span/></MetadataNodeActions>
         </div>
         <div className="row gap6" style={{ minWidth: 0, flexWrap: 'wrap' }}>
+          {editorTarget?.target&&<span className="chip mono" style={{fontSize:10.5}}>{t('dbviews.executionScope.'+editorTarget.target.kind)}</span>}
           {!querySessions && ['postgres', 'mysql', 'sqlite', 'duckdb', 'sqlserver', 'jdbc'].includes(engine ?? '') && connId && <span className="chip" title={t('dbviews.sqlSessionHint')} style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{t('dbviews.sqlSession')}</span>}
           {connId && <label className="row gap6" style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
             {t('dbviews.resultLimit')}
@@ -664,17 +700,16 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
           When there are no results yet it fills the whole console; once a run
           starts it shares the space with the results region below (a split).
           功能#5/#6:split 态按 splitRatio 分配高度;maxEditor 占满;maxResults 时隐藏。 */}
-      {paneMode !== 'maxResults' && (
-        <div style={{
+      <div style={{
+          display: paneMode === 'maxResults' ? 'none' : undefined,
           flexGrow: !hasResults || paneMode === 'maxEditor' ? 1 : splitRatio,
           flexBasis: 0,
           minHeight: 140,
           width: '100%',
           borderBottom: !hasResults ? 'none' : '1px solid var(--border-hairline)',
         }}>
-          <SqlEditor ref={editorRef} target={connName || connId || 'SQL'} code={code} onChange={setCode} schema={editorSchema} engine={engineId ?? engine} defaultSchema={completionNamespace} onRun={run} onRunSelection={run} onSelectionChange={setHasSelection} placeholder={editorPlaceholder} plain={plain} completion={completion} lintSource={lintSource} extraCompletion={advancedCompletion} />
+          <SqlEditor ref={editorRef} target={connName || connId || 'SQL'} code={code} onChange={setCode} schema={editorSchema} engine={engineId ?? engine} defaultSchema={completionNamespace} contextActions={editorMenu} contextKey={menuOwner} onRun={runCurrent} onRunAll={()=>runScope('all')} onRunSelection={runSelected} onTargetChange={setEditorTarget} onSelectionChange={setHasSelection} placeholder={editorPlaceholder} plain={plain} completion={completion} lintSource={lintSource} extraCompletion={advancedCompletion} />
         </div>
-      )}
       {/* 功能#5:编辑区与结果区之间的水平拖动分隔条。仅在 split 态且有结果区时显示。 */}
       {hasResults && paneMode === 'split' && (
         <div
@@ -705,6 +740,7 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
           </div>}
           {/* 功能#6:结果区极简工具条,仅放最大化/恢复入口(控制 maxResults<->split)。视觉克制,右对齐。 */}
           <div className="row" style={{ justifyContent: 'flex-end', flex: 'none', padding: '3px 8px', borderBottom: '1px solid var(--border-hairline)' }}>
+            {statementResults[selectedStatement]?.source&&<button className="btn ghost sm" disabled={statementResults[selectedStatement].source!.document!==code} title={t('dbviews.sourceChangedHint')} onClick={()=>{const range=statementResults[selectedStatement]?.source;if(range)locateSource(range)}}><Icon name="code" size={13}/>{t('dbviews.locateSqlSource')}</button>}
             {result?.rowsAffected != null && <span role="status" style={{ marginRight: 'auto', color: 'var(--signal-green)', fontSize: 12 }}>{t('dbviews.rowsAffected', { count: result.rowsAffected })}</span>}
             {paneMode === 'maxResults'
               ? <button className="icon-btn bare" title={t('dbviews.restorePane')} onClick={() => setPaneMode('split')}><Icon name="minimize-2" size={15} /></button>
@@ -712,7 +748,7 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
           </div>
           <div style={{ flex: 1, minHeight: 0, width: '100%' }}>
           {explain
-            ? <ExplainPlanViewer plan={explain.plan} loading={explain.loading} error={explain.error} onClose={() => setExplain(null)} />
+            ? <ExplainPlanViewer plan={explain.plan} loading={explain.loading} error={explain.error} sourceSql={explain.source?.target.sql} onLocateSource={explain.source?.document===code?()=>{const source=explain.source;if(source)locateSource({document:source.document,from:source.target.from,to:source.target.to})}:undefined} onClose={() => setExplain(null)} />
             : phase === 'running'
             ? <div className="col" style={{ alignItems: 'center', justifyContent: 'center', height: '100%', gap: 10, color: 'var(--text-tertiary)' }}>
                 <Icon name="loader" size={26} style={{ animation: 'spin 1s linear infinite' }} />

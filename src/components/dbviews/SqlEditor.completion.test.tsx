@@ -1,7 +1,7 @@
 import { act, fireEvent, render, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { EditorView } from '@codemirror/view'
-import { syntaxTree } from '@codemirror/language'
+import { ensureSyntaxTree } from '@codemirror/language'
 import { CompletionContext, type CompletionSource, currentCompletions, startCompletion, acceptCompletion } from '@codemirror/autocomplete'
 import { undoDepth } from '@codemirror/commands'
 import { MSSQL, MySQL, PostgreSQL, SQLite, StandardSQL, PLSQL } from '@codemirror/lang-sql'
@@ -34,7 +34,9 @@ describe('live SQL dialect and namespace completion', () => {
 
   it('actually mounts the MySQL parser for backtick identifiers', () => {
     const { view } = mount('SELECT `order details`', { engine: 'mysql' })
-    expect(syntaxTree(view.state).toString()).toContain('QuotedIdentifier')
+    // Reconfiguration schedules parsing; this assertion tests dialect identity,
+    // not whether the background parser happened to win a loaded CI timeslice.
+    expect(ensureSyntaxTree(view.state,view.state.doc.length,100)?.toString()).toContain('QuotedIdentifier')
   })
   it('resolves an alias against the actual default schema instead of the first catalog entry', async () => {
     const { view } = mount('SELECT o.| FROM orders o', { defaultSchema: 'app', engine: 'postgres' })

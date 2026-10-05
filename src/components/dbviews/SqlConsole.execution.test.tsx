@@ -4,6 +4,7 @@ import { LanguageProvider } from '../../state/LanguageContext'
 import { DataProvider } from '../../state/DataContext'
 import i18n from '../../i18n'
 import { SqlConsole } from './SqlConsole'
+import { EditorView } from '@codemirror/view'
 import type { DataGridProps } from './DataGrid'
 
 const api = vi.hoisted(() => ({ runQuery: vi.fn(), splitQuery: vi.fn(), cancelQuery: vi.fn(), grid: null as DataGridProps | null }))
@@ -13,7 +14,7 @@ vi.mock('../../services/db', async original => ({
   getSchema: vi.fn().mockResolvedValue({ db: 'c1', schemas: [] }),
   schemaColumns: vi.fn().mockResolvedValue([]), erRelations: vi.fn().mockResolvedValue([]),
 }))
-vi.mock('./SqlEditor', () => ({ SqlEditor: () => <div /> }))
+// Keep the real CodeMirror execution-target contract; only the backend and grid are mocked.
 vi.mock('./DataGrid', () => ({ DataGrid: (props: DataGridProps) => {
   api.grid = props
   return <div data-testid="result-grid">{props.loadError && <span role="alert">{props.loadError}</span>}</div>
@@ -25,6 +26,27 @@ beforeAll(async () => { await i18n.changeLanguage('en') })
 beforeEach(() => { api.runQuery.mockReset(); api.splitQuery.mockReset().mockImplementation((_id: string, sql: string) => Promise.resolve([sql])); api.cancelQuery.mockReset(); api.grid = null })
 
 describe('SQL execution truthfulness', () => {
+  it('keeps the editor and undo history mounted when locating source from maximized results', async () => {
+    api.runQuery.mockResolvedValue({ columns: [{ name: 'n', type: 'int' }], rows: [[2]] })
+    const view=wrap('sqlite','SELECT 1; SELECT 2;')
+    const editor=EditorView.findFromDOM(view.container.querySelector('.cm-editor')!)!
+    act(()=>editor.dispatch({selection:{anchor:15}}))
+    fireEvent.click(screen.getByTestId('sql-run'))
+    await screen.findByTestId('result-grid')
+    fireEvent.click(screen.getByTitle('Maximize results'))
+    expect(EditorView.findFromDOM(view.container.querySelector('.cm-editor')!)).toBe(editor)
+    fireEvent.click(screen.getByRole('button',{name:'Locate source SQL'}))
+    expect(editor.state.sliceDoc(editor.state.selection.main.from,editor.state.selection.main.to)).toBe('SELECT 2;')
+  })
+  it('does not run a current statement from an explicitly whitespace-only selection',async()=>{
+    const view=wrap('sqlite','SELECT   1;')
+    const editor=EditorView.findFromDOM(view.container.querySelector('.cm-editor')!)!
+    act(()=>editor.dispatch({selection:{anchor:6,head:9}}))
+    fireEvent.click(screen.getByTestId('sql-run'))
+    await screen.findByRole('alert')
+    expect(api.runQuery).not.toHaveBeenCalled()
+    expect(api.splitQuery).not.toHaveBeenCalled()
+  })
   it('waits for the backend terminal result after requesting cancellation', async () => {
     let reject!: (e: Error) => void
     api.runQuery.mockReturnValue(new Promise((_, no) => { reject = no }))
@@ -72,7 +94,8 @@ describe('SQL execution truthfulness', () => {
     api.runQuery.mockResolvedValueOnce({ columns: [{ name: 'n', type: 'int' }], rows: [[1]] })
       .mockRejectedValueOnce(new Error('syntax error'))
     wrap('postgres', 'SELECT 1; bad statement; DELETE FROM items')
-    fireEvent.click(screen.getByTestId('sql-run'))
+    fireEvent.click(screen.getByRole('button', { name: 'More actions' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Run entire script' }))
     await screen.findByText('syntax error')
     expect(api.runQuery).toHaveBeenCalledTimes(2)
     expect(screen.getAllByRole('tab')).toHaveLength(2)

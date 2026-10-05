@@ -1,0 +1,17 @@
+import {useEffect,useMemo,useRef,useState} from 'react'
+import {useTranslation} from 'react-i18next'
+import {Icon} from '../Icon'
+export interface DatabaseCommand {id:string;label:string;detail?:string;icon:string;run:()=>void}
+export function DatabaseCommandPalette({commands,onClose}:{commands:DatabaseCommand[];onClose:()=>void}){
+  const {t}=useTranslation(),input=useRef<HTMLInputElement>(null)
+  const [query,setQuery]=useState(''),[selected,setSelected]=useState(0)
+  const matches=useMemo(()=>commands.filter(command=>(command.label+' '+(command.detail??'')).toLowerCase().includes(query.trim().toLowerCase())).slice(0,100),[commands,query])
+  useEffect(()=>{const before=document.activeElement as HTMLElement|null;input.current?.focus();return()=>{if(before?.isConnected)before.focus()}},[])
+  const execute=(command?:DatabaseCommand)=>{if(command){onClose();command.run()}}
+  return <div onMouseDown={event=>{if(event.target===event.currentTarget)onClose()}} style={{position:'absolute',inset:0,zIndex:100,background:'color-mix(in srgb,var(--surface-base) 60%,transparent)',backdropFilter:'blur(2px)',padding:'min(10vh,60px) 12px 12px',display:'flex',alignItems:'flex-start',justifyContent:'center'}}>
+    <section role="dialog" aria-modal="true" aria-label={t('dbviews.commands')} className="col" onKeyDown={event=>{event.stopPropagation();if(event.nativeEvent.isComposing||event.nativeEvent.keyCode===229)return;if(event.key==='Escape'){event.preventDefault();onClose()}else if(event.key==='ArrowDown'){event.preventDefault();setSelected(index=>(index+1)%Math.max(matches.length,1))}else if(event.key==='ArrowUp'){event.preventDefault();setSelected(index=>(index+matches.length-1)%Math.max(matches.length,1))}else if(event.key==='Enter'){event.preventDefault();execute(matches[Math.min(selected,matches.length-1)])}else if(event.key==='Tab'){event.preventDefault();input.current?.focus()}}} style={{width:580,maxWidth:'100%',maxHeight:'75%',borderRadius:12,border:'1px solid var(--border-hairline-alt)',background:'var(--surface-card)',boxShadow:'var(--shadow-dropdown)',overflow:'hidden',minHeight:0}}>
+      <div className="row gap8" style={{padding:12,borderBottom:'1px solid var(--border-hairline)'}}><Icon name="search" size={16}/><input ref={input} aria-label={t('dbviews.quickFind')} placeholder={t('dbviews.quickFind')} value={query} onChange={event=>{setQuery(event.target.value);setSelected(0)}} style={{flex:1,minWidth:0,border:0,outline:0,background:'transparent',color:'var(--text-primary)',fontSize:13}}/><button className="icon-btn bare" title={t('shell.close')} onClick={onClose}><Icon name="x" size={14}/></button></div>
+      <div role="listbox" aria-label={t('dbviews.commands')} className="scrollon" style={{overflowY:'auto',padding:6}}>{matches.map((command,index)=><button key={command.id} role="option" aria-selected={index===selected} className="row gap8" onMouseEnter={()=>setSelected(index)} onClick={()=>execute(command)} style={{width:'100%',padding:'9px 10px',borderRadius:6,textAlign:'left',background:index===selected?'var(--accent-soft)':'transparent',color:'var(--text-primary)',fontSize:12}}><Icon name={command.icon} size={14}/><span className="ell">{command.label}</span><span className="mono ell" style={{marginLeft:'auto',color:'var(--text-tertiary)',fontSize:11,maxWidth:'50%'}}>{command.detail}</span></button>)}{matches.length===0&&<div role="status" style={{padding:16,color:'var(--text-tertiary)',fontSize:12}}>{t('workbench.searchNoObjects')}</div>}</div>
+    </section>
+  </div>
+}

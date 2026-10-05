@@ -17,6 +17,8 @@ import { copyTextToClipboard } from '../../services/clipboard'
 import { supportsServerFilter } from './serverFilter'
 import { clauseSuggest, applyClauseItem, type ClauseMode, type ClauseSuggest, type ClauseItem } from './clauseComplete'
 import { TableImportDialog } from './TableImportDialog'
+import { DatabaseValueInspector,type InspectedDatabaseValue } from './DatabaseValueInspector'
+import { useReportDatabaseWork } from '../../state/databaseDraftWork'
 
 export interface DataGridProps {
   columns: ResultColumn[]
@@ -82,21 +84,6 @@ function cellText(v: unknown): string {
     try { return JSON.stringify(v) } catch { return String(v) }
   }
   return String(v)
-}
-
-/** Full-content text for the cell viewer: objects/arrays pretty-printed, JSON
- *  strings re-indented, everything else as-is. */
-function prettyCell(v: unknown): string {
-  if (v == null) return ''
-  if (typeof v === 'object') {
-    try { return JSON.stringify(v, null, 2) } catch { return String(v) }
-  }
-  const s = String(v)
-  const t = s.trim()
-  if ((t.startsWith('{') && t.endsWith('}')) || (t.startsWith('[') && t.endsWith(']'))) {
-    try { return JSON.stringify(JSON.parse(t), null, 2) } catch { /* not JSON — show raw */ }
-  }
-  return s
 }
 
 /** Truncate to `n` chars, appending an ellipsis when clipped. */
@@ -217,7 +204,7 @@ export function DataGrid({ columns: inputColumns, rows, binaryCells, statusTones
   const [applyMsg, setApplyMsg] = useState<string | null>(null)
   const [applyErr, setApplyErr] = useState<string | null>(null)
   // Full-content viewer for a long/nested cell value (opened from the status bar).
-  const [cellViewer, setCellViewer] = useState<{ label: string; text: string } | null>(null)
+  const [cellViewer, setCellViewer] = useState<InspectedDatabaseValue|null>(null)
   // 列宽（列名→像素宽，仅会话内存）；首屏由启发式宽度填充，用户拖动后覆盖。
   const [colWidths, setColWidths] = useState<Record<string, number>>({})
   // 表头显示模式:false=英文列名(默认),true=列注释。本地状态;DataGrid 带 key={schema.table}
@@ -1090,6 +1077,7 @@ export function DataGrid({ columns: inputColumns, rows, binaryCells, statusTones
   const deletedCount = deleted.size
   const pendingTotal = editedCount + newCount + deletedCount
   // Kept for the in-toolbar "unsaved edits" chip wording (cell-level count).
+  useReportDatabaseWork('grid',pendingTotal>0||editing!==null,applying)
   const editCount = pendingTotal
   // The trailing action column now exists ONLY to host the remove-X on pending
   // new rows. Existing-row deletion moved to the toolbar (删除行), so per-row
@@ -1141,7 +1129,7 @@ export function DataGrid({ columns: inputColumns, rows, binaryCells, statusTones
     if (!entry || !col) return null
     const k = cellKey(sel.r, col.name)
     const raw = edits[k] !== undefined ? edits[k] : entry.row[sel.c]
-    return { label: col.name, raw, full: cellText(raw) }
+    return { label: col.name, raw, full: cellText(raw),type:col.type,binary:isBinaryCell(sel.r,sel.c) }
   })()
 
   return (
@@ -1528,9 +1516,9 @@ export function DataGrid({ columns: inputColumns, rows, binaryCells, statusTones
           <span className="row gap6" style={{ minWidth: 0, maxWidth: 520 }}>
             <span style={{ flex: 'none' }}>{t('dbviews.cell')}:</span>
             <span className="mono ell" style={{ color: 'var(--text-secondary)', minWidth: 0 }}>{selCell ? (clip(selCell.full, 120) || '—') : '—'}</span>
-            {selCell && selCell.full.length > 120 && (
+            {selCell && (
               <button className="icon-btn bare" title={t('dbviews.viewFull')} style={{ width: 18, height: 18, flex: 'none' }}
-                onClick={() => setCellViewer({ label: selCell.label, text: prettyCell(selCell.raw) })}>
+                onClick={() => setCellViewer({label:selCell.label,value:selCell.raw,type:selCell.type,binary:selCell.binary,binaryKnown:binaryMetadataKnown})}>
                 <Icon name="external-link" size={12} />
               </button>
             )}
@@ -1593,26 +1581,7 @@ export function DataGrid({ columns: inputColumns, rows, binaryCells, statusTones
         </div>
       )}
 
-      {/* Cell content viewer — full value of a long/nested cell (objects pretty-printed). */}
-      {cellViewer && (
-        <div onClick={() => setCellViewer(null)}
-          style={{ position: 'absolute', inset: 0, zIndex: 70, background: 'color-mix(in srgb, var(--cta-bg) 42%, transparent)', backdropFilter: 'blur(3px)', display: 'grid', placeItems: 'center' }}>
-          <div onClick={e => e.stopPropagation()} className="pop-in"
-            style={{ width: 620, maxWidth: '90%', maxHeight: '80%', background: 'var(--surface-card)', borderRadius: 18, border: '1px solid var(--border-hairline)', boxShadow: 'var(--shadow-window)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-            <div className="row" style={{ justifyContent: 'space-between', padding: '16px 20px 12px', borderBottom: '1px solid var(--border-hairline)' }}>
-              <div className="col" style={{ gap: 2, minWidth: 0 }}>
-                <span style={{ fontSize: 15, fontWeight: 700, letterSpacing: '-0.2px' }}>{t('dbviews.cellContent')}</span>
-                <span className="mono ell" style={{ fontSize: 11.5, color: 'var(--text-tertiary)' }}>{cellViewer.label}</span>
-              </div>
-              <div className="row gap8">
-                <button className="icon-btn bare" title={t('dbviews.copy')} onClick={() => copyValue(cellViewer.text)}><Icon name="copy" size={15} /></button>
-                <IconBtn name="x" size={16} variant="bare" onClick={() => setCellViewer(null)} />
-              </div>
-            </div>
-            <pre className="mono" style={{ margin: 0, padding: '14px 18px', color: 'var(--text-primary)', fontSize: 12.5, lineHeight: 1.6, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{cellViewer.text}</pre>
-          </div>
-        </div>
-      )}
+      {cellViewer&&<DatabaseValueInspector cell={cellViewer} onClose={()=>setCellViewer(null)}/> }
 
       {/* 行明细 — 纵向表单展示该行全部字段；URL 文本渲染为可点击链接；支持当前页内上一条/下一条切换。
           遮罩用 position:fixed 覆盖整个控制台(含上方 SQL 编辑区)，而非仅遮住 DataGrid 所在的结果区。 */}

@@ -1,3 +1,6 @@
+import { EditorState } from '@codemirror/state'
+import { sql } from '@codemirror/lang-sql'
+import { sqlExecutionTarget } from './sqlExecutionTarget'
 import { forwardRef, useImperativeHandle } from 'react'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { beforeAll, beforeEach, expect, it, vi } from 'vitest'
@@ -15,7 +18,7 @@ vi.mock('../../services/db',async original=>({
   erRelations:vi.fn().mockResolvedValue([]),
 }))
 vi.mock('./SqlEditor',()=>({SqlEditor:forwardRef((props:{code:string;onSelectionChange?:(hasSelection:boolean)=>void},ref)=>{
-  useImperativeHandle(ref,()=>({getSelectedText:()=>api.selected,insertAtCursor:(s:string)=>s}))
+  useImperativeHandle(ref,()=>({getExecutionTarget:(scope:'current'|'selection'|'all')=>scope==='selection'?(api.selected?{target:{sql:api.selected,from:0,to:api.selected.length,kind:'selection'}}:{target:null,reason:'empty'}):sqlExecutionTarget(EditorState.create({doc:props.code,extensions:[sql()]}),scope),getSelectedText:()=>api.selected,insertAtCursor:(s:string)=>s}))
   return <><div data-testid="editor-text">{props.code}</div><button onClick={()=>{api.selected='SELECT 2';props.onSelectionChange?.(true)}}>Choose fragment</button><button onClick={()=>{api.selected='';props.onSelectionChange?.(false)}}>Clear selection</button></>
 })}))
 vi.mock('./DataGrid',()=>({DataGrid:()=> <div data-testid="grid"/>}))
@@ -24,7 +27,7 @@ beforeAll(async()=>{await i18n.changeLanguage('en')})
 beforeEach(()=>{localStorage.clear();api.selected='';api.run.mockReset().mockResolvedValue({columns:[],rows:[]});api.split.mockReset().mockImplementation((_c:string,s:string)=>Promise.resolve([s]))})
 it('shows the actual target and discoverable action labels, not only icons',()=>{
   mount();expect(screen.getByTestId('sql-query-target')).toHaveTextContent('Reporting')
-  expect(screen.getByRole('button',{name:'Run SQL Alt↵'})).toBeInTheDocument()
+  expect(screen.getByRole('button',{name:'Run current statement Alt↵'})).toBeInTheDocument()
   expect(screen.getByRole('button',{name:'Run selection'})).toBeDisabled()
   expect(screen.getByRole('button',{name:'Analyze'})).toBeInTheDocument()
   expect(screen.getByRole('button',{name:'Format'})).toBeInTheDocument()
@@ -44,3 +47,5 @@ it('requires confirmation before clearing a nonempty editor',()=>{
   fireEvent.click(screen.getByRole('button',{name:'Keep SQL'}));expect(screen.getByTestId('editor-text')).toHaveTextContent('SELECT 1')
   fireEvent.click(screen.getByRole('button',{name:'More actions'}));fireEvent.click(screen.getByRole('menuitem',{name:'Clear editor'}));fireEvent.click(screen.getByRole('button',{name:'Clear editor'}));expect(screen.getByTestId('editor-text')).toHaveTextContent('')
 })
+
+it('runs the caret statement by default and the whole script only from its explicit action',async()=>{mount();fireEvent.click(screen.getByTestId('sql-run'));await waitFor(()=>expect(api.split).toHaveBeenCalledWith('c','SELECT 1;'));await waitFor(()=>expect(screen.getByTestId('sql-run')).toBeEnabled());fireEvent.click(screen.getByRole('button',{name:'More actions'}));fireEvent.click(screen.getByRole('menuitem',{name:'Run entire script'}));await waitFor(()=>expect(api.split).toHaveBeenLastCalledWith('c','SELECT 1; SELECT 2;'))})

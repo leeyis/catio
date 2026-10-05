@@ -4,7 +4,8 @@ import { useState, useMemo, useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { ConfirmModal } from '../modals/ConfirmModal'
-import { hasPendingQueryWork, useQuerySessionWork } from '../../state/querySessionWork'
+import { useQuerySessionWork } from '../../state/querySessionWork'
+import { DatabaseWorkProvider,useDatabaseDraftWork,hasPendingDatabaseWork,hasBusyDatabaseDraftWork } from '../../state/databaseDraftWork'
 import { SqlConsole, ERDiagram } from '../dbviews'
 import { CreateObjectModal } from '../dbviews/CreateObjectModal'
 import { ObjectAdminModal } from '../dbviews/ObjectAdminModal'
@@ -16,6 +17,7 @@ import { useMetadataTree } from './useMetadataTree'
 import { ComparePane } from './ComparePane'
 import { TablePane } from './TablePane'
 import { ObjectPane } from './ObjectPane'
+import { DatabaseCommandPalette,type DatabaseCommand } from './DatabaseCommandPalette'
 import { useData } from '../../state/DataContext'
 import { listActiveDbConnections, useActiveDbConnections } from '../../state/dbConnections'
 import { runQuery, dropObject, renameObject, truncateTable, duplicateTableStructure, tableStructure, exportDatabaseSql, exportFile, dbErrMsg, preferredNamespace, type DbCapabilities } from '../../services/db'
@@ -48,18 +50,19 @@ const ALL_ENABLED: DbCapabilities = {
 
 /** 统一 tab:表预览 / 对象源码 / SQL 查询 / ER 图(照 dbx 的 QueryTab.mode 思路)。
  *  id 即身份键 → 单击侧边栏时同身份 tab 直接激活复用(findTabByIdentity)。 */
-export type WorkbenchTab =
+export type WorkbenchTab = (
   | { id: string; kind: 'table'; schema: string; table: string }
   | { id: string; kind: 'object'; schema: string; name: string; objKind: 'view' | 'function' | 'procedure' }
   | { id: string; kind: 'sql'; qid: number; defaultSchema?: string }
   | { id: string; kind: 'er'; schema: string }
-  | { id: string; kind: 'compare' }
+  | { id: string; kind: 'compare' }) & { preview?:boolean }
 
-const tabIdOf = {
-  table: (schema: string, table: string) => `table:${schema}.${table}`,
-  object: (kind: string, schema: string, name: string) => `object:${kind}:${schema}.${name}`,
+const identityPart=(name:string)=>encodeURIComponent(name).replace(/\./g, '%2E')
+export const tabIdOf = {
+  table: (schema: string, table: string) => `table:${identityPart(schema)}.${identityPart(table)}`,
+  object: (kind: string, schema: string, name: string) => `object:${kind}:${identityPart(schema)}.${identityPart(name)}`,
   sql: (qid: number) => `sql:${qid}`,
-  er: (schema: string) => `er:${schema}`,
+  er: (schema: string) => `er:${identityPart(schema)}`,
   compare: () => 'compare',
 }
 
@@ -68,8 +71,9 @@ export function DbWorkbench({ conn, density, active: shown = true, workspaceTabI
   const D = useData()
   const workbenchId=workspaceTabId??conn.id
   const sessionWork=useQuerySessionWork()
+  const drafts=useDatabaseDraftWork()
   const [queryCloseAction,setQueryCloseAction]=useState<(()=>void)|null>(null)
-  const pendingQueryTab=(id:string)=>hasPendingQueryWork({ownerId:workbenchId+':'+id})
+  const pendingQueryTab=(id:string)=>hasPendingDatabaseWork({ownerId:workbenchId+':'+id})
 
   // Resolve the active live connection (if any): the first one whose profileId matches conn.id.
   // When present (Tauri + connected) we drive the grid from the backend; otherwise we keep the
@@ -112,6 +116,8 @@ export function DbWorkbench({ conn, density, active: shown = true, workspaceTabI
 
   // ---- 侧栏整栏收起 (功能#2) — 仅本次会话内存 ----
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [sidebarWidth,setSidebarWidth]=useState(216)
+  const sidebarDrag=useRef<{x:number;width:number}|null>(null)
   // 每个 SQL 控制台上报的"是否最大化"(功能#6 父侧联动);活动 tab 最大化时联动收起侧栏。
   const [fsByTab, setFsByTab] = useState<Record<string, boolean>>({})
   // 有效收起 = 手动收起 || 当前活动 SQL 控制台处于最大化(activeId 可能为 null,安全取值)。
@@ -130,6 +136,8 @@ export function DbWorkbench({ conn, density, active: shown = true, workspaceTabI
   // Error surfaced when a CREATE statement fails to run.
   const [createErr, setCreateErr] = useState<string | null>(null)
   // 标签右键菜单(需求1):{tabId,x,y} 定位;全局 click / Escape 关闭。
+  const [commandsOpen,setCommandsOpen]=useState(false)
+  useEffect(()=>{if(!shown)setCommandsOpen(false)},[shown,connId])
   const [tabMenu, setTabMenu] = useState<{ tabId: string; x: number; y: number } | null>(null)
   // Horizontally-scrollable tab strip — chevrons scroll it when tabs overflow.
   const tabStripRef = useRef<HTMLDivElement>(null)
@@ -153,15 +161,22 @@ export function DbWorkbench({ conn, density, active: shown = true, workspaceTabI
 
   /** 同身份 tab 已开 → 激活复用;否则追加并激活。 */
   function openTab(tab: WorkbenchTab) {
-    setTabs(prev => (prev.some(x => x.id === tab.id) ? prev : [...prev, tab]))
+    setTabs(prev => {
+      const existing=prev.find(x=>x.id===tab.id)
+      if(existing)return tab.preview===false&&existing.preview?prev.map(x=>x.id===tab.id?{...x,preview:false}:x):prev
+      return [...prev.filter(x=>!tab.preview||!x.preview||pendingQueryTab(x.id)),tab]
+    })
     setActiveId(tab.id)
   }
-  function pickTable(schema: string, name: string) {
-    openTab({ id: tabIdOf.table(schema, name), kind: 'table', schema, table: name })
+  function pickTable(schema: string, name: string, pinned=false) {
+    openTab({ id: tabIdOf.table(schema, name), kind: 'table', schema, table: name,preview:!pinned })
   }
-  function pickObject(schema: string, name: string, kind: 'view' | 'function' | 'procedure') {
-    openTab({ id: tabIdOf.object(kind, schema, name), kind: 'object', schema, name, objKind: kind })
+  function pickObject(schema: string, name: string, kind: 'view' | 'function' | 'procedure',pinned=false) {
+    openTab({ id: tabIdOf.object(kind, schema, name), kind: 'object', schema, name, objKind: kind,preview:!pinned })
   }
+  function pinTab(id:string){setTabs(prev=>prev.map(tab=>tab.id===id&&tab.preview?{...tab,preview:false}:tab))}
+  useEffect(()=>{setTabs(prev=>{let changed=false;const next=prev.map(tab=>{if(tab.preview&&drafts.some(item=>item.ownerId===workbenchId+':'+tab.id&&(item.dirty||item.busy))){changed=true;return {...tab,preview:false}}return tab});return changed?next:prev})},[drafts,workbenchId])
+
   /** autoRun=true → 新控制台在挂载后自动插入并执行该 SQL 一次(历史「执行」无窗口兜底,功能#3)。 */
   function newQuery(seed?: string, defaultSchema?: string, autoRun = false) {
     if (!caps.sqlConsole) return
@@ -236,6 +251,7 @@ export function DbWorkbench({ conn, density, active: shown = true, workspaceTabI
   /** 关闭 tab;若关的是当前 tab,激活右侧相邻(无则左侧),全关后为空状态。
    *  全函数式更新:批量/程序化连续关闭也不会用陈旧 tabs 覆盖。 */
   function closeTab(id: string, confirmed = false) {
+    if(hasBusyDatabaseDraftWork({ownerId:workbenchId+':'+id})){setQueryCloseAction(()=>()=>closeTab(id));return}
     if(confirmed!==true&&pendingQueryTab(id)){setQueryCloseAction(()=>()=>closeTab(id,true));return}
     setTabs(prev => {
       const idx = prev.findIndex(x => x.id === id)
@@ -248,12 +264,14 @@ export function DbWorkbench({ conn, density, active: shown = true, workspaceTabI
   /** 关闭除 id 外的其余 tab,并激活该 id。 */
   function closeOthers(id: string, confirmed = false) {
     if(confirmed!==true&&tabs.some(tab=>tab.id!==id&&pendingQueryTab(tab.id))){setQueryCloseAction(()=>()=>closeOthers(id,true));return}
+    if(tabs.some(tab=>tab.id!==id&&hasBusyDatabaseDraftWork({ownerId:workbenchId+':'+tab.id}))){setQueryCloseAction(()=>()=>closeOthers(id));return}
     setTabs(prev => prev.filter(x => x.id === id))
     setActiveId(id)
   }
   /** 关闭全部 tab,进入空状态。 */
   function closeAll(confirmed = false) {
     if(confirmed!==true&&tabs.some(tab=>pendingQueryTab(tab.id))){setQueryCloseAction(()=>()=>closeAll(true));return}
+    if(hasBusyDatabaseDraftWork({workbenchId})){setQueryCloseAction(()=>()=>closeAll());return}
     setTabs([])
     setActiveId(null)
   }
@@ -266,7 +284,7 @@ export function DbWorkbench({ conn, density, active: shown = true, workspaceTabI
       n => n.name === s && ((n.status && n.status!=='loaded') || n.tables.some(x => x.name === tname) || n.views.some(v => v.name === tname)),
     )
     setTabs(prev => {
-      const kept = prev.filter(tb => tb.kind !== 'table' || exists(tb.schema, tb.table))
+      const kept = prev.filter(tb => tb.kind !== 'table' || exists(tb.schema, tb.table) || pendingQueryTab(tb.id))
       return kept.length === prev.length ? prev : kept
     })
   }, [connId, liveSchema])
@@ -280,7 +298,7 @@ export function DbWorkbench({ conn, density, active: shown = true, workspaceTabI
     if (!connId) return
     const settledEmpty = schemaErr != null || (liveSchema != null && liveSchema.schemas.length === 0)
     if (!settledEmpty) return
-    setTabs(prev => (prev.some(tb => tb.kind !== 'sql') ? prev.filter(tb => tb.kind === 'sql') : prev))
+    setTabs(prev => (prev.some(tb => tb.kind !== 'sql') ? prev.filter(tb => tb.kind === 'sql' || pendingQueryTab(tb.id)) : prev))
   }, [connId, schemaErr, liveSchema])
 
   // activeId 失效(指向已被剔除的 tab)时回落到最后一个 tab。
@@ -341,9 +359,20 @@ export function DbWorkbench({ conn, density, active: shown = true, workspaceTabI
     }
   }, [tabMenu])
 
+  const commands:DatabaseCommand[]=[
+    ...(caps.sqlConsole?[{id:'query',label:t('workbench.newQuery'),icon:'file-code',run:()=>newQuery(undefined,namespace?.name)}]:[]),
+    ...(caps.er?[{id:'er',label:t('workbench.erDiagram'),icon:'network',run:()=>openER()}]:[]),
+    ...(connId?[{id:'compare',label:t('compare.title'),icon:'git-compare',run:openCompare}]:[]),
+    {id:'refresh',label:t('workbench.refresh'),icon:'refresh-cw',run:refreshSchema},
+    ...namespaces.flatMap(ns=>[
+      ...ns.tables.map(table=>({id:tabIdOf.table(ns.name,table.name),label:table.name,detail:ns.name,icon:'table-2',run:()=>pickTable(ns.name,table.name,true)})),
+      ...(caps.views?ns.views.map(view=>({id:tabIdOf.object('view',ns.name,view.name),label:view.name,detail:ns.name,icon:'eye',run:()=>pickObject(ns.name,view.name,'view',true)})):[]),
+      ...(caps.functions?ns.functions.map(fn=>({id:tabIdOf.object('function',ns.name,fn.name),label:fn.name,detail:ns.name,icon:'function-square',run:()=>pickObject(ns.name,fn.name,'function',true)})):[]),
+    ]),
+  ]
   return (
-    <div style={{ display: 'flex', alignItems: 'stretch', height: '100%', width: '100%', flex: 1, minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
-      <SchemaBrowser visible={shown} onPick={pickTable} onPickObject={pickObject}
+    <DatabaseWorkProvider owner={{ownerId:workbenchId+':tasks',workbenchId,profileId:conn.id}}><div onKeyDown={event=>{if(shown&&!event.defaultPrevented&&!event.nativeEvent.isComposing&&event.nativeEvent.keyCode!==229&&(event.ctrlKey||event.metaKey)&&event.shiftKey&&event.key.toLowerCase()==='p'){event.preventDefault();event.stopPropagation();setCommandsOpen(true)}}} style={{ display: 'flex', alignItems: 'stretch', height: '100%', width: '100%', flex: 1, minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
+      <SchemaBrowser width={sidebarWidth} visible={shown} onPick={pickTable} onPickObject={pickObject} onPin={(schema,name)=>pickTable(schema,name,true)} onPinObject={(schema,name,kind)=>pickObject(schema,name,kind,true)}
         active={activeTab?.kind === 'table' ? { schema: activeTab.schema, table: activeTab.table } : null}
         onNewQuery={(schema) => newQuery(undefined, schema ?? namespace?.name)} onOpenER={openER} onOpenCompare={connId ? openCompare : undefined} onNewObjectTemplate={onNewObjectTemplate} onRefresh={refreshSchema}
         onObjectAdmin={connId ? (op, objectType, schema, name) => setAdminObj({ op, objectType, schema, name }) : undefined}
@@ -356,7 +385,10 @@ export function DbWorkbench({ conn, density, active: shown = true, workspaceTabI
         canViews={caps.views} canFunctions={caps.functions}
         collapsed={effectiveCollapsed} onToggleCollapse={() => setSidebarCollapsed(c => !c)}
         schemas={connId ? namespaces : undefined} connId={connId??undefined} onLoadNamespace={metadata.loadNamespace} conn={connId ? conn : undefined} live={!!connId} loading={schemaLoading} />
+      {!effectiveCollapsed&&<div role="separator" aria-orientation="vertical" aria-label={t('dbviews.resizeColumnHint')} tabIndex={0} onKeyDown={event=>{if(['ArrowLeft','ArrowRight'].includes(event.key)){event.preventDefault();setSidebarWidth(width=>Math.max(176,Math.min(360,width+(event.key==='ArrowLeft'?-12:12))))}}} onPointerDown={event=>{event.preventDefault();sidebarDrag.current={x:event.clientX,width:sidebarWidth};event.currentTarget.setPointerCapture(event.pointerId)}} onPointerMove={event=>{const drag=sidebarDrag.current;if(drag)setSidebarWidth(Math.max(176,Math.min(360,drag.width+event.clientX-drag.x)))}} onPointerUp={event=>{sidebarDrag.current=null;event.currentTarget.releasePointerCapture(event.pointerId)}} onLostPointerCapture={()=>{sidebarDrag.current=null}} style={{width:5,flex:'none',cursor:'col-resize',background:'var(--surface-subtle)'}}/>}
       <div className="col grow" style={{ minWidth: 0, minHeight: 0, overflow: 'hidden', position: 'relative' }}>
+        <div className="row gap6" style={{padding:'5px 10px',flex:'none',borderBottom:'1px solid var(--border-hairline)',minWidth:0}}><span className="mono ell" style={{fontSize:11,color:'var(--text-tertiary)'}}>{conn.name}</span><button className="btn ghost sm" title="Ctrl/⌘ Shift P" style={{marginLeft:'auto'}} onClick={()=>setCommandsOpen(true)}><Icon name="search" size={13}/>{t('dbviews.commands')}</button></div>
+        {commandsOpen&&shown&&<DatabaseCommandPalette commands={commands} onClose={()=>setCommandsOpen(false)}/>}
         {/* 统一 tab strip:表 / 对象 / 查询 / ER 平级,身份复用,全部保持 mounted。 */}
         {tabs.length > 0 && (
           <div className="row" style={{ gap: 4, padding: '6px 8px', borderBottom: '1px solid var(--border-hairline)', flex: 'none', width: '100%', minWidth: 0, alignItems: 'center' }}>
@@ -377,11 +409,13 @@ export function DbWorkbench({ conn, density, active: shown = true, workspaceTabI
                   : tb.name
                 return (
                   <div key={tb.id} data-testid={`wbtab-${tb.id}`} onClick={() => setActiveId(tb.id)}
-                    onContextMenu={e => { e.preventDefault(); setTabMenu({ tabId: tb.id, x: e.clientX, y: e.clientY }) }}
+                    onDoubleClick={()=>pinTab(tb.id)} onContextMenu={e => { e.preventDefault(); setTabMenu({ tabId: tb.id, x: e.clientX, y: e.clientY }) }}
                     className="row gap6" title={label}
                     style={{ flex: 'none', alignItems: 'center', height: 26, padding: '0 6px 0 10px', borderRadius: 8, cursor: 'pointer', fontSize: 12,
                       background: isActive ? 'var(--accent-soft)' : 'var(--surface-sunken)', color: isActive ? 'var(--accent-primary)' : 'var(--text-secondary)' }}>
-                    <Icon name={icon} size={12} /> {sessionState && sessionState!=='idle' && <span className="dot" title={t(`dbviews.txState.${sessionState}`)} style={{background:sessionState==='failed'?'var(--danger-fg)':'var(--signal-amber)'}}/>} <span className="ell mono" style={{ maxWidth: 140 }}>{label}</span>
+                    <Icon name={icon} size={12} /> {sessionState && sessionState!=='idle' && <span className="dot" title={t(`dbviews.txState.${sessionState}`)} style={{background:sessionState==='failed'?'var(--danger-fg)':'var(--signal-amber)'}}/>} <span className="ell mono" style={{ maxWidth: 140,fontStyle:tb.preview?'italic':undefined }}>{label}</span>
+                    {tb.preview&&<button className="icon-btn bare" data-testid={'wbtab-pin-'+tb.id} title={t('dbviews.pinTab')} onClick={event=>{event.stopPropagation();pinTab(tb.id)}}><Icon name="pin" size={12}/></button>}
+                    {drafts.some(item=>item.ownerId===workbenchId+':'+tb.id&&item.dirty)&&<span className="dot" title={t('dbviews.unsavedEdits')} style={{background:'var(--signal-amber)'}}/>}
                     <button className="icon-btn bare" data-testid={`wbtab-close-${tb.id}`} style={{ width: 18, height: 18 }} title={t('shell.close')} onClick={e => { e.stopPropagation(); closeTab(tb.id) }}><Icon name="x" size={11} /></button>
                   </div>
                 )
@@ -400,6 +434,7 @@ export function DbWorkbench({ conn, density, active: shown = true, workspaceTabI
               borderRadius: 10, boxShadow: 'var(--shadow-dropdown)', padding: '4px 0', minWidth: 160,
             }}>
             {[
+              ...(tabs.find(tab=>tab.id===tabMenu.tabId)?.preview?[{label:t('dbviews.pinTab'),action:()=>{pinTab(tabMenu.tabId);setTabMenu(null)}}]:[]),
               { label: t('workbench.closeCurrent'), action: () => { closeTab(tabMenu.tabId); setTabMenu(null) } },
               { label: t('workbench.closeOthers'), action: () => { closeOthers(tabMenu.tabId); setTabMenu(null) } },
               { label: t('workbench.closeAll'), action: () => { closeAll(); setTabMenu(null) } },
@@ -423,11 +458,12 @@ export function DbWorkbench({ conn, density, active: shown = true, workspaceTabI
         <div className="grow" style={{ minHeight: 0, minWidth: 0, position: 'relative' }}>
           {tabs.map(tb => (
             <div key={tb.id} className="col" style={{ height: '100%', width: '100%', minHeight: 0, minWidth: 0, display: tb.id === activeId ? 'flex' : 'none' }}>
+              <DatabaseWorkProvider owner={{ownerId:workbenchId+':'+tb.id,workbenchId,profileId:conn.id}}>
               {tb.kind === 'table' && (
                 <TablePane conn={conn} connId={connId} caps={caps} schema={tb.schema} table={tb.table} density={density} />
               )}
               {tb.kind === 'object' && (
-                <ObjectPane connId={connId} connName={conn.name} schema={tb.schema} name={tb.name} objKind={tb.objKind} engine={conn.engineId ?? conn.engine} />
+                <ObjectPane canEdit={caps.writable&&caps.structureEdit} connId={connId} connName={conn.name} schema={tb.schema} name={tb.name} objKind={tb.objKind} engine={conn.engineId ?? conn.engine} />
               )}
               {tb.kind === 'sql' && (
                 <SqlConsole density={density} fresh queryN={tb.qid} writable={caps.writable} connId={connId ?? undefined}
@@ -437,11 +473,12 @@ export function DbWorkbench({ conn, density, active: shown = true, workspaceTabI
                   active={shown && tb.id === activeId} engine={conn.engine} engineId={conn.engineId} connName={conn.name} profileId={conn.id} />
               )}
               {tb.kind === 'er' && (
-                <ERDiagram connId={connId ?? undefined} schema={tb.schema} onOpenTable={tname => pickTable(tb.schema, tname)} />
+                <ERDiagram connId={connId ?? undefined} schema={tb.schema} onOpenTable={tname => pickTable(tb.schema, tname,true)} />
               )}
               {tb.kind === 'compare' && (
                 <ComparePane connId={connId ?? ''} engine={conn.engine} schemas={namespaces} />
               )}
+              </DatabaseWorkProvider>
             </div>
           ))}
           {tabs.length === 0 && (
@@ -452,8 +489,8 @@ export function DbWorkbench({ conn, density, active: shown = true, workspaceTabI
             </div>
           )}
         </div>
-        {queryCloseAction && <ConfirmModal title={t('dbviews.sessionCloseTitle')} message={t('dbviews.sessionCloseWarning')}
-          confirmLabel={t('dbviews.sessionCloseConfirm')} danger confirmIcon="x"
+        {queryCloseAction && <ConfirmModal title={t('dbviews.draftCloseTitle')} message={<>{t('dbviews.databaseCloseWarning')}{hasBusyDatabaseDraftWork({workbenchId})&&<div role="status">{t('dbviews.pendingWorkHint')}</div>}</>}
+          confirmLabel={t('dbviews.discardAndClose')} cancelLabel={t('dbviews.keepWork')} confirmDisabled={hasBusyDatabaseDraftWork({workbenchId})} danger confirmIcon="x"
           onCancel={()=>setQueryCloseAction(null)} onConfirm={()=>{const action=queryCloseAction;setQueryCloseAction(null);action()}}/>}
         {/* CREATE TABLE / VIEW form modal — only with a live connection. */}
         {createObj && connId && (
@@ -554,6 +591,6 @@ export function DbWorkbench({ conn, density, active: shown = true, workspaceTabI
           </div>
         )}
       </div>
-    </div>
+    </div></DatabaseWorkProvider>
   )
 }

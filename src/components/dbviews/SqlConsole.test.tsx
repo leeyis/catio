@@ -1,3 +1,6 @@
+import { EditorState } from '@codemirror/state'
+import { sql } from '@codemirror/lang-sql'
+import { sqlExecutionTarget } from './sqlExecutionTarget'
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest'
 import { forwardRef, useImperativeHandle } from 'react'
 import { render, screen, fireEvent, within, waitFor } from '@testing-library/react'
@@ -11,18 +14,19 @@ import { writeHiddenSchemas } from '../../state/schemaFilter'
 // 故把 SqlEditor 替换成一个轻量桩件。
 // 测试可通过此变量给桩件设定「当前选中文本」,以验证 EXPLAIN 走选中优先逻辑。
 let stubSelectedText = ''
+beforeEach(()=>{stubSelectedText=''})
 vi.mock('./SqlEditor', () => ({
   // 桩件回显 code,使格式化按钮的接线(对编辑器内容做格式化替换)可被断言;
   // 同时暴露 getSelectedText 句柄,模拟用户选中片段的场景。
   SqlEditor: forwardRef<{ getSelectedText: () => string }, { code?: string; onRunSelection?: (sql: string) => void }>((props, ref) => {
     useImperativeHandle(ref, () => ({
-      getSelectedText: () => stubSelectedText,
+      getExecutionTarget:(scope:'current'|'selection'|'all')=>(scope==='selection'||scope==='current'&&!!stubSelectedText)?(stubSelectedText?{target:{sql:stubSelectedText,from:0,to:stubSelectedText.length,kind:'selection'}}:{target:null,reason:'empty'}):sqlExecutionTarget(EditorState.create({doc:props.code??'',extensions:[sql()]}),scope),getSelectedText: () => stubSelectedText,
       insertAtCursor: (t: string) => t,
-    }), [])
+    }), [props.code])
     return <>
       <div data-testid="sql-editor-stub">{props.code}</div>
       {props.onRunSelection && (
-        <button data-testid="sql-selection-run-stub" onClick={() => props.onRunSelection?.('select 2')}>
+        <button data-testid="sql-selection-run-stub" onClick={() => {stubSelectedText='select 2';props.onRunSelection?.('select 2')}}>
           run selection
         </button>
       )}

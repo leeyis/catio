@@ -1,4 +1,5 @@
 import { MetadataSearch } from './MetadataSearch'
+import { LazyTableColumns } from './LazyTableColumns'
 /* ported from ref-ui/_extract/blob7.txt — verbatim per plan T1-T7; live multi-schema tree wired in E-series */
 import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -12,10 +13,13 @@ import type { Connection, SchemaNamespace, SchemaTable } from '../../services/ty
 export interface SchemaBrowserProps {
   /** Hidden workbenches must not retain an actionable portaled menu. */
   visible?: boolean
+  width?:number
   connId?: string
   onLoadNamespace?: (name:string,force?:boolean)=>void
   /** Pick a table/view — carries BOTH the schema namespace and the object name (names are ambiguous across schemas). */
   onPick: (schema: string, name: string) => void
+  onPin?: (schema:string,name:string)=>void
+  onPinObject?: (schema:string,name:string,kind:'view'|'function'|'procedure')=>void
   /** Pick a view / function / procedure to show its definition (DDL/source) in the main panel. */
   onPickObject?: (schema: string, name: string, kind: 'view' | 'function' | 'procedure') => void
   /** Currently-selected object as schema+table, or null when not viewing a table. */
@@ -79,7 +83,7 @@ export interface SchemaBrowserProps {
   onToggleCollapse?: () => void
 }
 
-export function SchemaBrowser({ visible = true, connId, onLoadNamespace, onPick, onPickObject, active, onNewQuery, onOpenER, onOpenCompare, onNewObjectTemplate, onRefresh, onObjectAdmin, onTransferData, onExportDatabase, schemas, conn, live, refreshing, loading, collapsed, onToggleCollapse, sqlActive, canSqlConsole = true, canEr = true, canStructureEdit = true, canViews = true, canFunctions = true }: SchemaBrowserProps) {
+export function SchemaBrowser({ visible = true, width=216, connId, onLoadNamespace, onPick, onPickObject, onPin, onPinObject, active, onNewQuery, onOpenER, onOpenCompare, onNewObjectTemplate, onRefresh, onObjectAdmin, onTransferData, onExportDatabase, schemas, conn, live, refreshing, loading, collapsed, onToggleCollapse, sqlActive, canSqlConsole = true, canEr = true, canStructureEdit = true, canViews = true, canFunctions = true }: SchemaBrowserProps) {
   const { t } = useTranslation()
   const D = useData()
   // Live path: render every supplied namespace; mock path: the single seeded schema (pixel-identical).
@@ -132,7 +136,7 @@ export function SchemaBrowser({ visible = true, connId, onLoadNamespace, onPick,
   }
 
   return (
-    <div className="col" style={{ width: 248, flex: 'none', borderRight: '1px solid var(--border-hairline)', background: 'var(--surface-card)' }}>
+    <div className="col" style={{ width, flex: 'none', borderRight: '1px solid var(--border-hairline)', background: 'var(--surface-card)' }}>
       {/* header */}
       <div className="row" style={{ padding: '10px 10px 8px', justifyContent: 'space-between' }}>
         <div className="row gap6" style={{ minWidth: 0 }}><ConnGlyph conn={headerGlyph} size={24} radius={7} /><div className="col" style={{ lineHeight: 1.2, minWidth: 0 }}><span className="ell" style={{ fontSize: 12.5, fontWeight: 700 }}>{headerName}</span><span className="mono ell" style={{ fontSize: 9.5, color: 'var(--text-faint)' }}>{headerEngine}</span></div></div>
@@ -205,7 +209,7 @@ export function SchemaBrowser({ visible = true, connId, onLoadNamespace, onPick,
           Live connection: skeleton while introspecting, empty-state when it returns
           nothing, otherwise the real tree. Mock path always has namespaces. */}
       <div className="grow scrollon" style={{ overflowY: 'auto', padding: '0 6px 10px' }}>
-        {globalSearch && connId && <MetadataSearch connId={connId} query={q} onPick={onPick} onPickObject={onPickObject}/>}
+        {globalSearch && connId && <MetadataSearch connId={connId} query={q} onPick={onPick} onPickObject={onPickObject} onPin={onPin} onPinObject={onPinObject}/>}
         <div style={{display:globalSearch?'none':undefined}}>
         {loading && namespaces.length === 0 ? (
           <div className="col" style={{ gap: 9, padding: '8px 6px' }} aria-busy="true" data-testid="schema-skeleton">
@@ -229,7 +233,7 @@ export function SchemaBrowser({ visible = true, connId, onLoadNamespace, onPick,
             <button onClick={() => applyHidden(new Set())} style={{ border: '1px solid var(--border-hairline)', background: 'transparent', borderRadius: 7, padding: '4px 10px', fontSize: 11.5, color: 'var(--accent-primary)', cursor: 'pointer' }}>{t('workbench.showAllSchemas')}</button>
           </div>
         ) : visibleNamespaces.map(ns => (
-          <SchemaNode key={ns.name} ownerKey={JSON.stringify([connId ?? connKey,visible])} ns={ns} query={query} active={active} onPick={onPick} onPickObject={onPickObject} live={!!live}
+          <SchemaNode key={ns.name} connId={connId} engine={conn?.engineId??conn?.engine} ownerKey={JSON.stringify([connId ?? connKey,visible,!globalSearch])} ns={ns} query={query} active={active} onPick={onPick} onPickObject={onPickObject} onPin={onPin} onPinObject={onPinObject} live={!!live}
             onNewQuery={onNewQuery} onOpenER={onOpenER} onNewObjectTemplate={onNewObjectTemplate} onRefresh={onRefresh} onObjectAdmin={onObjectAdmin} onTransferData={onTransferData} onExportDatabase={onExportDatabase}
             sqlActive={sqlActive} canSqlConsole={canSqlConsole} canEr={canEr} canStructureEdit={canStructureEdit}
             canViews={canViews} canFunctions={canFunctions} onLoadNamespace={onLoadNamespace} />
@@ -248,9 +252,13 @@ export function SchemaBrowser({ visible = true, connId, onLoadNamespace, onPick,
 }
 
 interface SchemaNodeProps {
+  connId?:string
+  engine?:string
   ownerKey: string
   onLoadNamespace?: (name:string,force?:boolean)=>void
   ns: SchemaNamespace
+  onPin?:SchemaBrowserProps['onPin']
+  onPinObject?:SchemaBrowserProps['onPinObject']
   query: string
   active: { schema: string; table: string } | null
   onPick: (schema: string, name: string) => void
@@ -272,7 +280,7 @@ interface SchemaNodeProps {
 }
 
 /** One schema namespace rendered as a collapsible DB tree node (Tables / Views / Functions). */
-function SchemaNode({ ownerKey, onLoadNamespace, ns, query, active, onPick, onPickObject, live, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, onObjectAdmin, onTransferData, onExportDatabase, sqlActive, canSqlConsole, canEr, canStructureEdit, canViews, canFunctions }: SchemaNodeProps) {
+function SchemaNode({ connId,engine,ownerKey, onLoadNamespace, ns, query, active, onPick, onPickObject, onPin, onPinObject, live, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, onObjectAdmin, onTransferData, onExportDatabase, sqlActive, canSqlConsole, canEr, canStructureEdit, canViews, canFunctions }: SchemaNodeProps) {
   const { t } = useTranslation()
   const D = useData()
   // Schemas start COLLAPSED — a freshly-connected DB shows nothing expanded until the
@@ -314,6 +322,7 @@ function SchemaNode({ ownerKey, onLoadNamespace, ns, query, active, onPick, onPi
     const actions:MetadataAction[] = [
       {id:'open',icon:'eye',label:t('workbench.previewObject'),disabled:objectType!=='TABLE'&&!onPickObject,action:()=>objectType==='TABLE'?onPick(ns.name,name):onPickObject?.(ns.name,name,objectType==='VIEW'?'view':'function')},
       {id:'copy',icon:'copy',label:t('workbench.copyName'),action:()=>copyName(name)},
+      ...((objectType==='TABLE'?onPin:onPinObject)?[{id:'pin',icon:'pin',label:t('dbviews.pinTab'),action:()=>objectType==='TABLE'?onPin?.(ns.name,name):onPinObject?.(ns.name,name,objectType==='VIEW'?'view':'function')}] : []),
       ...(sqlActive ? [{id:'insert',icon:'arrow-right-to-line',label:t('workbench.insertName'),action:()=>window.dispatchEvent(new CustomEvent('catio-insert',{detail:{kind:'sql',text:name}}))}] : []),
     ]
     if(live&&canStructureEdit&&onObjectAdmin&&objectType!=='FUNCTION') {
@@ -366,7 +375,7 @@ function SchemaNode({ ownerKey, onLoadNamespace, ns, query, active, onPick, onPi
           const isOpen = expanded[tbl.name]
           const isActive = active != null && active.schema === ns.name && active.table === tbl.name
           // In live mode we never show mock column expansion (the Structure tab covers columns).
-          const showExpand = !live && !!st
+          const showExpand = !!connId || (!live && !!st)
           return (
             <div key={tbl.name}>
               <MetadataNodeActions ownerKey={ownerKey+JSON.stringify([ns.name,'TABLE',tbl.name])} items={leafMenuItems('TABLE',tbl.name)} title={t('workbench.schemaMenu')} triggerTestId={'leaf-admin-btn:TABLE:'+tbl.name} className="row treeleaf treerow" style={{ position: 'relative', alignItems: 'center', gap: 2, paddingLeft: 22, paddingRight: 6, borderRadius: 8, background: isActive ? 'var(--accent-soft)' : 'transparent' }}>
@@ -375,7 +384,7 @@ function SchemaNode({ ownerKey, onLoadNamespace, ns, query, active, onPick, onPi
                       <Icon name="chevron-right" size={11} style={{ color: 'var(--text-faint)', transition: 'transform .15s', transform: isOpen ? 'rotate(90deg)' : 'none' }} />
                     </button>
                   : <span style={{ width: 18, height: 26, flex: 'none' }} />}
-                <button data-testid={`schema-tbl:${ns.name}.${tbl.name}`} onClick={() => onPick(ns.name, tbl.name)} style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 7, padding: '5px 6px 5px 0', minWidth: 0, color: isActive ? 'var(--accent-primary)' : 'var(--text-secondary)' }}>
+                <button data-testid={`schema-tbl:${ns.name}.${tbl.name}`} onDoubleClick={()=>onPin?.(ns.name,tbl.name)} onClick={() => onPick(ns.name, tbl.name)} style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 7, padding: '5px 6px 5px 0', minWidth: 0, color: isActive ? 'var(--accent-primary)' : 'var(--text-secondary)' }}>
                   <Icon name="table-2" size={13} style={{ color: isActive ? 'var(--accent-primary)' : 'var(--text-tertiary)', flex: 'none' }} />
                   <span className="ell mono" style={{ fontSize: 12, fontWeight: isActive ? 600 : 400 }}>{tbl.name}</span>
                   {tbl.pinned && <Icon name="star" size={10} style={{ color: 'var(--signal-amber)', fill: 'var(--signal-amber)', flex: 'none' }} />}
@@ -383,7 +392,8 @@ function SchemaNode({ ownerKey, onLoadNamespace, ns, query, active, onPick, onPi
                 </button>
                 {leafActions(tbl.name)}
               </MetadataNodeActions>
-              {showExpand && isOpen && st && (
+              {connId&&isOpen&&<LazyTableColumns ownerKey={ownerKey} connId={connId} schema={ns.name} table={tbl.name} engine={engine} sqlActive={sqlActive}/>}
+              {!connId && showExpand && isOpen && st && (
                 <div className="col" style={{ paddingLeft: 40, paddingBottom: 4 }}>
                   {st.columns.map(c => (
                     <div key={c.name} className="row gap6" style={{ padding: '3px 6px', minWidth: 0 }}>
@@ -403,7 +413,7 @@ function SchemaNode({ ownerKey, onLoadNamespace, ns, query, active, onPick, onPi
           const isActive = active != null && active.schema === ns.name && active.table === v.name
           return (
             <MetadataNodeActions key={v.name} ownerKey={ownerKey+JSON.stringify([ns.name,'VIEW',v.name])} items={leafMenuItems('VIEW',v.name)} title={t('workbench.schemaMenu')} triggerTestId={'leaf-admin-btn:VIEW:'+v.name} className="row treeleaf treerow" style={{ position: 'relative', alignItems: 'center', gap: 2, paddingRight: 6, borderRadius: 8, background: isActive ? 'var(--accent-soft)' : 'transparent' }}>
-              <button onClick={() => onPickObject?.(ns.name, v.name, 'view')} style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 7, padding: '5px 8px 5px 40px', minWidth: 0, color: isActive ? 'var(--accent-primary)' : 'var(--text-tertiary)' }}>
+              <button onDoubleClick={()=>onPinObject?.(ns.name,v.name,'view')} onClick={() => onPickObject?.(ns.name, v.name, 'view')} style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 7, padding: '5px 8px 5px 40px', minWidth: 0, color: isActive ? 'var(--accent-primary)' : 'var(--text-tertiary)' }}>
                 <Icon name="eye" size={12} style={{ color: 'var(--signal-violet)', flex: 'none' }} /><span className="ell mono" style={{ fontSize: 12 }}>{v.name}</span>
               </button>
               {leafActions(v.name)}
@@ -415,7 +425,7 @@ function SchemaNode({ ownerKey, onLoadNamespace, ns, query, active, onPick, onPi
         <MetadataNodeActions ownerKey={JSON.stringify([ownerKey,ns.name,'functions'])} items={folderItems('functions')} title={t('workbench.schemaMenu')} className="row" triggerTestId={'folder-menu:functions:'+ns.name}><TreeNode icon="function-square" label={t('workbench.functions')} count={ns.functions.length} open={open.fns} onToggle={() => setOpen(o => ({ ...o, fns: !o.fns }))} depth={1} /></MetadataNodeActions>
         {open.fns && ns.functions.map(f => (
           <MetadataNodeActions key={f.name} ownerKey={ownerKey+JSON.stringify([ns.name,'FUNCTION',f.name])} items={leafMenuItems('FUNCTION',f.name)} title={t('workbench.schemaMenu')} triggerTestId={'leaf-admin-btn:FUNCTION:'+f.name} className="row treeleaf treerow" style={{ position: 'relative', alignItems: 'center', gap: 2, paddingRight: 6, borderRadius: 8, background: 'transparent' }}>
-            <button onClick={() => onPickObject?.(ns.name, f.name, 'function')} style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 7, padding: '5px 8px 5px 40px', minWidth: 0, color: 'var(--text-tertiary)' }}>
+            <button onDoubleClick={()=>onPinObject?.(ns.name,f.name,'function')} onClick={() => onPickObject?.(ns.name, f.name, 'function')} style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 7, padding: '5px 8px 5px 40px', minWidth: 0, color: 'var(--text-tertiary)' }}>
               <Icon name="function-square" size={12} style={{ color: 'var(--signal-green)', flex: 'none' }} /><span className="ell mono" style={{ fontSize: 12 }}>{f.name}()</span>
             </button>
             {leafActions(f.name)}
