@@ -89,6 +89,7 @@ pub struct AppState {
     /// Network-scan cancellation registry — the scan runs on the server's network and streams
     /// `scan://*` events through the WS hub (already Arc-backed internally, so a cheap clone).
     pub scan: crate::scan::ScanState,
+    pub sql_files: crate::db::SqlFileState,
     /// AES-256 key derived from `CATIO_MASTER_KEY`, encrypting the per-user connection-secret
     /// vault at rest (web head). `None` when the env var is unset → secret storage is disabled
     /// (the browser falls back to prompting each connect).
@@ -161,6 +162,7 @@ impl AppState {
             agent: Arc::new(crate::agent::AgentRuntime::production()),
             vnc: Arc::new(VncManager::default()),
             scan: crate::scan::ScanState::default(),
+            sql_files: crate::db::SqlFileState::default(),
             secret_key: std::env::var("CATIO_MASTER_KEY").ok()
                 .filter(|k| !k.is_empty())
                 .map(|k| crate::secrets::derive_key(&k)),
@@ -751,6 +753,7 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
             let conn_id = require(&args, "connId")?;
             st.conn_owners.lock().unwrap().remove(conn_id);
             st.conn_meta.lock().unwrap().remove(conn_id);
+            st.sql_files.cancel_connection(conn_id);
             if conns.remove(conn_id).await { Ok(Value::Null) }
             else { Err("connection not found".into()) }
         }
@@ -934,6 +937,14 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
                 args.get("rowLimit").and_then(Value::as_u64).map(|n| n.min(u32::MAX as u64) as u32),
             ).await.map_err(estr)?;
             Ok(Value::String(sql))
+        }
+
+        "db_sql_file_preview_bytes" | "db_run_sql_file_bytes" => {
+            crate::server_sql_file::handle(st,&actor.id.to_string(),cmd=="db_run_sql_file_bytes",args).await
+        }
+        "db_cancel_sql_file" => {
+            st.sql_files.cancel(require(&args,"connId")?,require(&args,"executionId")?).map_err(estr)?;
+            Ok(Value::Null)
         }
 
         // Browser imports accept bounded bytes, never a renderer-provided server file path.

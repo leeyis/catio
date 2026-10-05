@@ -4,6 +4,7 @@ pub mod db;
 pub mod server;
 pub mod server_mcp;
 pub mod server_ws;
+mod server_sql_file;
 pub mod auth;
 pub mod secrets;
 pub mod events;

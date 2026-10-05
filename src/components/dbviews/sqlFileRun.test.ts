@@ -70,10 +70,20 @@ describe('sqlFileRun pure logic', () => {
     expect(next.errors.length).toBe(1)
   })
 
+  it('a started final statement is not a completed progress receipt', () => {
+    const s=reduceProgress(initialRunState(),ev({status:'running',statementIndex:1,total:1}))
+    expect(progressPercent(s)).toBe(0)
+  })
+  it('bounds retained failure details without losing real counters or preparing bytes', () => {
+    let s=initialRunState()
+    for(let i=1;i<=160;i++)s=reduceProgress(s,ev({status:'statementFailed',error:'failure',failureCount:i,statementIndex:i,bytesRead:2048,phase:'executing'}))
+    expect(s.errors).toHaveLength(100);expect(s.errors[0].statementIndex).toBe(61)
+    expect(s.failureCount).toBe(160);expect(s.bytesRead).toBe(2048)
+  })
   it('progressPercent clamps and handles zero total', () => {
     expect(progressPercent({ ...initialRunState(), total: 0, statementIndex: 0 })).toBe(0)
-    expect(progressPercent({ ...initialRunState(), total: 4, statementIndex: 1 })).toBe(25)
-    expect(progressPercent({ ...initialRunState(), total: 4, statementIndex: 4 })).toBe(100)
-    expect(progressPercent({ ...initialRunState(), total: 4, statementIndex: 9 })).toBe(100)
+    expect(progressPercent({ ...initialRunState(), total: 4, statementIndex: 1, successCount: 1 })).toBe(25)
+    expect(progressPercent({ ...initialRunState(), total: 4, statementIndex: 4, successCount: 4 })).toBe(100)
+    expect(progressPercent({ ...initialRunState(), total: 4, statementIndex: 9, successCount: 9 })).toBe(100)
   })
 })

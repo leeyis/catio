@@ -39,6 +39,10 @@ it('runs only the live selected fragment from the explicit selection button',asy
 it('does not fall back to the document after a selection disappears',()=>{
   mount();fireEvent.click(screen.getByText('Choose fragment'));fireEvent.click(screen.getByText('Clear selection'));const button=screen.getByRole('button',{name:'Run selection'});expect(button).toBeDisabled();fireEvent.click(button);expect(api.split).not.toHaveBeenCalled()
 })
+it.each(['mongodb','redis','elasticsearch'])('does not advertise SQL-file execution for the %s native console',engine=>{
+  render(<LanguageProvider><DataProvider><SqlConsole fresh connId="native" connName="Native QA" engine={engine}/></DataProvider></LanguageProvider>)
+  fireEvent.click(screen.getByRole('button',{name:'More actions'}));expect(screen.queryByRole('menuitem',{name:'Run SQL file'})).toBeNull()
+})
 it('groups file and clear actions in a keyboard dismissible menu',()=>{
   mount();fireEvent.click(screen.getByRole('button',{name:'More actions'}));expect(screen.getByRole('menu')).toBeInTheDocument();expect(screen.getByRole('menuitem',{name:'Run SQL file'})).toBeInTheDocument();fireEvent.keyDown(screen.getByRole('menu'),{key:'Escape'});expect(screen.queryByRole('menu')).not.toBeInTheDocument()
 })

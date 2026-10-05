@@ -605,7 +605,7 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
     ...(!plain&&connId?[{id:'peek',label:t('dbviews.structurePeek'),icon:'columns',disabled:!schemaOptions.length,action:()=>setPeekOpen(true)}]:[]),
     ...(!plain?[{id:'format',label:t('dbviews.format'),icon:'wrench',disabled:!code.trim()||actionBusy,action:()=>setCode(previous=>formatSql(previous,engineId??engine))}]:[]),
     {id:'save',label:t('dbviews.saveQuery'),icon:'save',disabled:!code.trim()||savingQuery,action:()=>{void saveQuery()}},
-    ...(connId?[{id:'file',label:t('dbviews.sqlFileRunFile'),icon:'file-code',testId:'sql-run-file',disabled:actionBusy,action:()=>setSqlFileOpen(true)}]:[]),
+    ...(connId&&!plain?[{id:'file',label:t('dbviews.sqlFileRunFile'),icon:'file-code',testId:'sql-run-file',disabled:actionBusy,action:()=>setSqlFileOpen(true)}]:[]),
     {id:'clear',label:t('dbviews.clearEditor'),icon:'eraser',danger:true,disabled:!code.trim()||actionBusy,action:()=>setClearConfirm(true)},
   ]
   const menuOwner=JSON.stringify([connId,active,code,phase,defaultNamespace,engineId??engine,editorTarget?.target?.from,editorTarget?.target?.to])

@@ -216,6 +216,8 @@ impl SqlStatementSplitter {
         statements
     }
 
+    pub fn buffered_bytes(&self) -> usize { self.buffer.len() + self.pending_input.len() }
+
     pub fn finish(mut self) -> Vec<String> {
         let pending = std::mem::take(&mut self.pending_input);
         let mut statements = self.process_chunk(&pending, true);
@@ -272,8 +274,8 @@ pub fn split_sql_statements_for_database(sql: &str, db_type: DatabaseType) -> Ve
 }
 
 /// SQL 文件大小上限（200 MiB，对齐 dbx sql_file.rs 的 200 MB 保护）。
-/// db_sql_file_preview / db_run_sql_file 都需把整文件读入内存再切分，对几 GB 的 dump
-/// 会直接 OOM，因此在读盘前用此上限拦截。
+/// Chunked preparation now uses a private disk spool; retain this ceiling to bound
+/// preparation time and disk usage. Individual statements have a separate 8 MiB bound.
 pub const MAX_SQL_FILE_BYTES: usize = 200 * 1024 * 1024;
 
 /// 在读盘前校验 SQL 文件大小，超过 MAX_SQL_FILE_BYTES 直接报错（防 OOM）。
@@ -291,11 +293,12 @@ pub fn check_sql_file_size(len: usize) -> Result<(), String> {
 /// 把语句压成单行、限长的摘要（供进度展示）。
 pub fn statement_summary(statement: &str) -> String {
     const MAX_LEN: usize = 120;
-    let collapsed = statement.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.chars().count() <= MAX_LEN {
-        return collapsed;
+    let mut out=String::new(); let mut count=0;
+    'words: for word in statement.split_whitespace() {
+        if !out.is_empty() { if count==MAX_LEN {break;} out.push(' ');count+=1; }
+        for ch in word.chars() { if count==MAX_LEN {break 'words;} out.push(ch);count+=1; }
     }
-    collapsed.chars().take(MAX_LEN).collect()
+    out
 }
 
 /// 片段是否含可执行 SQL（即去掉所有注释/空白后还剩非空内容）。
@@ -405,6 +408,8 @@ pub struct SqlFileRequest {
     pub conn_id: String,
     pub file_path: String,
     pub continue_on_error: bool,
+    #[serde(default)]
+    pub expected_fingerprint: Option<String>,
 }
 
 /// 进度事件状态（序列化为 camelCase 供前端判别）。
@@ -435,6 +440,10 @@ pub struct SqlFileProgress {
     pub elapsed_ms: u128,
     pub statement_summary: String,
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_read: Option<u64>,
 }
 
 /// 单条语句失败后的决策（纯函数，便于 TDD「继续 / 中止」分支）。
@@ -613,7 +622,7 @@ mod tests {
             affected_rows: 5,
             elapsed_ms: 7,
             statement_summary: "select 1".into(),
-            error: None,
+            error: None, phase: None, bytes_read: None,
         };
         let v = serde_json::to_value(p).unwrap();
         assert_eq!(v["executionId"], "e1");

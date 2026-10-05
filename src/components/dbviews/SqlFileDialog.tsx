@@ -1,15 +1,17 @@
 import { useReportDatabaseWork } from '../../state/databaseDraftWork'
+import { isServer, isTauri } from '../../services/transport'
+import { ConfirmModal } from '../modals/ConfirmModal'
 import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn, IconBtn } from '../atoms'
 import {
-  sqlFilePreview, runSqlFile, cancelSqlFile, onSqlFileProgress, dbErrMsg,
-  type SqlFilePreview,
+  sqlFilePreview, sqlFilePreviewBytes, runSqlFile, cancelSqlFile, onSqlFileProgress, dbErrMsg,
+  type SqlFilePreview, type SqlFileBytes,
 } from '../../services/db'
 import {
   initialRunState, isTerminalStatus, reduceProgress, progressPercent,
-  type SqlFileRunState,
+  type SqlFileRunState, type SqlFileProgress,
 } from './sqlFileRun'
 
 export interface SqlFileDialogProps {
@@ -26,7 +28,11 @@ export interface SqlFileDialogProps {
  */
 export function SqlFileDialog({ connId, connName, onClose }: SqlFileDialogProps) {
   const { t } = useTranslation()
+  const webMode=isServer()&&!isTauri()
+  const [confirmRerun,setConfirmRerun]=useState(false)
   const [filePath, setFilePath] = useState<string | null>(null)
+  const fileInput=useRef<HTMLInputElement>(null)
+  const [webFile,setWebFile]=useState<SqlFileBytes|null>(null)
   const [preview, setPreview] = useState<SqlFilePreview | null>(null)
   const [continueOnError, setContinueOnError] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -40,46 +46,62 @@ export function SqlFileDialog({ connId, connName, onClose }: SqlFileDialogProps)
   const dispatched = useRef(false), stopBeforeDispatch = useRef(false)
   const [cancelling,setCancelling]=useState(false)
   useEffect(()=>{
-    generation.current++;picking.current=false;executing.current=false;dispatched.current=false
-    setFilePath(null);setPreview(null);setRun(null);setRunning(false);setBusy(false);setErr(null);setCancelling(false)
-    return()=>{generation.current++;unlistenRef.current?.();unlistenRef.current=null;if(dispatched.current&&execIdRef.current)void cancelSqlFile(execIdRef.current).catch(()=>{});execIdRef.current=null}
+    generation.current++;picking.current=false;executing.current=false;dispatched.current=false;setConfirmRerun(false)
+    setWebFile(null);setFilePath(null);setPreview(null);setRun(null);setRunning(false);setBusy(false);setErr(null);setCancelling(false)
+    return()=>{generation.current++;unlistenRef.current?.();unlistenRef.current=null;if(dispatched.current&&execIdRef.current)void cancelSqlFile(execIdRef.current,connId).catch(()=>{});execIdRef.current=null}
   },[connId])
 
-  async function pickFile() {
+  async function loadFile(resolveFile:()=>Promise<{path:string;bytes?:SqlFileBytes}|null>) {
     if(picking.current||executing.current)return
     picking.current=true;const owner=generation.current;setBusy(true);setErr(null)
-    // A failed replacement preview must never leave the old file executable.
-    setPreview(null);setFilePath(null);setRun(null)
+    setPreview(null);setFilePath(null);setWebFile(null);setRun(null);setConfirmRerun(false)
     try {
-      const {open}=await import('@tauri-apps/plugin-dialog')
-      const picked=await open({multiple:false,filters:[{name:t('dbviews.sqlFileFilter'),extensions:['sql']}]})
-      if(owner!==generation.current)return
-      const path=Array.isArray(picked)?picked[0]:picked
-      if(!path)return
-      const pv=await sqlFilePreview(connId,path)
-      if(owner===generation.current){setFilePath(path);setPreview(pv)}
+      const source=await resolveFile()
+      if(owner!==generation.current||!source)return
+      const pv=source.bytes?await sqlFilePreviewBytes(connId,source.bytes):await sqlFilePreview(connId,source.path)
+      if(owner===generation.current){setFilePath(source.path);setWebFile(source.bytes??null);setPreview(pv)}
     }catch(e){if(owner===generation.current)setErr(dbErrMsg(e))}
     finally{if(owner===generation.current){picking.current=false;setBusy(false)}}
+  }
+  async function pickFile() {
+    if(webMode){fileInput.current?.click();return}
+    await loadFile(async()=>{
+      const {open}=await import('@tauri-apps/plugin-dialog')
+      const picked=await open({multiple:false,filters:[{name:t('dbviews.sqlFileFilter'),extensions:['sql']}]})
+      const path=Array.isArray(picked)?picked[0]:picked
+      return path?{path}:null
+    })
+  }
+  async function pickBrowserFile(file?:File) {
+    if(!file)return
+    await loadFile(async()=>{
+      if(file.size>8*1024*1024)throw new Error(t('dbviews.webImportLimit'))
+      const data=new Uint8Array(await file.arrayBuffer());let binary=''
+      for(let offset=0;offset<data.length;offset+=32768)binary+=String.fromCharCode(...data.subarray(offset,offset+32768))
+      return {path:file.name,bytes:{fileName:file.name,dataBase64:btoa(binary)}}
+    })
   }
 
   async function start() {
     if(!filePath||!preview||preview.statementCount===0||picking.current||executing.current)return
     executing.current=true;dispatched.current=false;stopBeforeDispatch.current=false
     const owner=generation.current
-    const executionId=globalThis.crypto?.randomUUID?.()??('sqlfile-'+Date.now()+'-'+Math.random())
+    const executionId=globalThis.crypto?.randomUUID?.()??('sqlfile-'+Date.now()+'-'+Math.random().toString(36).slice(2))
     execIdRef.current=executionId;setErr(null);setRun(initialRunState());setRunning(true);setCancelling(false)
     let terminalReceipt=false
-    try {
-      const unlisten=await onSqlFileProgress(p=>{
+    const receive=(p:SqlFileProgress)=>{
         if(owner!==generation.current||execIdRef.current!==executionId||p.executionId!==executionId||terminalReceipt)return
         setRun(prev=>reduceProgress(prev??initialRunState(),p))
-        if(isTerminalStatus(p.status)){terminalReceipt=true;setErr(null)}
-      })
+        if(isTerminalStatus(p.status)){terminalReceipt=true;setErr(p.status==='cancelled'?null:p.error)}
+    }
+    try {
+      const unlisten=await onSqlFileProgress(receive)
       if(owner!==generation.current){unlisten();return}
       unlistenRef.current=unlisten
       if(stopBeforeDispatch.current){setRun({...initialRunState(),status:'cancelled'});return}
       dispatched.current=true
-      await runSqlFile({executionId,connId,filePath,continueOnError})
+      const receipt=await runSqlFile({executionId,connId,filePath,continueOnError,expectedFingerprint:preview.fingerprint,...(webFile?{webFile}:{})})
+      if(receipt)receive(receipt)
       if(owner===generation.current&&!terminalReceipt)setErr(t('dbviews.sqlFileMissingReceipt'))
     }catch(e){if(owner===generation.current)setErr(dbErrMsg(e))}
     finally{if(owner===generation.current){unlistenRef.current?.();unlistenRef.current=null;execIdRef.current=null;executing.current=false;dispatched.current=false;setRunning(false);setCancelling(false)}}
@@ -90,7 +112,7 @@ export function SqlFileDialog({ connId, connName, onClose }: SqlFileDialogProps)
     const owner=generation.current,id=execIdRef.current
     setCancelling(true)
     if(!dispatched.current){stopBeforeDispatch.current=true;return}
-    try{if(id)await cancelSqlFile(id)}catch(e){if(owner===generation.current){setErr(dbErrMsg(e));setCancelling(false)}}
+    try{if(id)await cancelSqlFile(id,connId)}catch(e){if(owner===generation.current){setErr(dbErrMsg(e));setCancelling(false)}}
     // A cancellation request is not a terminal receipt or a rollback.
   }
 
@@ -98,7 +120,7 @@ export function SqlFileDialog({ connId, connName, onClose }: SqlFileDialogProps)
   const terminal = run != null && isTerminalStatus(run.status)
   const pct = run ? progressPercent(run) : 0
 
-  return (
+  return (<>
     <div onClick={running || busy ? undefined : onClose}
       style={{ position: 'absolute', inset: 0, zIndex: 70, background: 'color-mix(in srgb, var(--cta-bg) 42%, transparent)', backdropFilter: 'blur(3px)', display: 'grid', placeItems: 'center' }}>
       <div onClick={e => e.stopPropagation()} className="pop-in"
@@ -118,16 +140,17 @@ export function SqlFileDialog({ connId, connName, onClose }: SqlFileDialogProps)
           <div className="col" style={{ gap: 6 }}>
             <span style={labelStyle}>{t('dbviews.sqlFileFile')}</span>
             <div className="row gap8" style={{ alignItems: 'center' }}>
+              {webMode&&<input ref={fileInput} type="file" accept=".sql" hidden data-testid="browser-sql-file" onChange={event=>{const file=event.currentTarget.files?.[0];event.currentTarget.value='';void pickBrowserFile(file)}}/>}
               <Btn size="sm" variant="secondary" icon="upload" onClick={pickFile} disabled={busy || running}>
                 {t('dbviews.sqlFileChoose')}
               </Btn>
               {preview && (
                 <span className="mono ell" style={{ fontSize: 12, color: 'var(--text-secondary)', minWidth: 0 }}>
-                  {preview.fileName} · {t('dbviews.sqlFileStmtCount', { count: preview.statementCount })}
+                  {preview.fileName} · {preview.sizeBytes.toLocaleString()} B · {t('dbviews.sqlFileStmtCount', { count: preview.statementCount })}{preview.encoding?` · ${preview.encoding}`:''}
                 </span>
               )}
             </div>
-            <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>{t('dbviews.sqlFileHint')}</span>
+            <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>{t(webMode?'dbviews.sqlFileWebHint':'dbviews.sqlFileHint')}</span>
           </div>
 
           {/* error policy */}
@@ -150,6 +173,8 @@ export function SqlFileDialog({ connId, connName, onClose }: SqlFileDialogProps)
           {run && (
             <div className="col" style={{ gap: 8 }}>
               <span style={labelStyle}>{t('dbviews.sqlFileProgress')}</span>
+              {running&&run.phase==='preparing'&&<span role="status" style={{fontSize:12,color:'var(--text-secondary)'}}>{t('dbviews.sqlFilePreparing',{bytes:run.bytesRead??0})}</span>}
+              {run.errors.length<run.failureCount&&<span style={{fontSize:11,color:'var(--text-tertiary)'}}>{t('dbviews.sqlFileRecentErrors',{count:run.errors.length})}</span>}
               <div style={{ height: 8, borderRadius: 6, background: 'var(--surface-sunken)', overflow: 'hidden' }}>
                 <div style={{ height: '100%', width: `${pct}%`, background: run.status === 'error' ? 'var(--danger, #d9534f)' : 'var(--accent-primary)', transition: 'width .15s' }} />
               </div>
@@ -181,7 +206,7 @@ export function SqlFileDialog({ connId, connName, onClose }: SqlFileDialogProps)
               {terminal && run.status === 'cancelled' && (
                 <div className="row gap8" style={{ alignItems: 'center', color: 'var(--text-tertiary)', fontSize: 12.5 }}>
                   <Icon name="square" size={14} />
-                  <span>{t('dbviews.sqlFileCancelled')}</span>
+                  <span>{t('dbviews.sqlFileCancelled')}</span><span>{t('dbviews.sqlFileCancelBoundary')}</span>
                 </div>
               )}
               {terminal && run.status === 'error' && (
@@ -194,7 +219,7 @@ export function SqlFileDialog({ connId, connName, onClose }: SqlFileDialogProps)
           )}
 
           {err && (
-            <div className="row gap8" style={{ alignItems: 'center', color: 'var(--danger, #d9534f)', fontSize: 12 }}>
+            <div role="alert" className="row gap8" style={{ alignItems: 'center', color: 'var(--danger, #d9534f)', fontSize: 12 }}>
               <Icon name="alert-triangle" size={14} />
               <span>{err}</span>
             </div>
@@ -208,7 +233,7 @@ export function SqlFileDialog({ connId, connName, onClose }: SqlFileDialogProps)
           ) : (
             <>
               <Btn variant="ghost" disabled={busy} onClick={onClose}>{terminal ? t('dbviews.close') : t('dbviews.cancel')}</Btn>
-              <Btn variant="primary" icon="play" onClick={start} disabled={busy || !preview || preview.statementCount === 0}>
+              <Btn variant="primary" icon="play" onClick={()=>{if(run)setConfirmRerun(true);else void start()}} disabled={busy || !preview || preview.statementCount === 0}>
                 {t('dbviews.sqlFileRun', { count: preview?.statementCount ?? 0 })}
               </Btn>
             </>
@@ -216,5 +241,6 @@ export function SqlFileDialog({ connId, connName, onClose }: SqlFileDialogProps)
         </div>
       </div>
     </div>
-  )
+    {confirmRerun&&<ConfirmModal title={t('dbviews.sqlFileRerunTitle')} message={t('dbviews.sqlFileRerunBody')} confirmLabel={t('dbviews.sqlFileRerunConfirm')} danger confirmIcon="play" onCancel={()=>setConfirmRerun(false)} onConfirm={()=>{setConfirmRerun(false);void start()}}/>}
+  </>)
 }

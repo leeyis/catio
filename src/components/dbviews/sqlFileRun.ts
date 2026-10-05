@@ -28,6 +28,8 @@ export interface SqlFileProgress {
   affectedRows: number
   elapsedMs: number
   statementSummary: string
+  phase?: string | null
+  bytesRead?: number
   error: string | null
 }
 
@@ -41,6 +43,8 @@ export interface SqlFileRunState {
   affectedRows: number
   elapsedMs: number
   currentStatement: string
+  phase?: string | null
+  bytesRead?: number
   /** 失败的语句明细（continue_on_error 下可累积多条）。 */
   errors: { statementIndex: number; summary: string; message: string }[]
 }
@@ -81,6 +85,8 @@ export function reduceProgress(state: SqlFileRunState, ev: SqlFileProgress): Sql
     failureCount: ev.failureCount,
     affectedRows: ev.affectedRows,
     elapsedMs: ev.elapsedMs,
+    phase: ev.phase,
+    bytesRead: ev.bytesRead,
     errors: state.errors,
   }
   if (ev.status === 'running' && ev.statementSummary) {
@@ -88,7 +94,7 @@ export function reduceProgress(state: SqlFileRunState, ev: SqlFileProgress): Sql
   }
   if (ev.status === 'statementFailed' && ev.error) {
     next.errors = [
-      ...state.errors,
+      ...state.errors.slice(-99),
       { statementIndex: ev.statementIndex, summary: ev.statementSummary, message: ev.error },
     ]
   }
@@ -98,6 +104,6 @@ export function reduceProgress(state: SqlFileRunState, ev: SqlFileProgress): Sql
 /** 进度百分比 [0,100]（total 为 0 时返回 0，避免除零）。 */
 export function progressPercent(state: SqlFileRunState): number {
   if (state.total <= 0) return 0
-  const pct = Math.round((state.statementIndex / state.total) * 100)
+  const pct = Math.round(((state.successCount + state.failureCount) / state.total) * 100)
   return Math.min(100, Math.max(0, pct))
 }

@@ -10,7 +10,7 @@ import type { RedisEdit } from '../components/dbviews/redisEdit'
 // Transport: rpc() routes to Tauri invoke (desktop) or POST /api/invoke (server head);
 // isServer() lets the mock guard stay `if (!isTauri() && !isServer())` so vitest/dev (which
 // set neither flag) keep their mock path unchanged.
-import { rpc, isTauri, isServer } from './transport'
+import { rpc, isTauri, isServer, subscribe, ensureSubscription } from './transport'
 
 export { dbErrMsg } from './dbError'
 
@@ -460,7 +460,12 @@ export async function transferTable(args: {
 import type { SqlFileProgress } from '../components/dbviews/sqlFileRun'
 
 /** SQL 文件预览：文件名 / 大小 / 按目标方言切分后的语句数。 */
-export interface SqlFilePreview { fileName: string; sizeBytes: number; statementCount: number }
+export interface SqlFilePreview { fileName: string; sizeBytes: number; statementCount: number; fingerprint?: string; encoding?: string }
+export interface SqlFileBytes { fileName: string; dataBase64: string }
+export async function sqlFilePreviewBytes(connId: string, file: SqlFileBytes): Promise<SqlFilePreview> {
+  if (!isServer()) throw new Error("SQL byte uploads require server mode")
+  return rpc<SqlFilePreview>("db_sql_file_preview_bytes", {connId,...file})
+}
 
 /** 读 SQL 文件并按目标连接方言切分，返回预览（文件名/大小/语句数）。 */
 export async function sqlFilePreview(connId: string, filePath: string): Promise<SqlFilePreview> {
@@ -473,27 +478,32 @@ export async function sqlFilePreview(connId: string, filePath: string): Promise<
  * continueOnError=true 时单句失败继续，否则中止。executionId 由调用方生成，用于取消。
  */
 export async function runSqlFile(args: {
-  executionId: string; connId: string; filePath: string; continueOnError: boolean
-}): Promise<void> {
+  executionId: string; connId: string; filePath: string; continueOnError: boolean; expectedFingerprint?: string; webFile?: SqlFileBytes
+}): Promise<SqlFileProgress> {
+  const {webFile,filePath,...request}=args
+  if(isServer()&&!isTauri()) {
+    if(!webFile)throw new Error('Choose and preview a browser SQL file before running')
+    return rpc<SqlFileProgress>('db_run_sql_file_bytes', {...request,...webFile}).finally(()=>invalidateSchemaCache(args.connId))
+  }
   if (!isTauri()) throw new Error('runSqlFile requires the Tauri runtime')
-  return rpc<void>('db_run_sql_file', { req: args })
+  return rpc<SqlFileProgress>('db_run_sql_file', { req: {...request,filePath} }).finally(()=>invalidateSchemaCache(args.connId))
 }
 
 /** 取消正在执行的 SQL 文件批量任务。 */
-export async function cancelSqlFile(executionId: string): Promise<void> {
-  if (!isTauri()) return // pairs with the desktop-only runSqlFile; no-op over web
-  return rpc<void>('db_cancel_sql_file', { executionId })
+export async function cancelSqlFile(executionId: string, connId: string): Promise<void> {
+  if (!isTauri() && !isServer()) return
+  return rpc<void>('db_cancel_sql_file', { executionId, connId })
 }
 
 /**
- * 监听 SQL 文件执行进度事件（返回 unlisten；非 Tauri 下 no-op）。
- * 仍走 Tauri `listen`：SQL 文件批量执行是 server head 暂未暴露的命令，其事件流将随
- * M3 的 `subscribe()`/WebSocket 一并迁移，故此处保持 server 模式下 no-op（仅 isTauri 放行）。
+ * 监听 SQL 文件执行进度。Web 先等待服务端订阅回执；事件由后端按登录用户隔离。
+ * 最终 RPC 也返回实际终态，事件丢失不能被误称成功或触发自动重放。
  */
 export async function onSqlFileProgress(cb: (p: SqlFileProgress) => void): Promise<() => void> {
-  if (!isTauri()) return () => { /* no-op outside Tauri */ }
-  const { listen } = await import('@tauri-apps/api/event')
-  return listen<SqlFileProgress>('db://sql-file-progress', e => cb(e.payload))
+  if (!isTauri() && !isServer()) return () => {}
+  const off=await subscribe('db://sql-file-progress', payload=>cb(payload as SqlFileProgress))
+  try { if(isServer()&&!isTauri())await ensureSubscription('db://sql-file-progress'); return off }
+  catch(error){off();throw error}
 }
 
 // ---- History & saved snippets ----
