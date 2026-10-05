@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dawn">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Catio · 数据库工作区设计评审 v0</title>
+<link rel="icon" href="../../../src-tauri/icons/catio-source.svg" type="image/svg+xml">
+<link rel="stylesheet" href="prototype.css">
+</head>
+<body>
+<header class="p-review" aria-label="原型评审控制栏">
+  <strong>设计评审 v0</strong><span class="p-review-note">示例数据 · 未连接数据库 · 不执行 SQL / 不调用模型</span>
+  <div class="p-grow"></div>
+  <label class="p-review-label">场景 <select id="review-scene" aria-label="评审场景"><option value="query">SQL 编辑与结果</option><option value="table">对象预览与编辑</option><option value="plan">查询分析</option><option value="import">导入向导</option><option value="export">导出向导</option><option value="jobs">数据任务</option><option value="mongo">MongoDB 文档</option><option value="redis">Redis Stream</option><option value="elastic">Elasticsearch</option><option value="duck">DuckDB 文件</option><option value="ai">AI 预览审批</option></select></label>
+  <button class="p-review-button" data-act="review">设计说明</button><button class="p-review-button" data-act="tweaks">Tweaks</button>
+</header>
+<div class="win p-window">
+  <div class="titlebar p-preserved" data-preserved="主标题栏">
+    <div class="brand"><img src="../../../src-tauri/icons/catio-source.svg" width="26" height="26" alt="Catio"><span class="brand-name">Catio</span></div>
+    <div class="tb-spacer"></div><span class="p-preserve-tag">主外框保留</span>
+    <button class="tb-iconbtn" data-act="theme" title="评审：切换现有主题" aria-label="切换主题" data-icon="moon"></button>
+    <button class="tb-iconbtn" disabled title="原设置入口保留；此评审稿不操作设置" aria-label="设置" data-icon="settings"></button>
+    <div class="tb-divider"></div><div class="win-controls"><button class="win-btn" disabled aria-label="最小化" data-icon="minus"></button><button class="win-btn" disabled aria-label="最大化" data-icon="square"></button><button class="win-btn" disabled aria-label="关闭窗口" data-icon="x"></button></div>
+  </div>
+  <div class="body">
+    <aside class="card-surface p-vault p-preserved" data-preserved="连接保险库：不改主机 / SSH 连接行为">
+      <div class="p-vault-title"><strong>连接保险库</strong><span class="p-preserve-tag">保留</span></div>
+      <div class="p-vault-search"><span data-icon="search"></span><span>搜索连接</span><kbd>Ctrl K</kbd></div>
+      <div class="p-vault-segments"><span>收藏</span><span>主机</span><span class="selected">数据库</span></div>
+      <div class="p-section-label">示例连接分组</div>
+      <div class="p-conn selected"><div class="p-conn-glyph" data-icon="database"></div><div><strong id="vault-label">数据库 · 示例</strong><small>仅作设计展示，未连接</small></div></div>
+      <div class="p-section-label">主机区域保留</div>
+      <div class="p-conn p-quiet"><div class="p-conn-glyph" data-icon="server"></div><div><strong>已有主机 / SSH</strong><small>连接与认证流程不变</small></div></div>
+      <div class="p-conn p-quiet"><div class="p-conn-glyph" data-icon="folder"></div><div><strong>SFTP / 隧道</strong><small>现有功能不改造</small></div></div>
+      <div class="p-grow"></div><div class="p-vault-footer"><span data-icon="lock"></span> 保险库、分组、账户保持原样</div>
+    </aside>
+    <main class="card-surface p-main">
+      <nav class="p-worktabs p-preserved" data-preserved="应用级工作标签" aria-label="现有工作区标签">
+        <span class="p-worktab p-quiet"><span data-icon="terminal"></span> SSH 会话 · 保留</span><span class="p-worktab active"><span data-icon="database"></span> 数据库 · 示例</span><div class="p-grow"></div><span class="p-preserve-tag">仅下方数据库内容改造</span>
+      </nav>
+      <div class="p-db-header"><div class="p-header-left"><span class="p-db-glyph" data-icon="database"></span><div><strong id="db-title">SQL 工作区</strong><small id="db-subtitle">对象、查询与任务在同一工作台连续操作</small></div></div><div class="p-grow"></div><span class="p-badge amber">示例 · 未连接</span><button class="p-button" data-act="command"><span data-icon="command"></span>快捷操作<kbd>Ctrl ⇧ P</kbd></button><button class="p-button" data-view="jobs"><span data-icon="activity"></span>任务</button></div>
+      <div class="p-db-layout">
+        <aside class="p-tree" aria-label="数据库对象导航">
+          <div class="p-tree-head"><strong>对象</strong><div class="p-grow"></div><button class="p-icon-button" data-act="tree-state" title="评审：切换元数据加载状态" aria-label="预览元数据状态" data-icon="refresh-cw"></button><button class="p-icon-button" data-act="tree-collapse" title="收起对象树" aria-label="收起对象树" data-icon="panel-left"></button></div>
+          <div class="p-tree-search"><span data-icon="search"></span><input id="tree-search" aria-label="搜索数据库对象" placeholder="搜索对象或 schema…"><kbd>⌘ / Ctrl</kbd></div>
+          <div id="tree-content" class="p-tree-content"></div>
+          <div class="p-tree-bottom"><button class="p-button p-full" data-view="query"><span data-icon="plus"></span>新建查询</button><small>单击预览 · 双击 / 固定保留</small></div>
+        </aside>
+        <section id="canvas" class="p-canvas" aria-live="polite"></section>
+      </div>
+      <footer class="p-db-status"><span data-icon="shield"></span><span>原型沙箱 · 无数据库权限</span><span class="p-grow"></span><span id="status-info">所有查询、行数、任务和计划均为设计示意</span></footer>
+    </main>
+    <aside id="ai-panel" class="card-surface p-ai-panel" hidden aria-label="数据库 AI 上下文与审批示意"></aside>
+    <aside class="card-surface p-rail p-preserved" data-preserved="原工具栏：SFTP、MCP 与宿主面板不改" aria-label="现有工具栏">
+      <button class="p-rail-button" data-act="ai-toggle" title="评审：在原 AI 面板位置展示数据库工作流" aria-label="数据库 AI 面板" data-icon="wand"></button>
+      <button class="p-rail-button" disabled title="SFTP 保留" aria-label="SFTP 保留" data-icon="folder"></button>
+      <button class="p-rail-button" disabled title="监控保留" aria-label="监控保留" data-icon="gauge"></button>
+      <button class="p-rail-button" disabled title="隧道保留" aria-label="隧道保留" data-icon="link"></button>
+      <button class="p-rail-button" disabled title="片段入口保留" aria-label="片段保留" data-icon="snippet"></button>
+      <button class="p-rail-button" disabled title="历史入口保留" aria-label="历史保留" data-icon="history"></button>
+      <div class="p-grow"></div><button class="p-rail-button" disabled title="MCP 保留" aria-label="MCP 保留" data-icon="network"></button>
+    </aside>
+  </div>
+</div>
+<div id="context-menu" class="p-context" hidden role="menu" aria-label="数据库上下文菜单"></div>
+<div id="overlay" class="p-overlay" hidden></div>
+<div id="tweaks" class="p-tweaks" hidden></div>
+<div id="toast" class="p-toast" hidden role="status"></div>
+<script src="icons.js"></script><script src="prototype.js"></script>
+</body>
+</html>
