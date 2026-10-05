@@ -83,7 +83,7 @@ with no docker required.
 
 Cargo can build normal binary targets when integration tests are selected, even with explicit `--lib --test ...` selectors. If `catio.exe` is running, this can fail with `failed to remove file ... catio.exe` / access denied. Do not stop a user's running desktop just to run tests.
 
-The desktop target now requires the default-enabled, target-only `desktop` feature. Use `--no-default-features` for integration tests (as above and in `tests/database-lab/run.ps1`); this does not change library behavior. Normal `npm run tauri dev` / desktop builds retain the default feature. Explicit desktop builds using `--no-default-features` must add `--features desktop`. The server target continues to use `--features server --bin catio-server`.
+The desktop target now requires the default-enabled, target-only `desktop` feature. Use `--no-default-features` for integration tests (as above and in `tests/database-lab/run.ps1`); this does not change library behavior. Normal `npm run tauri dev` / desktop builds retain the default feature. `tauri.conf.json` also explicitly forwards `desktop` via `build.features`, so the CLI's `cargo run --no-default-features` and hot rebuilds do not drop the required target feature. Explicit desktop builds using `--no-default-features` must add `--features desktop`. The server target continues to use `--features server --bin catio-server`.
 
 ### Space-constrained machines — redirect the Cargo target directory
 

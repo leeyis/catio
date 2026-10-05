@@ -4,6 +4,7 @@
   "version": "0.7.3",
   "identifier": "io.catio.app",
   "build": {
+    "features": ["desktop"],
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
     "beforeDevCommand": "npm run dev",
