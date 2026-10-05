@@ -76,7 +76,8 @@
 ### Windows 构建隔离
 
 - 首次扩展后端矩阵退出 101，原因是 Cargo 为 integration targets 自动构建普通二进制，尝试移除仍运行的 `K:/cargo/debug/catio.exe` 被拒绝；不是测试断言通过。`cargo rustc --test` 也会触发此行为，失败记录保留，不循环重试或终止用户开发版。
-- 桌面目标增加默认启用、仅门控 target 的 `desktop` feature；测试 runner 用 `--no-default-features` 跳过普通桌面 bin，核心库行为不变。正常 Tauri dev/build 保持默认桌面功能，手动关闭默认 feature 的桌面构建需显式添加 `--features desktop`。没有通过修改/终止运行中的桌面实例来绕过文件锁。
+- 桌面目标增加默认启用、仅门控 target 的 `desktop` feature；测试 runner 用 `--no-default-features` 跳过普通桌面 bin，核心库行为不变。正常 Tauri dev/build 保持默认桌面功能，手动关闭默认 feature 的桌面构建需显式添加 `--features desktop`。没有手动终止进程来绕过文件锁；但最终进程复核发现旧开发实例在 Cargo 配置热重建时已退出，不能因此声称运行态一直保留。
+- 随后修正 `tauri.conf.json` 的 `build.features=["desktop"]`，明确给 Tauri CLI 的 `cargo run --no-default-features` 转发桌面 feature；新增静态契约测试先 red 后 green。恢复启动实际执行了 `--features desktop,desktop`（Cargo 会去重），3m18s 后生成开发窗口。新开发实例 PID 57024、窗口句柄 63507618；安装版 PID 18216 未终止，旧开发控制台保留，新控制台 PID 61808。旧开发实例的临时会话不能称作一直未中断。
 
 ### 本批最终检查点
 
@@ -86,6 +87,16 @@
 - 审查发现 Mongo / Redis / Elasticsearch 原生控制台仍显示 SQL 文件入口；3 项先 red，已按协议族隐藏该入口，后端也拒绝把这些驱动当 SQL 文件引擎。
 - `b-delivery-build` / `b-delivery-full` 的中间检查点为构建、TypeScript 与 163 files / 1438 tests。补原生入口能力门禁后，**`b-feature-build.exit=0`、`b-feature-full.exit=0`，最终 163 files / 1441 tests 全通过**。act / chunk-size 提示仍存在。
 - 功能提交 `67651c9`：有界 SQL 文件执行、Web 上传/owner 进度、驱动取消、终态回执、重复执行核验与元数据失效。staged 审计通过；用户 capabilities.json 的原 SHA-256 保持不变。临时 QA example 源文件已移除；没有提交截图、日志、输入文件或数据目录。
+
+### 开发运行态恢复后的补全门禁回归
+
+- 重新检查发现旧开发版已退出后，没有掩盖为“保留运行”。`f3da278` 补上 Tauri 的显式 desktop feature 接线及启动契约测试，实际恢复开发版窗口；安装版保留。随后在 PID 57024 持续运行时，`b-desktop-alive-regression` 的 550 library + SQLite/DuckDB/HTTP 10 项集成检查通过，证明新的测试命令不再要求关闭开发版。
+- 恢复后的前端全量 `b-recovery-full` 有 1 个真实失败：CTE 字段候选混进了全局关键字。根因是 CodeMirror 发布的 `LanguageState.tree` 落后于 `ensureSyntaxTree` 所在的 ParseContext；lang-sql 内置关键词源和旧 ifNotIn 读取了前者。
+- 确定性回归保留 SQL 根节点的 language data、模拟其已发布子树落后，并保持新 ParseContext 可用；关键词/字面量/预算耗尽场景先 5 red / 1 pass，caller extra-source 再补 2 red。初版只 mock 导出函数未影响库内部引用，不把那次通过当作复现证据。
+- 所有 SQL 补全源现在先经过有界就绪树门禁；keyword 源额外排除限定名 / 引号标识符 / 点号。字段/CTE 与函数/JOIN源保持原有职责，普通关键字仍复用 lang-sql 列表；预算耗尽不回落成全局候选。生产解析预算仍是 10 ms，没有为通过测试调高预算。
+- 作用域语义测试先预热测试 fixture 的解析上下文，时序/预算由专门的受控测试验证；受控测试还断言真实的 2/3 个补全源仍注册，避免通过移除语言数据制造空结果。
+- `b-complete-build` / `b-complete-full` 的构建、TypeScript 与 165 files / 1450 tests 全通过；加强 fixture 就绪和 2/3 个源仍注册的断言后，**`b-final-verification-full.exit=0`，最终仍为 165 files / 1450 tests，tsc 无错误**。`add8ea8` 已提交补全门禁修复。保留既有 act / chunk-size 警告，不将 desktop 窗口存在当成全部桌面交互已验收。
+- 最终现场确认开发版 PID 57024 与安装版 PID 18216 均仍存在并有窗口。用户 capabilities.json 哈希未变，所有提交审计通过。
 
 ## 后续仍需实施 / 补齐验收
 
