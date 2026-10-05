@@ -138,6 +138,28 @@ describe('DetailsPanel (db)', () => {
     expect(onConnect).not.toHaveBeenCalled()
   })
 
+  it.each(['sqlite', 'duckdb'] as const)('connects %s without looking up or prompting for a password', async dbType => {
+    const p: DbProfile = { ...profile, dbType, host: ':memory:', port: 0, user: '' }
+    saveDbConnection(p)
+    const onConnect=vi.fn().mockResolvedValue(undefined), onTry=vi.fn().mockResolvedValue(false)
+    const {container}=wrap(<DetailsPanel conn={dbProfileToConnection(p)} onClose={()=>{}} onConnectDb={onConnect} onTryConnectDb={onTry} />)
+    fireEvent.click(screen.getByText('连接'))
+    await waitFor(()=>expect(onConnect).toHaveBeenCalledWith(p,''))
+    expect(onTry).not.toHaveBeenCalled()
+    expect(container.querySelector('input[type="password"]')).toBeNull()
+    expect(screen.getByText('数据库文件路径')).toBeInTheDocument()
+    expect(screen.queryByText('端口')).toBeNull()
+  })
+
+  it('shows a native file error inline instead of suggesting a password retry', async () => {
+    const p: DbProfile={...profile,dbType:'sqlite',host:'missing/qa.db'};saveDbConnection(p)
+    const {container}=wrap(<DetailsPanel conn={dbProfileToConnection(p)} onClose={()=>{}} onConnectDb={vi.fn().mockRejectedValue(new Error('cannot open database file'))} />)
+    fireEvent.click(screen.getByText('连接'))
+    await waitFor(()=>expect(screen.getByRole('alert')).toHaveTextContent('cannot open database file'))
+    expect(container.querySelector('input[type="password"]')).toBeNull()
+    expect(screen.getByRole('button',{name:'连接'})).toBeEnabled()
+  })
+
   it('renders an empty state when no matching saved profile exists', () => {
     const conn = dbProfileToConnection({ ...profile, id: 'db-missing' })
     wrap(<DetailsPanel conn={conn} onClose={() => {}} />)

@@ -1100,6 +1100,7 @@
     "fieldUserPlaceholder": "用户名",
     "fieldDatabase": "数据库（可选）",
     "fieldDatabasePath": "数据库文件路径",
+    "databasePathRequired": "数据库文件路径为空，请先编辑连接并指定文件路径或 :memory:。",
     "databasePathPlaceholder": "/path/to/database.db 或 :memory:",
     "databasePathHint": "填写明确的本地数据库文件路径。新路径会创建数据库，已有文件会原地打开。",
     "databasePathServerHint": "此路径位于 Catio 服务器，而不是浏览器所在电脑；服务器进程需要能够访问该文件。",

@@ -1,4 +1,5 @@
 import { DATA } from './mockData'
+import { isNativeFileDatabase } from './dbConnectionPolicy'
 import { invalidateSchemaCache } from './dbMetadata'
 import { classifyAiSqlExecution } from './aiSqlExecutionPolicy'
 export { getSchema, loadSchemaNamespace, preferredNamespace, searchSchemaObjects, cancelMetadataSearch, schemaColumnCatalog, invalidateSchemaCache, SCHEMA_INVALIDATED_EVENT } from './dbMetadata'
@@ -85,6 +86,7 @@ export type DbConnectProfileLike = Omit<DbConnectArgs, 'secret'>
  * when unset so the backend sees a clean payload (no `ssl: false` noise).
  */
 export function dbConnectArgsFromProfile(profile: DbConnectProfileLike, secret?: string): DbConnectArgs {
+  if (isNativeFileDatabase(profile.dbType)) return { dbType: profile.dbType, host: profile.host, port: 0, user: '' }
   return {
     dbType: profile.dbType,
     ...(profile.driverProfile ? { driverProfile: profile.driverProfile } : {}),

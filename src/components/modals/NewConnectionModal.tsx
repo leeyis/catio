@@ -8,6 +8,7 @@ import type { AuthMethod, SshConnectArgs, SshTestResult } from '../../services/s
 import { sshTest, serialListPorts } from '../../services/ssh'
 import { isServer, isTauri } from '../../services/transport'
 import { dbConnect, testConnection, dbErrMsg } from '../../services/db'
+import { isNativeFileDatabase } from '../../services/dbConnectionPolicy'
 import { enginesByGroup, findEngine, matchEngineId } from '../../services/dbEngines'
 import { jdbcDriverStatus, downloadJdbcDriver, openJdbcDriversDir, importJdbcDriver, JDBC_DOWNLOADABLE, type JdbcDriverStatus } from '../../services/jdbcDrivers'
 import { dbLogo } from '../../services/logos'
@@ -216,7 +217,7 @@ export function NewConnectionModal({
   // JDBC engines need a driver JAR; surface install-status + one-click download.
   const currentEngine = findEngine(engine)
   const isJdbc = currentEngine?.dbType === 'jdbc'
-  const isFileDb = currentEngine?.dbType === 'sqlite' || currentEngine?.dbType === 'duckdb'
+  const isFileDb = isNativeFileDatabase(currentEngine?.dbType)
   const jdbcProfile = currentEngine?.driverProfile
   const [driverStatus, setDriverStatus] = useState<JdbcDriverStatus | null>(null)
   const [driverBusy, setDriverBusy] = useState(false)

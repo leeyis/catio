@@ -15,6 +15,7 @@ import {
 } from '../../state/dbConnections'
 import { loadProfiles } from '../../state/connections'
 import { dbErrMsg } from '../../services/db'
+import { isNativeFileDatabase } from '../../services/dbConnectionPolicy'
 import { findEngine } from '../../services/dbEngines'
 
 export interface DetailsPanelProps {
@@ -233,7 +234,8 @@ function DbDetails({ conn, onClose, onEdit, onDelete, onConnect, onDisconnect, o
     ?? (D.engineMeta[profile.engineId ?? profile.dbType] || {}).label
     ?? profile.dbType
 
-  const descriptor = `${profile.dbType}://${profile.user}@${profile.host}:${profile.port}/${profile.database ?? ''}`
+  const fileDatabase = isNativeFileDatabase(profile.dbType)
+  const descriptor = fileDatabase ? profile.host : `${profile.dbType}://${profile.user}@${profile.host}:${profile.port}/${profile.database ?? ''}`
   const notes = (profile.notes ?? '').trim()
 
   async function handleCopy() {
@@ -251,6 +253,16 @@ function DbDetails({ conn, onClose, onEdit, onDelete, onConnect, onDisconnect, o
     // Already active → open workbench directly, no password prompt.
     if (isActive) {
       void onConnect?.(profile!, '')
+      return
+    }
+    // Native SQLite/DuckDB have no password auth; file errors are not auth retries.
+    if (fileDatabase) {
+      setConnecting(true)
+      try {
+        if (!profile!.host.trim()) throw new Error(t('modals.databasePathRequired'))
+        await onConnect?.(profile!, '')
+      } catch (err) { setConnectError(dbErrMsg(err)) }
+      finally { setConnecting(false) }
       return
     }
     // Auth-gated cached secret → connect without prompting. Show a connecting
@@ -295,19 +307,20 @@ function DbDetails({ conn, onClose, onEdit, onDelete, onConnect, onDisconnect, o
           <ConnGlyph conn={conn} size={48} radius={14} />
           <div className="col" style={{ lineHeight: 1.3 }}>
             <span style={{ fontSize: 16, fontWeight: 700, letterSpacing: '-0.3px' }}>{profile.name}</span>
-            <span className="mono" style={{ fontSize: 11.5, color: 'var(--text-faint)' }}>{profile.dbType} · {profile.host}:{profile.port}</span>
+            <span className="mono" style={{ fontSize: 11.5, color: 'var(--text-faint)' }}>{profile.dbType} · {profile.host}{fileDatabase ? '' : `:${profile.port}`}</span>
           </div>
         </div>
         <div className="col">
           <Row k={t('panels.detailEngine')} v={engineLabel} />
           <Row k={t('panels.detailStatus')} v={isActive ? t('panels.statusConnected') : t('panels.statusNotConnected')} />
-          <Row k={t('panels.detailHost')} v={profile.host} mono />
-          <Row k={t('panels.detailPort')} v={profile.port} mono />
-          <Row k={t('panels.detailUser')} v={profile.user} mono />
-          {profile.database && <Row k={t('panels.detailDatabase')} v={profile.database} mono />}
+          <Row k={t(fileDatabase ? 'modals.fieldDatabasePath' : 'panels.detailHost')} v={profile.host} mono />
+          {!fileDatabase && <Row k={t('panels.detailPort')} v={profile.port} mono />}
+          {!fileDatabase && <Row k={t('panels.detailUser')} v={profile.user} mono />}
+          {!fileDatabase && profile.database && <Row k={t('panels.detailDatabase')} v={profile.database} mono />}
           {notes && <NotesBlock label={t('panels.detailNotes')} value={notes} />}
         </div>
 
+        {fileDatabase && connectError && <div role="alert" style={{ marginTop: 12, fontSize: 12, color: 'var(--danger-fg)', overflowWrap: 'anywhere' }}>{connectError}</div>}
         {copied && (
           <div style={{ marginTop: 12, fontSize: 12, color: 'var(--signal-green)' }}>{t('panels.copied')}</div>
         )}

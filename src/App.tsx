@@ -36,6 +36,7 @@ import { usePrefs, uiFontStack, monoFontStack } from './state/preferences'
 import { readTermBufferTail } from './services/termBuffers'
 import { buildAgentSystemPrompt } from './services/agentPrompt'
 import { useData } from './state/DataContext'
+import { isNativeFileDatabase } from './services/dbConnectionPolicy'
 import { dbConnect, dbConnectArgsFromProfile, dbDisconnect, closeQuerySession, getHistory as getDbHistory, clearDbHistory, deleteDbHistory, deleteDbHistoryForProfile, dbErrMsg } from './services/db'
 import {
   useDbConnections, useActiveDbConnections, dbProfileToConnection, listActiveDbConnections,
@@ -941,6 +942,11 @@ export default function App() {
       } else {
         const dbp = dbProfiles.find(p => p.id === conn.id)
         if (dbp) {
+          if (isNativeFileDatabase(dbp.dbType)) {
+            try { await connectDbProfile(dbp, '') }
+            catch (err) { setConnectError(dbErrMsg(err)) }
+            return
+          }
           // 扫描导入的 ✓authed 库：本次会话内存里存有命中密码,首连直连免再输。
           const sess = getSessionSecret(dbp.id)
           if (sess) {
@@ -1295,10 +1301,11 @@ export default function App() {
     // directConnection/authSource or a protocol-family variant connects as the base),
     // AND the SSL/TLS config (ssl/sslMode/caCertPath/sslRejectUnauthorized) — without
     // it the sidebar/home direct-connect path silently dropped TLS.
+    if (isNativeFileDatabase(profile.dbType) && !profile.host.trim()) throw new Error(t('modals.databasePathRequired'))
     const result = await dbConnect(dbConnectArgsFromProfile(profile, secret || undefined), profile.name)
     setActiveDbConnection(result, profile)
     // Auth succeeded → cache the secret (when auth + vault allow).
-    rememberConnSecret(profile.id, secret)
+    if (!isNativeFileDatabase(profile.dbType)) rememberConnSecret(profile.id, secret)
     // 扫描导入的「需要认证」草稿：首次成功登录后清除标记（不再显示徽标）。
     if (profile.needsAuth) saveDbConnection({ ...profile, needsAuth: false })
     bumpDbActive()

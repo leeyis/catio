@@ -1100,6 +1100,7 @@
     "fieldUserPlaceholder": "username",
     "fieldDatabase": "Database (optional)",
     "fieldDatabasePath": "Database file path",
+    "databasePathRequired": "Database file path is empty. Edit the connection and specify a file path or :memory:.",
     "databasePathPlaceholder": "/path/to/database.db or :memory:",
     "databasePathHint": "Enter an explicit local database file path. New paths create a database; existing files are opened in place.",
     "databasePathServerHint": "This path is on the Catio server, not on the browser's computer. It must be accessible to the server process.",

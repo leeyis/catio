@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react'
 import type { DbConnectArgs, DbConnectResult, DbCapabilities } from '../services/db'
+import { isNativeFileDatabase } from '../services/dbConnectionPolicy'
 import type { Connection } from '../services/types'
 import { storeLoad, storeUpsert, storeRemove, onStoresChanged, type StoreItem } from '../services/userStore'
 
@@ -92,7 +93,7 @@ export function dbProfileToConnection(p: DbProfile, active = false): Connection 
     group: p.group ?? DEFAULT_DB_GROUP,
     kind: 'db',
     name: p.name,
-    sub: `${p.engineId ?? p.dbType} · ${p.host}:${p.port}`,
+    sub: `${p.engineId ?? p.dbType} · ${p.host}${isNativeFileDatabase(p.dbType) ? '' : `:${p.port}`}`,
     icon: 'database',
     // `engine` MUST stay the protocol family (dbType) — DDL dialect selection
     // (structureDdl.dialectFor) keys off it by substring, so a MySQL-wire variant
