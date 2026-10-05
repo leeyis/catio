@@ -44,7 +44,7 @@ if ($OnlyTargets.Count -gt 0) {
 }
 # Concurrent Windows debug linkers each consume several GiB; avoid paging the machine.
 if ($IsWindows -and -not $env:CARGO_BUILD_JOBS) { $env:CARGO_BUILD_JOBS = '2' }
-$arguments = @('test','--manifest-path',(Join-Path $repo 'src-tauri/Cargo.toml'),'--lib','--no-fail-fast')
+$arguments = @('test','--no-default-features','--manifest-path',(Join-Path $repo 'src-tauri/Cargo.toml'),'--lib','--no-fail-fast')
 foreach ($target in $targets) { $arguments += @('--test', $target) }
 # Windows PowerShell 5 wraps native stderr (including Cargo progress) as error
 # records when the caller redirects streams. Progress is not a build failure.

@@ -11,6 +11,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [[bin]]
 name = "catio"
 path = "src/main.rs"
+# Keep integration tests from replacing a running desktop executable on Windows.
+required-features = ["desktop"]
 
 # Web-server head (Option B spike): serves the built UI + exposes the same Rust core over
 # HTTP/WS for LAN browser access. Reuses catio_lib; does not affect the desktop binary.
@@ -27,6 +29,10 @@ path = "src/server_main.rs"
 required-features = ["server"]
 
 [features]
+# Desktop builds retain their default target; --no-default-features tests compile
+# the same library without Cargo's automatic integration-test binary build.
+default = ["desktop"]
+desktop = []
 # 仅用于开启 catio-server 二进制的构建;不改变 lib 行为。
 server = []
 
