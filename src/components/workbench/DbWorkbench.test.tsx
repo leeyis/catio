@@ -761,8 +761,10 @@ describe('DbWorkbench D3 跨库迁移 UI 接入', () => {
     wrap(<DbWorkbench conn={DATA.byId['d-orders']} />)
     fireEvent.click(await screen.findByTestId('schema-node:public'))
     await screen.findByTestId('schema-tbl:public.orders')
-    // mock 路径无 onTransferData → 连「...」对象管理菜单都不出现。
-    expect(screen.queryByTestId('leaf-admin-btn:TABLE:orders')).not.toBeInTheDocument()
+    // Read-only navigation/copy actions remain discoverable; migration still needs a live source.
+    fireEvent.click(screen.getByTestId('leaf-admin-btn:TABLE:orders'))
+    expect(screen.queryByTestId('leaf-transfer:TABLE:orders')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('leaf-admin-item:drop:TABLE:orders')).not.toBeInTheDocument()
   })
 
   // 回归(codex P2):源 workbench 已挂载后,用户「之后」才连上目标库时,目标必须

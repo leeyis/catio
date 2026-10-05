@@ -3,6 +3,7 @@ import { useState, useEffect, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
 import { Btn } from '../atoms'
+import { ConfirmModal } from '../modals/ConfirmModal'
 import { useData } from '../../state/DataContext'
 import { runQuery, splitQuery, cancelQuery, runExplain, getSchema, loadSchemaNamespace, preferredNamespace, SCHEMA_INVALIDATED_EVENT, schemaColumnCatalog, tablePreview, erRelations, dbErrMsg } from '../../services/db'
 import type { QueryResult, Schema, ErRelation } from '../../services/types'
@@ -134,6 +135,19 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
   const [liveRelations, setLiveRelations] = useState<Record<string, ErRelation[]>>({})
   // Imperative handle to the CodeMirror editor for cursor-aware insertion.
   const editorRef = useRef<SqlEditorHandle>(null)
+  const [hasSelection, setHasSelection] = useState(false)
+  const [actionsOpen, setActionsOpen] = useState(false)
+  const [clearConfirm, setClearConfirm] = useState(false)
+  const actionsRef = useRef<HTMLDivElement>(null)
+  useEffect(() => { setActionsOpen(false); setClearConfirm(false) }, [connId, active, code])
+  useEffect(() => {
+    if (!actionsOpen) return
+    const onDown = (event: MouseEvent) => { if (!actionsRef.current?.contains(event.target as Node)) setActionsOpen(false) }
+    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') { setActionsOpen(false); actionsRef.current?.querySelector('button')?.focus() } }
+    document.addEventListener('mousedown', onDown); document.addEventListener('keydown', onKey)
+    return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey) }
+  }, [actionsOpen])
+  function runSelected() { const selected = editorRef.current?.getSelectedText(); if (selected?.trim()) run(selected) }
   // 编辑区/结果区上下分隔(功能#5):编辑区占比,仅会话内存。
   const [splitRatio, setSplitRatio] = useState(0.5)
   // 一键最大化(功能#6):'split' 上下分屏 / 'maxEditor' 编辑区占满 / 'maxResults' 结果区占满。
@@ -558,6 +572,13 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
         {Object.entries(completionErrors).map(([key,message])=><div key={key}>{message}</div>)}
       </details>}
       {schemaError && <div role="alert" style={{ padding: '6px 12px', color: 'var(--danger-fg)', fontSize: 12 }}>{t('dbviews.loadError', { message: schemaError })}</div>}
+      <div data-testid="sql-query-target" className="row gap8" style={{ flex: 'none', minWidth: 0, padding: '8px 12px', borderBottom: '1px solid var(--border-hairline)', background: 'var(--surface-subtle)', fontSize: 11.5 }}>
+        <Icon name="database" size={14} style={{color:'var(--accent-primary)',flex:'none'}} />
+        <strong className="ell" title={connName || connId || t('dbviews.demoTarget')}>{connName || connId || t('dbviews.demoTarget')}</strong>
+        {engine && <span className="chip mono" style={{fontSize:10}}>{engineId || engine}</span>}
+        {completionNamespace && <span className="mono ell" title={completionNamespace}>{completionNamespace}</span>}
+        <span style={{marginLeft:'auto',color:'var(--text-tertiary)',fontSize:10.5}}>{t('dbviews.scriptRunHint')}</span>
+      </div>
       {querySessions && connId && <QuerySessionToolbar info={session.info} loading={session.loading}
         busy={phase==='running'||session.actionBusy||!!explain?.loading} error={session.error}
         onAction={action=>{void session.transact(action)}} onReconnect={()=>{void session.reconnect()}}/>}
@@ -571,25 +592,34 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
             </Btn>
           ) : (
             <Btn size="sm" variant="primary" testId="sql-run" disabled={!code.trim() || session.loading || session.actionBusy || !!explain?.loading} style={{ height: 26, padding: '0 10px', fontSize: 11.5 }} icon="play" onClick={() => run()}>
-              {t('dbviews.run')} <span style={{ opacity: .6, fontSize: 10, marginLeft: 2 }}>Alt↵</span>
+              {t('dbviews.runSql')} <span style={{ opacity: .6, fontSize: 10, marginLeft: 2 }}>Alt↵</span>
             </Btn>
           )}
+          <Btn size="sm" icon="snippet" title={t('dbviews.runSelectedSql')} disabled={!hasSelection || phase==='running' || session.loading || session.actionBusy || !!explain?.loading} onClick={runSelected}>{t('dbviews.runSelectedSql')}</Btn>
           {/* T12 执行计划入口:仅 PG/MySQL 且已连接时出现,空 SQL 时禁用。纯 icon + 悬浮提示
               「查看执行计划」(与右侧格式化/清除等工具按钮一致;\"解释\"二字易误解,去掉文字)。 */}
           {canExplain && (
-            <button className="icon-btn bare" data-testid="sql-explain" disabled={!code.trim() || phase==='running' || session.loading || session.actionBusy || !!explain?.loading}
+            <button className="btn btn-secondary sm" data-testid="sql-explain" disabled={!code.trim() || phase==='running' || session.loading || session.actionBusy || !!explain?.loading}
               title={t('dbviews.explainTitle')} onClick={runExplainPlan}>
-              <Icon name="git-branch" size={15} />
+              <Icon name="git-branch" size={15} /> {t('dbviews.analyze')}
             </button>
           )}
           <div style={{ width: 1, height: 18, background: 'var(--border-hairline)' }} />
-          <button className="icon-btn bare" title={t('dbviews.format')} disabled={plain || !code.trim()}
-            onClick={() => setCode(prev => formatSql(prev, engine))}><Icon name="wrench" size={15} /></button>
-          <button className="icon-btn bare" title={t('dbviews.clear')} onClick={() => setCode('')}><Icon name="eraser" size={15} /></button>
-          {/* T16 SQL 文件批量执行:选 .sql 文件 → 按方言切分 → 逐句执行 + 进度/错误恢复。仅已连接可用。 */}
-          {connId && (
-            <button className="icon-btn bare" title={t('dbviews.sqlFileRunFile')} data-testid="sql-run-file" onClick={() => setSqlFileOpen(true)}><Icon name="file-code" size={15} /></button>
-          )}
+          <button className="btn btn-secondary sm" title={t('dbviews.format')} disabled={plain || !code.trim()}
+            onClick={() => setCode(prev => formatSql(prev, engine))}><Icon name="wrench" size={15} /> {t('dbviews.format')}</button>
+          <div ref={actionsRef} style={{position:'relative'}}>
+            <button className="btn btn-secondary sm" aria-haspopup="menu" aria-expanded={actionsOpen} title={t('dbviews.moreActions')} onClick={()=>setActionsOpen(value=>!value)}><Icon name="more-horizontal" size={15}/>{t('dbviews.moreActions')}</button>
+            {actionsOpen && <div role="menu" aria-label={t('dbviews.moreActions')} onKeyDown={event=>{
+              if(!['ArrowDown','ArrowUp','Home','End'].includes(event.key))return
+              event.preventDefault();const items=Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'));const index=items.indexOf(document.activeElement as HTMLButtonElement)
+              const next=event.key==='Home'?0:event.key==='End'?items.length-1:event.key==='ArrowDown'?(index+1)%items.length:(index+items.length-1)%items.length;items[next]?.focus()
+            }} style={{position:'absolute',top:'100%',left:0,zIndex:60,minWidth:190,padding:5,marginTop:4,background:'var(--surface-elevated)',border:'1px solid var(--border-hairline-alt)',borderRadius:9,boxShadow:'var(--shadow-dropdown)'}}>
+              <button role="menuitem" className="row gap8 sel-pill" disabled={!code.trim() || phase==='running' || session.actionBusy || !!explain?.loading} onClick={()=>{setActionsOpen(false);run()}} style={{width:'100%',padding:'8px 10px',fontSize:12}}><Icon name="play" size={14}/>{t('dbviews.runEntireScript')}</button>
+              {connId && <button role="menuitem" className="row gap8 sel-pill" title={t('dbviews.sqlFileRunFile')} data-testid="sql-run-file" disabled={phase==='running' || session.actionBusy || !!explain?.loading} onClick={()=>{setActionsOpen(false);setSqlFileOpen(true)}} style={{width:'100%',padding:'8px 10px',fontSize:12}}><Icon name="file-code" size={14}/>{t('dbviews.sqlFileRunFile')}</button>}
+              <div style={{height:1,background:'var(--border-hairline)',margin:'4px 2px'}} />
+              <button role="menuitem" className="row gap8 sel-pill" disabled={!code.trim() || phase==='running' || !!explain?.loading} onClick={()=>{setActionsOpen(false);setClearConfirm(true)}} style={{width:'100%',padding:'8px 10px',fontSize:12,color:'var(--danger-fg)'}}><Icon name="eraser" size={14}/>{t('dbviews.clearEditor')}</button>
+            </div>}
+          </div>
         </div>
         <div className="row gap6" style={{ minWidth: 0, flexWrap: 'wrap' }}>
           {!querySessions && ['postgres', 'mysql', 'sqlite', 'duckdb', 'sqlserver', 'jdbc'].includes(engine ?? '') && connId && <span className="chip" title={t('dbviews.sqlSessionHint')} style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{t('dbviews.sqlSession')}</span>}
@@ -642,7 +672,7 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
           width: '100%',
           borderBottom: !hasResults ? 'none' : '1px solid var(--border-hairline)',
         }}>
-          <SqlEditor ref={editorRef} target={connName || connId || 'SQL'} code={code} onChange={setCode} schema={editorSchema} engine={engineId ?? engine} defaultSchema={completionNamespace} onRun={run} onRunSelection={run} placeholder={editorPlaceholder} plain={plain} completion={completion} lintSource={lintSource} extraCompletion={advancedCompletion} />
+          <SqlEditor ref={editorRef} target={connName || connId || 'SQL'} code={code} onChange={setCode} schema={editorSchema} engine={engineId ?? engine} defaultSchema={completionNamespace} onRun={run} onRunSelection={run} onSelectionChange={setHasSelection} placeholder={editorPlaceholder} plain={plain} completion={completion} lintSource={lintSource} extraCompletion={advancedCompletion} />
         </div>
       )}
       {/* 功能#5:编辑区与结果区之间的水平拖动分隔条。仅在 split 态且有结果区时显示。 */}
@@ -711,6 +741,7 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
           </div>
         </div>
       )}
+      {clearConfirm && <ConfirmModal title={t('dbviews.clearEditor')} message={t('dbviews.clearEditorWarning')} confirmLabel={t('dbviews.clearEditor')} cancelLabel={t('dbviews.keepSql')} onCancel={()=>setClearConfirm(false)} onConfirm={()=>{setClearConfirm(false);setCode('');setHasSelection(false)}} />}
       {/* T16 SQL 文件批量执行对话框。 */}
       {sqlFileOpen && connId && (
         <SqlFileDialog connId={connId} connName={connName} onClose={() => setSqlFileOpen(false)} />

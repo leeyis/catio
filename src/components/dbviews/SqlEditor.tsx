@@ -37,6 +37,8 @@ export interface SqlEditorProps {
   onRun?: () => void
   /** Run just the currently-selected SQL (from the selection toolbar or Alt+Enter with a selection). */
   onRunSelection?: (sql: string) => void
+  /** Selection availability only; the caller reads live text at dispatch time. */
+  onSelectionChange?: (hasSelection: boolean) => void
   /** 空文档占位提示(mongo/es 控制台展示各自语法示例)。 */
   placeholder?: string
   /** true → 非 SQL 模式:不挂 lang-sql(无 SQL 补全),用于 mongo/es 控制台。 */
@@ -74,7 +76,7 @@ export interface SqlEditorHandle {
 }
 
 export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function SqlEditor(
-  { code, onChange, minHeight, target = 'SQL', schema, engine, defaultSchema, onRun, onRunSelection, placeholder, plain, completion, lintSource, extraCompletion },
+  { code, onChange, minHeight, target = 'SQL', schema, engine, defaultSchema, onRun, onRunSelection, onSelectionChange, placeholder, plain, completion, lintSource, extraCompletion },
   ref,
 ) {
   const { t: tr } = useTranslation()
@@ -121,6 +123,8 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
   onRunRef.current = onRun
   const onRunSelectionRef = useRef(onRunSelection)
   onRunSelectionRef.current = onRunSelection
+  const selectionChangeRef = useRef(onSelectionChange)
+  selectionChangeRef.current = onSelectionChange
   const [selBar, setSelBar] = useState<{ left: number; top: number; text: string; below: boolean } | null>(null)
   const [stats, setStats] = useState<EditorStats>(() => editorStats(code, 0))
 
@@ -178,6 +182,8 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
           setSelBar(null)
           // Refresh the status-bar stats (line count / chars / caret line:col).
           const s = update.state
+          const selection = s.selection.main
+          selectionChangeRef.current?.(!selection.empty && !!s.sliceDoc(selection.from, selection.to).trim())
           setStats(editorStats(s.doc.toString(), s.selection.main.head))
         }
       }),
@@ -198,6 +204,7 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
     }
     return () => {
       ro?.disconnect()
+      selectionChangeRef.current?.(false)
       view.destroy()
       viewRef.current = null
     }

@@ -3,12 +3,15 @@ import { MetadataSearch } from './MetadataSearch'
 import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
+import { MetadataNodeActions, type MetadataAction } from './MetadataNodeActions'
 import { ConnGlyph, StatusDot } from '../atoms'
 import { useData } from '../../state/DataContext'
 import { readHiddenSchemas, writeHiddenSchemas } from '../../state/schemaFilter'
 import type { Connection, SchemaNamespace, SchemaTable } from '../../services/types'
 
 export interface SchemaBrowserProps {
+  /** Hidden workbenches must not retain an actionable portaled menu. */
+  visible?: boolean
   connId?: string
   onLoadNamespace?: (name:string,force?:boolean)=>void
   /** Pick a table/view — carries BOTH the schema namespace and the object name (names are ambiguous across schemas). */
@@ -76,7 +79,7 @@ export interface SchemaBrowserProps {
   onToggleCollapse?: () => void
 }
 
-export function SchemaBrowser({ connId, onLoadNamespace, onPick, onPickObject, active, onNewQuery, onOpenER, onOpenCompare, onNewObjectTemplate, onRefresh, onObjectAdmin, onTransferData, onExportDatabase, schemas, conn, live, refreshing, loading, collapsed, onToggleCollapse, sqlActive, canSqlConsole = true, canEr = true, canStructureEdit = true, canViews = true, canFunctions = true }: SchemaBrowserProps) {
+export function SchemaBrowser({ visible = true, connId, onLoadNamespace, onPick, onPickObject, active, onNewQuery, onOpenER, onOpenCompare, onNewObjectTemplate, onRefresh, onObjectAdmin, onTransferData, onExportDatabase, schemas, conn, live, refreshing, loading, collapsed, onToggleCollapse, sqlActive, canSqlConsole = true, canEr = true, canStructureEdit = true, canViews = true, canFunctions = true }: SchemaBrowserProps) {
   const { t } = useTranslation()
   const D = useData()
   // Live path: render every supplied namespace; mock path: the single seeded schema (pixel-identical).
@@ -134,10 +137,6 @@ export function SchemaBrowser({ connId, onLoadNamespace, onPick, onPickObject, a
       <div className="row" style={{ padding: '10px 10px 8px', justifyContent: 'space-between' }}>
         <div className="row gap6" style={{ minWidth: 0 }}><ConnGlyph conn={headerGlyph} size={24} radius={7} /><div className="col" style={{ lineHeight: 1.2, minWidth: 0 }}><span className="ell" style={{ fontSize: 12.5, fontWeight: 700 }}>{headerName}</span><span className="mono ell" style={{ fontSize: 9.5, color: 'var(--text-faint)' }}>{headerEngine}</span></div></div>
         <div className="row gap2">
-          <button className="icon-btn bare" data-testid="wb-new-query" style={{ width: 26, height: 26 }}
-            title={t('workbench.newQuery')} onClick={() => onNewQuery()}>
-            <Icon name="terminal-square" size={15} style={{ color: 'var(--accent-primary)' }} />
-          </button>
           {live && canSqlConsole && onOpenCompare && (
             <button className="icon-btn bare" data-testid="wb-compare" style={{ width: 26, height: 26 }} title={t('compare.title')} onClick={() => onOpenCompare()}>
               <Icon name="git-compare" size={14} />
@@ -153,6 +152,9 @@ export function SchemaBrowser({ connId, onLoadNamespace, onPick, onPickObject, a
             </button>
           )}
         </div>
+      </div>
+      <div style={{padding:'0 10px 8px'}}>
+        <button className="btn btn-secondary sm" data-testid="wb-new-query" title={t('workbench.newQuery')} disabled={!canSqlConsole} onClick={()=>onNewQuery()} style={{width:'100%',justifyContent:'flex-start'}}><Icon name="plus" size={14}/>{t('workbench.newQuery')}</button>
       </div>
       {/* search + schema/database visibility filter */}
       <div className="row gap6" style={{ margin: '0 10px 8px', position: 'relative' }}>
@@ -227,7 +229,7 @@ export function SchemaBrowser({ connId, onLoadNamespace, onPick, onPickObject, a
             <button onClick={() => applyHidden(new Set())} style={{ border: '1px solid var(--border-hairline)', background: 'transparent', borderRadius: 7, padding: '4px 10px', fontSize: 11.5, color: 'var(--accent-primary)', cursor: 'pointer' }}>{t('workbench.showAllSchemas')}</button>
           </div>
         ) : visibleNamespaces.map(ns => (
-          <SchemaNode key={ns.name} ns={ns} query={query} active={active} onPick={onPick} onPickObject={onPickObject} live={!!live}
+          <SchemaNode key={ns.name} ownerKey={JSON.stringify([connId ?? connKey,visible])} ns={ns} query={query} active={active} onPick={onPick} onPickObject={onPickObject} live={!!live}
             onNewQuery={onNewQuery} onOpenER={onOpenER} onNewObjectTemplate={onNewObjectTemplate} onRefresh={onRefresh} onObjectAdmin={onObjectAdmin} onTransferData={onTransferData} onExportDatabase={onExportDatabase}
             sqlActive={sqlActive} canSqlConsole={canSqlConsole} canEr={canEr} canStructureEdit={canStructureEdit}
             canViews={canViews} canFunctions={canFunctions} onLoadNamespace={onLoadNamespace} />
@@ -246,6 +248,7 @@ export function SchemaBrowser({ connId, onLoadNamespace, onPick, onPickObject, a
 }
 
 interface SchemaNodeProps {
+  ownerKey: string
   onLoadNamespace?: (name:string,force?:boolean)=>void
   ns: SchemaNamespace
   query: string
@@ -269,7 +272,7 @@ interface SchemaNodeProps {
 }
 
 /** One schema namespace rendered as a collapsible DB tree node (Tables / Views / Functions). */
-function SchemaNode({ onLoadNamespace, ns, query, active, onPick, onPickObject, live, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, onObjectAdmin, onTransferData, onExportDatabase, sqlActive, canSqlConsole, canEr, canStructureEdit, canViews, canFunctions }: SchemaNodeProps) {
+function SchemaNode({ ownerKey, onLoadNamespace, ns, query, active, onPick, onPickObject, live, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, onObjectAdmin, onTransferData, onExportDatabase, sqlActive, canSqlConsole, canEr, canStructureEdit, canViews, canFunctions }: SchemaNodeProps) {
   const { t } = useTranslation()
   const D = useData()
   // Schemas start COLLAPSED — a freshly-connected DB shows nothing expanded until the
@@ -279,10 +282,6 @@ function SchemaNode({ onLoadNamespace, ns, query, active, onPick, onPickObject, 
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   useEffect(()=>{if(open.schema && ns.status==='unloaded')onLoadNamespace?.(ns.name)},[open.schema,ns.status,ns.name,onLoadNamespace])
   const countLabel=ns.status==='unloaded'?t('workbench.metadataNotLoaded'):ns.status==='loading'?t('workbench.metadataLoading'):ns.status==='error'?t('workbench.metadataUnavailable'):ns.tables.length+' tables'
-  // Hover reveals the "..." action button; the schema-management dropdown opens from it.
-  const [hover, setHover] = useState(false)
-  const [menuOpen, setMenuOpen] = useState(false)
-  const menuRef = useRef<HTMLDivElement>(null)
   // 复制节点名后的短暂反馈:被复制的节点名,~1.2s 后清空(图标 copy→check)。
   const [copiedName, setCopiedName] = useState<string | null>(null)
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -296,98 +295,35 @@ function SchemaNode({ onLoadNamespace, ns, query, active, onPick, onPickObject, 
   const tables: SchemaTable[] = ns.tables.filter(tbl => tbl.name.toLowerCase().includes(query))
   const keyTone: Record<string, string> = { PK: 'var(--signal-amber)', FK: 'var(--signal-blue)', UNI: 'var(--signal-violet)' }
 
-  // Close the menu on any outside mousedown.
-  useEffect(() => {
-    if (!menuOpen) return
-    function onDown(e: MouseEvent) {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false)
-    }
-    document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
-  }, [menuOpen])
-
   // 按引擎能力动态构建:不支持的项直接隐藏(而非禁用)。
-  const menuItems: { icon: string; label: string; action: () => void }[] = [
+  const schemaItems: { icon: string; label: string; action: () => void }[] = [
     ...(canSqlConsole ? [{ icon: 'terminal', label: t('workbench.newQuery'), action: () => onNewQuery(ns.name) }] : []),
     ...(canEr ? [{ icon: 'network', label: t('workbench.erDiagram'), action: () => onOpenER(ns.name) }] : []),
     ...(canStructureEdit && onNewObjectTemplate ? [
       { icon: 'table-2', label: t('workbench.newTable'), action: () => onNewObjectTemplate(ns.name, 'table') },
-      { icon: 'eye', label: t('workbench.newView'), action: () => onNewObjectTemplate(ns.name, 'view') },
+      ...(canViews ? [{ icon: 'eye', label: t('workbench.newView'), action: () => onNewObjectTemplate(ns.name, 'view') }] : []),
     ] : []),
     ...(onExportDatabase ? [{ icon: 'download', label: t('dbexport.title'), action: () => onExportDatabase(ns.name) }] : []),
     ...((onRefresh||onLoadNamespace) ? [{ icon: 'refresh-cw', label: t('workbench.refresh'), action: () => onLoadNamespace ? onLoadNamespace(ns.name,true) : onRefresh?.() }] : []),
   ]
 
-  // 单叶节点(表/视图)的对象管理"..."菜单:删除/重命名/清空表/复制表结构。
-  // 仅在 live + 支持结构编辑 + 父级提供 onObjectAdmin 时出现(mock/只读引擎隐藏)。
-  const [leafMenu, setLeafMenu] = useState<string | null>(null)
-  const leafMenuRef = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    if (!leafMenu) return
-    function onDown(e: MouseEvent) {
-      if (leafMenuRef.current && !leafMenuRef.current.contains(e.target as Node)) setLeafMenu(null)
+  const menuItems: MetadataAction[] = schemaItems.map(item=>({...item,id:item.label}))
+  const folderItems=(kind:'tables'|'views'|'functions')=>menuItems.filter(item=>['terminal','refresh-cw',...(kind==='tables'?['table-2']:kind==='views'?['eye']:[])].includes(item.icon))
+  const leafMenuItems = (objectType:'TABLE'|'VIEW'|'FUNCTION',name:string):MetadataAction[] => {
+    const key=objectType+':'+name
+    const actions:MetadataAction[] = [
+      {id:'open',icon:'eye',label:t('workbench.previewObject'),disabled:objectType!=='TABLE'&&!onPickObject,action:()=>objectType==='TABLE'?onPick(ns.name,name):onPickObject?.(ns.name,name,objectType==='VIEW'?'view':'function')},
+      {id:'copy',icon:'copy',label:t('workbench.copyName'),action:()=>copyName(name)},
+      ...(sqlActive ? [{id:'insert',icon:'arrow-right-to-line',label:t('workbench.insertName'),action:()=>window.dispatchEvent(new CustomEvent('catio-insert',{detail:{kind:'sql',text:name}}))}] : []),
+    ]
+    if(live&&canStructureEdit&&onObjectAdmin&&objectType!=='FUNCTION') {
+      const admin:[('drop'|'rename'|'truncate'|'duplicate'),string,boolean?][] = [
+        ['rename','pencil'],...(objectType==='TABLE'?[['duplicate','copy'],['truncate','eraser',true]] as [('duplicate'|'truncate'),string,boolean?][]:[]),['drop','trash-2',true],
+      ]
+      actions.push(...admin.map(([op,icon,danger])=>({id:op,icon,label:t('workbench.objAdmin.'+op),danger,testId:'leaf-admin-item:'+op+':'+key,action:()=>onObjectAdmin(op,objectType,ns.name,name)})))
     }
-    document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
-  }, [leafMenu])
-
-  // 表叶含全部四项 + 「迁移数据」(D3 跨库迁移);视图叶只含删除/重命名(无清空/复制结构/迁移)。
-  // 结构编辑类操作走 onObjectAdmin;「迁移数据」走 onTransferData,二者各自独立 —— 即便引擎
-  // 不支持结构编辑(canStructureEdit=false),只要 live 且提供了 onTransferData 也能迁移数据。
-  const leafAdminMenu = (objectType: 'TABLE' | 'VIEW', name: string) => {
-    const canAdmin = live && canStructureEdit && !!onObjectAdmin
-    const canTransfer = live && objectType === 'TABLE' && !!onTransferData
-    if (!canAdmin && !canTransfer) return null
-    const key = `${objectType}:${name}`
-    const items: { icon: string; label: string; op: 'drop' | 'rename' | 'truncate' | 'duplicate'; danger?: boolean }[] = canAdmin ? [
-      { icon: 'pencil', label: t('workbench.objAdmin.rename'), op: 'rename' },
-      ...(objectType === 'TABLE' ? [
-        { icon: 'copy', label: t('workbench.objAdmin.duplicate'), op: 'duplicate' as const },
-        { icon: 'eraser', label: t('workbench.objAdmin.truncate'), op: 'truncate' as const, danger: true },
-      ] : []),
-      { icon: 'trash-2', label: t('workbench.objAdmin.drop'), op: 'drop', danger: true },
-    ] : []
-    return (
-      <span style={{ position: 'relative', flex: 'none' }}>
-        <button className="icon-btn bare" data-testid={`leaf-admin-btn:${key}`} title={t('workbench.schemaMenu')} aria-label={t('workbench.schemaMenu')}
-          onClick={e => { e.stopPropagation(); setLeafMenu(m => m === key ? null : key) }}
-          style={{ width: 20, height: 20 }}>
-          <Icon name="more-horizontal" size={12} style={{ color: 'var(--text-tertiary)' }} />
-        </button>
-        {leafMenu === key && (
-          <div ref={leafMenuRef} onClick={e => e.stopPropagation()}
-            style={{ position: 'absolute', top: '100%', right: 0, zIndex: 200, marginTop: 2,
-              background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', borderRadius: 10,
-              boxShadow: 'var(--shadow-dropdown)', padding: '4px 0', minWidth: 150 }}>
-            {items.map(item => (
-              <button key={item.op} data-testid={`leaf-admin-item:${item.op}:${key}`}
-                onClick={() => { setLeafMenu(null); onObjectAdmin?.(item.op, objectType, ns.name, name) }}
-                className="row gap8"
-                style={{ width: '100%', textAlign: 'left', padding: '7px 12px', border: 'none', background: 'transparent',
-                  fontSize: 12.5, color: item.danger ? 'var(--danger-fg)' : 'var(--text-primary)', cursor: 'pointer', alignItems: 'center' }}
-                onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = item.danger ? 'var(--danger-soft)' : 'var(--accent-soft)' }}
-                onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}>
-                <Icon name={item.icon} size={13} style={{ color: item.danger ? 'var(--danger-fg)' : 'var(--text-tertiary)', flex: 'none' }} />
-                <span className="ell">{item.label}</span>
-              </button>
-            ))}
-            {/* D3 跨库迁移入口:仅表叶 + live + 父级提供 onTransferData。以本表为迁移源。 */}
-            {canTransfer && (
-              <button data-testid={`leaf-transfer:${key}`}
-                onClick={() => { setLeafMenu(null); onTransferData!(ns.name, name) }}
-                className="row gap8"
-                style={{ width: '100%', textAlign: 'left', padding: '7px 12px', border: 'none', background: 'transparent',
-                  fontSize: 12.5, color: 'var(--text-primary)', cursor: 'pointer', alignItems: 'center' }}
-                onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = 'var(--accent-soft)' }}
-                onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}>
-                <Icon name="arrow-up-down" size={13} style={{ color: 'var(--text-tertiary)', flex: 'none' }} />
-                <span className="ell">{t('workbench.objAdmin.transferData')}</span>
-              </button>
-            )}
-          </div>
-        )}
-      </span>
-    )
+    if(live&&objectType==='TABLE'&&onTransferData)actions.push({id:'transfer',icon:'arrow-up-down',label:t('workbench.objAdmin.transferData'),testId:'leaf-transfer:'+key,action:()=>onTransferData(ns.name,name)})
+    return actions
   }
 
   // Hover-revealed copy/insert actions for a leaf node (table/view/function).
@@ -415,42 +351,16 @@ function SchemaNode({ onLoadNamespace, ns, query, active, onPick, onPickObject, 
 
   return (
     <>
-      <div className="row" style={{ position: 'relative', alignItems: 'center' }}
-        onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <TreeNode icon="database" iconColor="var(--signal-blue)" label={ns.name} count={countLabel} open={open.schema} onToggle={() => setOpen(o => ({ ...o, schema: !o.schema }))} depth={0} testId={`schema-node:${ns.name}`} />
-        </div>
-        <button className="icon-btn bare" title={t('workbench.schemaMenu')} aria-label={t('workbench.schemaMenu')}
-          onClick={e => { e.stopPropagation(); setMenuOpen(o => !o) }}
-          style={{ width: 22, height: 22, flex: 'none', marginRight: 4, opacity: hover || menuOpen ? 1 : 0, transition: 'opacity .12s' }}>
-          <Icon name="more-horizontal" size={14} />
-        </button>
-        {menuOpen && (
-          <div ref={menuRef} onClick={e => e.stopPropagation()}
-            style={{ position: 'absolute', top: '100%', right: 4, zIndex: 200, marginTop: 2,
-              background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', borderRadius: 10,
-              boxShadow: 'var(--shadow-dropdown)', padding: '4px 0', minWidth: 150 }}>
-            {menuItems.map(item => (
-              <button key={item.label} onClick={() => { item.action(); setMenuOpen(false) }}
-                className="row gap8"
-                style={{ width: '100%', textAlign: 'left', padding: '7px 12px', border: 'none', background: 'transparent',
-                  fontSize: 12.5, color: 'var(--text-primary)', cursor: 'pointer', alignItems: 'center' }}
-                onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = 'var(--accent-soft)' }}
-                onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}>
-                <Icon name={item.icon} size={13} style={{ color: 'var(--text-tertiary)', flex: 'none' }} />
-                <span className="ell">{item.label}</span>
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
+      <MetadataNodeActions ownerKey={ownerKey+JSON.stringify([ns.name,'schema'])} items={menuItems} title={t('workbench.schemaMenu')} className="row" style={{alignItems:'center'}}>
+        <div style={{flex:1,minWidth:0}}><TreeNode icon="database" iconColor="var(--signal-blue)" label={ns.name} count={countLabel} open={open.schema} onToggle={()=>setOpen(o=>({...o,schema:!o.schema}))} depth={0} testId={'schema-node:'+ns.name}/></div>
+      </MetadataNodeActions>
       {open.schema && <>
         {ns.status==='loading'&&<div role="status" style={{padding:'8px 18px',fontSize:11.5,color:'var(--text-tertiary)'}}>{t('workbench.metadataLoading')}</div>}
         {(ns.error||ns.routineError)&&<div role="alert" style={{padding:'8px 18px',fontSize:11.5,color:'var(--danger-fg)',overflowWrap:'anywhere'}}>
           <div>{ns.error??ns.routineError}</div>
           {onLoadNamespace&&<button className="btn ghost sm" onClick={()=>onLoadNamespace(ns.name,true)}>{t('workbench.metadataRetry')}</button>}
         </div>}
-        <TreeNode icon="folder" label={t('workbench.tables')} count={tables.length} open={open.tables} onToggle={() => setOpen(o => ({ ...o, tables: !o.tables }))} depth={1} />
+        <MetadataNodeActions ownerKey={JSON.stringify([ownerKey,ns.name,'tables'])} items={folderItems('tables')} title={t('workbench.schemaMenu')} className="row" triggerTestId={'folder-menu:tables:'+ns.name}><TreeNode icon="folder" label={t('workbench.tables')} count={tables.length} open={open.tables} onToggle={() => setOpen(o => ({ ...o, tables: !o.tables }))} depth={1} /></MetadataNodeActions>
         {open.tables && tables.map(tbl => {
           const st = D.tableStructures[tbl.name]
           const isOpen = expanded[tbl.name]
@@ -459,7 +369,7 @@ function SchemaNode({ onLoadNamespace, ns, query, active, onPick, onPickObject, 
           const showExpand = !live && !!st
           return (
             <div key={tbl.name}>
-              <div className="row treeleaf treerow" style={{ position: 'relative', alignItems: 'center', gap: 2, paddingLeft: 22, paddingRight: 6, borderRadius: 8, background: isActive ? 'var(--accent-soft)' : 'transparent' }}>
+              <MetadataNodeActions ownerKey={ownerKey+JSON.stringify([ns.name,'TABLE',tbl.name])} items={leafMenuItems('TABLE',tbl.name)} title={t('workbench.schemaMenu')} triggerTestId={'leaf-admin-btn:TABLE:'+tbl.name} className="row treeleaf treerow" style={{ position: 'relative', alignItems: 'center', gap: 2, paddingLeft: 22, paddingRight: 6, borderRadius: 8, background: isActive ? 'var(--accent-soft)' : 'transparent' }}>
                 {showExpand
                   ? <button onClick={() => setExpanded(e => ({ ...e, [tbl.name]: !e[tbl.name] }))} style={{ width: 18, height: 26, display: 'grid', placeItems: 'center', flex: 'none' }} title={t('workbench.expandColumns')}>
                       <Icon name="chevron-right" size={11} style={{ color: 'var(--text-faint)', transition: 'transform .15s', transform: isOpen ? 'rotate(90deg)' : 'none' }} />
@@ -472,8 +382,7 @@ function SchemaNode({ onLoadNamespace, ns, query, active, onPick, onPickObject, 
                   <span className="rowcount mono" style={{ marginLeft: 'auto', fontSize: 9.5, color: 'var(--text-faint)', flex: 'none' }}>{tbl.rows}</span>
                 </button>
                 {leafActions(tbl.name)}
-                {leafAdminMenu('TABLE', tbl.name)}
-              </div>
+              </MetadataNodeActions>
               {showExpand && isOpen && st && (
                 <div className="col" style={{ paddingLeft: 40, paddingBottom: 4 }}>
                   {st.columns.map(c => (
@@ -489,29 +398,28 @@ function SchemaNode({ onLoadNamespace, ns, query, active, onPick, onPickObject, 
           )
         })}
         {canViews && <>
-        <TreeNode icon="eye" label={t('workbench.views')} count={ns.views.length} open={open.views} onToggle={() => setOpen(o => ({ ...o, views: !o.views }))} depth={1} />
+        <MetadataNodeActions ownerKey={JSON.stringify([ownerKey,ns.name,'views'])} items={folderItems('views')} title={t('workbench.schemaMenu')} className="row" triggerTestId={'folder-menu:views:'+ns.name}><TreeNode icon="eye" label={t('workbench.views')} count={ns.views.length} open={open.views} onToggle={() => setOpen(o => ({ ...o, views: !o.views }))} depth={1} /></MetadataNodeActions>
         {open.views && ns.views.map(v => {
           const isActive = active != null && active.schema === ns.name && active.table === v.name
           return (
-            <div key={v.name} className="row treeleaf treerow" style={{ position: 'relative', alignItems: 'center', gap: 2, paddingRight: 6, borderRadius: 8, background: isActive ? 'var(--accent-soft)' : 'transparent' }}>
+            <MetadataNodeActions key={v.name} ownerKey={ownerKey+JSON.stringify([ns.name,'VIEW',v.name])} items={leafMenuItems('VIEW',v.name)} title={t('workbench.schemaMenu')} triggerTestId={'leaf-admin-btn:VIEW:'+v.name} className="row treeleaf treerow" style={{ position: 'relative', alignItems: 'center', gap: 2, paddingRight: 6, borderRadius: 8, background: isActive ? 'var(--accent-soft)' : 'transparent' }}>
               <button onClick={() => onPickObject?.(ns.name, v.name, 'view')} style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 7, padding: '5px 8px 5px 40px', minWidth: 0, color: isActive ? 'var(--accent-primary)' : 'var(--text-tertiary)' }}>
                 <Icon name="eye" size={12} style={{ color: 'var(--signal-violet)', flex: 'none' }} /><span className="ell mono" style={{ fontSize: 12 }}>{v.name}</span>
               </button>
               {leafActions(v.name)}
-              {leafAdminMenu('VIEW', v.name)}
-            </div>
+            </MetadataNodeActions>
           )
         })}
         </>}
         {canFunctions && <>
-        <TreeNode icon="function-square" label={t('workbench.functions')} count={ns.functions.length} open={open.fns} onToggle={() => setOpen(o => ({ ...o, fns: !o.fns }))} depth={1} />
+        <MetadataNodeActions ownerKey={JSON.stringify([ownerKey,ns.name,'functions'])} items={folderItems('functions')} title={t('workbench.schemaMenu')} className="row" triggerTestId={'folder-menu:functions:'+ns.name}><TreeNode icon="function-square" label={t('workbench.functions')} count={ns.functions.length} open={open.fns} onToggle={() => setOpen(o => ({ ...o, fns: !o.fns }))} depth={1} /></MetadataNodeActions>
         {open.fns && ns.functions.map(f => (
-          <div key={f.name} className="row treeleaf treerow" style={{ position: 'relative', alignItems: 'center', gap: 2, paddingRight: 6, borderRadius: 8, background: 'transparent' }}>
+          <MetadataNodeActions key={f.name} ownerKey={ownerKey+JSON.stringify([ns.name,'FUNCTION',f.name])} items={leafMenuItems('FUNCTION',f.name)} title={t('workbench.schemaMenu')} triggerTestId={'leaf-admin-btn:FUNCTION:'+f.name} className="row treeleaf treerow" style={{ position: 'relative', alignItems: 'center', gap: 2, paddingRight: 6, borderRadius: 8, background: 'transparent' }}>
             <button onClick={() => onPickObject?.(ns.name, f.name, 'function')} style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 7, padding: '5px 8px 5px 40px', minWidth: 0, color: 'var(--text-tertiary)' }}>
               <Icon name="function-square" size={12} style={{ color: 'var(--signal-green)', flex: 'none' }} /><span className="ell mono" style={{ fontSize: 12 }}>{f.name}()</span>
             </button>
             {leafActions(f.name)}
-          </div>
+          </MetadataNodeActions>
         ))}
         </>}
       </>}

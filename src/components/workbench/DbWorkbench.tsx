@@ -343,7 +343,7 @@ export function DbWorkbench({ conn, density, active: shown = true, workspaceTabI
 
   return (
     <div style={{ display: 'flex', alignItems: 'stretch', height: '100%', width: '100%', flex: 1, minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
-      <SchemaBrowser onPick={pickTable} onPickObject={pickObject}
+      <SchemaBrowser visible={shown} onPick={pickTable} onPickObject={pickObject}
         active={activeTab?.kind === 'table' ? { schema: activeTab.schema, table: activeTab.table } : null}
         onNewQuery={(schema) => newQuery(undefined, schema ?? namespace?.name)} onOpenER={openER} onOpenCompare={connId ? openCompare : undefined} onNewObjectTemplate={onNewObjectTemplate} onRefresh={refreshSchema}
         onObjectAdmin={connId ? (op, objectType, schema, name) => setAdminObj({ op, objectType, schema, name }) : undefined}

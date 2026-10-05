@@ -92,7 +92,7 @@ describe('SchemaBrowser', () => {
     expect(screen.queryByText('ER 图')).not.toBeInTheDocument()
     expect(screen.queryByText('新建表')).not.toBeInTheDocument()
     expect(screen.queryByText('新建视图')).not.toBeInTheDocument()
-    expect(screen.getByText('新建查询')).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: '新建查询' })).toBeInTheDocument()
     expect(screen.getByText('刷新')).toBeInTheDocument()
   })
 
@@ -106,7 +106,7 @@ describe('SchemaBrowser', () => {
       </DataProvider></LanguageProvider>,
     )
     fireEvent.click(screen.getAllByTitle('Schema 操作')[0])
-    expect(screen.getByText('新建查询')).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: '新建查询' })).toBeInTheDocument()
     expect(screen.getByText('ER 图')).toBeInTheDocument()
     expect(screen.getByText('新建表')).toBeInTheDocument()
     expect(screen.getByText('新建视图')).toBeInTheDocument()
