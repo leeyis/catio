@@ -171,7 +171,7 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
   // T16 SQL 文件批量执行对话框开关。仅已连接(connId)时可用。
   const [sqlFileOpen, setSqlFileOpen] = useState(false)
   const [savedCode,setSavedCode]=useState(''),[savingQuery,setSavingQuery]=useState(false)
-  useReportDatabaseWork('sql',code!==savedCode,phase==='running'||!!explain?.loading||savingQuery)
+  useReportDatabaseWork('sql',code!==savedCode,phase==='running'||session.actionBusy||!!explain?.loading||savingQuery)
   async function saveQuery(){
     if(savingQuery)return
     const text=editorRef.current?.getExecutionTarget?.('all').target?.sql??code

@@ -6,6 +6,7 @@ import i18n from '../../i18n'
 import { SqlConsole } from './SqlConsole'
 import type { QuerySessionInfo } from '../../services/db'
 import type { DataGridProps } from './DataGrid'
+import { DatabaseWorkProvider,hasBusyDatabaseDraftWork } from '../../state/databaseDraftWork'
 import { listQuerySessionWork,removeQuerySessionWork } from '../../state/querySessionWork'
 const api=vi.hoisted(()=>({openQuerySession:vi.fn(),closeQuerySession:vi.fn(),querySessionStatus:vi.fn(),pingQuerySession:vi.fn(),querySessionTransaction:vi.fn(),runQuery:vi.fn(),cancelQuery:vi.fn(),grid:null as DataGridProps|null}))
 vi.mock('../../services/db',async original=>({...await original<typeof import('../../services/db')>(),...api,
@@ -14,8 +15,8 @@ vi.mock('../../services/db',async original=>({...await original<typeof import('.
 // Exercise the real CodeMirror current-statement seam with the isolated-session backend mock.
 vi.mock('./DataGrid',()=>({DataGrid:(props:DataGridProps)=>{api.grid=props;return <div data-testid="session-result"/>}}))
 const info=(id='sql-a',transactionState:QuerySessionInfo['transactionState']='idle'):QuerySessionInfo=>({id,transactionState,busy:false,canCancel:true,leaseSeconds:1800})
-const wrap=()=>render(<LanguageProvider><DataProvider><SqlConsole fresh connId="c" engine="sqlite" querySessions
-  profileId="profile" workbenchId="outer" sessionOwnerId="inner" initialCode="SELECT 1"/></DataProvider></LanguageProvider>)
+const wrap=()=>render(<LanguageProvider><DataProvider><DatabaseWorkProvider owner={{ownerId:'inner',workbenchId:'outer',profileId:'profile'}}><SqlConsole fresh connId="c" engine="sqlite" querySessions
+  profileId="profile" workbenchId="outer" sessionOwnerId="inner" initialCode="SELECT 1"/></DatabaseWorkProvider></DataProvider></LanguageProvider>)
 beforeEach(async()=>{
   localStorage.clear();for(const [key,value] of Object.entries(api))if(key!=='grid')(value as ReturnType<typeof vi.fn>).mockReset()
   listQuerySessionWork().forEach(item=>removeQuerySessionWork(item.info.id));api.grid=null
@@ -25,6 +26,17 @@ beforeEach(async()=>{
   api.runQuery.mockResolvedValue({columns:[{name:'n',type:'int'}],rows:[[1]]})
 })
 describe('isolated SQL sessions',()=>{
+  it('holds the draft close guard while a transaction action is awaiting its real receipt',async()=>{
+    let finish!:(value:QuerySessionInfo)=>void
+    api.querySessionTransaction.mockReturnValue(new Promise(resolve=>{finish=resolve}))
+    wrap();await waitFor(()=>expect(screen.getByRole('button',{name:'Begin transaction'})).toBeEnabled())
+    fireEvent.click(screen.getByRole('button',{name:'Begin transaction'}))
+    await waitFor(()=>expect(api.querySessionTransaction).toHaveBeenCalledTimes(1))
+    expect(hasBusyDatabaseDraftWork({ownerId:'inner'})).toBe(true)
+    api.querySessionStatus.mockResolvedValue(info('sql-a','active'))
+    await act(async()=>{finish(info('sql-a','active'))})
+    await waitFor(()=>expect(hasBusyDatabaseDraftWork({ownerId:'inner'})).toBe(false))
+  })
   it('binds execution, results and paging to its session ID and closes on unmount',async()=>{
     const view=wrap();await waitFor(()=>expect(api.openQuerySession).toHaveBeenCalledWith('c'))
     await screen.findByRole('button',{name:'Begin transaction'})
