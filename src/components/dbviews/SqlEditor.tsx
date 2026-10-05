@@ -8,7 +8,7 @@ import { useTranslation } from 'react-i18next'
 import { EditorView, keymap, placeholder as cmPlaceholder, lineNumbers, highlightActiveLineGutter } from '@codemirror/view'
 import { EditorState, Compartment, Prec, type Extension } from '@codemirror/state'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
-import { search,searchKeymap,openSearchPanel } from '@codemirror/search'
+import { search,searchKeymap,openSearchPanel,closeSearchPanel,searchPanelOpen } from '@codemirror/search'
 import { autocompletion, completionKeymap, closeBrackets, closeBracketsKeymap, acceptCompletion, ifNotIn, type CompletionSource } from '@codemirror/autocomplete'
 import { linter, lintGutter, type Diagnostic } from '@codemirror/lint'
 import { syntaxHighlighting, bracketMatching, indentOnInput } from '@codemirror/language'
@@ -21,6 +21,7 @@ import { catioTheme, catioHighlight } from '../editor/editorTheme'
 import { Icon } from '../Icon'
 import { editorStats, type EditorStats } from './editorStats'
 import { sqlExecutionTarget, type SqlTargetResult } from './sqlExecutionTarget'
+import { sqlSearchPhrases } from './sqlSearchPhrases'
 import { MetadataNodeActions,type MetadataAction } from '../workbench/MetadataNodeActions'
 
 export interface SqlEditorProps {
@@ -94,6 +95,7 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
   const rootRef = useRef<HTMLDivElement>(null)
   const viewRef = useRef<EditorView | null>(null)
   const sqlCompartment = useRef(new Compartment())
+  const searchUiCompartment = useRef(new Compartment())
   // Build the language/completion extension for the SQL compartment. Plain mode
   // (mongo/es) drops lang-sql; it gets a custom completion source when provided.
   function langExt(): Extension {
@@ -147,7 +149,7 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
     const extensions: Extension[] = [
       lineNumbers(),
       highlightActiveLineGutter(),
-      history(),search({top:true}),
+      history(),search({top:true}),searchUiCompartment.current.of(sqlSearchPhrases(tr)),
       EditorView.theme({'.cm-panels':{backgroundColor:'var(--surface-subtle)',color:'var(--text-primary)'},'.cm-search input':{backgroundColor:'var(--surface-card)',color:'var(--text-primary)',border:'1px solid var(--border-hairline)',borderRadius:'5px'},'.cm-search button':{backgroundImage:'none',backgroundColor:'var(--surface-sunken)',color:'var(--text-primary)',border:'1px solid var(--border-hairline)',borderRadius:'5px'}}),
       bracketMatching(),
       closeBrackets(),
@@ -238,6 +240,14 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
     view.dispatch({ effects: sqlCompartment.current.reconfigure(langExt()) })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [schema, engine, defaultSchema, plain, completion, lintSource, extraCompletion, tr])
+
+  useEffect(()=>{
+    const view=viewRef.current;if(!view)return
+    const wasOpen=searchPanelOpen(view.state)
+    if(wasOpen)closeSearchPanel(view)
+    view.dispatch({effects:searchUiCompartment.current.reconfigure(sqlSearchPhrases(tr))})
+    if(wasOpen)openSearchPanel(view)
+  },[tr])
 
   // Sync external `code` changes (e.g. AI-inserted SQL, Clear button) into the
   // doc without clobbering the cursor while the user types locally.
