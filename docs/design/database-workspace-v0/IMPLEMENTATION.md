@@ -51,12 +51,48 @@
 - 主题修复最终验证：`a-theme-final-build.exit=0`，`a-theme-final-full` 为 **161 files / 1417 tests，exit 0**。最新 Web 构建 Amber 实测按钮 class 为 `btn btn-ghost sm`、文字 `rgb(205, 193, 174)`，背景 `#221E18`，无 body 横向溢出；不是修改页面 DOM 伪装修复。保留 act / chunk-size 警告，不称零 warning。
 - 本批没有 Rust / Java 变更，因此没有无理由重复驱动构建；旧真实驱动矩阵仍只作为历史证据。开发版、安装版与隔离 Web server 保留运行。
 
+## 第四批：文件型重连与 SQL 文件真实执行链路
+
+- `2036fe3`：原生 SQLite / DuckDB 重连不再访问密码缓存或弹密码框；详情与侧栏用文件路径而非 host:port，文件失败内联显示；按真正的 driver family 判断，不把名为 sqlite 的 JDBC profile 当作无密码引擎。旧 profile 的网络、SSL、secret 等字段在构造调用参数时剔除。5 项回归先 red，相关 78 项及 tsc 通过。
+- `sql_file_io.rs` 以 64 KiB 块严格解码 UTF-8（可带 BOM）及带 BOM 的 UTF-16LE/BE，跨字节、代理对、注释/tag 边界保真；非法/截断编码、NUL/UTF-32 不静默替换。沿用 200 MiB 文件上限，新增单语句 8 MiB 上限。
+- 完整编码和切分预检后，语句保存在私有自动清理的磁盘暂存文件，再逐条读取执行。文件尾编码错误不会先执行前面的写入；不是全脚本 SQL 语法/依赖验证或全局原子事务。SHA-256 指纹把 UI 执行绑定到预览内容，文件变化必须重新预览。
+- 执行前登记按连接 / execution ID 隔离的 RAII guard，复用有界 early-cancel 机制；重复在途 ID 不覆盖令牌。准备期间可中止，执行阶段调用驱动的 query_cancellable 并等真实结果，不能通过丢弃写 future 冒称回滚。
+- 支持 query-session 的引擎使用一个独立物理会话，文件中的 TEMP 表和 BEGIN/COMMIT 保持同一会话；结束时清理。没有确认 idle 的事务不报成功；已提交的语句与清理回滚的未提交事务明确分开。
+- Web 新增本机文件选择与有界字节上传（8 MiB），不接受 renderer 的服务器路径；临时文件属于这次请求，自动清理。执行 / 取消受现有连接 owner gate 约束，进度仅发给发起请求的登录用户；Web 请求响应被关闭也不直接丢弃在途写 future。
+- native 和 Web 都返回真实终态回执，事件丢失时不靠猜测判成功；缺回执/未知传输结果不自动重放。重跑已有任务要用户确认已核验数据库，明确“这是新执行，不是断点恢复”。末条正在运行时进度条不冒充 100%；UI 失败明细最多保留最近 100 条，总失败计数不丢失。
+- 文件 RPC 终止后（含取消/未知传输结果）才失效元数据缓存。正常取消用本地化状态和部分提交边界提示，不再额外显示英文 `query cancelled` 错误条。
+- 初步真实核心测试 6 项 / HTTP 3 项通过，覆盖末尾坏编码零写入、指纹变化零写入、UTF-16 两种字节序、TEMP/事务会话、真正中断 SQLite 当前语句、保留先前提交、owner/路径隔离。后续增加 DuckDB 物理会话路径进入最终矩阵，不把初步 9 项冒称覆盖它。
+- 全量前端中间检查点为 **163 files / 1436 tests，exit 0**；其后补元数据失效时机、取消展示与字节数，最终回归另记。不是复用旧版本测试当作新代码证据。
+
+### 真实前台 Web 验收（隔离 loopback 18878）
+
+- 为保留原 18877 QA 与两套桌面进程，使用新的临时 QA head / 隔离数据目录。随机 QA 登录口令未打印，不读取历史部署凭据，没有访问生产服务器。
+- 真正上传 `b-good-utf16.sql`，预览识别 UTF-16LE / 3 条语句，执行回执为成功 3、失败 0；之后在真实 CodeMirror 中查询，读回中文 emoji、`900719925474099312345` 文本、`0001` 与空 BLOB 的 HEX。
+- 上传 4 句取消样例：前两句建表及写入 7 已提交；第三句 10 亿项递归 SQL 运行中点击取消，收到取消终态。再查询只有 7，第四句写入 99 未执行。没有称整个文件已回滚。
+- 取消后重新点击运行出现“新执行、非断点恢复、先核验数据库”的确认；本次取消确认，没有重复执行脚本。
+- 在同一新构建 Web 中明确关闭自建内存 QA 连接，重新从详情连接，无密码输入框并成功连接；新内存库生命周期按提示处理，不称旧内存内容恢复。
+- 使用真实页面、文件上传工具、CodeMirror 输入及程序化 DOM 点击；不是纯 mock，也不是完整 desktop 人工键鼠验收。截图/数据/失败日志在 `.worktrees/dbx-parity-logs/`，不提交。
+
+### Windows 构建隔离
+
+- 首次扩展后端矩阵退出 101，原因是 Cargo 为 integration targets 自动构建普通二进制，尝试移除仍运行的 `K:/cargo/debug/catio.exe` 被拒绝；不是测试断言通过。`cargo rustc --test` 也会触发此行为，失败记录保留，不循环重试或终止用户开发版。
+- 桌面目标增加默认启用、仅门控 target 的 `desktop` feature；测试 runner 用 `--no-default-features` 跳过普通桌面 bin，核心库行为不变。正常 Tauri dev/build 保持默认桌面功能，手动关闭默认 feature 的桌面构建需显式添加 `--features desktop`。没有通过修改/终止运行中的桌面实例来绕过文件锁。
+
+### 本批最终检查点
+
+- `afb6829` 已提交 Windows target 隔离；默认 `desktop` feature / `catio` required-feature 以及独立 `server` feature 经 cargo metadata 核对。重新执行矩阵 `b-file-final-matrix-2.exit=0`：**550 library tests + 10 个 integration targets / 55 tests 全部通过**，包括新增 DuckDB 文件执行会话路径；实际 env gate 已启用，SQL Server 仍是 2019。本轮没有 TLS 专项、未修改 Java 或重建 JAR。
+- 最新 Web 构建再次验证：先展开 main（0 tables），上传 430 B UTF-16LE 文件并完成 3 条语句后，树自动刷新为 1 table / `main.b_receipts`，没有手动刷新或修改 DOM 伪造结果。
+- 提示明确要求使用限定对象名，不依赖编辑器标签的命名空间或事务；SQL 文件的完整 namespace 目标选择仍不是本批交付内容。
+- 审查发现 Mongo / Redis / Elasticsearch 原生控制台仍显示 SQL 文件入口；3 项先 red，已按协议族隐藏该入口，后端也拒绝把这些驱动当 SQL 文件引擎。
+- `b-delivery-build` / `b-delivery-full` 的中间检查点为构建、TypeScript 与 163 files / 1438 tests。补原生入口能力门禁后，**`b-feature-build.exit=0`、`b-feature-full.exit=0`，最终 163 files / 1441 tests 全通过**。act / chunk-size 提示仍存在。
+- 功能提交 `67651c9`：有界 SQL 文件执行、Web 上传/owner 进度、驱动取消、终态回执、重复执行核验与元数据失效。staged 审计通过；用户 capabilities.json 的原 SHA-256 保持不变。临时 QA example 源文件已移除；没有提交截图、日志、输入文件或数据目录。
+
 ## 后续仍需实施 / 补齐验收
 
 1. 当前语句 / 选区 / 全脚本、上下文菜单、搜索和显式结构速览已实现本批路径；继续补方言/过程批次/大脚本预算与全部桌面键盘门禁，不把有界推断称为完整 SQL 编译器。
 2. 临时预览 / 固定、草稿保护和字段树已实现本批路径；继续补所有结构类型层级、任务持久化、各入口及逐主题/desktop 完整验收。
 3. 已有结果 / 计划的源 SQL 定位；更多引擎、字段血缘与真实优化依据仍待实施。
-4. 导入导出 / 迁移的大文件 I/O、任务与授权、真正取消 / 核验 / 一致性。
-5. Mongo / Redis / ES / DuckDB 原生工作区与完整 AI 工具预览审批维护闭环。文件型连接的新建入口已改善，但已有 profile 重连仍经过通用密码提示，这不应算作原生文件工作流已完整交付。
+4. SQL 文件已有有界读取、严格解码、预检暂存、真实驱动取消及有界 Web 上传；仍需持久化任务 / 断网与进程重启后的回执恢复、大于 8 MiB 的 Web 分块上传、其他编码 / 方言、逐驱动取消验收，以及全范围导出 / 迁移 / 一致性。取消是否能打断正在运行的语句仍取决于驱动；不支持时只能等待当前语句真实返回。
+5. Mongo / Redis / ES / DuckDB 原生工作区与完整 AI 工具预览审批维护闭环。文件型连接的新建和手动重连入口已改善，但不是 Parquet/CSV/JSON 文件工作流或所有原生数据库工作区已完成。
 
 原型能点击、菜单已出现、测试数量增加都不能代替这些未完成能力。
