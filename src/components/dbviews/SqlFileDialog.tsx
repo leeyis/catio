@@ -1,3 +1,4 @@
+import { useReportDatabaseWork } from '../../state/databaseDraftWork'
 import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
@@ -32,6 +33,7 @@ export function SqlFileDialog({ connId, connName, onClose }: SqlFileDialogProps)
   const [err, setErr] = useState<string | null>(null)
   const [running, setRunning] = useState(false)
   const [run, setRun] = useState<SqlFileRunState | null>(null)
+  useReportDatabaseWork('sql-file',!!preview,busy||running)
   // 当前执行的 executionId(用于取消)。
   const execIdRef = useRef<string | null>(null)
   // 在途 unlisten,卸载时清理。

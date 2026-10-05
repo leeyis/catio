@@ -6,8 +6,10 @@ import { Icon } from '../Icon'
 import { Btn, IconBtn } from '../atoms'
 import { SqlEditor } from '../dbviews/SqlEditor'
 import { objectSource, saveObjectSource, dbErrMsg } from '../../services/db'
+import { useReportDatabaseWork } from '../../state/databaseDraftWork'
 
 export interface ObjectPaneProps {
+  canEdit?:boolean
   connId: string | null
   schema: string
   name: string
@@ -16,7 +18,7 @@ export interface ObjectPaneProps {
   connName?: string
 }
 
-export function ObjectPane({ connId, schema, name, objKind, engine, connName }: ObjectPaneProps) {
+export function ObjectPane({ connId, schema, name, objKind, engine, connName,canEdit=true }: ObjectPaneProps) {
   const { t } = useTranslation()
   const [src, setSrc] = useState('')
   const [loading, setLoading] = useState(false)
@@ -27,18 +29,20 @@ export function ObjectPane({ connId, schema, name, objKind, engine, connName }: 
   const [saved, setSaved] = useState(false)
   const [saveErr, setSaveErr] = useState<string | null>(null)
   // dirty 守卫:仅当源码相对上次 fetch/保存发生改动才允许保存,避免误触发重跑 DDL。
-  const [isDirty, setIsDirty] = useState(false)
+  const [baseline,setBaseline]=useState('')
+  const isDirty=src!==baseline
+  useReportDatabaseWork('source',isDirty,saving)
   const savedTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => () => { if (savedTimer.current) clearTimeout(savedTimer.current) }, [])
 
   async function save() {
-    if (!connId || !src.trim() || saving || !isDirty) return
+    if (!connId || !canEdit || !src.trim() || saving || !isDirty) return
     setSaving(true)
     setSaveErr(null)
     setSaved(false)
     try {
       await saveObjectSource(connId, schema, name, objKind, src)
-      setIsDirty(false)
+      setBaseline(src)
       setSaved(true)
       if (savedTimer.current) clearTimeout(savedTimer.current)
       savedTimer.current = setTimeout(() => setSaved(false), 1600)
@@ -69,9 +73,9 @@ export function ObjectPane({ connId, schema, name, objKind, engine, connName }: 
     setSrc('')
     setSaved(false)
     setSaveErr(null)
-    setIsDirty(false)
+    setBaseline('')
     objectSource(connId, schema, name, objKind)
-      .then(s => { if (!cancelled) setSrc(s) })
+      .then(s => { if (!cancelled) {setSrc(s);setBaseline(s)} })
       .catch(e => { if (!cancelled) setErr(dbErrMsg(e)) })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
@@ -100,7 +104,7 @@ export function ObjectPane({ connId, schema, name, objKind, engine, connName }: 
             style={{ color: copied ? 'var(--signal-green)' : undefined, ...(src ? null : { opacity: 0.4, pointerEvents: 'none' }) }}
             onClick={copySrc} />
           <Btn variant="primary" size="sm" icon="save"
-            onClick={save} disabled={saving || !src.trim() || !isDirty}>
+            onClick={save} disabled={!canEdit || saving || !src.trim() || !isDirty}>
             {saving ? t('dbviews.objSaving') : t('dbviews.objSave')}
           </Btn>
           <span className="mono" style={{ alignSelf: 'center', height: 22, lineHeight: '22px', padding: '0 9px', borderRadius: 7, fontSize: 11, fontWeight: 600,
@@ -114,8 +118,8 @@ export function ObjectPane({ connId, schema, name, objKind, engine, connName }: 
           ? <div className="grow" style={{ display: 'grid', placeItems: 'center', color: 'var(--text-faint)', fontSize: 12 }}>{t('dbviews.objLoading')}</div>
           : err
             ? <div className="grow" style={{ display: 'grid', placeItems: 'center', color: 'var(--signal-red)', fontSize: 12, padding: 16, textAlign: 'center' }}>{t('dbviews.loadError', { message: err })}</div>
-            : src
-              ? <SqlEditor code={src} target={connName || `${schema}.${name}`} engine={engine} defaultSchema={schema} onChange={v => { setSrc(v); setIsDirty(true); if (saveErr) setSaveErr(null); if (saved) setSaved(false) }} />
+            : (baseline || src)
+              ? <SqlEditor code={src} target={connName || `${schema}.${name}`} engine={engine} defaultSchema={schema} onChange={v => { setSrc(v); if (saveErr) setSaveErr(null); if (saved) setSaved(false) }} />
               : <div className="grow" style={{ display: 'grid', placeItems: 'center', color: 'var(--text-faint)', fontSize: 12 }}>{t('dbviews.noDefinition')}</div>}
       </div>
     </>

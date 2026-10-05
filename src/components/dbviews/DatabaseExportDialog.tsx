@@ -7,6 +7,7 @@ import {
   buildSelectedTablesPayload, exportReady,
 } from './databaseExport'
 import { dbErrMsg } from '../../services/db'
+import { useReportDatabaseWork } from '../../state/databaseDraftWork'
 
 /** 父级(DbWorkbench)拿到这份选项后:收集每表 DDL → 调 exportDatabaseSql → 落盘。 */
 export interface DatabaseExportRequest {
@@ -48,6 +49,7 @@ export function DatabaseExportDialog({ schema, allTables, onClose, onExport }: D
   const [rowLimit, setRowLimit] = useState('')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
+  useReportDatabaseWork('database-export',false,busy)
 
   const filtered = useMemo(() => filterTables(allTables, filter), [allTables, filter])
   const selectedSet = useMemo(() => new Set(selected), [selected])

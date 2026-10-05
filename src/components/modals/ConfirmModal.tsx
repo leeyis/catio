@@ -7,13 +7,14 @@ export interface ConfirmModalProps {
   message: ReactNode
   confirmLabel: string
   cancelLabel?: string
+  confirmDisabled?: boolean
   danger?: boolean
   confirmIcon?: string
   onConfirm: () => void
   onCancel: () => void
 }
 
-export function ConfirmModal({ title, message, confirmLabel, cancelLabel, danger, confirmIcon, onConfirm, onCancel }: ConfirmModalProps) {
+export function ConfirmModal({ title, message, confirmLabel, cancelLabel, confirmDisabled, danger, confirmIcon, onConfirm, onCancel }: ConfirmModalProps) {
   const { t } = useTranslation()
 
   return (
@@ -55,7 +56,7 @@ export function ConfirmModal({ title, message, confirmLabel, cancelLabel, danger
           </div>
           <div className="row gap8" style={{ justifyContent: 'flex-end', marginTop: 4 }}>
             <Btn variant="ghost" onClick={onCancel}>{cancelLabel ?? t('modals.cancel')}</Btn>
-            <Btn variant={danger ? 'danger' : 'primary'} icon={confirmIcon ?? (danger ? 'trash-2' : 'check')} onClick={onConfirm}>{confirmLabel}</Btn>
+            <Btn variant={danger ? 'danger' : 'primary'} icon={confirmIcon ?? (danger ? 'trash-2' : 'check')} disabled={confirmDisabled} onClick={onConfirm}>{confirmLabel}</Btn>
           </div>
         </div>
       </div>

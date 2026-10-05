@@ -11,7 +11,8 @@ import { LocalSplitTerminal } from './components/workbench/LocalSplitTerminal'
 import { SplitTerminal } from './components/workbench/SplitTerminal'
 import { VncPane } from './components/workbench/VncPane'
 import { DbWorkbench } from './components/workbench/DbWorkbench'
-import { hasPendingQueryWork, listQuerySessionWork } from './state/querySessionWork'
+import { listQuerySessionWork } from './state/querySessionWork'
+import { hasPendingDatabaseWork as hasPendingQueryWork,hasBusyDatabaseDraftWork,useDatabaseDraftWork } from './state/databaseDraftWork'
 import { AIPanel } from './components/panels/AIPanel'
 import { SftpPanel } from './components/panels/SftpPanel'
 import { MonitorPanel } from './components/panels/MonitorPanel'
@@ -136,6 +137,7 @@ export default function App() {
   // Pending unsaved-changes confirmation when closing a dirty remote-file tab.
   const [closeConfirm, setCloseConfirm] = useState<{ id: string; title: string } | null>(null)
   const [queryCloseAction,setQueryCloseAction]=useState<(()=>void)|null>(null)
+  useDatabaseDraftWork()
   const allowNativeClose=useRef(false)
   useEffect(()=>{
     const beforeUnload=(event:BeforeUnloadEvent)=>{if(!allowNativeClose.current&&hasPendingQueryWork()){event.preventDefault();event.returnValue=''}}
@@ -2514,8 +2516,8 @@ export default function App() {
         />
       )}
 
-      {queryCloseAction && <ConfirmModal title={t('dbviews.sessionCloseTitle')} message={t('dbviews.sessionCloseWarning')}
-        confirmLabel={t('dbviews.sessionCloseConfirm')} danger confirmIcon="x"
+      {queryCloseAction && <ConfirmModal title={t('dbviews.draftCloseTitle')} message={<>{t('dbviews.databaseCloseWarning')}{hasBusyDatabaseDraftWork()&&<div role="status">{t('dbviews.pendingWorkHint')}</div>}</>}
+        confirmLabel={t('dbviews.discardAndClose')} cancelLabel={t('dbviews.keepWork')} confirmDisabled={hasBusyDatabaseDraftWork()} danger confirmIcon="x"
         onCancel={()=>setQueryCloseAction(null)} onConfirm={()=>{const action=queryCloseAction;setQueryCloseAction(null);action()}}/>}
       {closeConfirm && (
         <ConfirmModal

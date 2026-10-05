@@ -3,6 +3,7 @@ import { render, screen, fireEvent, waitFor, within } from '@testing-library/rea
 import { LanguageProvider } from '../../state/LanguageContext'
 import i18n from '../../i18n'
 import { DataTransferDialog } from './DataTransferDialog'
+import { DatabaseWorkProvider, hasBusyDatabaseDraftWork } from '../../state/databaseDraftWork'
 
 // Mock the db service so the dialog runs without the Tauri runtime.
 const transferTable = vi.fn()
@@ -72,6 +73,30 @@ describe('DataTransferDialog', () => {
     const schemaSelect = screen.getByLabelText('transfer-target-schema')
     expect(schemaSelect.tagName).toBe('SELECT')
     expect((schemaSelect as HTMLSelectElement).value).toBe('analytics')
+  })
+
+  it('registers pending transfer work and prevents closing until its receipt arrives', async () => {
+    let finish!: (value: { rowsTransferred: number }) => void
+    transferTable.mockImplementation(() => new Promise(resolve => { finish = resolve }))
+    const close = vi.fn()
+    const view = wrap(<DatabaseWorkProvider owner={{ ownerId: 'transfer-owner', workbenchId: 'transfer-workbench', profileId: 'src' }}>
+      <DataTransferDialog connections={connections} initialSourceConnId="src" initialSourceSchema="public" initialSourceTable="users" onClose={close} />
+    </DatabaseWorkProvider>)
+    fireEvent.change(screen.getByLabelText('transfer-target-conn'), { target: { value: 'dst' } })
+    await selectTargetTable('users_copy')
+    fireEvent.click(await screen.findByRole('button', { name: /Migrate 2 column/i }))
+    await waitFor(() => expect(hasBusyDatabaseDraftWork({ workbenchId: 'transfer-workbench' })).toBe(true))
+    const cancel = screen.getByRole('button', { name: 'Cancel' })
+    expect(cancel).toBeDisabled()
+    fireEvent.click(cancel)
+    expect(close).not.toHaveBeenCalled()
+    finish({ rowsTransferred: 2 })
+    await screen.findByText(/Migrated 2 row/i)
+    await waitFor(() => expect(hasBusyDatabaseDraftWork({ workbenchId: 'transfer-workbench' })).toBe(false))
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    expect(close).toHaveBeenCalledTimes(1)
+    view.unmount()
+    expect(hasBusyDatabaseDraftWork({ workbenchId: 'transfer-workbench' })).toBe(false)
   })
 
   it('auto-maps matching columns and migrates with append by default', async () => {

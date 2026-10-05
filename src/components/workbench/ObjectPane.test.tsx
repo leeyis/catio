@@ -87,6 +87,17 @@ describe('ObjectPane 源码编辑保存', () => {
     await waitFor(() => expect(saveBtn).toBeDisabled())
   })
 
+  it('retains the editor after clearing a loaded definition and protects read-only capabilities',async()=>{
+    objectSource.mockResolvedValue('SELECT 1')
+    wrap(<ObjectPane connId="c1" schema="public" name="v" objKind="view" canEdit={false}/>)
+    const editor=await screen.findByTestId('sql-editor')
+    fireEvent.change(editor,{target:{value:''}})
+    expect(screen.getByTestId('sql-editor')).toBe(editor)
+    fireEvent.change(editor,{target:{value:'SELECT 2'}})
+    expect(screen.getByRole('button',{name:'Save'})).toBeDisabled()
+    expect(saveObjectSource).not.toHaveBeenCalled()
+  })
+
   it('surfaces a save error from the backend', async () => {
     objectSource.mockResolvedValue('CREATE OR REPLACE VIEW v AS SELECT 1;')
     saveObjectSource.mockRejectedValue(new Error('boom'))

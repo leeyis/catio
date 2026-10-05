@@ -27,6 +27,7 @@ export function TablePane({ conn, connId, caps, schema, table, density }: TableP
   const D = useData()
   // data | structure. Structure is VIEWABLE for every engine; editing gated by caps.structureEdit inside StructureView.
   const [tableTab, setTableTab] = useState('data')
+  const [structureVisited,setStructureVisited]=useState(false)
 
   // mock 路径的行/列标签(live 路径用真实 fetch 计数)
   const mockTbl = useMemo(
@@ -100,7 +101,7 @@ export function TablePane({ conn, connId, caps, schema, table, density }: TableP
               : mockTbl ? `${mockTbl.rows} ${t('workbench.rowsLabel')} · ${mockTbl.cols} ${t('workbench.colsLabel')}` : ''}</span>
           </div>
         </div>
-        <Segmented value={tableTab} onChange={setTableTab} options={[
+        <Segmented value={tableTab} onChange={value=>{setTableTab(value);if(value==='structure')setStructureVisited(true)}} options={[
           { value: 'data', label: t('workbench.tabData'), icon: 'table-2' },
           { value: 'structure', label: isRedis ? t('workbench.tabKeyspace') : t('workbench.tabStructure'), icon: isRedis ? 'database' : 'columns', testId: 'seg-structure' },
         ]} />
@@ -112,7 +113,8 @@ export function TablePane({ conn, connId, caps, schema, table, density }: TableP
             <Icon name="loader" size={24} style={{ animation: 'spin 1s linear infinite' }} />
           </div>
         )}
-        {tableTab === 'data' && (connId
+        <div style={{height:'100%',display:tableTab==='data'?'block':'none'}}>
+        {(connId
           ? <DataGrid
               columns={(live?.columns ?? [])}
               rows={(live?.rows ?? [])}
@@ -125,9 +127,12 @@ export function TablePane({ conn, connId, caps, schema, table, density }: TableP
               columns={D.ordersColumns.map((c): ResultColumn => ({ name: c.name, type: c.type, pk: c.pk, fk: c.fk, icon: c.icon }))}
               rows={D.ordersRows.map(r => D.ordersColumns.map(c => (r as unknown as Record<string, unknown>)[c.name]))}
               statusTones={D.statusTones} density={density} key={table} />)}
-        {tableTab === 'structure' && (isRedis
+        </div>
+        <div style={{height:'100%',display:tableTab==='structure'?'block':'none'}}>
+        {structureVisited && (isRedis
           ? <RedisKeyspaceView connId={connId ?? undefined} schema={schema} key={`ks.${schema ?? ''}`} />
           : <StructureView table={table} schema={schema} connId={connId ?? undefined} engine={conn.engine} canEdit={caps.structureEdit} key={`${schema ?? ''}.${table}`} />)}
+        </div>
       </div>
     </>
   )

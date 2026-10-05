@@ -1,3 +1,4 @@
+import { useReportDatabaseWork } from '../../state/databaseDraftWork'
 import { useEffect, useMemo, useState, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
@@ -49,6 +50,7 @@ export function TableImportDialog({ connId, schema, table, engine, transactions,
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [summary, setSummary] = useState<number | null>(null)
+  useReportDatabaseWork('import',!!preview,busy)
 
   // 加载目标表的列名（用于映射下拉）。失败不阻断——用户仍可手动填写目标列。
   useEffect(() => {

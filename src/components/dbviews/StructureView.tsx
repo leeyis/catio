@@ -1,6 +1,7 @@
 /* ported from ref-ui/_extract/blob5.txt — verbatim per plan T1-T7; live structure wired in E-series; column editing (add/modify/drop) added */
 import React, { useState, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
+import { useReportDatabaseWork } from '../../state/databaseDraftWork'
 import { Icon } from '../Icon'
 import { Btn, IconBtn, Segmented, Toggle } from '../atoms'
 import { useData } from '../../state/DataContext'
@@ -111,6 +112,7 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
   const [preview, setPreview] = useState<string[] | null>(null)
   const [applying, setApplying] = useState(false)
   const [applyErr, setApplyErr] = useState<string | null>(null)
+  useReportDatabaseWork('structure',!!form||!!preview,applying)
 
   function openAdd() {
     setApplyErr(null)
