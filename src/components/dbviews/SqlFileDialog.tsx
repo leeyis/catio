@@ -34,66 +34,64 @@ export function SqlFileDialog({ connId, connName, onClose }: SqlFileDialogProps)
   const [running, setRunning] = useState(false)
   const [run, setRun] = useState<SqlFileRunState | null>(null)
   useReportDatabaseWork('sql-file',!!preview,busy||running)
-  // 当前执行的 executionId(用于取消)。
   const execIdRef = useRef<string | null>(null)
-  // 在途 unlisten,卸载时清理。
   const unlistenRef = useRef<(() => void) | null>(null)
-
-  useEffect(() => () => { unlistenRef.current?.() }, [])
+  const generation = useRef(0), picking = useRef(false), executing = useRef(false)
+  const dispatched = useRef(false), stopBeforeDispatch = useRef(false)
+  const [cancelling,setCancelling]=useState(false)
+  useEffect(()=>{
+    generation.current++;picking.current=false;executing.current=false;dispatched.current=false
+    setFilePath(null);setPreview(null);setRun(null);setRunning(false);setBusy(false);setErr(null);setCancelling(false)
+    return()=>{generation.current++;unlistenRef.current?.();unlistenRef.current=null;if(dispatched.current&&execIdRef.current)void cancelSqlFile(execIdRef.current).catch(()=>{});execIdRef.current=null}
+  },[connId])
 
   async function pickFile() {
-    setErr(null)
+    if(picking.current||executing.current)return
+    picking.current=true;const owner=generation.current;setBusy(true);setErr(null)
+    // A failed replacement preview must never leave the old file executable.
+    setPreview(null);setFilePath(null);setRun(null)
     try {
-      const { open } = await import('@tauri-apps/plugin-dialog')
-      const picked = await open({
-        multiple: false,
-        filters: [{ name: t('dbviews.sqlFileFilter'), extensions: ['sql'] }],
-      })
-      const path = Array.isArray(picked) ? picked[0] : picked
-      if (!path) return
-      setFilePath(path)
-      setRun(null)
-      setBusy(true)
-      const pv = await sqlFilePreview(connId, path)
-      setPreview(pv)
-    } catch (e) {
-      setErr(dbErrMsg(e))
-    } finally {
-      setBusy(false)
-    }
+      const {open}=await import('@tauri-apps/plugin-dialog')
+      const picked=await open({multiple:false,filters:[{name:t('dbviews.sqlFileFilter'),extensions:['sql']}]})
+      if(owner!==generation.current)return
+      const path=Array.isArray(picked)?picked[0]:picked
+      if(!path)return
+      const pv=await sqlFilePreview(connId,path)
+      if(owner===generation.current){setFilePath(path);setPreview(pv)}
+    }catch(e){if(owner===generation.current)setErr(dbErrMsg(e))}
+    finally{if(owner===generation.current){picking.current=false;setBusy(false)}}
   }
 
   async function start() {
-    if (!filePath) return
-    setErr(null)
-    setRun(initialRunState())
-    setRunning(true)
-    const executionId = (globalThis.crypto?.randomUUID?.() ?? `sqlfile-${Date.now()}-${Math.random()}`)
-    execIdRef.current = executionId
+    if(!filePath||!preview||preview.statementCount===0||picking.current||executing.current)return
+    executing.current=true;dispatched.current=false;stopBeforeDispatch.current=false
+    const owner=generation.current
+    const executionId=globalThis.crypto?.randomUUID?.()??('sqlfile-'+Date.now()+'-'+Math.random())
+    execIdRef.current=executionId;setErr(null);setRun(initialRunState());setRunning(true);setCancelling(false)
+    let terminalReceipt=false
     try {
-      // 先挂监听,避免「Started」事件先于订阅丢失。
-      const unlisten = await onSqlFileProgress(p => {
-        if (p.executionId !== executionId) return
-        setRun(prev => reduceProgress(prev ?? initialRunState(), p))
-        if (isTerminalStatus(p.status)) {
-          setRunning(false)
-          unlistenRef.current?.()
-          unlistenRef.current = null
-        }
+      const unlisten=await onSqlFileProgress(p=>{
+        if(owner!==generation.current||execIdRef.current!==executionId||p.executionId!==executionId||terminalReceipt)return
+        setRun(prev=>reduceProgress(prev??initialRunState(),p))
+        if(isTerminalStatus(p.status)){terminalReceipt=true;setErr(null)}
       })
-      unlistenRef.current = unlisten
-      await runSqlFile({ executionId, connId, filePath, continueOnError })
-    } catch (e) {
-      setErr(dbErrMsg(e))
-      setRunning(false)
-      unlistenRef.current?.()
-      unlistenRef.current = null
-    }
+      if(owner!==generation.current){unlisten();return}
+      unlistenRef.current=unlisten
+      if(stopBeforeDispatch.current){setRun({...initialRunState(),status:'cancelled'});return}
+      dispatched.current=true
+      await runSqlFile({executionId,connId,filePath,continueOnError})
+      if(owner===generation.current&&!terminalReceipt)setErr(t('dbviews.sqlFileMissingReceipt'))
+    }catch(e){if(owner===generation.current)setErr(dbErrMsg(e))}
+    finally{if(owner===generation.current){unlistenRef.current?.();unlistenRef.current=null;execIdRef.current=null;executing.current=false;dispatched.current=false;setRunning(false);setCancelling(false)}}
   }
 
   async function cancel() {
-    const id = execIdRef.current
-    if (id) await cancelSqlFile(id)
+    if(!executing.current||cancelling)return
+    const owner=generation.current,id=execIdRef.current
+    setCancelling(true)
+    if(!dispatched.current){stopBeforeDispatch.current=true;return}
+    try{if(id)await cancelSqlFile(id)}catch(e){if(owner===generation.current){setErr(dbErrMsg(e));setCancelling(false)}}
+    // A cancellation request is not a terminal receipt or a rollback.
   }
 
   const labelStyle: React.CSSProperties = { fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }
@@ -101,7 +99,7 @@ export function SqlFileDialog({ connId, connName, onClose }: SqlFileDialogProps)
   const pct = run ? progressPercent(run) : 0
 
   return (
-    <div onClick={running ? undefined : onClose}
+    <div onClick={running || busy ? undefined : onClose}
       style={{ position: 'absolute', inset: 0, zIndex: 70, background: 'color-mix(in srgb, var(--cta-bg) 42%, transparent)', backdropFilter: 'blur(3px)', display: 'grid', placeItems: 'center' }}>
       <div onClick={e => e.stopPropagation()} className="pop-in"
         style={{ width: 640, maxWidth: '92%', maxHeight: '88%', background: 'var(--surface-card)', borderRadius: 18, border: '1px solid var(--border-hairline)', boxShadow: 'var(--shadow-window)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
@@ -111,7 +109,7 @@ export function SqlFileDialog({ connId, connName, onClose }: SqlFileDialogProps)
             <span style={{ fontSize: 15, fontWeight: 700, letterSpacing: '-0.2px' }}>{t('dbviews.sqlFileTitle')}</span>
             {connName && <span className="mono" style={{ fontSize: 11.5, color: 'var(--text-tertiary)' }}>{connName}</span>}
           </div>
-          <IconBtn name="x" size={16} variant="bare" onClick={running ? () => { /* 执行中不可关闭 */ } : onClose} />
+          <IconBtn name="x" size={16} variant="bare" onClick={running || busy ? () => { /* 执行中不可关闭 */ } : onClose} />
         </div>
 
         {/* body */}
@@ -206,11 +204,11 @@ export function SqlFileDialog({ connId, connName, onClose }: SqlFileDialogProps)
         {/* footer */}
         <div className="row gap8" style={{ justifyContent: 'flex-end', padding: '14px 20px 18px', borderTop: '1px solid var(--border-hairline)', flex: 'none' }}>
           {running ? (
-            <Btn variant="danger" icon="square" onClick={cancel}>{t('dbviews.sqlFileCancel')}</Btn>
+            <Btn variant="danger" icon="square" disabled={cancelling} onClick={cancel}>{t(cancelling?'dbviews.cancelling':'dbviews.sqlFileCancel')}</Btn>
           ) : (
             <>
-              <Btn variant="ghost" onClick={onClose}>{terminal ? t('dbviews.close') : t('dbviews.cancel')}</Btn>
-              <Btn variant="primary" icon="play" onClick={start} disabled={!preview || preview.statementCount === 0}>
+              <Btn variant="ghost" disabled={busy} onClick={onClose}>{terminal ? t('dbviews.close') : t('dbviews.cancel')}</Btn>
+              <Btn variant="primary" icon="play" onClick={start} disabled={busy || !preview || preview.statementCount === 0}>
                 {t('dbviews.sqlFileRun', { count: preview?.statementCount ?? 0 })}
               </Btn>
             </>
