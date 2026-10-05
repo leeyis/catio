@@ -18,7 +18,7 @@ function pinnedTabs(){return state.pinnedObjects.filter(name=>name!==state.objec
 function docTabs(){return `<nav class="p-doc-tabs" aria-label="数据库内部标签"><button class="p-doc-tab ${['query','ai'].includes(state.view)?'active':''}" data-view="query">${icon('file-code')}查询 1<span class="p-badge">未保存</span></button><button class="p-doc-tab ${state.view==='table'?'active':''} ${state.pinned?'':'preview'}" data-view="table">${icon('table-2')}${esc(state.object)}${state.pinned?icon('bookmark',12):'<span class="p-badge">预览</span>'}</button>${pinnedTabs()}${state.view==='plan'?'<span class="p-doc-tab active">'+icon('git-branch')+'查询分析</span>':''}${['import','export','jobs'].includes(state.view)?'<span class="p-doc-tab active">'+icon(state.view==='jobs'?'activity':state.view==='import'?'upload':'download')+esc(titles[state.view][0])+'</span>':''}<span class="p-grow"></span>${state.view==='table'?button(state.pinned?'已固定':'固定预览','pin','bookmark','small'):''}</nav>`}
 function targetBar(){return `<div class="p-targetbar"><span>${icon('database',13)} 示例连接</span><span class="p-quiet">/</span><select aria-label="当前默认 Schema"><option>public</option><option>app</option></select><span class="p-badge">权限：读取后确认</span><span class="p-grow"></span><span class="p-badge">会话状态 · 示意</span><button class="p-button small ghost" data-act="transaction">事务操作 ${icon('chevron-down',12)}</button><span class="p-wide-hint p-quiet">实际状态从物理会话读取</span></div>`}
 function renderTree(){
-  const node=(name,kind='table-2')=>`<button class="p-tree-line ${state.object===name?'active':''}" data-object="${esc(name)}" aria-label="预览 ${esc(name)}">${icon(kind)}<span>${esc(name)}</span><small>⋯</small></button>`;
+  const node=(name,kind='table-2')=>`<div class="p-node-row" data-menu-target="${esc(name)}" data-node-kind="${kind==='eye'?'view':kind==='function-square'?'function':'table'}"><button class="p-tree-line ${state.object===name?'active':''}" data-object="${esc(name)}" aria-label="预览 ${esc(name)}">${icon(kind)}<span>${esc(name)}</span></button><button class="p-icon-button" data-act="node-menu" aria-label="${esc(name)} 操作">${icon('more-horizontal',12)}</button></div>`;
   const head=(name,fold='')=>`<button class="p-tree-line" data-act="tree-fold" data-fold="${fold}">${icon('chevron-down',12)}${icon('folder',13)}${name}</button>`;
   let content='';
   if(state.treeState==='loading')content='<div class="p-statebox">正在读取对象目录…<br><small>未加载不等于空 schema</small></div>';
@@ -95,7 +95,9 @@ function showDialog(title,html,footer=''){const overlay=$('#overlay');overlay.in
 function closeDialog(){const root=$('#overlay');root.hidden=true;root.innerHTML=''}
 function showMenu(kind,at){
   let groups;
-  if(kind==='editor')groups=[['运行', [['运行当前 / 选中 SQL','run','play','Alt ↵'],['预览写入影响','diff','eye'],['分析当前语句','analyze','git-branch']]],['编辑与上下文',[['格式化','format','wrench'],['生成完整 JOIN 条件','hint','sparkles','Ctrl Space'],['查看引用对象','object-more','table-2'],['发送选中内容给 AI','ai-toggle','wand']]],['文件与数据',[['保存查询','save-query','save'],['运行 SQL 文件','sql-file','file-code'],['导出查询结果','to-export','download']]]];
+  if(kind==='object'&&state.menuNodeKind==='function')groups=[['函数 / 程序',[['查看定义','to-structure','code'],['复制名称','copy-name','copy'],['在当前 Schema 新建查询','to-query','terminal']]]];
+  else if(kind==='object'&&state.menuNodeKind==='view')groups=[['视图',[['预览数据','to-table','eye'],['查看定义','to-structure','code'],['复制名称','copy-name','copy'],['导出','to-export','download']]],['维护',[['重命名','structure-edit','pencil'],['删除视图','danger-object','trash-2']]]];
+  else if(kind==='editor')groups=[['运行', [['运行当前 / 选中 SQL','run','play','Alt ↵'],['预览写入影响','diff','eye'],['分析当前语句','analyze','git-branch']]],['编辑与上下文',[['格式化','format','wrench'],['生成完整 JOIN 条件','hint','sparkles','Ctrl Space'],['查看引用对象','object-more','table-2'],['发送选中内容给 AI','ai-toggle','wand']]],['文件与数据',[['保存查询','save-query','save'],['运行 SQL 文件','sql-file','file-code'],['导出查询结果','to-export','download']]]];
   else if(kind==='result')groups=[['选中内容',[['完整值 / 类型','inspect','eye'],['复制值','copy-value','copy','Ctrl C'],['列显示 / 排序','grid-columns','columns']]],['结果范围',[['导出当前页','export-page','download'],['导出完整结果','to-export','download'],['发送选中内容给 AI','ai-toggle','wand']]]];
   else if(kind==='transaction')groups=[['事务（实际能力决定）',[['开始事务','txn-begin','play'],['提交','txn-commit','check'],['回滚','txn-rollback','history']]]];
   else groups=[['浏览 / 预览',[['预览数据','to-table','eye'],['固定预览','pin','bookmark'],['查看字段 / 约束','to-structure','table-2'],['复制限定名称','copy-name','copy']]],['查询 / 数据',[['生成 SELECT','generate-select','code'],['导入数据','to-import','upload'],['导出数据','to-export','download'],['迁移 / 对比','data-tools','git-compare']]],['对象维护（保留现有能力）',[['重命名 / 复制结构','structure-edit','pencil'],['清空表 / 删除对象','danger-object','trash-2']]]];
@@ -133,6 +135,7 @@ function act(name,element){
     case 'hint':hint();break;
     case 'accept-join':state.sql=defaultSql;render();notice('示例完整 JOIN 候选接受；非数据库元数据验证');break;
     case 'accept-function':state.sql="SELECT SUBSTR(string, start, length);";render();const input=$('#sql-input');input.focus();input.setSelectionRange(14,20);notice('占位示意；正式实现使用 CodeMirror snippet 字段');break;
+    case 'node-menu':{const row=element.closest('[data-menu-target]');state.object=row.dataset.menuTarget;state.menuNodeKind=row.dataset.nodeKind;showMenu('object',element);break}
     case 'editor-more':showMenu('editor',element);break;case 'result-more':showMenu('result',element);break;case 'object-more':showMenu('object',element);break;case 'transaction':showMenu('transaction',element);break;
     case 'pin':state.pinned=true;if(!state.pinnedObjects.includes(state.object))state.pinnedObjects.push(state.object);render();notice('示例对象已固定；单击其他对象不覆盖固定标签');break;
     case 'inspect':inspector();break;case 'close-inspector':$('.p-inspector')?.remove();break;
@@ -155,7 +158,7 @@ function act(name,element){
     case 'job-cancel':state.job='cancelled';render();notice('演示取消回执；真实部分写入 / 回滚结果只能由执行回执证明');break;
     case 'export-task':state.view='jobs';state.job='idle';render();notice('仅展示任务设计；没有生成或下载文件');break;
     case 'verify-receipt':showDialog('结果未知：先核验，不盲目重放',`<p>通过真实执行 ID / 会话状态 / 目标读回判断已确认范围。不能在网络失败时假定已回滚。</p><p>没有足够证据时停留“需人工核验”；恢复仅在幂等检查点完整时可用。</p>`);break;
-    case 'to-table':changeView('table');break;case 'to-structure':state.view='table';state.engineTab='1';render();break;case 'to-import':changeView('import');break;case 'to-export':changeView('export');break;case 'export-page':state.exportScope='page';changeView('export');break;
+    case 'to-query':changeView('query');break;case 'to-table':changeView('table');break;case 'to-structure':state.view='table';state.engineTab='1';render();break;case 'to-import':changeView('import');break;case 'to-export':changeView('export');break;case 'export-page':state.exportScope='page';changeView('export');break;
     case 'copy-name':case 'copy-value':case 'copy-json':notice('复制入口与键盘范围示意；本评审稿不更改系统剪贴板');break;
     case 'plan-node':notice('正式实现：节点详情与源 SQL 范围联动，所有结论保留真实依据');break;
     default:showDialog('能力与交互说明',`<p>${esc({ 'mongo-index':'MongoDB 索引单独管理；准确目标与写权限校验。','mongo-filter':'Mongo 查询使用原生数据模型，Extended JSON 类型不退化为普通字符串。','redis-ttl':'TTL / 永不过期分开；键身份与权限需确认。','stream-groups':'消费者组、消费者、Lag / Pending 状态按真实返回展示。','stream-pending':'Pending 读取有游标 / 范围 / 预算；ACK 等写操作单独确认。','inspect-stream':'完整消息 ID / 原始字段与字节类型；不从截断文本恢复身份。','es-mapping':'Mapping 独立展示与管理；修改之前检查版本 / 权限 / 依赖。','es-settings':'索引设置与集群管理不是同一权限范围。','es-alias':'Alias 显示真实指向，变更预览明确所有索引目标。','es-edit':'保存文档使用 _seq_no / _primary_term 并发保护，冲突不自动覆盖。','duck-register':'Web 文件令牌与 Tauri 文件选择都必须验证所有权与生命周期。','duck-query':'仅授权文件的查询对象，不接受模型生成的任意服务器路径。','duck-import':'格式预览 → 字段类型 → 目标 / 覆盖策略 → 导入预检。','txn-begin':'按查询会话真实 capability 开放；不暗中换物理连接。','txn-commit':'只有实际会话可提交；目标变化与结果未知时禁用盲目操作。','txn-rollback':'回滚仅以实际驱动回执为准，不能保证所有 DDL 可回滚。'}[name]||'拟实现交互；此原型没有数据库或模型请求。')}</p>`);
@@ -178,7 +181,7 @@ document.addEventListener('click',event=>{
 });
 document.addEventListener('dblclick',event=>{const el=event.target.closest('[data-object]');if(el){state.object=el.dataset.object;state.pinned=true;if(!state.pinnedObjects.includes(state.object))state.pinnedObjects.push(state.object);if(!['mongo','redis','elastic','duck'].includes(state.view))changeView('table');else render()}});
 document.addEventListener('contextmenu',event=>{
-  if(event.target.closest('.p-tree-line[data-object]')){event.preventDefault();state.object=event.target.closest('[data-object]').dataset.object;showMenu('object',event)}
+  if(event.target.closest('[data-menu-target]')){event.preventDefault();const row=event.target.closest('[data-menu-target]');state.object=row.dataset.menuTarget;state.menuNodeKind=row.dataset.nodeKind;showMenu('object',event)}
   else if(event.target.closest('.p-sql')){event.preventDefault();showMenu('editor',event)}
   else if(event.target.closest('.p-grid')){event.preventDefault();showMenu('result',event)}
 });
