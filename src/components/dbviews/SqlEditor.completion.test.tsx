@@ -86,7 +86,9 @@ describe('live SQL dialect and namespace completion', () => {
     // Wait beyond CodeMirror's default acceptance guard (75 ms), without changing production timing.
     await new Promise(resolve => setTimeout(resolve, 100))
     fireEvent.keyDown(view.contentDOM, { key: 'Tab', code: 'Tab' })
-    expect(view.state.doc.toString()).toBe('SELECT * FROM app.orders')
+    // Namespace navigation uses the same safe identifier application as live metadata,
+    // rather than the library's statement-wide alias scanner.
+    expect(view.state.doc.toString()).toBe('SELECT * FROM app."orders"')
   })
   it.each([
     ['WITH recent AS (SELECT app_only AS public_id FROM app.orders) SELECT r.| FROM recent r', ['public_id']],
@@ -147,6 +149,14 @@ describe('live SQL dialect and namespace completion', () => {
   it('supports Oracle quoted CTE identities without treating them as strings',async()=>{
     const {view}=mount('WITH "r.dot" AS (SELECT 1 AS public_id FROM dual) SELECT "r.dot".| FROM "r.dot"',{engine:'oracle'})
     expect((await candidates(view)).map(c=>c.label)).toEqual(['PUBLIC_ID'])
+  })
+  it('accepts a correlated CTE column through the live popup and Tab key',async()=>{
+    const {view}=mount('WITH r AS (SELECT 1 AS derived_id) SELECT (SELECT r.|) FROM r',{engine:'postgres'})
+    act(()=>{view.focus();startCompletion(view)})
+    await waitFor(()=>expect(currentCompletions(view.state).map(c=>c.label)).toEqual(['derived_id']))
+    await new Promise(resolve=>setTimeout(resolve,100))
+    fireEvent.keyDown(view.contentDOM,{key:'Tab',code:'Tab'})
+    expect(view.state.doc.toString()).toBe('WITH r AS (SELECT 1 AS derived_id) SELECT (SELECT r."derived_id") FROM r')
   })
   it('does not run SQL on an IME confirmation key', () => {
     const onRun = vi.fn()
