@@ -94,4 +94,39 @@
   .db-output-tools .db-action-label { display:none; }
   .db-output-nav button { padding:5px 6px; }
 }
+/* Table objects use one navigation row, not nested Data/Structure switches. */
+.db-object-workspace { min-width:0; overflow:hidden; background:var(--surface-card); }
+.db-object-identity { display:flex; align-items:center; gap:7px; padding:7px 11px; min-height:34px; flex:none; border-bottom:1px solid var(--border-hairline); color:var(--text-tertiary); }
+.db-object-identity strong { min-width:0; font-size:12px; font-weight:550; color:var(--text-primary); }
+.db-object-identity > svg { flex:none; }
+.db-object-caption { font-size:10px; color:var(--text-faint); white-space:nowrap; }
+.db-object-tabs { display:flex; flex:none; min-width:0; overflow-x:auto; background:var(--surface-subtle); border-bottom:1px solid var(--border-hairline); }
+.db-object-tabs > button { display:flex; align-items:center; gap:6px; flex:none; padding:0 12px; height:34px; border:0; border-bottom:2px solid transparent; background:transparent; color:var(--text-tertiary); font-size:11px; cursor:pointer; }
+.db-object-tabs > button:hover { background:var(--surface-sunken); color:var(--text-primary); }
+.db-object-tabs > button[aria-selected="true"] { color:var(--accent-primary); border-bottom-color:var(--accent-primary); background:var(--surface-card); }
+.db-object-tabs > button:focus-visible { outline:2px solid var(--accent-primary); outline-offset:-3px; }
+.db-structure { min-width:0; overflow:hidden; }
+.db-structure-local-tabs { display:flex; flex:none; padding:6px 10px; overflow:auto; border-bottom:1px solid var(--border-hairline); }
+.db-structure-toolbar { display:flex; flex:none; flex-wrap:wrap; align-items:center; gap:6px; padding:6px 10px; border-bottom:1px solid var(--border-hairline); }
+.db-structure-toolbar .btn.sm { height:28px; padding:0 8px; font-size:11px; border-radius:4px; color:var(--text-secondary); background:transparent; border-color:transparent; }
+.db-structure-toolbar .btn.sm:hover:not(:disabled) { background:var(--surface-sunken); }
+.db-structure-toolbar button > svg { flex:none; }
+.db-metadata-search { display:flex; align-items:center; gap:6px; height:28px; width:260px; max-width:100%; border:1px solid var(--border-hairline); border-radius:4px; padding:0 7px; background:var(--surface-subtle); color:var(--text-tertiary); }
+.db-metadata-search:focus-within { border-color:var(--accent-primary); }
+.db-metadata-search > svg { flex:none; }
+.db-metadata-search input { border:0; outline:0; width:100%; min-width:0; background:transparent; color:var(--text-primary); font-size:11px; }
+.db-metadata-search input::-webkit-search-cancel-button { display:none; }
+.db-metadata-search input::placeholder { color:var(--text-faint); }
+.db-metadata-search .icon-btn { flex:none; width:18px; height:18px; }
+.db-metadata-count { color:var(--text-faint); font-size:10px; white-space:nowrap; }
+.db-metadata-notice { display:flex; align-items:flex-start; gap:7px; padding:9px 12px; margin:0; font-size:11px; line-height:1.65; color:var(--text-tertiary); background:var(--surface-subtle); border-bottom:1px solid var(--border-hairline); flex:none; }
+.db-metadata-notice > svg { flex:none; margin-top:2px; }
+.db-metadata-state { display:flex; align-items:center; justify-content:center; flex-direction:column; gap:10px; min-height:130px; height:100%; padding:24px; font-size:12px; color:var(--text-tertiary); text-align:center; overflow-wrap:anywhere; }
+.db-metadata-error { color:var(--danger-fg); font-size:12px; padding:10px 12px; overflow-wrap:anywhere; }
+.db-metadata-comment { flex:none; font-size:11px; color:var(--text-tertiary); border-top:1px solid var(--border-hairline); padding:7px 11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.db-structure-content { min-height:0; }
+.db-structure-content table { min-width:650px; }
+.db-structure-content td { overflow-wrap:anywhere; }
+.db-structure .structrow-actions .icon-btn { width:24px; height:24px; }
+.db-structure .structrow:focus-within .structrow-actions { opacity:1; }
 @media (prefers-reduced-motion:reduce) { .db-workbench * { scroll-behavior:auto; } }

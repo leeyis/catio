@@ -149,6 +149,21 @@
     "needsAuthHint": "自动扫描识别到此连接但未验证凭证，首次连接需手动输入密码"
   },
   "dbviews": {
+    "structureWorkspace": {
+      "navigation": "对象视图",
+      "search": "筛选名称、类型、注释…",
+      "clearFilter": "清除元数据筛选",
+      "refresh": "刷新结构",
+      "loading": "正在加载结构…",
+      "noMatches": "没有匹配的元数据",
+      "empty": "未返回元数据条目",
+      "ddlDerived": "根据已加载元数据重建，并非数据库原始 DDL。约束、生成列、索引与引擎选项可能不完整，不能作为备份或迁移脚本。",
+      "recheck": "请先核对数据库状态再准备新的变更。关闭此确认并刷新结构；失败不表示此前修改已回滚。",
+      "mutationReview": "已收到 {{count}} 条语句成功回执。请核对数据库状态后再准备新的变更。本批次不能直接重放，错误或响应丢失不表示已回滚。",
+      "readOnly": "结构只读",
+      "data": "表数据",
+      "keyMetadataUnavailable": "未能加载最新的列键元数据。已有行暂不可编辑，请成功刷新后重试。"
+    },
     "workspace": {
       "title": "数据库工作区",
       "databaseTools": "数据库工具",

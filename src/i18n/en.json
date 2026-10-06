@@ -149,6 +149,21 @@
     "needsAuthHint": "Auto-scan identified this connection but did not verify a credential — first connect will prompt for the password"
   },
   "dbviews": {
+    "structureWorkspace": {
+      "navigation": "Object views",
+      "search": "Filter metadata…",
+      "clearFilter": "Clear metadata filter",
+      "refresh": "Refresh structure",
+      "loading": "Loading structure…",
+      "noMatches": "No matching metadata",
+      "empty": "No metadata entries returned",
+      "ddlDerived": "Reconstructed from loaded metadata, not the original database DDL. Constraints, generated columns, indexes and engine options may be incomplete; this is not a backup or a migration script.",
+      "recheck": "Check the database state before preparing another change. Close this confirmation and refresh the structure; a failure does not prove that earlier changes were rolled back.",
+      "mutationReview": "Successful statement receipts: {{count}}. Check the database state before preparing another change. This batch cannot be replayed; an error or a lost response does not imply rollback.",
+      "readOnly": "Read-only structure",
+      "data": "Table data",
+      "keyMetadataUnavailable": "Fresh column key metadata could not be loaded. Existing row editing is disabled until a successful refresh."
+    },
     "workspace": {
       "title": "Database workspace",
       "databaseTools": "Database tools",

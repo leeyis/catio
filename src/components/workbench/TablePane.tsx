@@ -1,9 +1,9 @@
 /* 表预览 pane:统一 tab 系统中的 kind:'table' 内容。自管数据 fetch +
    data/structure 子切换,保持 mounted 时切回状态原样(逻辑自 DbWorkbench 平移)。 */
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useId } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
-import { Segmented } from '../atoms'
+import type { StructureSection } from '../dbviews/StructureView'
 import { DataGrid, StructureView, RedisKeyspaceView } from '../dbviews'
 import { useData } from '../../state/DataContext'
 import { tablePreview, tableStructure, dbErrMsg, type DbCapabilities } from '../../services/db'
@@ -22,18 +22,16 @@ export interface TablePaneProps {
   density?: 'comfortable' | 'compact'
 }
 
-export function TablePane({ conn, connId, caps, schema, table, density }: TablePaneProps) {
+export function TablePane(props: TablePaneProps) {
+  return <TableContent key={JSON.stringify([props.connId, props.schema, props.table, props.conn.engine])} {...props} />
+}
+function TableContent({ conn, connId, caps, schema, table, density }: TablePaneProps) {
   const { t } = useTranslation()
   const D = useData()
-  // data | structure. Structure is VIEWABLE for every engine; editing gated by caps.structureEdit inside StructureView.
-  const [tableTab, setTableTab] = useState('data')
-  const [structureVisited,setStructureVisited]=useState(false)
-
-  // mock 路径的行/列标签(live 路径用真实 fetch 计数)
-  const mockTbl = useMemo(
-    () => D.schema.schemas.find(n => n.name === schema)?.tables.find(x => x.name === table),
-    [D.schema, schema, table],
-  )
+  const viewId = useId()
+  const [tableTab, setTableTab] = useState<'data' | 'keyspace' | StructureSection>('data')
+  const [structureVisited, setStructureVisited] = useState(false)
+  const [structureSection, setStructureSection] = useState<StructureSection>('columns')
 
   // ---- Live table-data fetch(平移自 DbWorkbench,语义不变)----
   const [live, setLive] = useState<{ columns: ResultColumn[]; rows: unknown[][]; binaryCells?: BinaryCell[]; truncated?: boolean } | null>(null)
@@ -88,23 +86,43 @@ export function TablePane({ conn, connId, caps, schema, table, density }: TableP
   // Redis 无表结构:第二个 segment 改为展示 key 元信息(keyspace 概览)而非列/DDL。
   const isRedis = (conn.engine ?? '').toLowerCase() === 'redis'
 
+  const views: { value: typeof tableTab; label: string; icon: string }[] = [
+    { value: 'data', label: t('workbench.tabData'), icon: 'table-2' },
+    ...(isRedis ? [{ value: 'keyspace' as const, label: t('workbench.tabKeyspace'), icon: 'database' }] : [
+      { value: 'columns' as const, label: t('dbviews.tabColumns'), icon: 'columns' },
+      { value: 'indexes' as const, label: t('dbviews.tabIndexes'), icon: 'gauge' },
+      ...(sqlDml ? [
+        { value: 'fks' as const, label: t('dbviews.tabFks'), icon: 'link' },
+        { value: 'triggers' as const, label: t('dbviews.tabTriggers'), icon: 'zap' },
+        { value: 'ddl' as const, label: 'DDL', icon: 'code' },
+      ] : []),
+    ]),
+  ]
+  function choose(value: typeof tableTab) {
+    setTableTab(value)
+    if (value !== 'data') setStructureVisited(true)
+    if (value !== 'data' && value !== 'keyspace') setStructureSection(value)
+  }
+
   return (
-    <>
-      <div className="row" style={{ justifyContent: 'space-between', padding: '8px 12px', borderBottom: '1px solid var(--border-hairline)', flex: 'none', gap: 12 }}>
-        <div className="row gap7" style={{ minWidth: 0 }}>
-          <div className="icon-badge" style={{ width: 28, height: 28, borderRadius: 8, background: 'var(--accent-soft)', color: 'var(--accent-primary)' }}><Icon name="table-2" size={15} /></div>
-          <div className="col" style={{ lineHeight: 1.25, minWidth: 0 }}>
-            <span className="mono ell" style={{ fontSize: 13.5, fontWeight: 700 }}>{connId ? (schema ? `${schema}.${table}` : table) : `public.${table}`}</span>
-            <span className="mono" style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{connId
-              // DataGrid owns subsequent pages; this initial preview is not the table's row count.
-              ? (live ? `${live.columns.length} ${t('workbench.colsLabel')}` : '')
-              : mockTbl ? `${mockTbl.rows} ${t('workbench.rowsLabel')} · ${mockTbl.cols} ${t('workbench.colsLabel')}` : ''}</span>
-          </div>
-        </div>
-        <Segmented value={tableTab} onChange={value=>{setTableTab(value);if(value==='structure')setStructureVisited(true)}} options={[
-          { value: 'data', label: t('workbench.tabData'), icon: 'table-2' },
-          { value: 'structure', label: isRedis ? t('workbench.tabKeyspace') : t('workbench.tabStructure'), icon: isRedis ? 'database' : 'columns', testId: 'seg-structure' },
-        ]} />
+    <div className="col db-object-workspace" style={{ height: '100%', minHeight: 0 }}>
+      <div className="db-object-identity">
+        <Icon name="table-2" size={14} />
+        <strong className="mono ell" title={schema ? `${schema}.${table}` : table}>{schema ? `${schema}.${table}` : table}</strong>
+        <span className="db-object-caption">{conn.engineId ?? conn.engine}</span>
+        <div className="grow" />
+        {!caps.structureEdit && tableTab !== 'data' && <span className="db-object-caption">{t('dbviews.structureWorkspace.readOnly')}</span>}
+      </div>
+      <div className="db-object-tabs" role="tablist" aria-label={t('dbviews.structureWorkspace.navigation')}>
+        {views.map((view, index) => <button key={view.value} id={`${viewId}-${view.value}`} role="tab" aria-controls={`${viewId}-${view.value === 'data' ? 'data-panel' : 'metadata-panel'}`} aria-selected={tableTab === view.value} tabIndex={tableTab === view.value ? 0 : -1}
+          data-testid={view.value === 'columns' || view.value === 'keyspace' ? 'seg-structure' : `object-view-${view.value}`}
+          onClick={() => choose(view.value)} onKeyDown={event => {
+            if (event.nativeEvent.isComposing || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+            event.preventDefault()
+            const next = event.key === 'Home' ? 0 : event.key === 'End' ? views.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + views.length) % views.length
+            choose(views[next].value)
+            ;(event.currentTarget.parentElement?.children[next] as HTMLElement | undefined)?.focus()
+          }}><Icon name={view.icon} size={13} />{view.label}</button>)}
       </div>
       <div className="grow" style={{ minHeight: 0, position: 'relative' }}>
         {/* result-area loading overlay — shown while a table's data is (re)fetching */}
@@ -113,7 +131,7 @@ export function TablePane({ conn, connId, caps, schema, table, density }: TableP
             <Icon name="loader" size={24} style={{ animation: 'spin 1s linear infinite' }} />
           </div>
         )}
-        <div style={{height:'100%',display:tableTab==='data'?'block':'none'}}>
+        <div id={`${viewId}-data-panel`} role="tabpanel" aria-labelledby={`${viewId}-data`} style={{height:'100%',display:tableTab==='data'?'block':'none'}}>
         {(connId
           ? <DataGrid
               columns={(live?.columns ?? [])}
@@ -122,18 +140,21 @@ export function TablePane({ conn, connId, caps, schema, table, density }: TableP
               statusTones={D.statusTones} density={density} key={`${connId}.${schema ?? ''}.${table}`}
               writable={caps.writable && sqlDml} transactions={caps.transactions} connId={connId} table={table} schema={schema} engine={conn.engine}
               rowKeys={rowKeys ?? undefined} keyColumn={rowKeys ? 'ctid' : undefined}
+              loadColumnMetadata={sqlDml ? async () => (await tableStructure(connId, schema ?? '', table)).columns.map(c => ({
+                name: c.name, type: c.type, pk: c.key === 'PK' && conn.engine !== 'clickhouse', fk: c.key === 'FK', comment: c.comment || undefined,
+              })) : undefined}
               livePreview truncated={live?.truncated} loadError={liveErr ?? undefined} />
           : <DataGrid
               columns={D.ordersColumns.map((c): ResultColumn => ({ name: c.name, type: c.type, pk: c.pk, fk: c.fk, icon: c.icon }))}
               rows={D.ordersRows.map(r => D.ordersColumns.map(c => (r as unknown as Record<string, unknown>)[c.name]))}
               statusTones={D.statusTones} density={density} key={table} />)}
         </div>
-        <div style={{height:'100%',display:tableTab==='structure'?'block':'none'}}>
+        <div id={`${viewId}-metadata-panel`} role="tabpanel" aria-labelledby={`${viewId}-${isRedis ? 'keyspace' : structureSection}`} style={{height:'100%',display:tableTab!=='data'?'block':'none'}}>
         {structureVisited && (isRedis
           ? <RedisKeyspaceView connId={connId ?? undefined} schema={schema} key={`ks.${schema ?? ''}`} />
-          : <StructureView table={table} schema={schema} connId={connId ?? undefined} engine={conn.engine} canEdit={caps.structureEdit} key={`${schema ?? ''}.${table}`} />)}
+          : <StructureView section={structureSection} table={table} schema={schema} connId={connId ?? undefined} engine={conn.engine} canEdit={caps.writable && caps.structureEdit} />)}
         </div>
       </div>
-    </>
+    </div>
   )
 }

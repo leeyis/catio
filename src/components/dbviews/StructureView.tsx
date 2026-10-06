@@ -10,7 +10,10 @@ import type { StructColumn, StructIndex, StructFk, StructTrigger, TableStructure
 import { highlightSQL } from './highlightSQL'
 import { dialectFor, qualifiedTable, buildAddColumn, buildModifyColumn, buildDropColumn, buildCreateTableDDL, type ColumnDraft } from './structureDdl'
 
+export type StructureSection = 'columns' | 'indexes' | 'fks' | 'triggers' | 'ddl'
 export interface StructureViewProps {
+  /** The table workspace owns navigation; standalone callers keep the local tabs. */
+  section?: StructureSection
   table: string
   /** Live backend connection id; when undefined we render the mock structure (pixel-identical demo). */
   connId?: string
@@ -34,7 +37,7 @@ const inputStyle: React.CSSProperties = { border: '1px solid var(--border-hairli
 // Column widths for the fixed-layout structure table, by header index
 // (#, 列名, 类型, 可空, 默认值, 键, 备注). 列名/类型 get the most room; 默认值/备注
 // (undefined) share whatever's left. Cells truncate so nothing overlaps regardless.
-const colWidth: (number | string | undefined)[] = [36, '26%', '18%', 64, undefined, 72, undefined]
+const colWidth: (number | string | undefined)[] = [36, '26%', '18%', 80, undefined, 64, undefined]
 // Single-line ellipsis truncation for a fixed-table cell (maxWidth:0 forces the
 // cell to honor its column width instead of growing to fit the content).
 const ellCell: React.CSSProperties = { maxWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }
@@ -54,22 +57,31 @@ interface ColForm {
   comment: string
 }
 
-export function StructureView({ table, connId, schema, engine, canEdit = true }: StructureViewProps) {
+export function StructureView(props: StructureViewProps) {
+  // An owner change must not expose stale metadata, forms or confirmation gates.
+  return <StructureContent key={JSON.stringify([props.connId, props.schema, props.table, props.engine])} {...props} />
+}
+
+function StructureContent({ table, connId, schema, engine, canEdit = true, section }: StructureViewProps) {
   const { t } = useTranslation()
   const D = useData()
   const mockSt = D.tableStructures[table] || D.tableStructures['orders']
   // Live path: fetch the real structure from the backend; null until loaded.
   const [liveSt, setLiveSt] = useState<TableStructure | null>(null)
   const [structErr, setStructErr] = useState<string | null>(null)
+  const [loading, setLoading] = useState(!!connId)
+  const alive = React.useRef(true)
+  useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
   // Bumped after a successful DDL apply to force a structure re-fetch.
   const [refreshTick, setRefreshTick] = useState(0)
   useEffect(() => {
-    if (!connId) { setLiveSt(null); setStructErr(null); return }
+    if (!connId) { setLiveSt(null); setStructErr(null); setLoading(false); return }
     let cancelled = false
-    setStructErr(null)
+    setStructErr(null); setLiveSt(null); setLoading(true)
     tableStructure(connId, schema ?? '', table)
       .then(s => { if (!cancelled) setLiveSt(s) })
       .catch(e => { if (!cancelled) { setLiveSt(null); setStructErr(dbErrMsg(e)) } })
+      .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
   }, [connId, schema, table, refreshTick])
   // When connected, render real data once loaded; otherwise the mock structure.
@@ -78,23 +90,43 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
   // and the triggers section never read `.length` off undefined.
   const st: TableStructure & { triggers: StructTrigger[] } = { ...stRaw, triggers: stRaw.triggers ?? [] }
   const ddlQualified = connId ? (schema ? `${schema}.${table}` : table) : `public.${table}`
-  const [tab, setTab] = useState('columns')
+  const [localTab, setTab] = useState('columns')
+  const tab = section ?? localTab
+  const [filters, setFilters] = useState<Record<string, string>>({})
+  const filter = filters[tab] ?? ''
+  const needle = filter.trim().toLocaleLowerCase()
+  const matches = (values: unknown[]) => !needle || values.some(value => String(value ?? '').toLocaleLowerCase().includes(needle))
+  const columns = st.columns.map((value, ordinal) => ({ value, ordinal })).filter(({ value: c }) => matches([c.name, c.type, c.comment, c.default, c.extra, c.key]))
+  const indexes = st.indexes.map((value, ordinal) => ({ value, ordinal })).filter(({ value: ix }) => matches([ix.name, ix.cols, ix.method, ix.unique ? 'UNIQUE' : '']))
+  const fks = st.fks.map((value, ordinal) => ({ value, ordinal })).filter(({ value: fk }) => matches([fk.name, fk.col, fk.ref, fk.onDelete, fk.onUpdate]))
+  const triggers = st.triggers.map((value, ordinal) => ({ value, ordinal })).filter(({ value: tr }) => matches([tr.name, tr.timing, tr.event]))
+  const counts: Record<string, [number, number]> = { columns: [columns.length, st.columns.length], indexes: [indexes.length, st.indexes.length], fks: [fks.length, st.fks.length], triggers: [triggers.length, st.triggers.length] }
+  const count = counts[tab]
+  const empty = !!count && count[0] === 0
   const keyTone: Record<string, string> = { PK: 'var(--signal-amber)', FK: 'var(--signal-blue)', UNI: 'var(--signal-violet)' }
 
   // ---- One-tap DDL copy: copy → switch icon to `check` for ~1.2s → revert. ----
   const [ddlCopied, setDdlCopied] = useState(false)
   const ddlCopyTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => () => { if (ddlCopyTimer.current) clearTimeout(ddlCopyTimer.current) }, [])
-  function copyDdl() {
-    navigator.clipboard.writeText(buildCreateTableDDL(dialect, ddlQualified, st))
-    setDdlCopied(true)
-    if (ddlCopyTimer.current) clearTimeout(ddlCopyTimer.current)
-    ddlCopyTimer.current = setTimeout(() => setDdlCopied(false), 1200)
+  const [copyErr, setCopyErr] = useState<string | null>(null)
+  const [copying, setCopying] = useState(false)
+  async function copyDdl() {
+    if (loading || structErr || copying) return
+    setCopyErr(null); setDdlCopied(false); setCopying(true)
+    try {
+      await navigator.clipboard.writeText(buildCreateTableDDL(dialect, ddlQualified, st))
+      if (!alive.current) return
+      setDdlCopied(true)
+      if (ddlCopyTimer.current) clearTimeout(ddlCopyTimer.current)
+      ddlCopyTimer.current = setTimeout(() => setDdlCopied(false), 1200)
+    } catch (e) { if (alive.current) setCopyErr(dbErrMsg(e)) }
+    finally { if (alive.current) setCopying(false) }
   }
 
   // ---- Column editing (live path only, and only when the engine supports
   // structure edits — MongoDB/ClickHouse/… can VIEW structure but not ALTER it). ----
-  const editable = !!connId && canEdit
+  const editable = !!connId && canEdit && !loading && !structErr && !!liveSt
   const dialect = dialectFor(engine)
   // Schemaless / non-relational engines have no DDL: hide the DDL + 外键 tabs and
   // the 添加列 button (MongoDB infers 列/索引 from sampled docs but has no
@@ -112,13 +144,17 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
   const [preview, setPreview] = useState<string[] | null>(null)
   const [applying, setApplying] = useState(false)
   const [applyErr, setApplyErr] = useState<string | null>(null)
-  useReportDatabaseWork('structure',!!form||!!preview,applying)
+  const mutationLock = React.useRef(false)
+  const [previewStarted, setPreviewStarted] = useState(false)
+  const [confirmedStatements, setConfirmedStatements] = useState(0)
 
   function openAdd() {
+    if (!editable || mutationLock.current) return
     setApplyErr(null)
     setForm({ mode: 'add', name: '', type: '', nullable: true, default: '', comment: '' })
   }
   function openEdit(c: StructColumn) {
+    if (!editable || mutationLock.current) return
     setApplyErr(null)
     const original: ColumnDraft = { name: c.name, type: c.type, nullable: c.nullable, default: c.default ?? '', comment: c.comment ?? '' }
     setForm({ mode: { editing: c.name, original }, name: c.name, type: c.type, nullable: c.nullable, default: c.default ?? '', comment: c.comment ?? '' })
@@ -126,20 +162,21 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
 
   // Build the statements for the open form and hand them to the preview gate.
   function submitForm() {
-    if (!form) return
+    if (!form || !editable || mutationLock.current) return
     const draft: ColumnDraft = { name: form.name, type: form.type, nullable: form.nullable, default: form.default, comment: form.comment }
     const stmts = form.mode === 'add'
       ? buildAddColumn(dialect, sqlQualified, draft)
       : buildModifyColumn(dialect, sqlQualified, form.mode.original, draft)
     if (stmts.length === 0) return
-    setApplyErr(null)
+    setApplyErr(null); setPreviewStarted(false); setConfirmedStatements(0)
     setForm(null)
     setPreview(stmts)
   }
 
   // DROP COLUMN → straight to the preview gate (the gate itself is the confirm step).
   function startDrop(c: StructColumn) {
-    setApplyErr(null)
+    if (!editable || mutationLock.current) return
+    setApplyErr(null); setPreviewStarted(false); setConfirmedStatements(0)
     setPreview(buildDropColumn(dialect, sqlQualified, c.name))
   }
 
@@ -156,7 +193,17 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
   // Typed-name confirmation gate — matches the safety standard ObjectAdminModal sets for
   // destructive ops (user must type the object name; the confirm stays danger-styled).
   const [childDropText, setChildDropText] = useState('')
+  const [childStarted, setChildStarted] = useState(false)
+  const busy = applying || childDropping
+  useReportDatabaseWork('structure', !!form || !!preview || !!childDrop, busy)
+  const refreshBlocked = loading || copying || busy || !!form || !!preview || !!childDrop
+  function refresh() {
+    if (refreshBlocked) return
+    setDdlCopied(false); setCopyErr(null); setRefreshTick(n => n + 1)
+  }
   function startChildDrop(kind: ChildDropKind, name: string) {
+    if (!editable || mutationLock.current) return
+    setChildStarted(false)
     setChildDropErr(null)
     setChildDropText('')
     setChildDrop({ kind, name, label: name })
@@ -172,62 +219,84 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
   }
   const childDropArmed = !!childDrop && childDropText.trim() === childDrop.name
   async function confirmChildDrop() {
-    if (!childDrop || !connId || !childDropArmed) return
-    setChildDropping(true)
+    if (!childDrop || !connId || !childDropArmed || !editable || childStarted || mutationLock.current) return
+    mutationLock.current = true
+    setChildStarted(true); setChildDropping(true)
     setChildDropErr(null)
     try {
       await dropTableChildObject(connId, childDrop.kind, schema, table, childDrop.name)
+      if (!alive.current) return
       setChildDrop(null)
       setRefreshTick(n => n + 1)
     } catch (e) {
+      if (!alive.current) return
       setChildDropErr(t('dbviews.applyError', { message: dbErrMsg(e) }))
+      setLiveSt(null); setStructErr(t('dbviews.structureWorkspace.recheck'))
     } finally {
-      setChildDropping(false)
+      mutationLock.current = false
+      if (alive.current) setChildDropping(false)
     }
   }
 
   // Run each statement sequentially; stop + surface on the first error; refresh on success.
   async function confirmApply() {
-    if (!preview || !connId) return
-    setApplying(true)
+    if (!preview || !connId || !editable || previewStarted || mutationLock.current) return
+    mutationLock.current = true
+    setPreviewStarted(true); setApplying(true)
     setApplyErr(null)
     try {
       for (const stmt of preview) {
+        if (!alive.current) return
         await runQuery(connId, stmt)
+        if (!alive.current) return
+        setConfirmedStatements(n => n + 1)
       }
       setPreview(null)
       setRefreshTick(n => n + 1)
     } catch (e) {
+      if (!alive.current) return
       setApplyErr(t('dbviews.applyError', { message: dbErrMsg(e) }))
+      setLiveSt(null); setStructErr(t('dbviews.structureWorkspace.recheck'))
     } finally {
-      setApplying(false)
+      mutationLock.current = false
+      if (alive.current) setApplying(false)
     }
   }
 
   return (
-    <div className="col" style={{ height: '100%', minHeight: 0, position: 'relative' }}>
-      <div className="row" style={{ padding: '8px 12px', borderBottom: '1px solid var(--border-hairline)', gap: 8, flex: 'none' }}>
+    <div className="col db-structure" style={{ height: '100%', minHeight: 0, position: 'relative' }}>
+      {!section && <div className="db-structure-local-tabs">
         <Segmented size="sm" value={tab} onChange={setTab} options={[
-          { value: 'columns', label: `${t('dbviews.tabColumns')} (${st.columns.length})` },
-          { value: 'indexes', label: `${t('dbviews.tabIndexes')} (${st.indexes.length})` },
+          { value: 'columns', label: `${t('dbviews.tabColumns')} (${loading ? '…' : structErr ? '—' : st.columns.length})` },
+          { value: 'indexes', label: `${t('dbviews.tabIndexes')} (${loading ? '…' : structErr ? '—' : st.indexes.length})` },
           ...(hasDdl ? [
-            { value: 'fks', label: `${t('dbviews.tabFks')} (${st.fks.length})` },
-            { value: 'triggers', label: `${t('dbviews.tabTriggers')} (${st.triggers.length})` },
+            { value: 'fks', label: `${t('dbviews.tabFks')} (${loading ? '…' : structErr ? '—' : st.fks.length})` },
+            { value: 'triggers', label: `${t('dbviews.tabTriggers')} (${loading ? '…' : structErr ? '—' : st.triggers.length})` },
             { value: 'ddl', label: 'DDL' },
           ] : []),
         ]} />
+      </div>}
+      <div className="db-structure-toolbar">
+        {tab !== 'ddl' && <label className="db-metadata-search">
+          <Icon name="search" size={14} />
+          <input type="search" aria-label={t('dbviews.structureWorkspace.search')} placeholder={t('dbviews.structureWorkspace.search')} value={filter} onChange={e => setFilters(previous => ({ ...previous, [tab]: e.target.value }))} />
+          {filter && <IconBtn name="x" size={12} variant="bare" title={t('dbviews.structureWorkspace.clearFilter')} onClick={() => setFilters(previous => ({ ...previous, [tab]: '' }))} />}
+        </label>}
+        {count && !loading && !structErr && <span className="mono db-metadata-count">{count[0]} / {count[1]}</span>}
         <div className="grow" />
-        {tab === 'ddl' && (
-          <IconBtn name={ddlCopied ? 'check' : 'copy'} size={14} variant="bare"
-            title={ddlCopied ? t('dbviews.copied') : t('dbviews.copyDdl')}
-            style={ddlCopied ? { color: 'var(--signal-green)' } : undefined} onClick={copyDdl} />
-        )}
-        <span style={{ fontSize: 11.5, color: 'var(--text-faint)', maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={st.comment || undefined}>{st.comment}</span>
-        {hasDdl && <Btn size="sm" variant="secondary" icon="plus" onClick={editable ? openAdd : undefined} disabled={!editable}>{t('dbviews.addColumn')}</Btn>}
+        {hasDdl && tab === 'columns' && <Btn size="sm" variant="secondary" icon="plus" onClick={openAdd} disabled={!editable || busy}>{t('dbviews.addColumn')}</Btn>}
+        {tab === 'ddl' && <IconBtn name={ddlCopied ? 'check' : 'copy'} size={14} variant="bare" disabled={loading || !!structErr || copying || !st.columns.length}
+          title={ddlCopied ? t('dbviews.copied') : t('dbviews.copyDdl')}
+          style={ddlCopied ? { color: 'var(--signal-green)' } : undefined} onClick={copyDdl} />}
+        {connId && <Btn size="sm" variant="ghost" icon="refresh-cw" disabled={refreshBlocked} onClick={refresh}>{t('dbviews.structureWorkspace.refresh')}</Btn>}
       </div>
-      <div className="grow" style={{ overflow: 'auto' }}>
-        {structErr && <Empty icon="alert-triangle" text={structErr} />}
-        {!structErr && tab === 'columns' && (
+      {tab === 'ddl' && <div className="db-metadata-notice"><Icon name="info" size={14} /><span>{t('dbviews.structureWorkspace.ddlDerived')}</span></div>}
+      {tab === 'ddl' && copyErr && <div role="alert" className="db-metadata-error">{copyErr}</div>}
+      <div className="grow db-structure-content" style={{ overflow: 'auto' }}>
+        {loading && <div role="status" className="db-metadata-state"><Icon name="loader" size={20} />{t('dbviews.structureWorkspace.loading')}</div>}
+        {!loading && structErr && <div role="alert" className="db-metadata-state db-metadata-error"><Icon name="alert-triangle" size={20} />{structErr}</div>}
+        {!loading && !structErr && empty && <Empty icon="search" text={t(needle ? 'dbviews.structureWorkspace.noMatches' : 'dbviews.structureWorkspace.empty')} />}
+        {!loading && !structErr && !empty && tab === 'columns' && (
           <table style={tblStyle}>
             <thead><tr>
               {['', t('dbviews.colName'), t('dbviews.colType'), t('dbviews.colNullable'), t('dbviews.colDefault'), t('dbviews.colKey'), t('dbviews.colComment')].map((h, i) => (
@@ -235,10 +304,10 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
                 // overflowed into the next column); 可空/键 are narrow, 默认值/备注 share.
                 <th key={i} style={{ ...thCell, width: colWidth[i], textAlign: i === 3 ? 'center' : 'left' }}>{h}</th>
               ))}
-              {editable && <th style={{ ...thCell, width: 72, textAlign: 'right' }} />}
+              {editable && <th style={{ ...thCell, width: 86, textAlign: 'right' }} />}
             </tr></thead>
             <tbody>
-              {st.columns.map((c, i) => (
+              {columns.map(({ value: c, ordinal: i }) => (
                 <tr key={c.name} className="structrow" style={{ background: i % 2 ? 'var(--surface-subtle)' : 'transparent' }}>
                   <td style={{ ...tdCell, width: 30, color: 'var(--text-disabled)', textAlign: 'center' }}>{i + 1}</td>
                   <td style={{ ...tdCell, ...ellCell }}>
@@ -248,8 +317,8 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
                     </span>
                   </td>
                   <td style={{ ...tdCell, ...ellCell }} title={c.type}><span className="mono" style={{ color: 'var(--signal-blue)' }}>{c.type}</span></td>
-                  <td style={{ ...tdCell, textAlign: 'center' }}>{c.nullable ? <span style={{ color: 'var(--text-faint)' }}>NULL</span> : <Icon name="check" size={13} style={{ color: 'var(--signal-green)' }} />}</td>
-                  <td style={tdCell}><span className="mono" style={{ color: 'var(--text-tertiary)', fontSize: 11.5 }}>{c.default || '—'}</span></td>
+                  <td style={{ ...tdCell, textAlign: 'center' }}><span className="mono" style={{ color: c.nullable ? 'var(--text-faint)' : 'var(--text-secondary)', fontSize: 10 }}>{c.nullable ? 'NULL' : 'NOT NULL'}</span></td>
+                  <td style={{ ...tdCell, ...ellCell }} title={c.default ?? undefined}><span className="mono" style={{ color: 'var(--text-tertiary)', fontSize: 11.5 }}>{c.default ?? '—'}</span></td>
                   <td style={tdCell}>{c.key ? <span className="badge-accent" style={{ background: `color-mix(in srgb, ${keyTone[c.key]} 16%, transparent)`, color: keyTone[c.key] }}>{c.key}</span> : ''}</td>
                   <td style={{ ...tdCell, color: 'var(--text-faint)', fontSize: 11.5, maxWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={c.comment || undefined}>{c.comment}</td>
                   {editable && (
@@ -265,14 +334,14 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
             </tbody>
           </table>
         )}
-        {!structErr && tab === 'indexes' && (
+        {!loading && !structErr && !empty && tab === 'indexes' && (
           <table style={tblStyle}>
             <thead><tr>
               {['', t('dbviews.idxName'), t('dbviews.idxCols'), t('dbviews.idxUnique'), t('dbviews.idxMethod')].map((h, i) => <th key={i} style={{ ...thCell, width: i === 0 ? 36 : undefined }}>{h}</th>)}
               {editable && <th style={{ ...thCell, width: 56, textAlign: 'right' }} />}
             </tr></thead>
             <tbody>
-              {st.indexes.map((ix, i) => (
+              {indexes.map(({ value: ix, ordinal: i }) => (
                 <tr key={ix.name} className="structrow" style={{ background: i % 2 ? 'var(--surface-subtle)' : 'transparent' }}>
                   <td style={{ ...tdCell, width: 30, textAlign: 'center', color: 'var(--text-disabled)' }}>{i + 1}</td>
                   <td style={tdCell}><span className="row gap6"><Icon name="gauge" size={12} style={{ color: ix.unique ? 'var(--signal-amber)' : 'var(--text-faint)' }} /><span className="mono" style={{ fontWeight: 600 }}>{ix.name}</span></span></td>
@@ -291,7 +360,7 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
             </tbody>
           </table>
         )}
-        {!structErr && tab === 'fks' && (
+        {!loading && !structErr && !empty && tab === 'fks' && (
           st.fks.length ? (
             <table style={tblStyle}>
               <thead><tr>
@@ -299,7 +368,7 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
                 {editable && <th style={{ ...thCell, width: 56, textAlign: 'right' }} />}
               </tr></thead>
               <tbody>
-                {st.fks.map((fk, i) => (
+                {fks.map(({ value: fk, ordinal: i }) => (
                   <tr key={i} className="structrow" style={{ background: i % 2 ? 'var(--surface-subtle)' : 'transparent' }}>
                     <td style={{ ...tdCell, width: 30, textAlign: 'center', color: 'var(--text-disabled)' }}>{i + 1}</td>
                     <td style={tdCell}><span className="row gap6"><Icon name="link" size={12} style={{ color: 'var(--signal-blue)' }} /><span className="mono" style={{ fontWeight: 600 }}>{fk.col}</span></span></td>
@@ -322,7 +391,7 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
             </table>
           ) : <Empty icon="link" text={t('dbviews.noFks')} />
         )}
-        {!structErr && tab === 'triggers' && (
+        {!loading && !structErr && !empty && tab === 'triggers' && (
           st.triggers.length ? (
             <table style={tblStyle}>
               <thead><tr>
@@ -330,7 +399,7 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
                 {editable && <th style={{ ...thCell, width: 56, textAlign: 'right' }} />}
               </tr></thead>
               <tbody>
-                {st.triggers.map((tr, i) => (
+                {triggers.map(({ value: tr, ordinal: i }) => (
                   <tr key={tr.name} className="structrow" style={{ background: i % 2 ? 'var(--surface-subtle)' : 'transparent' }}>
                     <td style={{ ...tdCell, width: 30, textAlign: 'center', color: 'var(--text-disabled)' }}>{i + 1}</td>
                     <td style={tdCell}><span className="row gap6"><Icon name="zap" size={12} style={{ color: 'var(--signal-violet)' }} /><span className="mono" style={{ fontWeight: 600 }}>{tr.name}</span></span></td>
@@ -349,11 +418,13 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
             </table>
           ) : <Empty icon="zap" text={t('dbviews.noTriggers')} />
         )}
-        {!structErr && tab === 'ddl' && (
+        {!loading && !structErr && !empty && tab === 'ddl' && (
           <pre className="mono" style={{ margin: 0, padding: 16, fontSize: 12.5, lineHeight: 1.7, color: 'var(--text-secondary)', whiteSpace: 'pre-wrap' }}
             dangerouslySetInnerHTML={{ __html: highlightSQL(buildCreateTableDDL(dialect, ddlQualified, st)) }} />
         )}
       </div>
+
+      {!loading && !structErr && st.comment && <div className="db-metadata-comment" title={st.comment}>{st.comment}</div>}
 
       {/* Add / Modify column form — modal, mirrors the DML preview gate's visual language */}
       {form && (
@@ -419,6 +490,7 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
             </div>
             <div className="col" style={{ gap: 10, padding: '16px 20px 20px' }}>
               <pre className="mono" style={{ margin: 0, padding: '12px 14px', borderRadius: 10, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', color: 'var(--text-primary)', fontSize: 12.5, lineHeight: 1.6, maxHeight: 260, overflow: 'auto', whiteSpace: 'pre-wrap' }}>{preview.join('\n')}</pre>
+              {applyErr && <p className="db-metadata-notice">{t('dbviews.structureWorkspace.mutationReview', { count: confirmedStatements })}</p>}
               {applyErr && (
                 <div className="row gap6" style={{ padding: '9px 12px', borderRadius: 10, border: '1px solid var(--danger-border)', background: 'var(--danger-soft)', color: 'var(--danger-fg)', fontSize: 12 }}>
                   <Icon name="alert-triangle" size={14} style={{ flex: 'none' }} />
@@ -427,7 +499,7 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
               )}
               <div className="row gap8" style={{ justifyContent: 'flex-end', marginTop: 2 }}>
                 <Btn variant="ghost" onClick={() => setPreview(null)} disabled={applying}>{t('dbviews.cancel')}</Btn>
-                <Btn variant="primary" icon="check" onClick={confirmApply} disabled={applying}>{applying ? t('dbviews.applying') : t('dbviews.applyChanges')}</Btn>
+                <Btn variant="primary" icon="check" onClick={confirmApply} disabled={applying || previewStarted}>{applying ? t('dbviews.applying') : t('dbviews.applyChanges')}</Btn>
               </div>
             </div>
           </div>
@@ -458,6 +530,7 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
                   onKeyDown={e => { if (e.key === 'Enter') confirmChildDrop() }}
                   style={{ ...inputStyle, border: `1px solid ${childDropArmed ? 'var(--danger-border)' : 'var(--border-hairline)'}` }} />
               </label>
+              {childDropErr && <p className="db-metadata-notice">{t('dbviews.structureWorkspace.recheck')}</p>}
               {childDropErr && (
                 <div className="row gap6" style={{ padding: '9px 12px', borderRadius: 10, border: '1px solid var(--danger-border)', background: 'var(--danger-soft)', color: 'var(--danger-fg)', fontSize: 12 }}>
                   <Icon name="alert-triangle" size={14} style={{ flex: 'none' }} />
@@ -467,7 +540,7 @@ export function StructureView({ table, connId, schema, engine, canEdit = true }:
               <div className="row gap8" style={{ justifyContent: 'flex-end', marginTop: 2 }}>
                 <Btn variant="ghost" onClick={() => setChildDrop(null)} disabled={childDropping}>{t('dbviews.cancel')}</Btn>
                 <Btn testId="child-drop-confirm" variant="danger" icon="trash-2" onClick={confirmChildDrop}
-                  disabled={childDropping || !childDropArmed}
+                  disabled={childDropping || childStarted || !childDropArmed}
                   style={!childDropArmed ? { opacity: 0.5, cursor: 'not-allowed' } : undefined}>
                   {childDropping ? t('dbviews.applying') : childDropCopy[childDrop.kind].action}
                 </Btn>

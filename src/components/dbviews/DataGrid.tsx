@@ -53,6 +53,8 @@ export interface DataGridProps {
    * table-data path so identifier quoting/qualification lives in one place.
    */
   livePreview?: boolean
+  /** Refresh key/comment metadata with table pages. Failure makes existing rows read-only. */
+  loadColumnMetadata?: () => Promise<ResultColumn[]>
   /**
    * Per-row stable key values aligned to `rows` (one entry per row, same order).
    * Used to key UPDATE/DELETE when the table has NO primary key — e.g. Postgres
@@ -104,9 +106,11 @@ function colIcon(col: ResultColumn): string {
   return 'type'
 }
 
-export function DataGrid({ columns: inputColumns, rows, binaryCells, statusTones = {}, density = 'comfortable', writable = true, transactions, connId, table = connId ? '' : 'orders', schema, engine, sql, defaultNamespace, querySessionId, livePreview, onRefresh, truncated, loadError, resultLabel, rowKeys, keyColumn }: DataGridProps) {
+export function DataGrid({ columns: inputColumns, rows, binaryCells, statusTones = {}, density = 'comfortable', writable = true, transactions, connId, table = connId ? '' : 'orders', schema, engine, sql, defaultNamespace, querySessionId, livePreview, loadColumnMetadata, onRefresh, truncated, loadError, resultLabel, rowKeys, keyColumn }: DataGridProps) {
   const { t } = useTranslation()
-  const columns = useMemo(() => uniqueGridColumns(inputColumns), [inputColumns])
+  const [serverColumns, setServerColumns] = useState<ResultColumn[] | null>(null)
+  const [keyMetadataUnavailable, setKeyMetadataUnavailable] = useState(false)
+  const columns = useMemo(() => uniqueGridColumns(serverColumns ?? inputColumns), [serverColumns, inputColumns])
   const [sel, setSel] = useState({ r: connId ? 0 : 2, c: connId ? 0 : 3 })
   // 多选状态（叠加在单选之上）：单元格矩形 anchor/focus + 行多选集合（origIdx）。
   // 纯函数 reduce* 负责把点击事件归约为新选择，组件只持有状态。
@@ -148,11 +152,17 @@ export function DataGrid({ columns: inputColumns, rows, binaryCells, statusTones
   const activeEditorKind = useRef<'date' | 'datetime' | 'time' | 'text'>('text')
   useEffect(() => {
     pageRequest.current++
-    setServerRows(null); setServerBinaryCells(undefined); setServerRowKeys(null); setPage(1); setRefreshing(false)
+    setKeyMetadataUnavailable(false); setServerColumns(null); setServerRows(null); setServerBinaryCells(undefined); setServerRowKeys(null); setPage(1); setRefreshing(false)
     setEdits({}); setNewRows([]); setDeleted(new Set()); setEditing(null); setPreview(null)
     setPageError(null)
     return () => { pageRequest.current++ }
   }, [connId, schema, table, sql, defaultNamespace, querySessionId])
+  useEffect(() => {
+    // A new parent result supersedes a page fetched from the old result.
+    pageRequest.current++
+    setServerColumns(null); setServerRows(null); setServerBinaryCells(undefined); setServerRowKeys(null)
+    setKeyMetadataUnavailable(false); setRefreshing(false); setPage(1)
+  }, [inputColumns, rows])
   const [filterOpen, setFilterOpen] = useState(false)
   const [filterText, setFilterText] = useState('')
   // 列级结构化筛选规则(8 种操作符 + AND/OR)。叠加在全局文本搜索之上,二者同时生效。
@@ -250,7 +260,7 @@ export function DataGrid({ columns: inputColumns, rows, binaryCells, statusTones
   // over the parent-provided first-page keys, mirroring serverRows ?? rows.
   const activeRowKeys = serverRowKeys ?? rowKeys ?? null
   // Editable when there's a PK, OR a key column + per-row keys (ctid fallback).
-  const canEdit = writable && (!connId || !!table) && (pkCols.length > 0 || !!(keyColumn && activeRowKeys))
+  const canEdit = !keyMetadataUnavailable && writable && (!connId || !!table) && (pkCols.length > 0 || !!(keyColumn && activeRowKeys))
   const canInsert = writable && !!table && (!!livePreview || canEdit)
 
   // Find the index of sortCol in columns for indexed-value sort
@@ -373,8 +383,24 @@ export function DataGrid({ columns: inputColumns, rows, binaryCells, statusTones
   // too, or the values shift one column left of their headers. Detect it from the
   // fetched columns rather than from `keyColumn` (which is only set for PK-less
   // tables); capture its values as the per-row keys for ctid-based editing.
-  function applyServerPage(res: { columns?: ResultColumn[]; rows: unknown[][]; binaryCells?: BinaryCell[]; truncated?: boolean }) {
-    const hasCtid = res.columns?.[0]?.name === '__ctid' && !columns.some(c => c.name === '__ctid')
+  function applyServerPage(res: { columns?: ResultColumn[]; rows: unknown[][]; binaryCells?: BinaryCell[]; truncated?: boolean }, metadata?: ResultColumn[]) {
+    const hasCtid = res.columns?.[0]?.name === '__ctid' && !(metadata ?? inputColumns).some(c => c.name === '__ctid')
+    if (res.columns) {
+      const resultColumns = hasCtid ? res.columns.slice(1) : res.columns
+      const annotations = metadata ?? inputColumns
+      const nextColumns = resultColumns.map(c => {
+        const matching = annotations.filter(previous => previous.name === c.name)
+        const detail = matching.length === 1 ? matching[0] : undefined
+        return metadata
+          ? { ...c, pk: detail?.pk, fk: detail?.fk, comment: detail?.comment }
+          : { ...(detail?.type === c.type ? detail : {}), ...c }
+      })
+      setServerColumns(nextColumns)
+      const names = new Set(nextColumns.map(c => c.name))
+      setFilterRules(rules => rules.filter(rule => names.has(rule.columnName)))
+      setSortCol(previous => previous && names.has(previous) ? previous : null)
+      setCellViewer(null); setCtxMenu(null); setBulkOpen(false)
+    }
     if (hasCtid) {
       setServerRowKeys(res.rows.map(r => String(r[0])))
       setServerRows(res.rows.map(r => r.slice(1)))
@@ -398,9 +424,15 @@ export function DataGrid({ columns: inputColumns, rows, binaryCells, statusTones
     const request = ++pageRequest.current
     setRefreshing(true); setPageError(null)
     try {
-      const res = await fetcher(size, (next - 1) * size)
+      let metadataFailed = false
+      const [res, metadata] = await Promise.all([
+        fetcher(size, (next - 1) * size),
+        loadColumnMetadata ? Promise.resolve().then(loadColumnMetadata).catch(() => { metadataFailed = true; return [] }) : undefined,
+      ])
       if (request !== pageRequest.current) return
-      applyServerPage(res)
+      applyServerPage(res, metadata)
+      setKeyMetadataUnavailable(metadataFailed)
+      if (metadataFailed) setPageError(t('dbviews.structureWorkspace.keyMetadataUnavailable'))
       setPage(next); setPageSize(size); setDetailIdx(null)
       setGridSel({ anchor: null, focus: null, rows: new Set() }); lastRowRef.current = null
       setSel({ r: 0, c: 0 })

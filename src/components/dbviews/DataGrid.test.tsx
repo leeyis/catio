@@ -45,6 +45,53 @@ describe('DataGrid generic rows', () => {
     expect(screen.getByText('id')).toBeInTheDocument()
   })
 
+  it('refreshes headers and row values together after a schema change', async () => {
+    const initial: ResultColumn[] = [{ name: 'id', type: 'int', pk: true }, { name: 'old_name', type: 'text' }]
+    tablePreview.mockResolvedValue({ columns: [{ name: 'note', type: 'text' }, { name: 'id', type: 'int' }, { name: 'payload', type: 'BLOB' }], rows: [['new text', 7, '0x0001']], binaryCells: [[0, 2]] })
+    wrap(<DataGrid columns={initial} rows={[[7, 'old text']]} connId="c1" table="t" livePreview />)
+    fireEvent.click(screen.getByTitle('Refresh'))
+    expect(await screen.findByText('note')).toBeInTheDocument()
+    expect(screen.queryByText('old_name')).not.toBeInTheDocument()
+    expect(document.querySelector('[data-grid-header]')?.textContent).toMatch(/note.*id.*payload/)
+    expect(screen.getAllByText('new text').length).toBeGreaterThan(0)
+    expect(screen.getByText('0x0001')).toBeInTheDocument()
+    expect(screen.getByText('HEX')).toBeInTheDocument()
+  })
+
+  it('uses freshly loaded key metadata and stops trusting a removed primary key', async () => {
+    const loadColumnMetadata = vi.fn().mockResolvedValue([])
+    const initial: ResultColumn[] = [{ name: 'id', type: 'int', pk: true }, { name: 'name', type: 'text' }]
+    tablePreview.mockResolvedValue({ columns: [{ name: 'code', type: 'text' }, { name: 'name', type: 'text' }], rows: [['A', 'after']] })
+    wrap(<DataGrid columns={initial} rows={[[7, 'before']]} connId="c1" table="t" livePreview loadColumnMetadata={loadColumnMetadata} />)
+    fireEvent.click(screen.getByTitle('Refresh'))
+    await screen.findByText('after')
+    expect(loadColumnMetadata).toHaveBeenCalledTimes(1)
+    expect(screen.getByTitle('Delete row')).toBeDisabled()
+    loadColumnMetadata.mockResolvedValue([{ name: 'code', type: 'text', pk: true }])
+    fireEvent.click(screen.getByTitle('Refresh'))
+    await waitFor(() => expect(screen.getByTitle('Delete row')).toBeEnabled())
+  })
+
+  it('keeps refreshed data readable but prevents row edits when key metadata fails', async () => {
+    const loadColumnMetadata = vi.fn().mockRejectedValue(new Error('metadata unavailable'))
+    tablePreview.mockResolvedValue({ columns: [{ name: 'id', type: 'int' }], rows: [[8]] })
+    wrap(<DataGrid columns={[{ name: 'id', type: 'int', pk: true }]} rows={[[7]]} connId="c1" table="t" livePreview loadColumnMetadata={loadColumnMetadata} />)
+    fireEvent.click(screen.getByTitle('Refresh'))
+    expect(await screen.findByText(/Fresh column key metadata could not be loaded/)).toBeInTheDocument()
+    expect(screen.getByTitle('Delete row')).toBeDisabled()
+    expect(screen.getAllByText('8').length).toBeGreaterThan(0)
+  })
+
+  it('replaces a fetched page schema when the parent supplies a new result', async () => {
+    tablePreview.mockResolvedValue({ columns: [{ name: 'temporary', type: 'text' }], rows: [['page']] })
+    const ui = wrap(<DataGrid columns={[{ name: 'old', type: 'text' }]} rows={[]} connId="c1" table="t" livePreview />)
+    fireEvent.click(screen.getByTitle('Refresh')); await screen.findByText('temporary')
+    ui.rerender(<LanguageProvider><DataGrid columns={[{ name: 'fresh', type: 'int' }]} rows={[[999]]} connId="c1" table="t" livePreview /></LanguageProvider>)
+    expect(screen.queryByText('temporary')).not.toBeInTheDocument()
+    expect(screen.getByText('fresh')).toBeInTheDocument()
+    expect(screen.getAllByText('999').length).toBeGreaterThan(0)
+  })
+
   it('renders nested objects/arrays as JSON, not "[object Object]" (MongoDB sub-docs)', () => {
     const columns: ResultColumn[] = [
       { name: '_id', type: 'string', pk: true },

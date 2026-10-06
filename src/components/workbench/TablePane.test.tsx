@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { LanguageProvider } from '../../state/LanguageContext'
 import { DataProvider } from '../../state/DataContext'
 import i18n from '../../i18n'
@@ -17,7 +17,8 @@ vi.mock('../dbviews', () => ({
     lastGridTruncated = props.truncated
     return <div data-testid="datagrid-stub" />
   },
-  StructureView: () => <div data-testid="structure-stub" />,
+  StructureView: ({ section }: { section?: string }) => <div data-testid="structure-stub">{section}</div>,
+  RedisKeyspaceView: () => <div data-testid="keyspace-stub" />,
 }))
 
 const tablePreview = vi.fn()
@@ -40,6 +41,32 @@ const wrap = (ui: React.ReactNode) =>
 describe('TablePane comment mapping', () => {
   beforeAll(async () => { await i18n.changeLanguage('en') })
   beforeEach(() => { lastGridColumns = null; tablePreview.mockReset(); tableStructure.mockReset() })
+
+  it('puts data and supported metadata views on a single keyboard-accessible tab row', async () => {
+    tablePreview.mockResolvedValue({ columns: [], rows: [] })
+    tableStructure.mockResolvedValue({ comment: '', columns: [], indexes: [], fks: [] })
+    wrap(<TablePane conn={conn} connId="c1" caps={caps} schema="public" table="orders" />)
+    expect(screen.getAllByRole('tablist')).toHaveLength(1)
+    expect(screen.getAllByRole('tab').map(tab => tab.textContent)).toEqual(['Data', 'Columns', 'Indexes', 'Foreign keys', 'Triggers', 'DDL'])
+    const grid = screen.getByTestId('datagrid-stub')
+    expect(screen.queryByTestId('structure-stub')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('tab', { name: 'Indexes' }))
+    const structure = screen.getByTestId('structure-stub')
+    expect(structure).toHaveTextContent('indexes')
+    fireEvent.keyDown(screen.getByRole('tab', { name: 'Indexes' }), { key: 'ArrowRight' })
+    expect(screen.getByRole('tab', { name: 'Foreign keys' })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByTestId('structure-stub')).toBe(structure)
+    fireEvent.click(screen.getByRole('tab', { name: 'Data' }))
+    expect(screen.getByTestId('datagrid-stub')).toBe(grid)
+    expect(structure).not.toBeVisible()
+  })
+
+  it.each(['mongodb', 'elasticsearch'])('does not expose SQL metadata tabs for %s', async engine => {
+    tablePreview.mockResolvedValue({ columns: [], rows: [] })
+    tableStructure.mockResolvedValue({ comment: '', columns: [], indexes: [], fks: [] })
+    wrap(<TablePane conn={{ ...conn, engine }} connId="c1" caps={{ ...caps, structureEdit: false }} schema="public" table="orders" />)
+    expect(screen.getAllByRole('tab').map(tab => tab.textContent)).toEqual(['Data', 'Columns', 'Indexes'])
+  })
 
   it('attaches structure comments to the DataGrid columns by column name', async () => {
     tablePreview.mockResolvedValue({
@@ -81,7 +108,6 @@ describe('TablePane comment mapping', () => {
     tableStructure.mockResolvedValue({ comment: '', columns: [], indexes: [], fks: [] })
     wrap(<TablePane conn={conn} connId="c1" caps={caps} schema="public" table="items" />)
     await waitFor(() => expect(lastGridColumns).toHaveLength(1))
-    expect(screen.getByText(`1 ${i18n.t('workbench.colsLabel')}`)).toBeInTheDocument()
     expect(screen.queryByText(`1 ${i18n.t('workbench.rowsLabel')} · 1 ${i18n.t('workbench.colsLabel')}`)).not.toBeInTheDocument()
   })
 
