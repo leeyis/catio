@@ -10,6 +10,8 @@
 
 2026-10-06 用户要求改为参考最新 DBX 代码。已核对上游默认分支 main，当前批次基线更新为 `8025519039cf82bf6192cc0a3bbaf5f323c6a8ee`（相对旧基线 232 commits）；新旧证据与增量清单见 `docs/dbx-upstream-baseline.md`。旧版本 `046ae4cfb4a3a4675886b721ccad0b05c77d1ec1` 仅作为历史对照；后续每批核对上游、再绑定该批 SHA。不是把所有增强功能都宣称为 DBX 已有能力。每个增量先核对参考实现，再 red/green、类型检查、真实驱动和前台浏览器验收，独立中文语义化提交。外部依赖不可用时明确保留门禁。
 
+本轮后续差距审查再次核对上游 main，审查快照已更新为 `f9ee05fd7da74d4a3b8691b87e369597e97aadf8`（相对上一实施快照新增 6 commits）。这次未改产品代码；完整的界面 / 功能 / 验收分层清单及源码定位见 [dbx-current-gap-review.md](./dbx-current-gap-review.md)。旧的实现和验证仍绑定各自版本，不能因更新参考目录而升级完成声明。
+
 ## 1. 编辑器与智能提示
 
 - 外键关系保留来源/目标 namespace、源表范围内的 provider identity、1-based 列序和完整宽度。旧数据和无法确定分组的数据不猜成单列 JOIN。
