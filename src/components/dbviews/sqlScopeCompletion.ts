@@ -5,11 +5,15 @@ type SyntaxNode = ReturnType<typeof syntaxTree>['topNode']
 import { completionIdentifier } from './sqlCompletionSchema'
 import { dialectFor } from './sqlDialect'
 import { sqlIdentifierKey,sqlIdentifierMatches } from './sqlIdentifiers'
+import { sqlColumnContext } from './sqlColumnContext'
 
 type Id = { name: string; quoted: boolean }
-type Binding = { id: Id; columns: Completion[] }
+type Binding = { id: Id; columns: Completion[]; qualifier?: string }
 type Bindings = Map<string, Binding>
-interface Scope { relations: Bindings; ctes: Bindings; output: Completion[]; childOuter: Bindings }
+interface Scope {
+  relations: Bindings; ctes: Bindings; output: Completion[]; childOuter: Bindings
+  locals: Bindings; context: ReturnType<typeof sqlColumnContext>; using?: Completion[]; compoundOrder?: boolean
+}
 const stops = new Set('where group having order limit offset fetch returning union intersect except qualify window for'.split(' '))
 const modifiers = new Set('as on using join left right full inner outer cross natural with'.split(' '))
 const tableHints = new Set('nolock holdlock updlock rowlock paglock tablock tablockx xlock readpast nowait readcommitted readcommittedlock readuncommitted repeatableread serializable snapshot index forcescan forceseek'.split(' '))
@@ -30,7 +34,8 @@ export function scopedSchemaCompletion(schema: SQLNamespace, defaultSchema?: str
   return (context: CompletionContext): CompletionResult | null => {
     const { state, pos } = context
     const text = (node: SyntaxNode) => state.sliceDoc(node.from, node.to)
-    const word = (node?: SyntaxNode) => node ? text(node).toLowerCase() : ''
+    // Keywords are short tokens, never a whole parenthesized query body.
+    const word = (node?: SyntaxNode) => node && node.to-node.from<=32 ? text(node).toLowerCase() : ''
     const id = (node?: SyntaxNode | null): Id | undefined => {
       if (!node || !/^(Identifier|QuotedIdentifier|Keyword|Builtin|Type)$/.test(node.name)) return
       const raw = text(node)
@@ -74,7 +79,9 @@ export function scopedSchemaCompletion(schema: SQLNamespace, defaultSchema?: str
       for (const name of names) level = lookup(level, name)
       if (!level) return []
       const values = unwrap(level)
-      return Array.isArray(values) ? values.map(value => typeof value === 'string' ? column(value) : value) : []
+      if(!Array.isArray(values))return []
+      budget-=values.length
+      return budget<0?[]:values.map(value => typeof value === 'string' ? column(value) : value)
     }
     const queryNode = (node: SyntaxNode) => node.name === 'Statement' || node.name === 'Parens' && /^(select|with)$/i.test(word(children(node)[0]))
     // A cached tree may lag just after input (especially under load). Finish a
@@ -82,6 +89,12 @@ export function scopedSchemaCompletion(schema: SQLNamespace, defaultSchema?: str
     const tree = ensureSyntaxTree(state, Math.min(state.doc.length, pos + 20_000), 10)
     if (!tree) return null
     let leaf = tree.resolveInner(pos, -1)
+    // Whitespace after the last token belongs to an unfinished statement, but
+    // never inherit a completed statement across its semicolon.
+    if(leaf.name==='Script') {
+      const previous=leaf.childBefore(pos)
+      if(previous?.name==='Statement'&&previous.lastChild?.name!==';'&&pos-previous.to<=20_000&&/^\s*$/.test(state.sliceDoc(previous.to,pos)))leaf=previous
+    }
     for (let n: SyntaxNode | null = leaf; n; n = n.parent) if (['String', 'LineComment', 'BlockComment'].includes(n.name)) return null
     const ancestors: SyntaxNode[] = []
     for (let n: SyntaxNode | null = leaf; n; n = n.parent) if (queryNode(n)) ancestors.unshift(n)
@@ -100,7 +113,7 @@ export function scopedSchemaCompletion(schema: SQLNamespace, defaultSchema?: str
       budget=-1
     }
     const analyze = (node: SyntaxNode, inherited: Bindings, depth = 0, at?: number, outer:Bindings=new Map()): Scope => {
-      const empty: Scope = { ctes: new Map(inherited), relations: new Map(outer), output: [], childOuter:new Map(outer) }
+      const empty: Scope = { ctes: new Map(inherited), relations: new Map(outer), output: [], childOuter:new Map(outer),locals:new Map(),context:sqlColumnContext([],state,at??pos) }
       if (depth > 12 || --budget < 0) { budget=-1;return empty }
       let tokens = children(node)
       budget -= tokens.length
@@ -144,9 +157,13 @@ export function scopedSchemaCompletion(schema: SQLNamespace, defaultSchema?: str
         if (at !== undefined && tokens[i].from < at) branchStart = i + 1
         else { branchEnd = i; break }
       }
+      const hasSet=tokens.some(n=>['union','intersect','except'].includes(word(n)))
       tokens = tokens.slice(branchStart, branchEnd)
-      const relations = empty.relations, locals:Bindings=new Map()
-      let childOuter:Bindings|undefined, argumentScope:Bindings|undefined
+      const context=sqlColumnContext(tokens,state,at??pos)
+      const compoundOrder=at!==undefined&&hasSet&&context.clause==='order'
+      const relations = empty.relations, locals=empty.locals
+      let childOuter:Bindings|undefined, argumentScope:Bindings|undefined,conditionScope:Bindings|undefined
+      let group=new Map(outer),joinLeft:Bindings=new Map(),joinRight:Binding|undefined,using:Completion[]|undefined
       const from = tokens.findIndex(n => word(n) === 'from')
       const hint=(node?:SyntaxNode)=>sqlServer&&node?.name==='Parens'&&tableHints.has(word(children(node)[0]))
       if (from >= 0) {
@@ -155,7 +172,16 @@ export function scopedSchemaCompletion(schema: SQLNamespace, defaultSchema?: str
           const token = tokens[i], value = word(token)
           if (stops.has(value)) break
           if (value === 'join' || value === ',' || value === 'apply'&&supportsApply) {
+            if(value===',')group=new Map(outer)
+            joinLeft=new Map([...group].filter(([name])=>locals.has(name)))
             expecting = true;lateral=value==='apply';continue
+          }
+          if(token.from===context.from&&(value==='on'||value==='using')) {
+            conditionScope=new Map(group);childOuter=conditionScope
+            if(value==='using'&&joinLeft.size===1&&joinRight) {
+              const left=[...joinLeft.values()][0].columns
+              using=joinRight.columns.filter(c=>left.some(l=>sqlIdentifierMatches({name:l.label,quoted:true},c.label,engine)))
+            }
           }
           if(expecting&&value==='lateral'&&supportsLateral){lateral=true;continue}
           if (!expecting || isModifier(value)) continue
@@ -185,41 +211,55 @@ export function scopedSchemaCompletion(schema: SQLNamespace, defaultSchema?: str
           if(word(tokens[i+1])==='with'&&hint(tokens[i+2]))i+=2
           else if(hint(tokens[i+1]))i++
           else if(tokens[i+1]?.name==='Parens'&&(!sqlServer||nested)) {
-            const renamed=children(tokens[++i]).flatMap(n=>id(n)?[projected(id(n)!)]:[])
+            const names=children(tokens[++i]);budget-=names.length
+            const renamed=names.flatMap(n=>id(n)?[projected(id(n)!)]:[])
             if(renamed.length)cols=cols.length&&renamed.length>cols.length?[]:[...renamed,...cols.slice(renamed.length)]
           }
           const binding = alias ?? names.at(-1)
           if (binding) {
-            const value={id:binding,columns:locals.has(key(binding))?[]:cols}
-            locals.set(key(binding),value);relations.set(key(binding),value)
+            const qualifier=(alias?[alias]:names).map(n=>n.quoted?completionIdentifier(n.name,engine):n.name).join('.')
+            const value={id:binding,columns:locals.has(key(binding))?[]:cols,qualifier}
+            locals.set(key(binding),value);relations.set(key(binding),value);group.set(key(binding),value);joinRight=value
           }
           lateral=false
         }
       }
       const select = tokens.findIndex(n => word(n) === 'select')
       const output: Completion[] = []
+      const appendOutput=(values:Completion[])=>{
+        budget-=values.length
+        if(budget>=0)output.push(...values)
+      }
       if (select >= 0) {
-        const projection = tokens.slice(select + 1, from < 0 ? tokens.length : from)
+        const end=tokens.findIndex((n,i)=>i>select&&(word(n)==='from'||stops.has(word(n))))
+        const projection = tokens.slice(select + 1, end < 0 ? tokens.length : end)
         let part: SyntaxNode[] = []
         const emit = () => {
           if (['distinct', 'all'].includes(word(part[0]))) part = part.slice(1)
           const as = part.findIndex(n => word(n) === 'as')
           const alias = as >= 0 ? id(part[as + 1]) : undefined
           if (alias) output.push(projected(alias))
-          else if (part.length === 1 && text(part[0]) === '*') for (const binding of locals.values()) output.push(...binding.columns)
+          else if (part.length === 1 && text(part[0]) === '*') for (const binding of locals.values()) appendOutput(binding.columns)
           else if (part.length === 1 && path(part[0]).length && !text(part[0]).trimEnd().endsWith('.')) output.push(projected(path(part[0]).at(-1)!))
           else if (part.length && /\.\s*\*$/.test(state.sliceDoc(part[0].from, part.at(-1)!.to))) {
-            const owner = path(part[0])[0]; if (owner) output.push(...(relations.get(key(owner))?.columns ?? []))
+            const owner = path(part[0])[0]; if (owner) appendOutput(relations.get(key(owner))?.columns ?? [])
           }
           part = []
         }
         for (const token of projection) { if (word(token) === ',') emit(); else part.push(token) }
         emit()
       }
-      return { ctes, relations:argumentScope??relations, output, childOuter:childOuter??new Map(relations) }
+      if(argumentScope){context.column=context.expression;context.clause='where'}
+      const visible=argumentScope??conditionScope??relations
+      return { ctes, relations:compoundOrder?new Map():visible,
+        output:compoundOrder?analyze(node,inherited,depth+1,undefined,outer).output:output,
+        childOuter:childOuter??new Map(relations),locals:argumentScope?new Map():locals,context,using,compoundOrder }
     }
-    let scope: Scope = { relations: new Map(), ctes: new Map(), output: [],childOuter:new Map() }
-    for (const ancestor of ancestors) scope = analyze(ancestor, scope.ctes, 0, pos,scope.childOuter)
+    let scope: Scope = { relations: new Map(), ctes: new Map(), output: [],childOuter:new Map(),locals:new Map(),context:sqlColumnContext([],state,pos) }
+    for (const ancestor of ancestors) {
+      scope = analyze(ancestor, scope.ctes, 0, pos,scope.childOuter)
+      if(budget<0)break
+    }
     if (budget < 0) return null
     // Bindings include only lexically visible correlations. An unresolved alias
     // must never fall back to lang-sql's statement-wide scanner across boundaries.
@@ -255,9 +295,46 @@ export function scopedSchemaCompletion(schema: SQLNamespace, defaultSchema?: str
       return { from: current?.from ?? pos, to: close && state.sliceDoc(pos, pos + 1) === close ? pos + 1 : undefined, options }
     }
     const base = fallback(context) as CompletionResult | null
-    if (scope.ctes.size && !composite && base) {
-      return { ...base, options: [...base.options, ...[...scope.ctes.values()].map(c => ({ ...projected(c.id), type: 'type' }))] }
+    if(scope.context.clause==='other')return base // Preserve existing DML behavior.
+    // Never borrow the library's statement-wide column pool after doing a
+    // query-block analysis. Metadata navigation remains available separately.
+    const metadata=base?.options.filter(c=>c.type!=='property')??[]
+    if(scope.context.clause==='table')metadata.push(...[...scope.ctes.values()].map(c=>({...projected(c.id),type:'type'})))
+    const current=id(leaf)&&leaf.from<pos&&leaf.to>=pos?leaf:undefined
+    const quote=current?.name==='QuotedIdentifier'?text(current)[0]:undefined
+    const close=quote==='['?']':quote
+    const field=(c:Completion)=>quote?quote+c.label.split(close!).join(close!+close!)+close:typeof c.apply==='string'?c.apply:completionIdentifier(c.label,engine)
+    const unique=(values:Completion[])=>{
+      const counts=new Map<string,number>()
+      for(const c of values){const k=key({name:c.label,quoted:true});counts.set(k,(counts.get(k)??0)+1)}
+      return values.filter(c=>counts.get(key({name:c.label,quoted:true}))===1)
     }
-    return base
+    const columns:Completion[]=[]
+    if(scope.context.column) {
+      if(scope.context.clause==='using')columns.push(...unique(scope.using??[]).map(c=>({...c,apply:field(c)})))
+      else for(const [name,binding] of scope.relations) {
+        const qualified=scope.relations.size>1||!scope.locals.has(name)
+        for(const c of unique(binding.columns))columns.push({...c,
+          label:c.label,displayLabel:qualified?`${binding.id.name}.${c.label}`:undefined,
+          apply:qualified?`${binding.qualifier??String(projected(binding.id).apply)}.${field(c)}`:field(c),boost:90})
+      }
+      const clause=scope.context.clause
+      const aliasClause=clause==='order'||clause==='group'&&[dialectFor('postgres'),dialectFor('mysql'),dialectFor('mariadb'),dialectFor('sqlite')].includes(dialect)
+        ||clause==='having'&&(['mysql','mariadb','sqlite'].some(e=>dialect===dialectFor(e))||engine==='duckdb')
+        ||clause==='qualify'&&engine==='duckdb'
+      if(aliasClause&&(scope.context.standalone||clause==='having'||clause==='qualify')) {
+        const aliases=unique(scope.output).map(c=>({...c,apply:field(c),boost:clause==='order'?99:80}))
+        const merged=clause==='order'?[...aliases,...columns]:[...columns,...aliases]
+        const seen=new Set<string>()
+        columns.splice(0,columns.length,...merged.filter(c=>{const k=key({name:c.displayLabel??c.label,quoted:true});if(seen.has(k))return false;seen.add(k);return true}))
+      }
+    }
+    if(!current&&!context.explicit&&!base)return null
+    const options=[...columns,...metadata]
+    if(quote) {
+      const prefix=state.sliceDoc(current!.from+1,pos).split(close!+close!).join(close!).toLowerCase()
+      return {from:current!.from,to:current!.to,filter:false,options:options.filter(c=>c.label.toLowerCase().includes(prefix))}
+    }
+    return {from:current?.from??base?.from??pos,to:current?.to??base?.to,options}
   }
 }

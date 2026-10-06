@@ -158,6 +158,19 @@ describe('live SQL dialect and namespace completion', () => {
     fireEvent.keyDown(view.contentDOM,{key:'Tab',code:'Tab'})
     expect(view.state.doc.toString()).toBe('WITH r AS (SELECT 1 AS derived_id) SELECT (SELECT r."derived_id") FROM r')
   })
+  it.each([
+    ['WITH r AS (SELECT 1 AS public_id) SELECT pub|lic_id FROM r','public_id','WITH r AS (SELECT 1 AS public_id) SELECT "public_id" FROM r'],
+    ['SELECT no| FROM app.orders o, audit.orders a','o.note','SELECT o."note" FROM app.orders o, audit.orders a'],
+    ['SELECT "no|te" FROM app.orders','note','SELECT "note" FROM app.orders'],
+  ])('accepts scoped bare columns through the real popup without leftover suffixes: %s',async(text,label,expected)=>{
+    const {view}=mount(text,{engine:'postgres',defaultSchema:'app'})
+    expect(ensureSyntaxTree(view.state,view.state.doc.length,100)).not.toBeNull()
+    act(()=>{view.focus();startCompletion(view)})
+    await waitFor(()=>{const first=currentCompletions(view.state)[0];expect(first?.displayLabel??first?.label).toBe(label)})
+    await new Promise(resolve=>setTimeout(resolve,100))
+    fireEvent.keyDown(view.contentDOM,{key:'Tab',code:'Tab'})
+    expect(view.state.doc.toString()).toBe(expected)
+  })
   it('does not run SQL on an IME confirmation key', () => {
     const onRun = vi.fn()
     const { view } = mount('SELECT 1', { onRun })
