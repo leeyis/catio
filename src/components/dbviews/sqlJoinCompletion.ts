@@ -5,6 +5,7 @@ import { CompletionContext, type CompletionResult } from '@codemirror/autocomple
 import type { SyntaxNode } from '@lezer/common'
 import { dialectFor } from './sqlDialect'
 import { completionIdentifier as quote } from './sqlCompletionSchema'
+import { sqlIdentifierMatches } from './sqlIdentifiers'
 export interface JoinForeignKey {
   column: string; refTable: string; refColumn: string
   refSchema?: string; constraintId?: string; ordinal?: number; columnCount?: number
@@ -34,7 +35,7 @@ function groups(owner: JoinTable): JoinForeignKey[][] {
 /** Uses only the nearest query block in the editor's incremental CST; never scans earlier statements with regexes. */
 export function joinCompletion(context: CompletionContext, tables: JoinTable[], engine?: string, defaultSchema?: string): CompletionResult | null {
   if (!tables.length || tables.length > 5000) return null
-  const { state, pos } = context, dialect = dialectFor(engine)
+  const { state, pos } = context
   const tree = ensureSyntaxTree(state, Math.min(state.doc.length, pos + 20_000), 10)
   if (!tree) return null
   let budget = 4000
@@ -60,13 +61,7 @@ export function joinCompletion(context: CompletionContext, tables: JoinTable[], 
   }
   const path = (node?: SyntaxNode): Id[] => !node ? [] : node.name === 'CompositeIdentifier'
     ? children(node).flatMap(n => id(n) ? [id(n)!] : []) : id(node) ? [id(node)!] : []
-  const matches = (name: Id, stored: string) => {
-    if (dialect.spec.caseInsensitiveIdentifiers) return name.name.toLowerCase() === stored.toLowerCase()
-    if (name.quoted) return name.name === stored
-    if (['h2', 'oracle', 'oceanbase-oracle'].includes(engine ?? '')) return name.name.toUpperCase() === stored
-    if (dialect === dialectFor('postgres') && engine !== 'duckdb') return name.name.toLowerCase() === stored
-    return name.name.toLowerCase() === stored.toLowerCase()
-  }
+  const matches = (name: Id, stored: string) => sqlIdentifierMatches(name,stored,engine)
   let block: SyntaxNode | null = null
   const scopes: SyntaxNode[] = []
   const preceding = state.sliceDoc(Math.max(0, pos - 20_000), pos)

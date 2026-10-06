@@ -4,6 +4,7 @@ import type { Completion, CompletionContext, CompletionResult, CompletionSource 
 type SyntaxNode = ReturnType<typeof syntaxTree>['topNode']
 import { completionIdentifier } from './sqlCompletionSchema'
 import { dialectFor } from './sqlDialect'
+import { sqlIdentifierKey,sqlIdentifierMatches } from './sqlIdentifiers'
 
 type Id = { name: string; quoted: boolean }
 type Binding = { id: Id; columns: Completion[] }
@@ -32,11 +33,7 @@ export function scopedSchemaCompletion(schema: SQLNamespace, defaultSchema?: str
       const body = raw.endsWith(close) ? raw.slice(1, -1) : raw.slice(1)
       return { name: body.split(close + close).join(close), quoted: true }
     }
-    const key = (value: Id) => {
-      if (dialect.spec.caseInsensitiveIdentifiers) return value.name.toLowerCase()
-      if (value.quoted) return value.name
-      return ['h2', 'oracle', 'oceanbase-oracle'].includes(engine ?? '') ? value.name.toUpperCase() : value.name.toLowerCase()
-    }
+    const key = (value: Id) => sqlIdentifierKey(value,engine)
     const children = (node: SyntaxNode): SyntaxNode[] => {
       const result: SyntaxNode[] = []
       for (let child = node.firstChild; child; child = child.nextSibling) {
@@ -62,10 +59,7 @@ export function scopedSchemaCompletion(schema: SQLNamespace, defaultSchema?: str
       if (!ns) return
       const object = unwrap(ns) as Record<string, SQLNamespace>
       if (Array.isArray(object)) return
-      const escaped = name.name.replace(/\./g, '\\.')
-      if (Object.prototype.hasOwnProperty.call(object, escaped)) return object[escaped]
-      if (name.quoted && !dialect.spec.caseInsensitiveIdentifiers) return
-      const matches = Object.keys(object).filter(k => k.replace(/\\\./g, '.').toLowerCase() === name.name.toLowerCase())
+      const matches = Object.keys(object).filter(k => sqlIdentifierMatches(name,k.replace(/\\\./g, '.'),engine))
       return matches.length === 1 ? object[matches[0]] : undefined
     }
     const physicalColumns = (names: Id[]): Completion[] => {

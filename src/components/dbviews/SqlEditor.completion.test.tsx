@@ -32,7 +32,7 @@ async function candidates(view: EditorView) {
 describe('live SQL dialect and namespace completion', () => {
   it.each([
     ['mysql', MySQL], ['tidb', MySQL], ['sqlite', SQLite], ['rqlite', SQLite],
-    ['duckdb', PostgreSQL], ['sqlserver', MSSQL], ['oracle', PLSQL], ['jdbc', StandardSQL],
+    ['duckdb', PostgreSQL], ['sqlserver', {spec:{...MSSQL.spec,specialVar:'@#'}}], ['oracle', {spec:{...PLSQL.spec,doubleQuotedStrings:false,identifierQuotes:'"'}}], ['jdbc', StandardSQL],
   ])('selects an explicit parser for %s', (engine, dialect) => expect(dialectFor(engine).spec).toMatchObject(dialect.spec))
 
   it('actually mounts the MySQL parser for backtick identifiers', () => {
@@ -139,6 +139,14 @@ describe('live SQL dialect and namespace completion', () => {
     const options = await candidates(view)
     expect(options.find(c => c.label === 'odd.column')?.apply).toBe('"odd.column"')
     expect(options.find(c => c.label === 'a"b')?.apply).toBe('"a""b"')
+  })
+  it('folds PostgreSQL bare identifiers before physical metadata lookup',async()=>{
+    const {view}=mount('SELECT t.| FROM CaseTable t',{engine:'postgres',defaultSchema:'app',schema:{app:{CaseTable:['quoted_only'],casetable:['bare_only']}}})
+    expect((await candidates(view)).map(c=>c.label)).toEqual(['bare_only'])
+  })
+  it('supports Oracle quoted CTE identities without treating them as strings',async()=>{
+    const {view}=mount('WITH "r.dot" AS (SELECT 1 AS public_id FROM dual) SELECT "r.dot".| FROM "r.dot"',{engine:'oracle'})
+    expect((await candidates(view)).map(c=>c.label)).toEqual(['PUBLIC_ID'])
   })
   it('does not run SQL on an IME confirmation key', () => {
     const onRun = vi.fn()

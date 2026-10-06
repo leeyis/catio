@@ -5,20 +5,24 @@ import { DB_ENGINES } from '../../services/dbEngines'
 // Per-session SQL_MODE changes (e.g. NO_BACKSLASH_ESCAPES/ANSI_QUOTES) remain a separate capability gate.
 const mysqlDefault = SQLDialect.define({ ...MySQL.spec, backslashEscapes: true })
 const mariaDefault = SQLDialect.define({ ...MariaSQL.spec, backslashEscapes: true })
+// Oracle double quotes name objects, not strings. SQL Server #/## names are
+// session/global temporary objects, not parser errors splitting a statement.
+const oracle = SQLDialect.define({ ...PLSQL.spec, doubleQuotedStrings: false, identifierQuotes: '"' })
+const sqlServer = SQLDialect.define({ ...MSSQL.spec, specialVar: '@#' })
 
 /** Editor parsing only. Never use this fallback to authorize an operation or generate DDL. */
 export function dialectFor(engine?: string): SQLDialect {
   const id = engine?.toLowerCase()
-  if (id === 'oracle' || id === 'oceanbase-oracle') return PLSQL
+  if (id === 'oracle' || id === 'oceanbase-oracle') return oracle
   if (id === 'mariadb') return mariaDefault
   if (id === 'rqlite') return SQLite
-  if (id === 'mssql') return MSSQL
+  if (id === 'mssql') return sqlServer
   const family = DB_ENGINES.find(item => item.id === id)?.dbType ?? id
   switch (family) {
     case 'mysql': return mysqlDefault
     case 'sqlite': return SQLite
     case 'duckdb': case 'postgres': return PostgreSQL
-    case 'sqlserver': return MSSQL
+    case 'sqlserver': return sqlServer
     case undefined: return PostgreSQL // Preserve the unconnected/demo editor's existing default.
     default: return StandardSQL // A generic JDBC/unknown engine is not silently PostgreSQL.
   }
