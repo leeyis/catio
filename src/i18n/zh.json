@@ -149,6 +149,7 @@
     "needsAuthHint": "自动扫描识别到此连接但未验证凭证，首次连接需手动输入密码"
   },
   "dbviews": {
+    "exportPageDrafts": "导出当前页全部列（含隐藏列），包含单元格草稿；不应用待新增或删除的行。",
     "structureWorkspace": {
       "navigation": "对象视图",
       "search": "筛选名称、类型、注释…",
@@ -873,6 +874,7 @@
     }
   },
   "panels": {
+    "copyReceiptFailed": "复制失败，请重试。",
     "sessionHistory": "会话历史",
     "newConversation": "新建对话",
     "conversationHistory": "会话历史",

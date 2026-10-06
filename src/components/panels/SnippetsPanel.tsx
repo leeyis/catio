@@ -7,6 +7,7 @@ import type { Snippet } from '../../services/types'
 import { PanelShell } from './PanelShell'
 import { ConfirmModal } from '../modals/ConfirmModal'
 import { saveSnippet, deleteSnippet, newSnippetId } from '../../state/snippets'
+import { useCopyFeedback } from '../useCopyFeedback'
 
 export interface SnippetsPanelProps {
   onClose: () => void
@@ -34,14 +35,12 @@ interface SnippetRowProps {
 function SnippetRow({ s, onInsert, canInsert, canInsertEditor, onEdit, onDelete }: SnippetRowProps) {
   const { t } = useTranslation()
   const [hover, setHover] = useState(false)
-  const [copied, setCopied] = useState(false)
+  const {copy:copyText,copied,copyError,copying}=useCopyFeedback(s.code || '')
   const isShell = s.scope === 'Shell'
   const code = s.code || ''
   function copy(e: React.MouseEvent) {
     e.stopPropagation()
-    if (navigator.clipboard) navigator.clipboard.writeText(code).catch(() => {})
-    setCopied(true)
-    setTimeout(() => setCopied(false), 1400)
+    void copyText()
   }
   function run(e: React.MouseEvent) {
     e.stopPropagation()
@@ -65,8 +64,8 @@ function SnippetRow({ s, onInsert, canInsert, canInsertEditor, onEdit, onDelete 
         <span className="chip" style={{ height: 18, fontSize: 9.5, flex: 'none' }}>{s.scope}</span>
         {/* hover actions */}
         {/* action order (per spec): 复制 / 插入 / 运行 / 编辑 / 删除 */}
-        <div className="row gap2" style={{ flex: 'none', width: hover ? 'auto' : 0, overflow: 'hidden', opacity: hover ? 1 : 0, transition: 'opacity .12s' }}>
-          <button className="icon-btn bare" style={{ width: 24, height: 24 }} title={copied ? t('panels.copied') : t('panels.copy')} onClick={copy}>
+        <div className="row gap2" style={{ flex: 'none', width: hover || copied || copyError || copying ? 'auto' : 0, overflow: 'hidden', opacity: hover || copied || copyError || copying ? 1 : 0, transition: 'opacity .12s' }}>
+          <button className="icon-btn bare" style={{ width: 24, height: 24 }} title={copied ? t('panels.copied') : t('panels.copy')} disabled={copying} onClick={copy}>
             <Icon name={copied ? 'check' : 'copy'} size={13} style={copied ? { color: 'var(--signal-green)' } : undefined} />
           </button>
           {showInsert && (
@@ -86,6 +85,7 @@ function SnippetRow({ s, onInsert, canInsert, canInsertEditor, onEdit, onDelete 
         </div>
       </div>
       <pre className="mono ell" style={{ margin: 0, fontSize: 11.5, color: 'var(--text-secondary)', whiteSpace: 'pre', overflow: 'hidden', textOverflow: 'ellipsis' }}>{code.split('\n')[0]}{code.includes('\n') ? ' …' : ''}</pre>
+      {copyError && <span role="alert" style={{fontSize:11,color:'var(--danger-fg)'}}>{t('panels.copyReceiptFailed')}</span>}
     </div>
   )
 }

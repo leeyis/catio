@@ -7,6 +7,7 @@ import { useData } from '../../state/DataContext'
 import type { Snippet, HistoryItem, Connection } from '../../services/types'
 import { PanelShell } from './PanelShell'
 import { ConfirmModal } from '../modals/ConfirmModal'
+import { useCopyFeedback } from '../useCopyFeedback'
 
 export interface HistoryPanelProps {
   onClose: () => void
@@ -71,14 +72,12 @@ interface HistoryRowProps {
 function HistoryRow({ h, onSave, onInsert, canInsert, canInsertEditor, onDelete }: HistoryRowProps) {
   const { t } = useTranslation()
   const [hover, setHover] = useState(false)
-  const [copied, setCopied] = useState(false)
+  const {copy:copyText,copied,copyError,copying}=useCopyFeedback(h.text)
   const isSql = h.kind === 'sql'
   const hasFailed = h.exitCode != null && h.exitCode !== 0
   function copy(e: React.MouseEvent) {
     e.stopPropagation()
-    if (navigator.clipboard) navigator.clipboard.writeText(h.text).catch(() => {})
-    setCopied(true)
-    setTimeout(() => setCopied(false), 1400)
+    void copyText()
   }
   function run(e: React.MouseEvent) {
     e.stopPropagation()
@@ -112,8 +111,8 @@ function HistoryRow({ h, onSave, onInsert, canInsert, canInsertEditor, onDelete 
           </span>
         )}
         {/* action order (per spec): 复制 / 插入 / 执行(运行) / 保存 / 删除 */}
-        <div className="row gap2" style={{ flex: 'none', opacity: hover || copied ? 1 : 0, transition: 'opacity .12s' }}>
-          <button className="icon-btn bare" style={{ width: 22, height: 22, color: copied ? 'var(--signal-green)' : 'var(--text-tertiary)' }} title={copied ? t('panels.copied') : t('panels.copy')} onClick={copy}>
+        <div className="row gap2" style={{ flex: 'none', opacity: hover || copied || copyError || copying ? 1 : 0, transition: 'opacity .12s' }}>
+          <button className="icon-btn bare" style={{ width: 22, height: 22, color: copied ? 'var(--signal-green)' : 'var(--text-tertiary)' }} title={copied ? t('panels.copied') : t('panels.copy')} disabled={copying} onClick={copy}>
             <Icon name={copied ? 'check' : 'copy'} size={13} />
           </button>
           {showInsert && (
@@ -134,6 +133,7 @@ function HistoryRow({ h, onSave, onInsert, canInsert, canInsertEditor, onDelete 
           )}
         </div>
       </div>
+      {copyError && <span role="alert" style={{fontSize:11,color:'var(--danger-fg)'}}>{t('panels.copyReceiptFailed')}</span>}
     </div>
   )
 }

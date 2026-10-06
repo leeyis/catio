@@ -149,6 +149,7 @@
     "needsAuthHint": "Auto-scan identified this connection but did not verify a credential — first connect will prompt for the password"
   },
   "dbviews": {
+    "exportPageDrafts": "Current page, all columns (including hidden). Includes cell drafts; pending inserted/deleted rows are not applied.",
     "structureWorkspace": {
       "navigation": "Object views",
       "search": "Filter metadata…",
@@ -873,6 +874,7 @@
     }
   },
   "panels": {
+    "copyReceiptFailed": "Copy failed. Please try again.",
     "sessionHistory": "Session history",
     "newConversation": "New conversation",
     "conversationHistory": "Conversation history",

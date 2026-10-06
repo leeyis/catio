@@ -11,6 +11,7 @@ import { queryPage, tableStructure, getSchema, execSyncBatch, preferredNamespace
 import { listActiveDbConnections } from '../../state/dbConnections'
 import { computeDiff, genSyncStatements, qtable, qid } from './compareTables'
 import type { SchemaNamespace } from '../../services/types'
+import { useReportDatabaseWork } from '../../state/databaseDraftWork'
 
 export interface ComparePaneProps {
   /** Source connection (the active DB workbench connection). */
@@ -50,6 +51,8 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
   const sourceChosen = useRef(false)
   const targetChosen = useRef(false)
   const operation = useRef(0)
+  const writeLock = useRef(false)
+  const readLock = useRef<number | null>(null)
   const metadataError = [sourceMetadataError, targetMetadataError].filter(Boolean).join('; ')
   const [srcSchema, setSrcSchema] = useState(preferredNamespace(schemas.map(s => s.name)))
   const [srcTable, setSrcTable] = useState('')
@@ -66,6 +69,7 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
   const [executing, setExecuting] = useState(false)
   const [confirmVersion, setConfirmVersion] = useState<number | null>(null)
   const [execMsg, setExecMsg] = useState<{ ok: boolean; text: string } | null>(null)
+  useReportDatabaseWork('compare', !!sql || confirmVersion !== null, busy || executing)
 
   const srcTables = useMemo(() => sourceNamespaces.find(s => s.name === srcSchema)?.tables ?? [], [sourceNamespaces, srcSchema])
   const tgtTables = useMemo(() => tgtSchemas.find(s => s.name === tgtSchema)?.tables ?? [], [tgtSchemas, tgtSchema])
@@ -113,9 +117,10 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
     return () => { cancelled = true }
   }, [tgtConnId, connId, sourceNamespaces, sourceDefault])
 
-  async function compare() {
-    if (!srcTable || !tgtTable || busy) return
+  async function compare(afterWrite = false) {
+    if (!srcTable || !tgtTable || readLock.current === operation.current || (writeLock.current && !afterWrite)) return
     const version = ++operation.current
+    readLock.current = version
     setBusy(true); setError(null); setSummary(null); setSql(''); setStatements([]); setExecMsg(null)
     try {
       const st = await tableStructure(connId, srcSchema, srcTable)
@@ -155,6 +160,7 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
     } catch (e) {
       if (version === operation.current) setError(dbErrMsg(e))
     } finally {
+      if (readLock.current === version) readLock.current = null
       if (version === operation.current) setBusy(false)
     }
   }
@@ -162,7 +168,8 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
   function copySql() { if (sql && navigator.clipboard) navigator.clipboard.writeText(sql).catch(() => {}) }
 
   async function execute() {
-    if (!statements.length || executing || confirmVersion !== operation.current) return
+    if (!statements.length || writeLock.current || busy || confirmVersion !== operation.current) return
+    writeLock.current = true
     setConfirmVersion(null)
     // Truncation suppressed DELETEs, so this only syncs the INSERT/UPDATE subset.
     const partial = summary?.deleteSuppressed ?? false
@@ -172,7 +179,8 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
     try {
       const affected = await execSyncBatch(tgtConnId, statements)
       if (version !== operation.current) return
-      const refresh = compare()
+      if (!Number.isSafeInteger(affected) || affected < 0) throw new Error(t('dbflow.noReceipt'))
+      const refresh = compare(true)
       refreshVersion = operation.current
       await refresh
       if (refreshVersion === operation.current) setExecMsg({ ok: true, text: t(partial ? 'compare.executedPartial' : 'compare.executed', { n: affected }) })
@@ -183,6 +191,7 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
         setExecMsg({ ok: false, text: t('compare.execFailed', { msg: dbErrMsg(e) }) })
       }
     } finally {
+      writeLock.current = false
       setExecuting(false)
     }
   }

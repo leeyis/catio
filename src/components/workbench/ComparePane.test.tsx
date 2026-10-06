@@ -3,6 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { LanguageProvider } from '../../state/LanguageContext'
 import i18n from '../../i18n'
 import { ComparePane } from './ComparePane'
+import { DatabaseWorkProvider, hasBusyDatabaseDraftWork, hasPendingDatabaseWork } from '../../state/databaseDraftWork'
 import type { QueryResult, SchemaNamespace } from '../../services/types'
 
 const api = vi.hoisted(() => ({ queryPage: vi.fn(), tableStructure: vi.fn(), getSchema: vi.fn(), execSyncBatch: vi.fn() }))
@@ -33,6 +34,40 @@ async function readyComparison() {
   selectTables(); fireEvent.click(screen.getByRole('button', { name: 'Compare' }))
   await screen.findByRole('textbox')
 }
+it('registers sync preview and in-flight work until the real receipt, then clears on unmount', async () => {
+  let finish!: (value: number) => void
+  const ui = render(<DatabaseWorkProvider owner={{ownerId:'compare-guard',workbenchId:'wb',profileId:'p'}}>{view()}</DatabaseWorkProvider>)
+  await readyComparison()
+  expect(hasPendingDatabaseWork({ownerId:'compare-guard'})).toBe(true)
+  api.execSyncBatch.mockImplementationOnce(() => new Promise(resolve => { finish=resolve }))
+  api.queryPage.mockResolvedValue(result([[1,'0xff']], [[0,1]]))
+  fireEvent.click(screen.getByRole('button', {name:'Execute'}))
+  fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', {name:'Execute'}))
+  expect(hasBusyDatabaseDraftWork({ownerId:'compare-guard'})).toBe(true)
+  await act(async () => { finish(1) })
+  await screen.findByText('Done — 1 row(s) affected')
+  expect(hasBusyDatabaseDraftWork({ownerId:'compare-guard'})).toBe(false)
+  expect(hasPendingDatabaseWork({ownerId:'compare-guard'})).toBe(false)
+  ui.unmount()
+  expect(hasPendingDatabaseWork({ownerId:'compare-guard'})).toBe(false)
+})
+it('synchronously rejects duplicate confirmation events before React rerenders', async () => {
+  render(view()); await readyComparison()
+  api.execSyncBatch.mockImplementation(() => new Promise(() => {}))
+  fireEvent.click(screen.getByRole('button', {name:'Execute'}))
+  const run = within(screen.getByRole('dialog')).getByRole('button', {name:'Execute'})
+  act(() => { run.click(); run.click() })
+  expect(api.execSyncBatch).toHaveBeenCalledTimes(1)
+})
+it('does not publish a successful sync without a valid affected-row receipt', async () => {
+  render(view()); await readyComparison()
+  api.execSyncBatch.mockResolvedValueOnce(undefined)
+  fireEvent.click(screen.getByRole('button', {name:'Execute'}))
+  fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', {name:'Execute'}))
+  expect(await screen.findByRole('alert')).toHaveTextContent('No valid operation receipt')
+  expect(screen.getByRole('button', {name:'Execute'})).toBeDisabled()
+})
+
 it('confirms the target in-app and never writes on cancel', async () => {
   const native = vi.spyOn(window, 'confirm').mockReturnValue(false)
   render(view()); await readyComparison()

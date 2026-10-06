@@ -556,11 +556,14 @@ export function DataGrid({ columns: inputColumns, rows, binaryCells, statusTones
   // (after filter + sort) and columns. SQL reuses the same INSERT builder as the
   // grid's "copy as SQL" path (copySql.buildInsertSql), so escaping/quoting stays
   // consistent with single-row edits (dml.rs::build_insert).
-  function buildExport(format: 'csv' | 'json' | 'sql' | 'md'): { text: string; type: string } {
-    const displayRows = pageRows.map(({ row, origIdx }) => columns.map((col,c) => {
+  function exportRows() {
+    return pageRows.map(({ row, origIdx }) => columns.map((col,c) => {
       const value = edits[cellKey(origIdx,col.name)]
       return value !== undefined ? value : row[c]
     }))
+  }
+  function buildExport(format: 'csv' | 'json' | 'sql' | 'md'): { text: string; type: string } {
+    const displayRows = exportRows()
     if (format === 'sql') {
       const colNames = columns.map(c => c.name)
       const sql = buildInsertSql(displayRows, table, colNames, copyDialectFor(engine), schema, binaryForRows(pageRows.map(e=>e.origIdx),displayRows))
@@ -596,7 +599,7 @@ export function DataGrid({ columns: inputColumns, rows, binaryCells, statusTones
       // Server mode: build bytes server-side and download via the browser.
       if (isServer()) {
         try {
-          const displayRows = pageRows.map(({ row }) => row)
+          const displayRows = exportRows()
           const bytes = await exportXlsxBytes({ columns: columns.map(c => c.name), rows: displayRows, sheetName: table })
           const blob = new Blob([bytes.buffer as ArrayBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
           const url = URL.createObjectURL(blob)
@@ -621,7 +624,7 @@ export function DataGrid({ columns: inputColumns, rows, binaryCells, statusTones
           filters: [{ name: 'Excel', extensions: ['xlsx'] }],
         })
         if (path) {
-          const displayRows = pageRows.map(({ row }) => row)
+          const displayRows = exportRows()
           await exportXlsx({ columns: columns.map(c => c.name), rows: displayRows, sheetName: table, path })
         }
       } catch (e) {
@@ -1257,6 +1260,7 @@ export function DataGrid({ columns: inputColumns, rows, binaryCells, statusTones
               onClick={() => { setExportMenuOpen(o => !o); setSortMenuOpen(false) }}>{t('dbviews.export')}</Btn>
             {exportMenuOpen && (
               <div className="pop-in" style={{ position: 'absolute', top: 'calc(100% + 6px)', right: 0, zIndex: 60, minWidth: 120, background: 'var(--surface-card)', border: '1px solid var(--border-hairline)', borderRadius: 10, boxShadow: 'var(--shadow-window)', padding: 4 }}>
+                <p style={{maxWidth:240,margin:'4px 8px 8px',fontSize:11,color:'var(--text-tertiary)',lineHeight:1.5}}>{t('dbviews.exportPageDrafts')}</p>
                 {([
                   { fmt: 'csv', icon: 'table-2', label: 'CSV' },
                   { fmt: 'json', icon: 'file-code', label: 'JSON' },
