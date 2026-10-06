@@ -1,4 +1,4 @@
-import {act,render} from '@testing-library/react'
+import {act,render,waitFor} from '@testing-library/react'
 import {beforeAll,beforeEach,expect,it,vi} from 'vitest'
 import {Tree} from '@lezer/common'
 import {EditorView} from '@codemirror/view'
@@ -23,8 +23,13 @@ async function names(input:string,withExtra=false){
   // and ParseContext.tree (ensureSyntaxTree's newer tree). This test-only cast is
   // necessary because lang-sql's externalized import bypasses a Vitest export mock.
   const actual=await vi.importActual<typeof import('@codemirror/language')>('@codemirror/language')
-  const ready=actual.ensureSyntaxTree(view.state,view.state.doc.length,100)
-  expect(ready).not.toBeNull()
+  // Fixture preparation can yield under a loaded full-suite worker. This is not
+  // the production 10 ms guard: unavailable-tree behavior is tested separately.
+  const ready=await waitFor(()=>{
+    const tree=actual.ensureSyntaxTree(view.state,view.state.doc.length,100)
+    expect(tree).not.toBeNull()
+    return tree!
+  },{timeout:1500})
   const field=(Language as unknown as {state:StateField<{tree:Tree}>}).state
   const published=view.state.field(field)
   published.tree=new Tree(ready!.type,[],[],view.state.doc.length)
