@@ -1,10 +1,11 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, expect, it, vi } from 'vitest'
 import { LanguageProvider } from '../../state/LanguageContext'
 import { DataProvider } from '../../state/DataContext'
 import i18n from '../../i18n'
 import { SqlConsole } from './SqlConsole'
 import { EditorState } from '@codemirror/state'
+import type {EditorView} from '@codemirror/view'
 import { CompletionContext } from '@codemirror/autocomplete'
 import { sql as sqlLanguage } from '@codemirror/lang-sql'
 import { dialectFor } from './sqlDialect'
@@ -66,6 +67,32 @@ it('wires full foreign-key identities and the actual default schema into JOIN co
     const result = props.extraCompletion(new CompletionContext(state, code.length, true))
     expect(result?.options).toEqual(expect.arrayContaining([expect.objectContaining({ apply: '"OTHER"."users" ON o."owner_id" = "OTHER"."users"."id"' })]))
   })
+})
+it('re-lints loaded namespace identity, locale and connection changes without borrowing an old catalog',async()=>{
+  let complete!: (value:unknown)=>void
+  api.loadSchemaNamespace.mockImplementation((_id,name)=>name==='APP'?new Promise(resolve=>{complete=resolve}):Promise.resolve({...ns(name),status:'loaded'}))
+  const text='SELECT * FROM "APP".missing;'
+  const state=EditorState.create({doc:text,extensions:[dialectFor('postgres').language]})
+  const read=()=>api.editor.mock.calls.at(-1)![0].lintSource({state} as EditorView)
+  const {rerender}=render(<LanguageProvider><DataProvider><SqlConsole connId="c" engine="postgres" fresh initialCode={text}/></DataProvider></LanguageProvider>)
+  await waitFor(()=>expect(complete).toBeDefined())
+  expect(read()).toEqual([])
+  const before=api.editor.mock.calls.at(-1)![0].lintSource
+  await act(async()=>complete({...ns('APP'),status:'loaded',tables:[{name:'present',cols:1,rows:'0'}]}))
+  await waitFor(()=>expect(read()[0]?.message).toContain('not found in the loaded catalog'))
+  expect(api.editor.mock.calls.at(-1)![0].lintSource).not.toBe(before)
+  await act(async()=>{await i18n.changeLanguage('zh')})
+  await waitFor(()=>expect(read()[0]?.message).toContain('已加载目录'))
+  api.getSchema.mockReturnValue(new Promise(()=>{}))
+  rerender(<LanguageProvider><DataProvider><SqlConsole connId="other" engine="postgres" fresh initialCode={text}/></DataProvider></LanguageProvider>)
+  expect(read()).toEqual([])
+})
+it('uses the JDBC engine profile for diagnostics as well as completion',async()=>{
+  const text="SELECT q'[)]' FROM unqualified_table"
+  render(<LanguageProvider><DataProvider><SqlConsole connId="c" engine="jdbc" engineId="oracle" fresh initialCode={text}/></DataProvider></LanguageProvider>)
+  await waitFor(()=>expect(api.editor).toHaveBeenCalled())
+  const state=EditorState.create({doc:text,extensions:[dialectFor('oracle').language]})
+  expect(api.editor.mock.calls.at(-1)![0].lintSource({state} as EditorView).filter((d:{severity:string})=>d.severity==='error')).toEqual([])
 })
 it('shows completion truncation and permission errors rather than claiming complete suggestions', async () => {
   api.schemaColumnCatalog.mockResolvedValue({ tables: [['items',['id']]], errors: [{ schema: 'APP.private', message: 'permission denied' }], truncated: true })

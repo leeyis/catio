@@ -16,7 +16,7 @@ import { MetadataNodeActions,type MetadataAction } from '../workbench/MetadataNo
 import { mongoCompletion } from './mongoCompletion'
 import { redisCompletion } from './redisCompletion'
 import { redisLinter } from './redisDiagnostics'
-import { sqlLinter, linterTableNames } from './sqlDiagnostics'
+import { sqlLinter } from './sqlDiagnostics'
 import { formatSql } from './sqlFormatter'
 import type { SQLNamespace } from '@codemirror/lang-sql'
 import { DataGrid } from './DataGrid'
@@ -257,23 +257,19 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
       : undefined),
     [engine],
   )
-  // Known table/view names for the SQL linter's "unknown table" check. Held in a
-  // ref so the (stable-identity) linter reads the latest list without rebuilding
-  // the editor extension as the schema/columns load.
-  const sqlTablesRef = useRef<string[]>([])
-  // Syntax diagnostics source:
-  //  - redis → command arity / unknown / blocked / quotes
-  //  - SQL (non-plain) → unbalanced parens / unclosed strings / unknown tables
-  const lintSource = useMemo(
-    () => (engine === 'redis' ? redisLinter : plain ? undefined : sqlLinter(() => sqlTablesRef.current)),
-    [engine, plain],
-  )
-
   // Stable identity of the schema namespaces (names only) so the column fetch
   // re-runs when connId or the schema list changes, but NOT on every keystroke.
   const completionNamespace = supportsDefaultNamespace
     ? defaultNamespace || initialDefaultSchema || liveSchema?.defaultNamespace
     : liveSchema?.defaultNamespace
+  // Diagnostics share the actual dialect/namespace and object-loading state.
+  // A changed connection never borrows an old catalog for even one render; a
+  // fresh source also schedules lint after metadata/locale changes without edits.
+  const lintSource = useMemo(() => engine === 'redis' ? redisLinter : plain ? undefined : sqlLinter(
+    () => ({defaultSchema:completionNamespace,namespaces:connId
+      ? liveSchema?.db===connId ? liveSchema.schemas : [] : D.schema.schemas}),
+    {engine:engineId??engine,translate:(code,values)=>t('dbviews.sqlDiagnostics.'+code,values??{})},
+  ), [engine,engineId,plain,connId,liveSchema,D.schema,completionNamespace,t])
   const namespaceNames = useMemo(
     () => (liveSchema ? referencedNamespaces(plain ? '' : code, liveSchema.schemas.map(ns => ns.name), completionNamespace, engineId ?? engine) : []),
     [liveSchema, code, completionNamespace, engineId, engine, plain],
@@ -384,7 +380,6 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
   // Keep per-schema identity; unqualified names resolve through the editor's actual defaultSchema.
   const editorSchema = useMemo<SQLNamespace>(() => {
     const namespaces = (liveSchema ?? (connId ? { db: connId, schemas: [] } : D.schema)).schemas
-    sqlTablesRef.current = linterTableNames(connId, liveSchema, D.schema)
     return completionSchema(namespaces, (ns, table) => connId
       ? liveColumns[ns]?.[table] ?? []
       : D.tableStructures[table]?.columns.map(c => c.name) ?? [], engineId ?? engine)

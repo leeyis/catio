@@ -150,6 +150,17 @@
   },
   "dbviews": {
     "functionParameters": "Function parameters",
+    "sqlDiagnostics": {
+      "unclosedString": "Unclosed string literal",
+      "unclosedIdentifier": "Unclosed quoted identifier",
+      "unclosedComment": "Unclosed block comment",
+      "unclosedParen": "Unclosed parenthesis: a closing parenthesis is missing",
+      "unexpectedClose": "Unexpected closing parenthesis",
+      "unknownTable": "Table {{name}} was not found in the loaded catalog for {{namespace}}. Temporary/session objects may be absent from that catalog; this does not prove the table does not exist.",
+      "limited": "Local SQL checks reached their document, catalog or analysis budget. Unchecked SQL is not validated; the database remains authoritative.",
+      "notReady": "Local SQL checks are waiting for the syntax tree. No validation result is available yet.",
+      "referenceSkipped": "Local table checks were skipped for unsupported syntax or a script that changes objects/session settings. This is not a server validation result."
+    },
     "functionSignatureHint": "Local function template; actual signatures depend on server version and extensions. Esc hides; Ctrl/Cmd+Shift+Space shows again.",
     "maximizeEditor": "Maximize editor",
     "maximizeResults": "Maximize results",

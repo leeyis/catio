@@ -150,6 +150,17 @@
   },
   "dbviews": {
     "functionParameters": "函数参数",
+    "sqlDiagnostics": {
+      "unclosedString": "未闭合的字符串字面量",
+      "unclosedIdentifier": "未闭合的引用标识符",
+      "unclosedComment": "未闭合的块注释",
+      "unclosedParen": "未闭合的括号：缺少与之匹配的右括号",
+      "unexpectedClose": "多余的右括号：没有与之匹配的左括号",
+      "unknownTable": "已加载目录中未知的表：{{name}}（命名空间：{{namespace}}）。临时或会话对象可能未收录，这不证明该表不存在。",
+      "limited": "本地 SQL 检查已达到文档、目录或分析预算。未检查的 SQL 不代表有效，请以数据库实际校验为准。",
+      "notReady": "本地 SQL 检查正在等待语法树就绪，暂时没有校验结果。",
+      "referenceSkipped": "当前语法暂不支持本地表引用检查，或脚本包含对象/会话设置变更，已跳过此类检查；这不是数据库校验结果。"
+    },
     "functionSignatureHint": "本地函数模板，实际签名取决于服务端版本与扩展。Esc 隐藏，Ctrl/Cmd+Shift+Space 再次显示。",
     "maximizeEditor": "最大化编辑区",
     "maximizeResults": "最大化结果区",
