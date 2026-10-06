@@ -29,6 +29,7 @@ export interface SchemaBrowserProps {
   onOpenER: (schema?: string) => void
   /** Open the Data Compare tab. */
   onOpenCompare?: () => void
+  onOpenCommands?: () => void
   /** Open a fresh query tab seeded with a CREATE TABLE/VIEW template for the given schema. */
   onNewObjectTemplate?: (schema: string, kind: 'table' | 'view') => void
   /** Re-introspect the schema tree (drives both the header refresh button and the per-schema 刷新). */
@@ -83,7 +84,7 @@ export interface SchemaBrowserProps {
   onToggleCollapse?: () => void
 }
 
-export function SchemaBrowser({ visible = true, width=216, connId, onLoadNamespace, onPick, onPickObject, onPin, onPinObject, active, onNewQuery, onOpenER, onOpenCompare, onNewObjectTemplate, onRefresh, onObjectAdmin, onTransferData, onExportDatabase, schemas, conn, live, refreshing, loading, collapsed, onToggleCollapse, sqlActive, canSqlConsole = true, canEr = true, canStructureEdit = true, canViews = true, canFunctions = true }: SchemaBrowserProps) {
+export function SchemaBrowser({ visible = true, width=216, connId, onLoadNamespace, onPick, onPickObject, onPin, onPinObject, active, onNewQuery, onOpenER, onOpenCompare, onOpenCommands, onNewObjectTemplate, onRefresh, onObjectAdmin, onTransferData, onExportDatabase, schemas, conn, live, refreshing, loading, collapsed, onToggleCollapse, sqlActive, canSqlConsole = true, canEr = true, canStructureEdit = true, canViews = true, canFunctions = true }: SchemaBrowserProps) {
   const { t } = useTranslation()
   const D = useData()
   // Live path: render every supplied namespace; mock path: the single seeded schema (pixel-identical).
@@ -136,17 +137,13 @@ export function SchemaBrowser({ visible = true, width=216, connId, onLoadNamespa
   }
 
   return (
-    <div className="col" style={{ width, flex: 'none', borderRight: '1px solid var(--border-hairline)', background: 'var(--surface-card)' }}>
+    <div className="col db-explorer" style={{ width, flex: 'none', borderRight: '1px solid var(--border-hairline)' }}>
+      <div className="db-explorer-caption"><Icon name="database" size={12}/>{t('dbviews.workspace.explorer')}</div>
       {/* header */}
       <div className="row" style={{ padding: '10px 10px 8px', justifyContent: 'space-between' }}>
         <div className="row gap6" style={{ minWidth: 0 }}><ConnGlyph conn={headerGlyph} size={24} radius={7} /><div className="col" style={{ lineHeight: 1.2, minWidth: 0 }}><span className="ell" style={{ fontSize: 12.5, fontWeight: 700 }}>{headerName}</span><span className="mono ell" style={{ fontSize: 9.5, color: 'var(--text-faint)' }}>{headerEngine}</span></div></div>
         <div className="row gap2">
-          {live && canSqlConsole && onOpenCompare && (
-            <button className="icon-btn bare" data-testid="wb-compare" style={{ width: 26, height: 26 }} title={t('compare.title')} onClick={() => onOpenCompare()}>
-              <Icon name="git-compare" size={14} />
-            </button>
-          )}
-          <button className="icon-btn bare" data-testid="wb-refresh" style={{ width: 26, height: 26 }} title={t('workbench.refresh')} onClick={onRefresh} disabled={refreshing}>
+          <button className="icon-btn bare" data-testid="wb-refresh" style={{ width: 26, height: 26 }} title={t('dbviews.workspace.refreshObjects')} onClick={onRefresh} disabled={refreshing}>
             <Icon name="refresh-cw" size={13} style={refreshing ? { animation: 'spin 1s linear infinite' } : undefined} />
           </button>
           {onToggleCollapse && (
@@ -157,8 +154,13 @@ export function SchemaBrowser({ visible = true, width=216, connId, onLoadNamespa
           )}
         </div>
       </div>
-      <div style={{padding:'0 10px 8px'}}>
-        <button className="btn btn-secondary sm" data-testid="wb-new-query" title={t('workbench.newQuery')} disabled={!canSqlConsole} onClick={()=>onNewQuery()} style={{width:'100%',justifyContent:'flex-start'}}><Icon name="plus" size={14}/>{t('workbench.newQuery')}</button>
+      <div className="db-explorer-actions">
+        <button className="btn btn-secondary sm db-new-query" data-testid="wb-new-query" title={t('workbench.newQuery')} disabled={!canSqlConsole} onClick={()=>onNewQuery()}><Icon name="plus" size={14}/>{t('workbench.newQuery')}</button>
+        <MetadataNodeActions className="db-action-menu" ownerKey={JSON.stringify([connId??connKey,visible])} title={t('dbviews.workspace.databaseTools')} triggerLabel={t('dbviews.workspace.toolsShort')} triggerIcon="chevron-down" items={[
+          ...(live&&canSqlConsole&&onOpenCompare?[{id:'compare',label:t('compare.title'),icon:'git-compare',testId:'wb-compare',action:onOpenCompare}]:[]),
+          ...(canEr?[{id:'er',label:t('workbench.erDiagram'),icon:'network',action:()=>onOpenER()}]:[]),
+          ...(onOpenCommands?[{id:'commands',label:t('dbviews.commands'),icon:'search',action:onOpenCommands}]:[]),
+        ]}><span/></MetadataNodeActions>
       </div>
       {/* search + schema/database visibility filter */}
       <div className="row gap6" style={{ margin: '0 10px 8px', position: 'relative' }}>
@@ -289,7 +291,7 @@ function SchemaNode({ connId,engine,ownerKey, onLoadNamespace, ns, query, active
   const [open, setOpen] = useState({ schema: false, tables: true, views: false, fns: false })
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   useEffect(()=>{if(open.schema && ns.status==='unloaded')onLoadNamespace?.(ns.name)},[open.schema,ns.status,ns.name,onLoadNamespace])
-  const countLabel=ns.status==='unloaded'?t('workbench.metadataNotLoaded'):ns.status==='loading'?t('workbench.metadataLoading'):ns.status==='error'?t('workbench.metadataUnavailable'):ns.tables.length+' tables'
+  const countLabel=ns.status==='unloaded'?t('workbench.metadataNotLoaded'):ns.status==='loading'?t('workbench.metadataLoading'):ns.status==='error'?t('workbench.metadataUnavailable'):t('dbviews.workspace.tableCount',{count:ns.tables.length})
   // 复制节点名后的短暂反馈:被复制的节点名,~1.2s 后清空(图标 copy→check)。
   const [copiedName, setCopiedName] = useState<string | null>(null)
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null)

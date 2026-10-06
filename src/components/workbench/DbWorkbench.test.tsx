@@ -448,7 +448,7 @@ describe('DbWorkbench unified tabs', () => {
     expect(chip).toBeInTheDocument()
     fireEvent.click(screen.getByTestId('wbtab-close-table:public.orders'))
     expect(screen.queryByTestId('wbtab-table:public.orders')).not.toBeInTheDocument()
-    expect(screen.getByText(/没有打开的标签|No open tabs/)).toBeInTheDocument()
+    expect(screen.getByRole('heading',{name:/浏览对象，或开始一条查询|Explore objects or start a query/})).toBeInTheDocument()
   })
 })
 
@@ -489,7 +489,7 @@ describe('DbWorkbench 标签栏右键菜单 (需求1)', () => {
     fireEvent.contextMenu(chip)
     fireEvent.click(screen.getByText(/关闭所有|Close all/))
     expect(screen.queryByTestId('wbtab-table:public.orders')).not.toBeInTheDocument()
-    expect(screen.getByText(/没有打开的标签|No open tabs/)).toBeInTheDocument()
+    expect(screen.getByRole('heading',{name:/浏览对象，或开始一条查询|Explore objects or start a query/})).toBeInTheDocument()
   })
 })
 

@@ -94,7 +94,7 @@ describe('SQL execution truthfulness', () => {
     api.runQuery.mockResolvedValueOnce({ columns: [{ name: 'n', type: 'int' }], rows: [[1]] })
       .mockRejectedValueOnce(new Error('syntax error'))
     wrap('postgres', 'SELECT 1; bad statement; DELETE FROM items')
-    fireEvent.click(screen.getByRole('button', { name: 'More actions' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Run options' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Run entire script' }))
     await screen.findByText('syntax error')
     expect(api.runQuery).toHaveBeenCalledTimes(2)

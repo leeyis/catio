@@ -150,8 +150,8 @@ describe('SchemaBrowser', () => {
       </DataProvider></LanguageProvider>,
     )
     fireEvent.click(screen.getByTestId('schema-node:eastmoney'))
-    expect(screen.queryByText('Views')).not.toBeInTheDocument()
-    expect(screen.queryByText('Functions')).not.toBeInTheDocument()
+    expect(screen.queryByText('视图')).not.toBeInTheDocument()
+    expect(screen.queryByText('函数')).not.toBeInTheDocument()
     // Tables stay visible regardless.
     expect(screen.getByTestId('schema-tbl:eastmoney.orders')).toBeInTheDocument()
   })
@@ -165,8 +165,8 @@ describe('SchemaBrowser', () => {
       </DataProvider></LanguageProvider>,
     )
     fireEvent.click(screen.getByTestId('schema-node:eastmoney'))
-    expect(screen.getByText('Views')).toBeInTheDocument()
-    expect(screen.queryByText('Functions')).not.toBeInTheDocument()
+    expect(screen.getByText('视图')).toBeInTheDocument()
+    expect(screen.queryByText('函数')).not.toBeInTheDocument()
   })
 
   // ---- 需求4: 树叶子节点 hover 复制/插入图标 ----
@@ -179,8 +179,8 @@ describe('SchemaBrowser', () => {
   // Expand the schema, then Views / Functions groups, so all leaf nodes are visible.
   const expandAll = () => {
     fireEvent.click(screen.getByTestId('schema-node:eastmoney'))
-    fireEvent.click(screen.getByText('Views'))
-    fireEvent.click(screen.getByText('Functions'))
+    fireEvent.click(screen.getByText('视图'))
+    fireEvent.click(screen.getByText('函数'))
   }
 
   it('sqlActive=true: every leaf node has BOTH a copy and an insert button', () => {

@@ -18,6 +18,8 @@ import { supportsServerFilter } from './serverFilter'
 import { clauseSuggest, applyClauseItem, type ClauseMode, type ClauseSuggest, type ClauseItem } from './clauseComplete'
 import { TableImportDialog } from './TableImportDialog'
 import { DatabaseValueInspector,type InspectedDatabaseValue } from './DatabaseValueInspector'
+import { DatabaseRecordInspector } from './DatabaseRecordInspector'
+import '../workbench/databaseWorkspace.css'
 import { useReportDatabaseWork } from '../../state/databaseDraftWork'
 
 export interface DataGridProps {
@@ -89,11 +91,6 @@ function cellText(v: unknown): string {
 /** Truncate to `n` chars, appending an ellipsis when clipped. */
 function clip(s: string, n: number): string {
   return s.length > n ? s.slice(0, n) + '…' : s
-}
-
-/** 文本整体是否为一个可点击的 http(s) URL（行明细里把它渲染成链接）。 */
-function isUrl(s: string): boolean {
-  return /^https?:\/\/\S+$/i.test(s.trim())
 }
 
 /** Derive a column icon from its type/pk/fk flags (mirrors the mock ordersColumns icons). */
@@ -338,20 +335,17 @@ export function DataGrid({ columns: inputColumns, rows, binaryCells, statusTones
   // 当前展开行的数据(按 pageRows 显示下标取)与显示行号；上一条/下一条仅在当前页内移动。
   const detailEntry = detailIdx != null ? pageRows[detailIdx] : null
   const detailNumber = detailIdx != null ? (page - 1) * PAGE + detailIdx + 1 : 0
-  function detailPrev() { setDetailIdx(i => (i != null && i > 0 ? i - 1 : i)) }
-  function detailNext() { setDetailIdx(i => (i != null && i < pageRows.length - 1 ? i + 1 : i)) }
-  // 明细弹窗打开时支持键盘：Esc 关闭、↑ 上一条、↓ 下一条。
-  useEffect(() => {
-    if (detailIdx == null) return
-    function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') setDetailIdx(null)
-      else if (e.key === 'ArrowUp') { e.preventDefault(); setDetailIdx(i => (i != null && i > 0 ? i - 1 : i)) }
-      else if (e.key === 'ArrowDown') { e.preventDefault(); setDetailIdx(i => (i != null && i < pageRows.length - 1 ? i + 1 : i)) }
+  function showRecord(index:number|null) {
+    setDetailIdx(index)
+    if(index!==null&&pageRows[index]) {
+      const c=Math.max(0,Math.min(sel.c,columns.length-1))
+      setSel({r:pageRows[index].origIdx,c})
+      setGridSel({anchor:{r:index,c},focus:{r:index,c},rows:new Set()});lastRowRef.current=index
     }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [detailIdx, pageRows.length])
-
+  }
+  function detailPrev() { if(detailIdx!==null&&detailIdx>0)showRecord(detailIdx-1) }
+  function detailNext() { if(detailIdx!==null&&detailIdx<pageRows.length-1)showRecord(detailIdx+1) }
+  useEffect(()=>{if(detailIdx!==null){const index=pageRows.findIndex(entry=>entry.origIdx===sel.r);setDetailIdx(index>=0?index:null)}},[sel.r,pageRows,detailIdx])
   // Fetch one server page. Prefer the dialect-correct tablePreview (schema/table)
   // when the parent opts in via `livePreview`; else fall back to the raw-SQL queryPage.
   const fetchPage = useMemo(() => {
@@ -1135,7 +1129,7 @@ export function DataGrid({ columns: inputColumns, rows, binaryCells, statusTones
   return (
     <div className="col" style={{ height: '100%', minHeight: 0, position: 'relative' }}>
       {/* result toolbar */}
-      <div className="row" style={{ justifyContent: 'space-between', padding: '8px 12px', borderBottom: '1px solid var(--border-hairline)', gap: 10 }}>
+      <div className="row db-grid-toolbar" style={{ justifyContent: 'space-between', padding: '6px 10px', borderBottom: '1px solid var(--border-hairline)', gap: 8 }}>
         <div className="row gap8">
           <span className="chip" style={{ background: 'var(--accent-soft)', color: 'var(--accent-primary)', fontWeight: 600 }}>
             <Icon name="table-2" size={12} /> {toolbarLabel}
@@ -1148,6 +1142,7 @@ export function DataGrid({ columns: inputColumns, rows, binaryCells, statusTones
           )}
         </div>
         <div className="row gap6">
+          <button className="btn btn-ghost sm" data-testid="db-record-toggle" aria-pressed={detailIdx!==null} disabled={!pageRows.length} onClick={()=>showRecord(detailIdx!==null?null:Math.max(0,pageRows.findIndex(entry=>entry.origIdx===sel.r)))}><Icon name="panel-right" size={14}/>{t('dbviews.workspace.record')}</button>
           {/* edit actions as compact icons w/ hover tooltips (新增行/删除行/撤销/保存) */}
           {(canEdit || canInsert) && (
             <>
@@ -1369,8 +1364,9 @@ export function DataGrid({ columns: inputColumns, rows, binaryCells, statusTones
         </div>
       )}
 
+      <div className="db-grid-content">
       {/* grid */}
-      <div className="grow mono scrollon" tabIndex={0} onKeyDown={onGridKeyDown} style={{ overflow: 'auto', fontSize: 12.5, outline: 'none' }}>
+      <div className="grow mono scrollon" tabIndex={0} onKeyDown={onGridKeyDown} style={{ overflow: 'auto', fontSize: 12.5, outline: 'none', minWidth:0 }}>
         <div style={{ minWidth: 'max-content' }}>
           {/* header */}
           <div data-grid-header style={{ display: 'grid', gridTemplateColumns: gridTemplate, position: 'sticky', top: 0, zIndex: 2, background: 'var(--surface-subtle)', borderBottom: '1px solid var(--border-hairline-alt)' }}>
@@ -1404,7 +1400,7 @@ export function DataGrid({ columns: inputColumns, rows, binaryCells, statusTones
                       codex P2-1：按钮只占图标大小（22x22）并居中定位，不再 inset:0/100% 铺满整格，
                       否则悬浮态 pointer-events:auto 会拦截「点行号选行」。剩余区域仍可点行号触发多选。 */}
                   <button className="row-detail-btn" title={t('dbviews.viewRowDetail')}
-                    onClick={e => { e.stopPropagation(); setDetailIdx(ri) }}
+                    onClick={e => { e.stopPropagation(); showRecord(ri) }}
                     style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', width: 22, height: 22, display: 'flex', alignItems: 'center', justifyContent: 'center', border: 'none', borderRadius: 6, padding: 0, background: 'var(--surface-sunken)', cursor: 'pointer' }}>
                     <Icon name="maximize-2" size={13} style={{ color: 'var(--accent-primary)' }} />
                   </button>
@@ -1508,8 +1504,12 @@ export function DataGrid({ columns: inputColumns, rows, binaryCells, statusTones
         </div>
       </div>
 
+      {detailEntry&&<DatabaseRecordInspector number={detailNumber} canPrev={detailIdx!==null&&detailIdx>0} canNext={detailIdx!==null&&detailIdx<pageRows.length-1}
+        onPrev={detailPrev} onNext={detailNext} onClose={()=>setDetailIdx(null)} onInspect={setCellViewer}
+        cells={columns.map((col,ci)=>{const k=cellKey(detailEntry.origIdx,col.name);return {label:col.name,type:col.type,value:edits[k]!==undefined?edits[k]:detailEntry.row[ci],binary:isBinaryCell(detailEntry.origIdx,ci),binaryKnown:binaryMetadataKnown}})}/>}
+      </div>
       {/* status bar / pagination */}
-      <div className="row" style={{ justifyContent: 'space-between', padding: '7px 12px', borderTop: '1px solid var(--border-hairline)', fontSize: 11.5, color: 'var(--text-tertiary)' }}>
+      <div className="row db-grid-status" style={{ justifyContent: 'space-between', padding: '7px 12px', borderTop: '1px solid var(--border-hairline)', fontSize: 11.5, color: 'var(--text-tertiary)' }}>
         <div className="row gap10">
           <span>R{sel.r + 1} · C{sel.c + 1}</span>
           <span className="metadot" />
@@ -1582,44 +1582,6 @@ export function DataGrid({ columns: inputColumns, rows, binaryCells, statusTones
       )}
 
       {cellViewer&&<DatabaseValueInspector cell={cellViewer} onClose={()=>setCellViewer(null)}/> }
-
-      {/* 行明细 — 纵向表单展示该行全部字段；URL 文本渲染为可点击链接；支持当前页内上一条/下一条切换。
-          遮罩用 position:fixed 覆盖整个控制台(含上方 SQL 编辑区)，而非仅遮住 DataGrid 所在的结果区。 */}
-      {detailEntry && (
-        <div onClick={() => setDetailIdx(null)}
-          style={{ position: 'fixed', inset: 0, zIndex: 70, background: 'color-mix(in srgb, var(--cta-bg) 42%, transparent)', backdropFilter: 'blur(3px)', display: 'grid', placeItems: 'center' }}>
-          <div onClick={e => e.stopPropagation()} className="pop-in"
-            style={{ width: 640, maxWidth: '92%', maxHeight: '84%', background: 'var(--surface-card)', borderRadius: 18, border: '1px solid var(--border-hairline)', boxShadow: 'var(--shadow-window)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-            <div className="row" style={{ justifyContent: 'space-between', padding: '16px 20px 12px', borderBottom: '1px solid var(--border-hairline)' }}>
-              <span style={{ fontSize: 15, fontWeight: 700, letterSpacing: '-0.2px' }}>{t('dbviews.rowDetail')}[{detailNumber}]</span>
-              <div className="row gap6">
-                <button className="icon-btn bare" title={t('dbviews.prevRow')} disabled={detailIdx === 0} onClick={detailPrev}><Icon name="chevron-up" size={16} /></button>
-                <button className="icon-btn bare" title={t('dbviews.nextRow')} disabled={detailIdx != null && detailIdx >= pageRows.length - 1} onClick={detailNext}><Icon name="chevron-down" size={16} /></button>
-                <IconBtn name="x" size={16} variant="bare" onClick={() => setDetailIdx(null)} />
-              </div>
-            </div>
-            <div className="col scrollon" style={{ overflow: 'auto', padding: '4px 0 8px' }}>
-              {columns.map((col, ci) => {
-                const k = cellKey(detailEntry.origIdx, col.name)
-                const raw = edits[k] !== undefined ? edits[k] : detailEntry.row[ci]
-                const text = cellText(raw)
-                return (
-                  <div key={col.name} className="row" style={{ alignItems: 'flex-start', gap: 16, padding: '9px 22px', borderBottom: '1px solid var(--border-hairline)' }}>
-                    <span className="mono" style={{ flex: 'none', width: 168, textAlign: 'right', color: 'var(--text-tertiary)', fontSize: 12, paddingTop: 1, wordBreak: 'break-word' }}>{col.name}</span>
-                    <span style={{ flex: 1, minWidth: 0, color: 'var(--text-primary)', fontSize: 12.5, lineHeight: 1.6, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-                      {text === ''
-                        ? <span style={{ color: 'var(--text-faint)' }}>—</span>
-                        : isUrl(text)
-                          ? <a href={text} target="_blank" rel="noreferrer" style={{ color: 'var(--accent-primary)', textDecoration: 'underline', wordBreak: 'break-all' }}>{text}</a>
-                          : text}
-                    </span>
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* 右键上下文菜单：复制 / 删除选中行 / 批量编辑。点击空白处或选项后关闭。 */}
       {ctxMenu && (

@@ -25,12 +25,13 @@ beforeEach(async()=>{
   api.querySessionStatus.mockResolvedValue(info());api.pingQuerySession.mockResolvedValue(undefined)
   api.runQuery.mockResolvedValue({columns:[{name:'n',type:'int'}],rows:[[1]]})
 })
+const transactionAction=(name:string)=>{if(!screen.queryByRole('menuitem',{name}))fireEvent.click(screen.getByRole('button',{name:'Transaction actions'}));return screen.getByRole('menuitem',{name})}
 describe('isolated SQL sessions',()=>{
   it('holds the draft close guard while a transaction action is awaiting its real receipt',async()=>{
     let finish!:(value:QuerySessionInfo)=>void
     api.querySessionTransaction.mockReturnValue(new Promise(resolve=>{finish=resolve}))
-    wrap();await waitFor(()=>expect(screen.getByRole('button',{name:'Begin transaction'})).toBeEnabled())
-    fireEvent.click(screen.getByRole('button',{name:'Begin transaction'}))
+    wrap();await waitFor(()=>expect(transactionAction('Begin transaction')).toBeEnabled())
+    fireEvent.click(transactionAction('Begin transaction'))
     await waitFor(()=>expect(api.querySessionTransaction).toHaveBeenCalledTimes(1))
     expect(hasBusyDatabaseDraftWork({ownerId:'inner'})).toBe(true)
     api.querySessionStatus.mockResolvedValue(info('sql-a','active'))
@@ -39,7 +40,7 @@ describe('isolated SQL sessions',()=>{
   })
   it('binds execution, results and paging to its session ID and closes on unmount',async()=>{
     const view=wrap();await waitFor(()=>expect(api.openQuerySession).toHaveBeenCalledWith('c'))
-    await screen.findByRole('button',{name:'Begin transaction'})
+    await waitFor(()=>expect(transactionAction('Begin transaction')).toBeEnabled())
     fireEvent.click(screen.getByTestId('sql-run'))
     await screen.findByTestId('session-result')
     expect(api.runQuery.mock.calls[0][5]).toEqual(expect.objectContaining({querySessionId:'sql-a'}))
@@ -49,15 +50,15 @@ describe('isolated SQL sessions',()=>{
   })
   it('shows observed transaction state and issues explicit rollback',async()=>{
     api.querySessionTransaction.mockResolvedValueOnce(info('sql-a','active')).mockResolvedValueOnce(info())
-    wrap();await screen.findByRole('button',{name:'Begin transaction'})
+    wrap();await waitFor(()=>expect(transactionAction('Begin transaction')).toBeEnabled())
     api.querySessionStatus.mockResolvedValue(info('sql-a','active'))
-    fireEvent.click(screen.getByRole('button',{name:'Begin transaction'}))
-    await waitFor(()=>expect(screen.getByRole('button',{name:'Commit transaction'})).toBeEnabled())
+    fireEvent.click(transactionAction('Begin transaction'))
+    await waitFor(()=>expect(transactionAction('Commit transaction')).toBeEnabled())
     expect(api.querySessionTransaction).toHaveBeenCalledWith('c','sql-a','begin')
     expect(listQuerySessionWork()[0].info.transactionState).toBe('active')
     api.querySessionStatus.mockResolvedValue(info())
-    fireEvent.click(screen.getByRole('button',{name:'Roll back transaction'}))
-    await waitFor(()=>expect(screen.getByRole('button',{name:'Begin transaction'})).toBeEnabled())
+    fireEvent.click(transactionAction('Roll back transaction'))
+    await waitFor(()=>expect(transactionAction('Begin transaction')).toBeEnabled())
     expect(api.querySessionTransaction).toHaveBeenCalledWith('c','sql-a','rollback')
   })
   it('closes an opening session that arrives after its owner unmounts',async()=>{

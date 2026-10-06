@@ -28,20 +28,28 @@ beforeEach(()=>{localStorage.clear();api.selected='';api.run.mockReset().mockRes
 it('shows the actual target and discoverable action labels, not only icons',()=>{
   mount();expect(screen.getByTestId('sql-query-target')).toHaveTextContent('Reporting')
   expect(screen.getByRole('button',{name:'Run current statement Alt↵'})).toBeInTheDocument()
-  expect(screen.getByRole('button',{name:'Run selection'})).toBeDisabled()
+  expect(screen.queryByRole('button',{name:'Run selection'})).toBeNull()
   expect(screen.getByRole('button',{name:'Analyze'})).toBeInTheDocument()
   expect(screen.getByRole('button',{name:'Format'})).toBeInTheDocument()
 })
 it('runs only the live selected fragment from the explicit selection button',async()=>{
-  mount();fireEvent.click(screen.getByText('Choose fragment'));const action=screen.getByRole('button',{name:'Run selection'});expect(action).toBeEnabled();fireEvent.click(action)
+  mount();fireEvent.click(screen.getByText('Choose fragment'));const action=screen.getByRole('button',{name:'Run selection Alt↵'});expect(action).toBeEnabled();fireEvent.click(action)
   await waitFor(()=>expect(api.split).toHaveBeenCalledWith('c','SELECT 2'));expect(api.run.mock.calls[0][1]).toBe('SELECT 2')
 })
 it('does not fall back to the document after a selection disappears',()=>{
-  mount();fireEvent.click(screen.getByText('Choose fragment'));fireEvent.click(screen.getByText('Clear selection'));const button=screen.getByRole('button',{name:'Run selection'});expect(button).toBeDisabled();fireEvent.click(button);expect(api.split).not.toHaveBeenCalled()
+  mount();fireEvent.click(screen.getByText('Choose fragment'));api.selected='' // Live selection disappeared before its UI notification.
+  fireEvent.click(screen.getByRole('button',{name:'Run selection Alt↵'}));expect(api.split).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByText('Clear selection'));expect(screen.getByRole('button',{name:'Run current statement Alt↵'})).toBeInTheDocument()
 })
 it.each(['mongodb','redis','elasticsearch'])('does not advertise SQL-file execution for the %s native console',engine=>{
   render(<LanguageProvider><DataProvider><SqlConsole fresh connId="native" connName="Native QA" engine={engine}/></DataProvider></LanguageProvider>)
   fireEvent.click(screen.getByRole('button',{name:'More actions'}));expect(screen.queryByRole('menuitem',{name:'Run SQL file'})).toBeNull()
+})
+it('keeps script execution only in Run options, not duplicated in More actions',()=>{
+  mount();fireEvent.click(screen.getByRole('button',{name:'More actions'}));expect(screen.queryByRole('menuitem',{name:'Run entire script'})).toBeNull()
+  fireEvent.keyDown(screen.getByRole('menu'),{key:'Escape'})
+  fireEvent.click(screen.getByRole('button',{name:'Run options'}));expect(screen.getByRole('menuitem',{name:'Run entire script'})).toBeInTheDocument()
+  expect(screen.getAllByRole('menuitem')).toHaveLength(1)
 })
 it('groups file and clear actions in a keyboard dismissible menu',()=>{
   mount();fireEvent.click(screen.getByRole('button',{name:'More actions'}));expect(screen.getByRole('menu')).toBeInTheDocument();expect(screen.getByRole('menuitem',{name:'Run SQL file'})).toBeInTheDocument();fireEvent.keyDown(screen.getByRole('menu'),{key:'Escape'});expect(screen.queryByRole('menu')).not.toBeInTheDocument()
@@ -52,4 +60,4 @@ it('requires confirmation before clearing a nonempty editor',()=>{
   fireEvent.click(screen.getByRole('button',{name:'More actions'}));fireEvent.click(screen.getByRole('menuitem',{name:'Clear editor'}));fireEvent.click(screen.getByRole('button',{name:'Clear editor'}));expect(screen.getByTestId('editor-text')).toHaveTextContent('')
 })
 
-it('runs the caret statement by default and the whole script only from its explicit action',async()=>{mount();fireEvent.click(screen.getByTestId('sql-run'));await waitFor(()=>expect(api.split).toHaveBeenCalledWith('c','SELECT 1;'));await waitFor(()=>expect(screen.getByTestId('sql-run')).toBeEnabled());fireEvent.click(screen.getByRole('button',{name:'More actions'}));fireEvent.click(screen.getByRole('menuitem',{name:'Run entire script'}));await waitFor(()=>expect(api.split).toHaveBeenLastCalledWith('c','SELECT 1; SELECT 2;'))})
+it('runs the caret statement by default and the whole script only from its explicit action',async()=>{mount();fireEvent.click(screen.getByTestId('sql-run'));await waitFor(()=>expect(api.split).toHaveBeenCalledWith('c','SELECT 1;'));await waitFor(()=>expect(screen.getByTestId('sql-run')).toBeEnabled());fireEvent.click(screen.getByRole('button',{name:'Run options'}));fireEvent.click(screen.getByRole('menuitem',{name:'Run entire script'}));await waitFor(()=>expect(api.split).toHaveBeenLastCalledWith('c','SELECT 1; SELECT 2;'))})

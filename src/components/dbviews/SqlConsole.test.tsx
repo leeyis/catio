@@ -88,7 +88,8 @@ describe('SqlConsole 分屏与最大化', () => {
     fireEvent.click(screen.getByTitle('Maximize editor'))
     // maxEditor 态:结果区(及其最大化按钮)隐藏,编辑区按钮变为"恢复"。
     expect(screen.getByTitle('Restore size')).toBeInTheDocument()
-    expect(screen.queryByTitle('Maximize results')).toBeNull()
+    // Keep the result subtree mounted so pagination/selection/record details survive.
+    expect(screen.getByTitle('Maximize results')).not.toBeVisible()
     expect(screen.queryByTitle('Maximize editor')).toBeNull()
     // split 专属的分隔条在最大化态下消失。
     expect(screen.queryByRole('separator')).toBeNull()

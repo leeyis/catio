@@ -17,6 +17,7 @@ import { useMetadataTree } from './useMetadataTree'
 import { ComparePane } from './ComparePane'
 import { TablePane } from './TablePane'
 import { ObjectPane } from './ObjectPane'
+import './databaseWorkspace.css'
 import { DatabaseCommandPalette,type DatabaseCommand } from './DatabaseCommandPalette'
 import { useData } from '../../state/DataContext'
 import { listActiveDbConnections, useActiveDbConnections } from '../../state/dbConnections'
@@ -371,10 +372,10 @@ export function DbWorkbench({ conn, density, active: shown = true, workspaceTabI
     ]),
   ]
   return (
-    <DatabaseWorkProvider owner={{ownerId:workbenchId+':tasks',workbenchId,profileId:conn.id}}><div onKeyDown={event=>{if(shown&&!event.defaultPrevented&&!event.nativeEvent.isComposing&&event.nativeEvent.keyCode!==229&&(event.ctrlKey||event.metaKey)&&event.shiftKey&&event.key.toLowerCase()==='p'){event.preventDefault();event.stopPropagation();setCommandsOpen(true)}}} style={{ display: 'flex', alignItems: 'stretch', height: '100%', width: '100%', flex: 1, minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
+    <DatabaseWorkProvider owner={{ownerId:workbenchId+':tasks',workbenchId,profileId:conn.id}}><div className="db-workbench" onKeyDown={event=>{if(shown&&!event.defaultPrevented&&!event.nativeEvent.isComposing&&event.nativeEvent.keyCode!==229&&(event.ctrlKey||event.metaKey)&&event.shiftKey&&event.key.toLowerCase()==='p'){event.preventDefault();event.stopPropagation();setCommandsOpen(true)}}} style={{ display: 'flex', alignItems: 'stretch', height: '100%', width: '100%', flex: 1, minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
       <SchemaBrowser width={sidebarWidth} visible={shown} onPick={pickTable} onPickObject={pickObject} onPin={(schema,name)=>pickTable(schema,name,true)} onPinObject={(schema,name,kind)=>pickObject(schema,name,kind,true)}
         active={activeTab?.kind === 'table' ? { schema: activeTab.schema, table: activeTab.table } : null}
-        onNewQuery={(schema) => newQuery(undefined, schema ?? namespace?.name)} onOpenER={openER} onOpenCompare={connId ? openCompare : undefined} onNewObjectTemplate={onNewObjectTemplate} onRefresh={refreshSchema}
+        onNewQuery={(schema) => newQuery(undefined, schema ?? namespace?.name)} onOpenER={openER} onOpenCompare={connId ? openCompare : undefined} onOpenCommands={()=>setCommandsOpen(true)} onNewObjectTemplate={onNewObjectTemplate} onRefresh={refreshSchema}
         onObjectAdmin={connId ? (op, objectType, schema, name) => setAdminObj({ op, objectType, schema, name }) : undefined}
         onTransferData={connId ? (schema, table) => setTransferSource({ schema, table }) : undefined}
         onExportDatabase={connId && supportsDdlExport(conn.engine) ? (schema) => setExportSchema(schema) : undefined}
@@ -387,13 +388,12 @@ export function DbWorkbench({ conn, density, active: shown = true, workspaceTabI
         schemas={connId ? namespaces : undefined} connId={connId??undefined} onLoadNamespace={metadata.loadNamespace} conn={connId ? conn : undefined} live={!!connId} loading={schemaLoading} />
       {!effectiveCollapsed&&<div role="separator" aria-orientation="vertical" aria-label={t('dbviews.resizeColumnHint')} tabIndex={0} onKeyDown={event=>{if(['ArrowLeft','ArrowRight'].includes(event.key)){event.preventDefault();setSidebarWidth(width=>Math.max(176,Math.min(360,width+(event.key==='ArrowLeft'?-12:12))))}}} onPointerDown={event=>{event.preventDefault();sidebarDrag.current={x:event.clientX,width:sidebarWidth};event.currentTarget.setPointerCapture(event.pointerId)}} onPointerMove={event=>{const drag=sidebarDrag.current;if(drag)setSidebarWidth(Math.max(176,Math.min(360,drag.width+event.clientX-drag.x)))}} onPointerUp={event=>{sidebarDrag.current=null;event.currentTarget.releasePointerCapture(event.pointerId)}} onLostPointerCapture={()=>{sidebarDrag.current=null}} style={{width:5,flex:'none',cursor:'col-resize',background:'var(--surface-subtle)'}}/>}
       <div className="col grow" style={{ minWidth: 0, minHeight: 0, overflow: 'hidden', position: 'relative' }}>
-        <div className="row gap6" style={{padding:'5px 10px',flex:'none',borderBottom:'1px solid var(--border-hairline)',minWidth:0}}><span className="mono ell" style={{fontSize:11,color:'var(--text-tertiary)'}}>{conn.name}</span><button className="btn btn-ghost sm" title="Ctrl/⌘ Shift P" style={{marginLeft:'auto'}} onClick={()=>setCommandsOpen(true)}><Icon name="search" size={13}/>{t('dbviews.commands')}</button></div>
         {commandsOpen&&shown&&<DatabaseCommandPalette commands={commands} onClose={()=>setCommandsOpen(false)}/>}
         {/* 统一 tab strip:表 / 对象 / 查询 / ER 平级,身份复用,全部保持 mounted。 */}
         {tabs.length > 0 && (
-          <div className="row" style={{ gap: 4, padding: '6px 8px', borderBottom: '1px solid var(--border-hairline)', flex: 'none', width: '100%', minWidth: 0, alignItems: 'center' }}>
+          <div className="db-document-tabs">
             <button className="icon-btn bare" style={{ width: 24, height: 24, flex: 'none' }} title={t('workbench.scrollLeft')} onClick={() => scrollTabs(-160)}><Icon name="chevron-left" size={14} /></button>
-            <div ref={tabStripRef} className="row" style={{ gap: 6, flex: 1, minWidth: 0, overflowX: 'auto' }}>
+            <div ref={tabStripRef} role="tablist" aria-label={t('dbviews.workspace.title')} className="row" style={{ gap: 0, flex: 1, minWidth: 0, overflowX: 'auto' }}>
               {tabs.map(tb => {
                 const isActive = tb.id === activeId
                 const sessionState=sessionWork.find(item=>item.ownerId===workbenchId+':'+tb.id)?.info.transactionState
@@ -408,11 +408,10 @@ export function DbWorkbench({ conn, density, active: shown = true, workspaceTabI
                   : tb.kind === 'compare' ? t('compare.title')
                   : tb.name
                 return (
-                  <div key={tb.id} data-testid={`wbtab-${tb.id}`} onClick={() => setActiveId(tb.id)}
+                  <div key={tb.id} role="tab" aria-selected={isActive} tabIndex={isActive?0:-1} data-active={isActive} data-testid={`wbtab-${tb.id}`} onClick={() => setActiveId(tb.id)}
+                    onKeyDown={event=>{if(event.target!==event.currentTarget)return;if(['Enter',' '].includes(event.key)){event.preventDefault();setActiveId(tb.id)}else if(['ArrowLeft','ArrowRight','Home','End'].includes(event.key)){event.preventDefault();const index=tabs.findIndex(t=>t.id===tb.id);const next=event.key==='Home'?0:event.key==='End'?tabs.length-1:(index+(event.key==='ArrowLeft'?-1:1)+tabs.length)%tabs.length;setActiveId(tabs[next].id);tabStripRef.current?.querySelectorAll<HTMLElement>('[role="tab"]')[next]?.focus()}}}
                     onDoubleClick={()=>pinTab(tb.id)} onContextMenu={e => { e.preventDefault(); setTabMenu({ tabId: tb.id, x: e.clientX, y: e.clientY }) }}
-                    className="row gap6" title={label}
-                    style={{ flex: 'none', alignItems: 'center', height: 26, padding: '0 6px 0 10px', borderRadius: 8, cursor: 'pointer', fontSize: 12,
-                      background: isActive ? 'var(--accent-soft)' : 'var(--surface-sunken)', color: isActive ? 'var(--accent-primary)' : 'var(--text-secondary)' }}>
+                    className="db-document-tab" title={label}>
                     <Icon name={icon} size={12} /> {sessionState && sessionState!=='idle' && <span className="dot" title={t(`dbviews.txState.${sessionState}`)} style={{background:sessionState==='failed'?'var(--danger-fg)':'var(--signal-amber)'}}/>} <span className="ell mono" style={{ maxWidth: 140,fontStyle:tb.preview?'italic':undefined }}>{label}</span>
                     {tb.preview&&<button className="icon-btn bare" data-testid={'wbtab-pin-'+tb.id} title={t('dbviews.pinTab')} onClick={event=>{event.stopPropagation();pinTab(tb.id)}}><Icon name="pin" size={12}/></button>}
                     {drafts.some(item=>item.ownerId===workbenchId+':'+tb.id&&item.dirty)&&<span className="dot" title={t('dbviews.unsavedEdits')} style={{background:'var(--signal-amber)'}}/>}
@@ -482,10 +481,12 @@ export function DbWorkbench({ conn, density, active: shown = true, workspaceTabI
             </div>
           ))}
           {tabs.length === 0 && (
-            <div className="col" style={{ height: '100%', alignItems: 'center', justifyContent: 'center', gap: 8, color: 'var(--text-faint)' }}>
-              <Icon name="table-2" size={28} />
-              <span style={{ fontSize: 13, fontWeight: 600 }}>{t('workbench.noTabs')}</span>
-              <span style={{ fontSize: 11.5 }}>{t('workbench.noTabsHint')}</span>
+            <div className="db-welcome">
+              <div className="db-welcome-mark"><Icon name="database" size={26}/></div>
+              <span className="mono" style={{fontSize:11}}>{conn.name} · {conn.engineId??conn.engine}</span>
+              <h2>{t('dbviews.workspace.welcome')}</h2>
+              <p>{t(['mongodb','redis','elasticsearch'].includes(conn.engine??'')?'workbench.noTabsHint':'dbviews.workspace.welcomeHint')}</p>
+              <span className="db-welcome-shortcut"><kbd>Ctrl / ⌘ Shift P</kbd>{t('dbviews.commands')}</span>
             </div>
           )}
         </div>

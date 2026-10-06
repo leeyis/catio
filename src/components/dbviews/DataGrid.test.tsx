@@ -263,6 +263,17 @@ describe('DataGrid generic rows', () => {
     expect(screen.queryByRole('link')).toBeNull()
   })
 
+  it('keeps a docked record inspector and the selected grid row in sync', () => {
+    wrap(<DataGrid columns={[{name:'id',type:'int'},{name:'note',type:'text'}]} rows={[[1,'first-marker'],[2,'second-marker']]} connId="c1" writable={false}/>)
+    fireEvent.click(screen.getByTestId('db-record-toggle'))
+    expect(screen.getByText('Row detail[1]')).toBeInTheDocument()
+    fireEvent.click(screen.getByTitle('Next'))
+    expect(screen.getByText('R2 · C1')).toBeInTheDocument()
+    fireEvent.click(screen.getAllByText('first-marker')[0])
+    expect(screen.getByText('Row detail[1]')).toBeInTheDocument()
+    expect(within(screen.getByRole('complementary',{name:'Row detail'})).getByText('first-marker')).toBeInTheDocument()
+  })
+
   it('right-click on a cell opens a context menu with Copy and (when editable) Bulk edit', () => {
     const columns: ResultColumn[] = [
       { name: 'id', type: 'int', pk: true },
