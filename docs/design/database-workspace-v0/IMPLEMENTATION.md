@@ -98,9 +98,29 @@
 - `b-complete-build` / `b-complete-full` 的构建、TypeScript 与 165 files / 1450 tests 全通过；加强 fixture 就绪和 2/3 个源仍注册的断言后，**`b-final-verification-full.exit=0`，最终仍为 165 files / 1450 tests，tsc 无错误**。`add8ea8` 已提交补全门禁修复。保留既有 act / chunk-size 警告，不将 desktop 窗口存在当成全部桌面交互已验收。
 - 最终现场确认开发版 PID 57024 与安装版 PID 18216 均仍存在并有窗口。用户 capabilities.json 哈希未变，所有提交审计通过。
 
+## 第五批：诊断、方言与元数据身份一致
+
+- `5405213` 统一补全 / JOIN / 诊断的标识符匹配，修复 PostgreSQL 未引用名称被同形大小写对象抢占；Oracle 双引号改为标识符并保留 q-literal，SQL Server `#` / `##` 临时对象不再让当前语句边界误判。相关新增场景先 5 red；此处是编辑器方言测试，不是新一轮 Oracle / SQL Server 实例验收。
+- `619c193` 用编辑器实际方言的增量 CST 替换诊断中的独立旧扫描器；字符串、引用名、美元 / q 引用、转义与块注释不再用通用正则猜测。错误范围保留 UTF-16 偏移及行列，提示以 code 国际化，输入抑制不再依赖中文 message。
+- 表引用保留 namespace 与 loaded / unloaded / error / truncated 状态；完整空目录可以检查，未加载 / 出错 / 不完整目录不推断缺失，也不退回 demo。警告说明“目录未收录不证明不存在”，不把临时或会话对象误称为数据库错误。
+- CTE 按语句 / 查询块隔离，覆盖显式列、引用名、递归与各方言前向可见性；SQL Server / Oracle 隐式递归、SQLite 可省略 RECURSIVE、Oracle / MySQL / H2 DUAL 分别处理。表函数与 EXTRACT / SUBSTRING 中的 FROM 不冒充表来源。DDL / 会话变更脚本的对象检查保守跳过，仍不是完整 SQL 校验器。
+- 文档 200k 字符、解析 20 ms、遍历 8k 节点、目录 20k 名称、查询块 12 层及语义提示数量均有界；预算耗尽 / CST 未就绪给出未检查提示，不把无结果伪装成校验成功。连接、namespace、元数据和语言变化重新 lint，真实 EditorView 测试确认文档 / 选区 / undo 未丢失。
+- 新诊断场景初始 42 red / 1 pass；方言递归规则再补 5 red 后通过。定向 185 项通过后补充最终规则，`c-diagnostics-final-build.exit=0`、`c-diagnostics-final-full.exit=0`：**169 files / 1509 tests，TypeScript / build 通过**。既有 act / chunk-size 提示保留。
+- 真实 Web + SQLite（loopback 18878，独立 C-Diagnostics-QA 内存库）：带引用名和显式列的 CTE 执行返回 `)`；两条语句中仅第二条越界引用 r 被标记。切英文与 Grove 后同一 SQL 的提示更新，文本未改变；DOM / computed-style 检查无横溢出，提示位于 viewport 内。截图与证据 `c-diagnostics-browser.json` 是浏览器检查点，后续递归 / DUAL 规则另有单元回归，不冒称商业引擎实测或像素 diff。
+
+## 第六批：相关子查询与横向关联补全
+
+- `6bbad50` 按查询块传递真正可见的外层绑定；最近同名别名遮蔽外层，普通派生表屏蔽同层来源，LATERAL / APPLY 仅能看到之前的来源，不能借用自己 / 后续 JOIN / 其他 UNION 分支或先前语句。DuckDB 隐式 lateral 单独处理，不把它套到 PostgreSQL。
+- FROM 表函数不再套用同名物理表的列；显式列名及部分列重命名按位置保留，SQL Server table hints 不冒充函数 / 列名。函数参数（含内部子查询）只继承允许的输入来源。未解析出的厂商返回类型不猜测。
+- 外层可见字段支持限定星号投影；无 FROM 的 `*` 不会扩展成外层所有列。前向 / 递归 CTE 先占据名称，未知列保持未知，不降级到同名物理表；完整前向投影推导仍未交付。
+- namespace 限定补全直接导航已加载元数据，避免重走全语句 alias 扫描而绕过边界；接受候选统一使用安全标识符引用。旧原始 namespace fixture 因此由 `app.orders` 变成 `app."orders"`，Tab 接受语义保留，并有实际 popup / Tab 回归。
+- 新增 44 项作用域用例：首轮 16 red / 15 pass；审查追加 namespace 同名 alias、点后对象、DuckDB 隐式 lateral、函数参数与前向 CTE 遮蔽用例并逐项修复。`c-scope-final-build.exit=0`、`c-scope-final-full.exit=0`，最终 **170 files / 1554 tests，全绿**；包含现有非数据库前端回归。本批未改 Rust / Java，不复用历史矩阵冒充新后端测试，也不无理由重建 JAR。
+- 最终构建 `index-DpVKxuwL.js` 在真实可见 Web 中验收：SQLite 相关 EXISTS 内只给出 `derived_id`，Tab 接受后执行返回 77；DuckDB 未写 LATERAL 的派生表内只给出 `duck_value`，Tab 接受后执行返回 88。两个场景仅用常量 CTE，不修改数据表；记录 `c-scope-browser.json`。SQL Server APPLY / Oracle 仍区分为编辑器测试证据。
+- QA 主题 / 语言已恢复 Dawn / 中文，两份 QA SQL 文本保留；安装版 18216、开发版 57024、原 QA 41428 和文件 QA 54968 均现场确认仍在。浏览器的结果文本 / 单元格等待曾超时，后续读取真实结果确认成功，没有盲目重放；侧栏选择有少量明确记录的 DOM 事件辅助，不冒充全部人工键鼠或完整 desktop 验收。
+
 ## 后续仍需实施 / 补齐验收
 
-1. 当前语句 / 选区 / 全脚本、上下文菜单、搜索和显式结构速览已实现本批路径；继续补方言/过程批次/大脚本预算与全部桌面键盘门禁，不把有界推断称为完整 SQL 编译器。
+1. 当前语句 / 选区 / 全脚本、上下文菜单、搜索、结构速览、有界作用域诊断与基本相关 / lateral 补全已实现上述路径；继续补完整列级 / 语义诊断、裸列上下文、复杂表函数和前向 CTE 列推导、server version / SQL_MODE / 扩展 / 重载、过程批次 / 大脚本及全部桌面键盘门禁，不把有界推断称为完整 SQL 编译器。
 2. 临时预览 / 固定、草稿保护和字段树已实现本批路径；继续补所有结构类型层级、任务持久化、各入口及逐主题/desktop 完整验收。
 3. 已有结果 / 计划的源 SQL 定位；更多引擎、字段血缘与真实优化依据仍待实施。
 4. SQL 文件已有有界读取、严格解码、预检暂存、真实驱动取消及有界 Web 上传；仍需持久化任务 / 断网与进程重启后的回执恢复、大于 8 MiB 的 Web 分块上传、其他编码 / 方言、逐驱动取消验收，以及全范围导出 / 迁移 / 一致性。取消是否能打断正在运行的语句仍取决于驱动；不支持时只能等待当前语句真实返回。
