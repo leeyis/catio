@@ -142,10 +142,23 @@
 - 证据 `d-unified-browser.json`、`d-unified-review.png`、`d-unified-grove-record.png`、`d-unified-amber-plan.png` 均在忽略日志目录。最终截图用 fullPage CDP；部分导航用了明确记录的 DOM 事件辅助，且旧 native capture 曾滞后。属于真实 Web / SQLite 检查，不是完整 Tauri GUI、全部引擎或三主题所有交互组合验收。
 - 本批未改 Rust / Java / 打包配置，未运行或冒称新后端矩阵；没有部署、推送或替换安装版。安装版 / 开发版 / 两个 QA 服务仍在，用户 capabilities.json 原 SHA-256 未变且未提交。
 
+## 第九批：表对象工作区与结构刷新
+
+- `5b62e18` 对照固定 DBX `TableStructureEditor.vue` / `DataGridTableInfoPanels.vue`：将“数据 / 结构 → 列 / 索引 / …”两层导航合为数据、列、索引、外键、触发器、DDL 一排对象页签，支持方向键 / Home / End 与 tabpanel 关联。数据网格与已访问结构视图保留挂载；不同 connId / namespace / table / engine 的元数据、表单和确认不串用。
+- 元数据按名称、类型、注释、关联对象等本地筛选，各视图保留独立筛选词和原始序号；显示匹配条目 / 已返回条目。加载、请求错误、空集合、不匹配各有状态；刷新结构不会退到 mock 或复制旧 DDL。添加列只在列视图出现，按钮沿用 28px / 4px 与现有主题 token。非 SQL 对象不展示 SQL 元数据能力。
+- DDL 仍由现有元数据重建，新增明确来源说明：并非数据库原始 DDL，不保证完整约束、生成列、索引与引擎属性，不能当作备份 / 迁移脚本。没有把该提示包装成完整结构导出已实现。复制等待真实 clipboard 回执，失败不显示已复制。
+- 索引 / 外键 / 触发器确认和请求加入结构 dirty / busy 登记；同步锁防重复确认。多语句 DDL 按真实成功回执计数，失败后禁用整批重放，要求核对状态并刷新结构，不宣称事务回滚。预览或操作进行中不允许刷新覆盖上下文。
+- 实际 SQLite ADD COLUMN 后发现 DataGrid 刷新只更新行而沿用旧表头，属于产品缺陷，不是等待时序。新增 red 后修正：服务端列与行、binaryCells 同步更新；表页分页 / 刷新并行读取最新键与注释元数据，失败时保留可读数据但禁止已有行编辑；不使用已移除主键。新父结果不保留旧页表头，移除已经失效的列筛选与排序，仍保留已有草稿的刷新门禁。
+- 初始结构测试 10 项失败中，9 项对应交互 / 状态缺口，另 1 项使用了错误英文表单文案，纠正后验证多句失败门禁；对象页签 3 red / 4 pass；网格表头刷新 1 red / 36 skip。中间 build 因测试传入不支持的 ByRoleOptions.exact 失败，修测试类型；最后 `e-final-build.exit=0`、`e-final-full.exit=0`：**176 files / 1648 tests，TypeScript / build 通过**。此前 1644 计数不覆盖后续网格修复；既有 act / chunk-size 提示保留。
+- 真实 Web / SQLite：D-DBX-UI-QA 中已有 d_ui_orders 只读检查，amount 筛选为 1/6 且保持第 4 列序号；外键读取 main.d_ui_customers.id；断网刷新显示 Failed to fetch、隐藏旧 DDL 并禁复制，恢复网络后手动刷新成功。未将请求失败误判成空结构或重放写入。
+- 仅在同一本地隔离库创建 e_structure_probe（初始化一次）：2 行长数字 / 十进制 TEXT；实际走预览 / 确认添加 qa_note，再按名称确认删除 e_structure_probe_amount 索引，重读为 0/0。最终新构建 `index-hB9Q_Z0u.js` 另加不同的 qa_after_refresh 字段验证修复：网格刷新前 3 列、刷新后 4 列，主键重新加载、原两行 `900719925474099312345` / `1.2300` 与新字段 NULL 保持正确；不是重复执行旧建表脚本。
+- 最终前台原生键盘验证 End → DDL、Home → 数据、ArrowRight → 列；1440×1000 / 1100×800 无 body 横溢出，窄屏结构表在自己的滚动区滚动，工具按钮 28px / 图标 14px。本增量实际检查 Dawn / Amber / Grove 的独立界面检查点，最终读回确认恢复 Dawn / 中文；不代表三主题所有交互组合均已验收。
+- 证据在忽略目录：`e-object-browser.json`、`e-object-workspace-dawn-final.png`、`e-structure-amber-1100.png`、`e-structure-grove.png`、`e-grid-refreshed.png`。部分导航用 DOM 事件辅助；多语句网络不确定写 / 在途关闭保护为确定性组件测试，不冒称真实破坏性网络写验证。未改 Rust / Java / 安装包，未部署、推送或改动用户 capabilities.json。
+
 ## 后续仍需实施 / 补齐验收
 
 1. 当前语句 / 选区 / 全脚本、上下文菜单、搜索、结构速览、有界作用域诊断与基本相关 / lateral 补全已实现上述路径；继续补完整列级 / 语义诊断、DML 列列表与批量星号插入、复杂表函数和前向 CTE 列推导、server version / SQL_MODE / 扩展 / 重载、过程批次 / 大脚本及全部桌面键盘门禁，不把有界推断称为完整 SQL 编译器。
-2. 临时预览 / 固定、草稿保护、字段树、统一去重动作栏、双向分栏、执行记录和记录侧栏已有上述实现与检查点；继续按 ACTION-MAP 统一表结构 / 导入导出向导 / 原生工作区等界面，补所有结构类型层级、任务持久化及逐主题 / desktop 完整验收。
+2. 临时预览 / 固定、草稿保护、字段树、去重动作栏、双向分栏、执行记录、记录侧栏及表对象单层导航 / 结构筛选 / 刷新已有上述检查点；继续统一导入导出向导 / 原生工作区。原始 DDL 保真读取、约束 / 分区 / 生成列等完整元数据、更多方言结构编辑及 SQLite 安全重建仍缺，不能以本批浏览器 ADD COLUMN / DROP INDEX 样例代替。任务持久化、跨组件元数据失效串联及逐主题 / desktop 完整验收继续保留。
 3. 已有结果 / 计划的源 SQL 定位与独立输出视图；更多引擎、字段血缘与真实优化依据仍待实施。SQLite `stmt.execute` 对 DDL / 会话命令继承旧 changes 的原生计数问题也需独立修复和回归，本批只修正 UI 的计数展示边界。
 4. SQL 文件已有有界读取、严格解码、预检暂存、真实驱动取消及有界 Web 上传；仍需持久化任务 / 断网与进程重启后的回执恢复、大于 8 MiB 的 Web 分块上传、其他编码 / 方言、逐驱动取消验收，以及全范围导出 / 迁移 / 一致性。取消是否能打断正在运行的语句仍取决于驱动；不支持时只能等待当前语句真实返回。
 5. Mongo / Redis / ES / DuckDB 原生工作区与完整 AI 工具预览审批维护闭环。文件型连接的新建和手动重连入口已改善，但不是 Parquet/CSV/JSON 文件工作流或所有原生数据库工作区已完成。
