@@ -1,299 +1,179 @@
-import { useReportDatabaseWork } from '../../state/databaseDraftWork'
-import { useEffect, useMemo, useState, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { useReportDatabaseWork } from '../../state/databaseDraftWork'
+import { useActiveDbConnections } from '../../state/dbConnections'
 import { Icon } from '../Icon'
-import { Btn, IconBtn } from '../atoms'
-import {
-  importPreview, importTable, importPreviewBytes, importTableBytes, tableStructure, dbErrMsg,
-  type ImportPreview, type ImportColumnMapping, type BrowserImportFile,
-} from '../../services/db'
+import { Btn } from '../atoms'
+import { importPreview, importTable, importPreviewBytes, importTableBytes, tableStructure, dbErrMsg,
+  type ImportPreview, type BrowserImportFile, type ImportSummary } from '../../services/db'
 import { isServer } from '../../services/transport'
-import { autoMapImportColumns, IMPORT_SKIP_TARGET, engineSupportsImportTransaction } from './tableImport'
+import { autoMapImportColumns, engineSupportsImportTransaction } from './tableImport'
+import { DatabaseFileFlow } from './DatabaseFileFlow'
 
 export interface TableImportDialogProps {
   connId: string
-  /** schema 限定（无 schema 概念的引擎传 undefined/空串）。 */
   schema?: string
-  /** 目标表名。 */
   table: string
-  /** 连接引擎串：用于判断 truncate 模式是否有事务回滚保护。 */
   engine?: string
   transactions?: boolean
   onClose: () => void
-  /** 导入成功后回调（父组件刷新数据网格）。 */
   onImported?: (rowsImported: number) => void
 }
 
-/**
- * 表数据导入对话框：选文件 → 预览 → 列映射 → 选模式 → 导入。
- * 解析 / 列映射 / INSERT 生成均在后端纯函数（table_import.rs，已单测），自动映射在
- * tableImport.ts（已单测），这里只负责对话框编排与状态。
- */
-export function TableImportDialog({ connId, schema, table, engine, transactions, onClose, onImported }: TableImportDialogProps) {
+export function TableImportDialog(props: TableImportDialogProps) {
+  // Target changes invalidate the entire review, file preparation and late callbacks.
+  return <TableImportFlow key={JSON.stringify([props.connId, props.schema ?? '', props.table, props.engine])} {...props}/>
+}
+function TableImportFlow({ connId, schema, table, engine, transactions, onClose, onImported }: TableImportDialogProps) {
   const { t } = useTranslation()
-  // 不支持事务的引擎在 truncate 模式无回滚保护，额外提示用户。
+  const active = useActiveDbConnections()
+  const connectionName = active.find(c => c.connId === connId)?.name ?? connId
+  const target = `${connectionName} · ${schema ? `${schema}.` : ''}${table}`
   const noRollback = !(transactions ?? engineSupportsImportTransaction(engine))
-
+  const [step, setStep] = useState(0)
   const [filePath, setFilePath] = useState<string | null>(null)
   const [preview, setPreview] = useState<ImportPreview | null>(null)
-  const binaryCells = useMemo(() => new Set((preview?.binaryCells ?? []).map(([r,c]) => `${r}:${c}`)), [preview])
   const [webFile, setWebFile] = useState<BrowserImportFile | null>(null)
   const fileInput = useRef<HTMLInputElement>(null)
+  const [targetColumns, setTargetColumns] = useState<{name:string;type:string}[]>([])
+  const [metadata, setMetadata] = useState<'loading'|'ready'|'error'>('loading')
+  const [metadataError, setMetadataError] = useState(''), [reload, setReload] = useState(0)
+  const [mapping, setMapping] = useState<Record<string,string>>({})
+  const [mode, setMode] = useState<'append'|'truncate'>('append')
   const [confirmation, setConfirmation] = useState('')
-  const [targetColumns, setTargetColumns] = useState<string[]>([])
-  // source column → target column ('' = 跳过)
-  const [mapping, setMapping] = useState<Record<string, string>>({})
-  // 用户是否手动改过映射。未改过则在 preview / 目标列变化时持续重算自动映射
-  // （避免目标列异步晚到导致映射停留在「全跳过」）。
-  const [userEdited, setUserEdited] = useState(false)
-  const [mode, setMode] = useState<'append' | 'truncate'>('append')
-  const [busy, setBusy] = useState(false)
+  const [busy, setBusy] = useState(false), lock = useRef(false), generation = useRef(0)
   const [err, setErr] = useState<string | null>(null)
-  const [summary, setSummary] = useState<number | null>(null)
-  useReportDatabaseWork('import',!!preview,busy)
-
-  // 加载目标表的列名（用于映射下拉）。失败不阻断——用户仍可手动填写目标列。
+  const [summary, setSummary] = useState<ImportSummary | null>(null)
+  const [refreshError, setRefreshError] = useState<string | null>(null)
+  useEffect(() => () => { generation.current++ }, [])
+  useReportDatabaseWork('import', !!preview && step !== 3, busy)
   useEffect(() => {
     let alive = true
-    tableStructure(connId, schema ?? '', table)
-      .then(st => { if (alive) setTargetColumns(st.columns.map(c => c.name)) })
-      .catch(() => { /* best-effort */ })
+    setMetadata('loading'); setMetadataError(''); setTargetColumns([])
+    tableStructure(connId, schema ?? '', table).then(st => {
+      if (alive) { setTargetColumns(st.columns); setMetadata('ready') }
+    }).catch(e => { if (alive) { setMetadata('error'); setMetadataError(dbErrMsg(e)) } })
     return () => { alive = false }
-  }, [connId, schema, table])
+  }, [connId, schema, table, reload])
+  useEffect(() => {
+    if (preview) setMapping(autoMapImportColumns(preview.columns, targetColumns.map(c => c.name)))
+  }, [preview, targetColumns])
+  const binaryCells = useMemo(() => new Set((preview?.binaryCells ?? []).map(([r,c]) => `${r}:${c}`)), [preview])
+  const pairs = (preview?.columns ?? []).map(sourceColumn => ({sourceColumn, targetColumn: mapping[sourceColumn] ?? ''})).filter(m => m.targetColumn.trim() !== '')
+  const sourceUnique = !preview || new Set(preview.columns).size === preview.columns.length
+  const mappingProblem = !sourceUnique ? t('dbflow.duplicateSource')
+    : new Set(pairs.map(p => p.targetColumn)).size !== pairs.length ? t('dbflow.duplicateTarget')
+    : pairs.some(p => !targetColumns.some(c => c.name === p.targetColumn)) ? t('dbflow.unknownTarget')
+    : pairs.length === 0 ? t('dbflow.noMapping') : null
+  const sourceReady = !!preview && metadata === 'ready' && targetColumns.length > 0 && sourceUnique
+  const mappingReady = sourceReady && !mappingProblem && (mode !== 'truncate' || !noRollback)
+  const canRun = mappingReady && (mode !== 'truncate' || confirmation === table)
 
-  async function pickFile() {
-    if (isServer()) { fileInput.current?.click(); return }
-    setErr(null); setWebFile(null); setPreview(null); setFilePath(null); setConfirmation('')
+  function close() { if (!lock.current) onClose() }
+  async function prepare(read: () => Promise<{path:string;web?:BrowserImportFile;preview:ImportPreview} | null>) {
+    if (lock.current || step !== 0) return
+    lock.current = true; setBusy(true); setErr(null)
+    const token = ++generation.current
     try {
-      const { open } = await import('@tauri-apps/plugin-dialog')
-      const picked = await open({
-        multiple: false,
-        filters: [{ name: t('dbviews.importFileFilter'), extensions: ['csv', 'tsv', 'json', 'xlsx', 'xlsm', 'xls'] }],
-      })
-      const path = Array.isArray(picked) ? picked[0] : picked
-      if (!path) return
-      setFilePath(path)
-      setSummary(null)
-      setUserEdited(false)
-      setBusy(true)
-      const pv = await importPreview(path)
-      setPreview(pv)
-      // 初始映射：按列名启发式自动匹配目标列（目标列若晚到，由下方 effect 重算）。
-      setMapping(autoMapImportColumns(pv.columns, targetColumns))
-    } catch (e) {
-      setErr(dbErrMsg(e))
+      const source = await read()
+      if (token !== generation.current || !source) return
+      setFilePath(source.path); setWebFile(source.web ?? null); setPreview(source.preview)
+      setConfirmation(''); setSummary(null)
+    } catch (error) {
+      if (token === generation.current) { setPreview(null); setFilePath(null); setWebFile(null); setErr(dbErrMsg(error)) }
     } finally {
-      setBusy(false)
+      if (token === generation.current) { lock.current = false; setBusy(false) }
     }
   }
-
-  async function pickBrowserFile(file?: File) {
+  function pickFile() {
+    if (lock.current) return
+    if (isServer()) { fileInput.current?.click(); return }
+    void prepare(async () => {
+      const { open } = await import('@tauri-apps/plugin-dialog')
+      const picked = await open({ multiple:false, filters:[{name:t('dbviews.importFileFilter'),extensions:['csv','tsv','json','xlsx','xlsm','xls']}] })
+      const path = Array.isArray(picked) ? picked[0] : picked
+      if (!path) return null
+      return {path, preview:await importPreview(path)}
+    })
+  }
+  function pickBrowserFile(file?: File) {
     if (!file) return
-    setErr(null); setPreview(null); setWebFile(null); setFilePath(null); setSummary(null); setConfirmation('')
-    if (file.size > 8 * 1024 * 1024) { setErr(t('dbviews.webImportLimit')); return }
-    setBusy(true); setUserEdited(false)
-    try {
+    void prepare(async () => {
+      if (file.size > 8 * 1024 * 1024) throw new Error(t('dbviews.webImportLimit'))
       const bytes = new Uint8Array(await file.arrayBuffer())
       let binary = ''
-      for (let offset = 0; offset < bytes.length; offset += 32768) {
-        binary += String.fromCharCode(...bytes.subarray(offset, offset + 32768))
-      }
-      const payload = { fileName: file.name, dataBase64: btoa(binary) }
-      const pv = await importPreviewBytes(payload)
-      setWebFile(payload); setFilePath(file.name); setPreview(pv)
-      setMapping(autoMapImportColumns(pv.columns, targetColumns))
-    } catch (e) { setErr(dbErrMsg(e)) }
-    finally { setBusy(false) }
+      for (let offset = 0; offset < bytes.length; offset += 32768) binary += String.fromCharCode(...bytes.subarray(offset, offset + 32768))
+      const web = {fileName:file.name, dataBase64:btoa(binary)}
+      return {path:file.name, web, preview:await importPreviewBytes(web)}
+    })
   }
-
-  // preview 或目标列变化且用户尚未手动调整时，重算自动映射。
-  useEffect(() => {
-    if (preview && !userEdited) {
-      setMapping(autoMapImportColumns(preview.columns, targetColumns))
-    }
-  }, [preview, targetColumns, userEdited])
-
-  const mappedCount = useMemo(
-    () => Object.values(mapping).filter(v => v.trim() !== '').length,
-    [mapping],
-  )
-
-  function setTargetFor(source: string, target: string) {
-    setUserEdited(true)
-    setMapping(m => ({ ...m, [source]: target }))
-  }
-
   async function runImport() {
-    if (!filePath || !preview || mappedCount === 0 || busy) return
-    if (mode === 'truncate' && (noRollback || confirmation !== table)) return
-    setErr(null)
-    setBusy(true)
+    if (lock.current || step !== 2 || !canRun || !filePath || !preview) return
+    lock.current = true; setBusy(true); setStep(3); setErr(null)
+    const token = ++generation.current
     try {
-      const mappings: ImportColumnMapping[] = Object.entries(mapping)
-        .filter(([, target]) => target.trim() !== '')
-        .map(([sourceColumn, targetColumn]) => ({ sourceColumn, targetColumn }))
-      const args = { connId, schema, table, mappings, mode, ...(mode === 'truncate' ? { allowDestructive: true } : {}) }
-      const res = webFile ? await importTableBytes({ ...args, ...webFile })
-        : await importTable({ ...args, filePath })
-      setSummary(res.rowsImported)
-      onImported?.(res.rowsImported)
-    } catch (e) {
-      setErr(dbErrMsg(e))
-    } finally {
-      setBusy(false)
-    }
+      const args = {connId, schema, table, mappings:pairs, mode, ...(mode === 'truncate' ? {allowDestructive:true} : {})}
+      const result = webFile ? await importTableBytes({...args,...webFile}) : await importTable({...args,filePath})
+      if (token !== generation.current) return
+      if (!Number.isSafeInteger(result?.rowsImported) || result.rowsImported < 0) throw new Error(t('dbflow.noReceipt'))
+      setSummary(result)
+      // Refresh failure must not turn a confirmed write into a retryable import failure.
+      try { await onImported?.(result.rowsImported) }
+      catch (error) { if (token === generation.current) setRefreshError(dbErrMsg(error)) }
+    } catch (error) { if (token === generation.current) setErr(dbErrMsg(error)) }
+    finally { if (token === generation.current) { lock.current = false; setBusy(false) } }
   }
-
-  const inputStyle: React.CSSProperties = {
-    height: 30, boxSizing: 'border-box', border: '1px solid var(--border-hairline-alt)',
-    borderRadius: 8, background: 'var(--surface-sunken)', color: 'var(--text-primary)',
-    font: 'inherit', fontSize: 12.5, padding: '0 8px', outline: 'none',
-  }
-  const labelStyle: React.CSSProperties = { fontSize: 11.5, fontWeight: 600, color: 'var(--text-tertiary)' }
-
-  return (
-    <div onClick={() => { if (!busy) onClose() }}
-      style={{ position: 'absolute', inset: 0, zIndex: 70, background: 'color-mix(in srgb, var(--cta-bg) 42%, transparent)', backdropFilter: 'blur(3px)', display: 'grid', placeItems: 'center' }}>
-      <div onClick={e => e.stopPropagation()} className="pop-in"
-        style={{ width: 680, maxWidth: '92%', maxHeight: '88%', background: 'var(--surface-card)', borderRadius: 18, border: '1px solid var(--border-hairline)', boxShadow: 'var(--shadow-window)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-        {/* header */}
-        <div className="row" style={{ justifyContent: 'space-between', padding: '18px 20px 14px', borderBottom: '1px solid var(--border-hairline)', flex: 'none' }}>
-          <div className="col" style={{ gap: 2 }}>
-            <span style={{ fontSize: 15, fontWeight: 700, letterSpacing: '-0.2px' }}>{t('dbviews.importTitle')}</span>
-            <span className="mono" style={{ fontSize: 11.5, color: 'var(--text-tertiary)' }}>
-              {schema ? `${schema}.${table}` : table}
-            </span>
-          </div>
-          <IconBtn name="x" size={16} variant="bare" onClick={() => { if (!busy) onClose() }} />
-        </div>
-
-        {/* body */}
-        <div className="col" style={{ gap: 14, padding: '16px 20px', overflow: 'auto', flex: 1, minHeight: 0 }}>
-          {/* file picker */}
-          <div className="col" style={{ gap: 6 }}>
-            <span style={labelStyle}>{t('dbviews.importFile')}</span>
-            <div className="row gap8" style={{ alignItems: 'center' }}>
-              {isServer() && <input ref={fileInput} type="file" hidden accept=".csv,.tsv,.json,.xlsx,.xlsm,.xls"
-                data-testid="browser-import-file" onChange={e => { const file = e.currentTarget.files?.[0]; e.currentTarget.value = ''; void pickBrowserFile(file) }} />}
-              <Btn size="sm" variant="secondary" icon="upload" onClick={pickFile} disabled={busy}>
-                {t('dbviews.importChooseFile')}
-              </Btn>
-              {preview && (
-                <span className="mono ell" style={{ fontSize: 12, color: 'var(--text-secondary)', minWidth: 0 }}>
-                  {preview.fileName} · {preview.fileType.toUpperCase()} · {t('dbviews.importRowCount', { count: preview.totalRows })}
-                </span>
-              )}
-            </div>
-            <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>{t('dbviews.importSupported')}</span>
-          </div>
-
-          {/* column mapping */}
-          {preview && (
-            <div className="col" style={{ gap: 6 }}>
-              <span style={labelStyle}>{t('dbviews.importMapping')}</span>
-              <div className="row" style={{ gap: 8, fontSize: 10.5, fontWeight: 600, color: 'var(--text-faint)', padding: '0 2px' }}>
-                <span style={{ flex: 1 }}>{t('dbviews.importSourceColumn')}</span>
-                <span style={{ width: 20 }} />
-                <span style={{ flex: 1 }}>{t('dbviews.importTargetColumn')}</span>
-              </div>
-              {preview.columns.map(src => (
-                <div key={src} className="row" style={{ gap: 8, alignItems: 'center' }}>
-                  <span className="mono ell" style={{ flex: 1, fontSize: 12.5, color: 'var(--text-primary)', minWidth: 0 }}>{src}</span>
-                  <Icon name="arrow-right" size={13} style={{ width: 20, color: 'var(--text-faint)' }} />
-                  <select value={mapping[src] ?? IMPORT_SKIP_TARGET}
-                    onChange={e => setTargetFor(src, e.target.value)}
-                    style={{ ...inputStyle, flex: 1, cursor: 'pointer' }}>
-                    <option value={IMPORT_SKIP_TARGET}>{t('dbviews.importSkipColumn')}</option>
-                    {targetColumns.length === 0 && mapping[src] && mapping[src] !== IMPORT_SKIP_TARGET && (
-                      <option value={mapping[src]}>{mapping[src]}</option>
-                    )}
-                    {targetColumns.map(tc => <option key={tc} value={tc}>{tc}</option>)}
-                  </select>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* preview table */}
-          {preview && preview.rows.length > 0 && (
-            <div className="col" style={{ gap: 6 }}>
-              <span style={labelStyle}>{t('dbviews.importPreview')}</span>
-              <div style={{ border: '1px solid var(--border-hairline-alt)', borderRadius: 10, overflow: 'auto', maxHeight: 180 }}>
-                <table style={{ borderCollapse: 'collapse', fontSize: 12, width: '100%' }}>
-                  <thead>
-                    <tr>
-                      {preview.columns.map(c => (
-                        <th key={c} className="mono" style={{ textAlign: 'left', padding: '6px 10px', borderBottom: '1px solid var(--border-hairline)', color: 'var(--text-tertiary)', whiteSpace: 'nowrap', position: 'sticky', top: 0, background: 'var(--surface-card)' }}>{c}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {preview.rows.map((row, ri) => (
-                      <tr key={ri}>
-                        {preview.columns.map((_, ci) => (
-                          <td key={ci} className="mono" style={{ padding: '5px 10px', borderBottom: '1px solid var(--border-hairline-alt)', color: 'var(--text-secondary)', whiteSpace: 'nowrap', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                            {row[ci] == null ? <span style={{ color: 'var(--text-faint)', fontStyle: 'italic' }}>NULL</span> : typeof row[ci] === 'object' ? JSON.stringify(row[ci]) : String(row[ci])}
-                            {binaryCells.has(`${ri}:${ci}`) && <span title={t('dbviews.binaryEditorLabel')} style={{ marginLeft: 6, fontSize: 9, color: 'var(--accent-primary)' }}>HEX</span>}
-                          </td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
-
-          {/* mode */}
-          {preview && (
-            <div className="col" style={{ gap: 6 }}>
-              <span style={labelStyle}>{t('dbviews.importMode')}</span>
-              <div className="row gap8">
-                {(['append', 'truncate'] as const).map(m => (
-                  <button key={m} className="row" disabled={busy} onClick={() => { setMode(m); setConfirmation('') }}
-                    style={{ gap: 6, padding: '6px 12px', borderRadius: 8, border: `1px solid ${mode === m ? 'var(--accent-primary)' : 'var(--border-hairline-alt)'}`, background: mode === m ? 'var(--accent-soft)' : 'transparent', color: mode === m ? 'var(--accent-primary)' : 'var(--text-secondary)', cursor: 'pointer', fontSize: 12.5 }}>
-                    <Icon name={m === 'append' ? 'plus' : 'trash-2'} size={13} />
-                    {t(m === 'append' ? 'dbviews.importModeAppend' : 'dbviews.importModeTruncate')}
-                  </button>
-                ))}
-              </div>
-              {mode === 'truncate' && (
-                <span style={{ fontSize: 11, color: 'var(--danger-fg)' }}>{t('dbviews.importTruncateWarn')}</span>
-              )}
-              {mode === 'truncate' && !noRollback && (
-                <input aria-label={t('dbviews.importConfirmTable', { table })} value={confirmation} disabled={busy}
-                  placeholder={t('dbviews.importConfirmTable', { table })} onChange={e => setConfirmation(e.target.value)} style={inputStyle} />
-              )}
-              {mode === 'truncate' && noRollback && (
-                <span style={{ fontSize: 11, color: 'var(--danger-fg)' }}>{t('dbviews.importAtomicUnavailable')}</span>
-              )}
-            </div>
-          )}
-
-          {err && (
-            <div className="row gap8" style={{ alignItems: 'center', color: 'var(--danger-fg)', fontSize: 12 }}>
-              <Icon name="alert-triangle" size={14} />
-              <span>{t('dbviews.importError', { message: err })}</span>
-            </div>
-          )}
-          {summary != null && (
-            <div className="row gap8" style={{ alignItems: 'center', color: 'var(--accent-primary)', fontSize: 12.5 }}>
-              <Icon name="circle-check" size={14} />
-              <span>{t('dbviews.importDone', { count: summary })}</span>
-            </div>
-          )}
-        </div>
-
-        {/* footer */}
-        <div className="row gap8" style={{ justifyContent: 'flex-end', padding: '14px 20px 18px', borderTop: '1px solid var(--border-hairline)', flex: 'none' }}>
-          <Btn variant="ghost" onClick={onClose} disabled={busy}>{summary != null ? t('dbviews.close') : t('dbviews.cancel')}</Btn>
-          <Btn variant="primary" icon="upload"
-            onClick={runImport}
-            disabled={busy || !preview || mappedCount === 0 || (mode === 'truncate' && (noRollback || confirmation !== table))}>
-            {busy ? t('dbviews.importing') : t('dbviews.importApply', { count: mappedCount })}
-          </Btn>
-        </div>
-      </div>
-    </div>
-  )
+  const steps = [t('dbflow.source'), t('dbflow.mapping'), t('dbflow.review'), t('dbflow.receipt')]
+  return <DatabaseFileFlow title={t('dbviews.importTitle')} target={target} steps={steps} step={step} busy={busy} onClose={close}
+    footer={<>
+      <Btn variant="ghost" disabled={busy} onClick={close}>{step === 3 ? t('dbviews.close') : t('dbviews.cancel')}</Btn>
+      {step > 0 && step < 3 && <Btn variant="secondary" testId="dbflow-back" disabled={busy} onClick={() => { setStep(step-1); setConfirmation('') }}>{t('dbflow.back')}</Btn>}
+      {step < 2 && <Btn variant="primary" testId="dbflow-next" disabled={busy || !(step === 0 ? sourceReady : mappingReady)} onClick={() => setStep(step+1)}>{t('dbflow.next')}</Btn>}
+      {step === 2 && <Btn variant={mode === 'truncate' ? 'danger' : 'primary'} testId="dbimport-run" icon="upload" disabled={busy || !canRun} onClick={runImport}>{t('dbviews.importApply',{count:pairs.length})}</Btn>}
+    </>}>
+    {step === 0 && <>
+      <h3>{t('dbflow.source')}</h3>
+      <div className="db-flow-file"><Icon name="file" size={24}/><div><strong>{preview?.fileName ?? t('dbflow.chooseSource')}</strong>
+        <p className="db-flow-muted">{preview ? `${preview.fileType.toUpperCase()} · ${preview.sizeBytes} bytes · ${t('dbviews.importRowCount',{count:preview.totalRows})}` : t('dbviews.importSupported')}</p></div>
+        <Btn size="sm" variant="secondary" icon="upload" onClick={pickFile} disabled={busy}>{t('dbviews.importChooseFile')}</Btn>
+        {isServer() && <input ref={fileInput} type="file" hidden accept=".csv,.tsv,.json,.xlsx,.xlsm,.xls" data-testid="browser-import-file" onChange={e => { const file=e.currentTarget.files?.[0]; e.currentTarget.value=''; pickBrowserFile(file) }}/>}</div>
+      <p className="db-flow-muted">{isServer() ? t('dbflow.webSource') : t('dbflow.desktopSource')}</p>
+      {busy && <p role="status">{t('dbflow.preparing')}</p>}
+      {metadata === 'loading' && <p role="status" className="db-flow-muted">{t('dbflow.loadingColumns')}</p>}
+      {(metadata === 'error' || (metadata === 'ready' && !targetColumns.length)) && <div className="db-flow-notice" role="alert" data-danger="true">{metadataError || t('dbflow.noTargetColumns')} <Btn size="sm" disabled={busy} onClick={() => setReload(v=>v+1)}>{t('dbflow.reloadColumns')}</Btn></div>}
+      {preview && <section><h3>{t('dbviews.importPreview')}</h3><p className="db-flow-muted">{t('dbflow.previewScope',{shown:preview.rows.length,total:preview.totalRows})}</p>
+        <div className="db-flow-scroll"><table><thead><tr>{preview.columns.map((c,i)=><th key={i} className="mono">{c}</th>)}</tr></thead><tbody>{preview.rows.map((row,ri)=><tr key={ri}>{preview.columns.map((_,ci)=><td key={ci} className="mono"><span className="db-flow-cell">{row[ci] == null ? 'NULL' : row[ci] === '' ? t('dbflow.emptyString') : typeof row[ci] === 'object' ? JSON.stringify(row[ci]) : String(row[ci])}</span>{binaryCells.has(`${ri}:${ci}`) && <small> HEX</small>}</td>)}</tr>)}</tbody></table></div>
+        {!sourceUnique && <p role="alert" className="db-flow-notice" data-danger="true">{t('dbflow.duplicateSource')}</p>}
+      </section>}
+      {err && <p role="alert" className="db-flow-notice" data-danger="true">{err}</p>}
+    </>}
+    {step === 1 && preview && <>
+      <h3>{t('dbviews.importMapping')}</h3>
+      <div className="db-flow-scroll"><table className="db-flow-mapping"><thead><tr><th>{t('dbviews.importSourceColumn')}</th><th>{t('dbviews.importTargetColumn')}</th></tr></thead><tbody>
+        {preview.columns.map(src=><tr key={src}><td className="mono">{src}</td><td><select aria-label={t('dbflow.mapColumn',{column:src})} value={mapping[src] ?? ''} onChange={e=>setMapping(m=>({...m,[src]:e.target.value}))}>
+          <option value="">{t('dbviews.importSkipColumn')}</option>{targetColumns.map(c=><option key={c.name} value={c.name}>{c.name} · {c.type}</option>)}</select></td></tr>)}
+      </tbody></table></div>
+      <p className="db-flow-muted">{t('dbflow.mappingCount',{mapped:pairs.length,skipped:preview.columns.length-pairs.length})}</p>
+      {mappingProblem && <p role="alert" className="db-flow-notice" data-danger="true">{mappingProblem}</p>}
+      <section><h3>{t('dbviews.importMode')}</h3><div className="db-flow-mode">{(['append','truncate'] as const).map(m=><button className="btn btn-secondary sm" key={m} aria-pressed={m === mode} onClick={()=>{setMode(m);setConfirmation('')}}>{m === 'append' ? t('dbviews.importModeAppend') : t('dbflow.replaceMode')}</button>)}</div>
+        {mode === 'truncate' && <p className="db-flow-notice" data-danger="true">{noRollback ? t('dbviews.importAtomicUnavailable') : t('dbflow.replaceWarning')}</p>}
+      </section>
+    </>}
+    {step === 2 && preview && <section data-testid="dbimport-review"><h3>{t('dbflow.review')}</h3>
+      <dl className="db-flow-summary"><dt>{t('dbviews.importFile')}</dt><dd>{preview.fileName} · {preview.fileType.toUpperCase()}</dd><dt>{t('dbflow.target')}</dt><dd className="mono">{target}</dd><dt>{t('dbviews.importMode')}</dt><dd>{mode === 'append' ? t('dbviews.importModeAppend') : t('dbflow.replaceMode')}</dd><dt>{t('dbflow.rows')}</dt><dd>{preview.totalRows}</dd><dt>{t('dbviews.importMapping')}</dt><dd>{t('dbflow.mappingCount',{mapped:pairs.length,skipped:preview.columns.length-pairs.length})}</dd></dl>
+      <div className="db-flow-scroll"><table><tbody>{pairs.map(p=><tr key={p.sourceColumn}><td className="mono">{p.sourceColumn}</td><td aria-hidden="true">→</td><td className="mono">{p.targetColumn}</td></tr>)}</tbody></table></div>
+      <p className="db-flow-notice">{t('dbflow.importBoundary')}</p>
+      {!isServer() && <p className="db-flow-muted">{t('dbflow.desktopSource')}</p>}
+      {mode === 'truncate' && <><p className="db-flow-notice" data-danger="true">{t('dbflow.replaceWarning')}</p><label>{t('dbviews.importConfirmTable',{table})}<input aria-label={t('dbviews.importConfirmTable',{table})} value={confirmation} onChange={e=>setConfirmation(e.target.value)}/></label></>}
+    </section>}
+    {step === 3 && <section className="db-flow-receipt" data-testid="dbflow-receipt" data-error={!!err} aria-live="polite">
+      <Icon name={busy ? 'loader' : err ? 'alert-triangle' : 'circle-check'} size={28}/>
+      <h3>{summary ? t('dbviews.importDone',{count:summary.rowsImported}) : busy ? t('dbviews.importing') : t('dbflow.unconfirmed')}</h3>
+      <p className="mono">{target}</p><p>{preview?.fileName}</p>
+      {busy && <p className="db-flow-notice">{t('dbflow.waitReceipt')}</p>}
+      {err && <><p role="alert" className="db-flow-notice" data-danger="true">{err}</p><p className="db-flow-notice">{t('dbflow.checkTarget')}</p></>}
+      {summary && <p className="db-flow-muted">{t('dbflow.importReceiptHint')}</p>}
+      {refreshError && <p role="alert" className="db-flow-notice" data-danger="true">{t('dbflow.refreshFailed',{error:refreshError})}</p>}
+    </section>}
+  </DatabaseFileFlow>
 }

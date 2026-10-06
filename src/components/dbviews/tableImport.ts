@@ -42,13 +42,17 @@ export function autoMapImportColumns(
   targetColumns: string[],
 ): Record<string, string> {
   const exactTargets = new Map(targetColumns.map((c) => [c, c]))
-  const normalizedTargets = new Map(targetColumns.map((c) => [normalizeImportColumnName(c), c]))
+  const normalizedTargets = new Map<string, string[]>()
+  for (const column of targetColumns) {
+    const key = normalizeImportColumnName(column)
+    normalizedTargets.set(key, [...(normalizedTargets.get(key) ?? []), column])
+  }
 
-  const out: Record<string, string> = {}
+  const out: Record<string, string> = Object.create(null)
   for (const source of sourceColumns) {
     out[source] =
       exactTargets.get(source) ??
-      normalizedTargets.get(normalizeImportColumnName(source)) ??
+      (normalizedTargets.get(normalizeImportColumnName(source))?.length === 1 ? normalizedTargets.get(normalizeImportColumnName(source))![0] : undefined) ??
       IMPORT_SKIP_TARGET
   }
   return out

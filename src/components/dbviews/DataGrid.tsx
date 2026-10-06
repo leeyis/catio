@@ -1674,7 +1674,7 @@ export function DataGrid({ columns: inputColumns, rows, binaryCells, statusTones
           table={table}
           engine={engine} transactions={transactions}
           onClose={() => setImportOpen(false)}
-          onImported={() => { setImportOpen(false); refresh() }}
+          onImported={() => { refresh() }}
         />
       )}
     </div>

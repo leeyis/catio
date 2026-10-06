@@ -16,7 +16,7 @@ const h = vi.hoisted(() => ({
   tableStructure: vi.fn(() => Promise.resolve({ comment: '', columns: [], indexes: [], fks: [], triggers: [] })),
   exportDatabaseSql: vi.fn(() => Promise.resolve('-- sql --')),
   exportFile: vi.fn(() => Promise.resolve(undefined)),
-  save: vi.fn((..._a: unknown[]) => Promise.resolve('/tmp/out.sql')),
+  save: vi.fn((..._a: unknown[]) => Promise.resolve<string | null>('/tmp/out.sql')),
   // D3 跨库迁移:DataTransferDialog 提交时调用,默认 resolve 一个行数。
   transferTable: vi.fn(() => Promise.resolve({ rowsTransferred: 5 })),
 }))
@@ -672,6 +672,24 @@ describe('DbWorkbench 整库导出 — 引擎门控 + DDL 失败上报', () => {
     expect(screen.queryByText('整库导出')).not.toBeInTheDocument()
   })
 
+  it('取消桌面保存后不读取导出数据，也不冒充保存成功', async () => {
+    h.list.mockReturnValue([ACTIVE('postgres')]); h.save.mockResolvedValue(null)
+    wrap(<DbWorkbench conn={DATA.byId['d-orders']} />)
+    await openSchemaMenu(); fireEvent.click(screen.getByText('整库导出'))
+    fireEvent.click(await screen.findByTestId('dbflow-next')); fireEvent.click(await screen.findByTestId('dbexport-run'))
+    await waitFor(() => expect(screen.getByTestId('dbflow-receipt')).toHaveTextContent('已取消保存'))
+    expect(h.exportDatabaseSql).not.toHaveBeenCalled(); expect(h.exportFile).not.toHaveBeenCalled()
+  })
+  it('保存真实回执留在导出窗口并传显式表清单', async () => {
+    h.list.mockReturnValue([ACTIVE('postgres')])
+    wrap(<DbWorkbench conn={DATA.byId['d-orders']} />)
+    await openSchemaMenu(); fireEvent.click(screen.getByText('整库导出'))
+    fireEvent.click(await screen.findByTestId('dbexport-opt-structure'))
+    fireEvent.click(screen.getByTestId('dbflow-next')); fireEvent.click(screen.getByTestId('dbexport-run'))
+    await waitFor(() => expect(screen.getByTestId('dbflow-receipt')).toHaveTextContent('文件已保存'))
+    expect(h.exportDatabaseSql).toHaveBeenCalledWith(expect.objectContaining({selectedTables:['orders']}))
+    expect(h.exportFile).toHaveBeenCalledWith('/tmp/out.sql','-- sql --')
+  })
   it('结构导出时某表 tableStructure 失败 → 中止导出并上报,不落盘、不报成功', async () => {
     // 回归:此前 catch 静默丢弃该表 DDL,后端仍写文件并弹成功 toast,选中表悄悄消失。
     h.list.mockReturnValue([ACTIVE('postgres')])
@@ -680,6 +698,7 @@ describe('DbWorkbench 整库导出 — 引擎门控 + DDL 失败上报', () => {
     await openSchemaMenu()
     fireEvent.click(screen.getByText('整库导出'))
     // 仅勾选「结构」以触发逐表取结构(默认结构+数据都勾选,这里直接点导出即可)。
+    fireEvent.click(await screen.findByTestId('dbflow-next'))
     fireEvent.click(await screen.findByTestId('dbexport-run'))
     // 失败应被上报到 dialog 内联错误区,且不调用落盘/不弹成功。
     await waitFor(() => expect(screen.getByText(/权限不足:无法读取表结构/)).toBeInTheDocument())

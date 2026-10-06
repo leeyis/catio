@@ -9,7 +9,8 @@ import { DatabaseWorkProvider,useDatabaseDraftWork,hasPendingDatabaseWork,hasBus
 import { SqlConsole, ERDiagram } from '../dbviews'
 import { CreateObjectModal } from '../dbviews/CreateObjectModal'
 import { ObjectAdminModal } from '../dbviews/ObjectAdminModal'
-import { DatabaseExportDialog, type DatabaseExportRequest } from '../dbviews/DatabaseExportDialog'
+import { DatabaseExportDialog, type DatabaseExportRequest, type DatabaseExportOutcome } from '../dbviews/DatabaseExportDialog'
+import { isServer } from '../../services/transport'
 import { DataTransferDialog, type TransferConnectionOption } from '../dbviews/DataTransferDialog'
 import { buildCreateTableDDL, dialectFor, qualifiedTable, supportsDdlExport } from '../dbviews/structureDdl'
 import { SchemaBrowser } from './SchemaBrowser'
@@ -206,12 +207,22 @@ export function DbWorkbench({ conn, density, active: shown = true, workspaceTabI
    * 与结构面板 DDL 同源)→ 调 T13 service exportDatabaseSql 让后端分页取数 + 组装脚本 →
    * 通过 save 对话框选目标 .sql,后端 exportFile 落盘。落盘真机验证见 notes。
    */
-  async function runDatabaseExport(schema: string, req: DatabaseExportRequest) {
-    if (!connId) return
+  async function runDatabaseExport(schema: string, req: DatabaseExportRequest): Promise<DatabaseExportOutcome> {
+    if (!connId) throw new Error(t('dbflow.connectionUnavailable'))
+    const safeName = (schema || 'database').replace(/[\\/:*?"<>|]+/g, '_').trim() || 'database'
+    const fileName = `${safeName}.sql`
+    let path: string | null = null
+    if (!isServer()) {
+      // Cancel before any database reads / SQL assembly; cancellation is not a save receipt.
+      const { save } = await import('@tauri-apps/plugin-dialog')
+      path = await save({ defaultPath: fileName, filters: [{ name: 'SQL', extensions: ['sql'] }] })
+      if (!path) return {kind:'cancelled'}
+    }
     const dialect = dialectFor(conn.engine)
     // 要导出的表名:undefined 表示「全部」→ 取该 schema 当前树里的全部表名。
     const ns = namespaces.find(n => n.name === schema)
     const tableNames = req.selectedTables ?? (ns?.tables.map(t => t.name) ?? [])
+    if (!tableNames.length) throw new Error(t('dbexport.noTables'))
     // 逐表取结构 → 拼 DDL(仅在需要结构时)。某表取结构失败必须中止整次导出并上报:
     // 静默跳过会让该表 DDL 悄悄从输出消失,后端仍写文件并弹成功 toast(误导)。抛出由
     // dialog 的 catch 捕获,展示到内联错误区,且不会走到后续落盘。
@@ -228,21 +239,23 @@ export function DbWorkbench({ conn, density, active: shown = true, workspaceTabI
     }
     const script = await exportDatabaseSql({
       connId, database: schema, schema,
-      selectedTables: req.selectedTables ?? [],
+      selectedTables: tableNames,
       tableDdls,
       includeStructure: req.includeStructure,
       includeData: req.includeData,
       batchSize: req.batchSize,
       rowLimit: req.rowLimit,
     })
-    // 选目标文件并落盘(webview <a download> 在 Tauri 内为 no-op,走后端 exportFile)。
-    const { save } = await import('@tauri-apps/plugin-dialog')
-    const safeName = (schema || 'database').replace(/[\\/:*?"<>|]+/g, '_').trim() || 'database'
-    const path = await save({ defaultPath: `${safeName}.sql`, filters: [{ name: 'SQL', extensions: ['sql'] }] })
-    if (!path) return // 用户取消保存
-    await exportFile(path, script)
-    setExportSchema(null)
-    setAdminMsg({ kind: 'ok', text: t('dbexport.exported', { path }) })
+    if (isServer()) {
+      const url = URL.createObjectURL(new Blob([script], {type:'application/sql;charset=utf-8'}))
+      try {
+        const link = document.createElement('a')
+        link.href=url; link.download=fileName; link.click()
+      } finally { setTimeout(() => URL.revokeObjectURL(url), 1000) }
+      return {kind:'download',name:fileName}
+    }
+    await exportFile(path!, script)
+    return {kind:'saved',name:path!}
   }
   function openER(schema?: string) {
     if (!caps.er) return
@@ -541,6 +554,7 @@ export function DbWorkbench({ conn, density, active: shown = true, workspaceTabI
         {/* 整库导出对话框 — 仅 live + 支持 SQL(DDL/INSERT)的连接。 */}
         {exportSchema != null && connId && (
           <DatabaseExportDialog
+            connId={connId} connectionName={conn.name}
             schema={exportSchema}
             allTables={(namespaces.find(n => n.name === exportSchema)?.tables ?? []).map(t => t.name)}
             onClose={() => setExportSchema(null)}

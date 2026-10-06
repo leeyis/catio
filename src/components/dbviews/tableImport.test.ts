@@ -33,6 +33,14 @@ describe('normalizeImportColumnName', () => {
 })
 
 describe('autoMapImportColumns', () => {
+  it('does not guess between normalization collisions, but still honors exact identity', () => {
+    expect(autoMapImportColumns(['USER ID'], ['user_id', 'user-id'])['USER ID']).toBe('')
+    expect(autoMapImportColumns(['user_id'], ['user_id', 'user-id']).user_id).toBe('user_id')
+  })
+  it('treats prototype-looking column names as plain column data', () => {
+    const result = autoMapImportColumns(['__proto__','constructor'], ['__proto__','constructor'])
+    expect(Object.entries(result)).toEqual([['__proto__','__proto__'],['constructor','constructor']])
+  })
   it('maps exact source→target names', () => {
     const map = autoMapImportColumns(['id', 'name'], ['id', 'name', 'extra'])
     expect(map).toEqual({ id: 'id', name: 'name' })

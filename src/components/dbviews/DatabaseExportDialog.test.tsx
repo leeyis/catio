@@ -6,7 +6,7 @@ import { DatabaseExportDialog } from './DatabaseExportDialog'
 const TABLES = ['orders', 'order_items', 'customers']
 
 function renderDialog(overrides: Omit<Partial<React.ComponentProps<typeof DatabaseExportDialog>>, 'onExport'> = {}) {
-  const onExport = vi.fn().mockResolvedValue(undefined)
+  const onExport = vi.fn().mockResolvedValue({ kind: 'saved', name: '/qa/public.sql' })
   const onClose = overrides.onClose ?? vi.fn()
   render(
     <LanguageProvider>
@@ -50,6 +50,7 @@ describe('DatabaseExportDialog', () => {
     const { onExport } = renderDialog()
     fireEvent.click(screen.getByTestId('dbexport-clear'))
     fireEvent.click(screen.getByTestId('dbexport-tbl:orders'))
+    fireEvent.click(screen.getByTestId('dbflow-next'))
     await act(async () => { fireEvent.click(screen.getByTestId('dbexport-run')) })
     expect(onExport).toHaveBeenCalledTimes(1)
     expect(onExport.mock.calls[0][0].selectedTables).toEqual(['orders'])
@@ -58,14 +59,14 @@ describe('DatabaseExportDialog', () => {
   it('export button is disabled when no table is selected', () => {
     renderDialog()
     fireEvent.click(screen.getByTestId('dbexport-clear'))
-    expect(screen.getByTestId('dbexport-run')).toBeDisabled()
+    expect(screen.getByTestId('dbflow-next')).toBeDisabled()
   })
 
   it('export button is disabled when neither structure nor data is included', () => {
     renderDialog()
     fireEvent.click(screen.getByTestId('dbexport-opt-structure'))
     fireEvent.click(screen.getByTestId('dbexport-opt-data'))
-    expect(screen.getByTestId('dbexport-run')).toBeDisabled()
+    expect(screen.getByTestId('dbflow-next')).toBeDisabled()
   })
 
   it('surfaces a DbError plain-object reason instead of [object Object]', async () => {
@@ -76,6 +77,7 @@ describe('DatabaseExportDialog', () => {
         <DatabaseExportDialog schema="public" allTables={TABLES} onClose={vi.fn()} onExport={onExport} />
       </LanguageProvider>,
     )
+    fireEvent.click(screen.getByTestId('dbflow-next'))
     await act(async () => { fireEvent.click(screen.getByTestId('dbexport-run')) })
     expect(screen.getByText(/权限不足:无法读取表结构/)).toBeInTheDocument()
     expect(screen.queryByText(/\[object Object\]/)).not.toBeInTheDocument()
@@ -84,12 +86,13 @@ describe('DatabaseExportDialog', () => {
   it('passes the chosen options through to onExport', async () => {
     const { onExport } = renderDialog()
     fireEvent.click(screen.getByTestId('dbexport-opt-data')) // turn data OFF (structure-only)
+    fireEvent.click(screen.getByTestId('dbflow-next'))
     await act(async () => { fireEvent.click(screen.getByTestId('dbexport-run')) })
     expect(onExport).toHaveBeenCalledTimes(1)
     const arg = onExport.mock.calls[0][0]
     expect(arg.includeStructure).toBe(true)
     expect(arg.includeData).toBe(false)
-    // all selected → undefined means "all tables" to the backend
-    expect(arg.selectedTables).toBeUndefined()
+    // Review fixes an explicit list, even when every currently listed table was selected.
+    expect(arg.selectedTables).toEqual(TABLES)
   })
 })
