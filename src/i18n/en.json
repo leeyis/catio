@@ -7,6 +7,14 @@
     "column": "Column", "type": "Type", "nulls": "NULL", "empty": "Empty text", "binary": "Binary", "numbers": "Numeric values", "min": "Minimum", "max": "Maximum", "row": "Row {{n}}",
     "chartColumn": "Distribution column", "chartScope": "Frequency of up to 12 distinct scalar values in this sample. Text is quoted to distinguish it from numeric values and NULL. {{skipped}} binary, complex, non-finite or long-text values were excluded.", "chartLabel": "Value frequency chart", "other": "Other values", "noChart": "No supported scalar values in this sample."
   },
+  "dbTransfer": {
+    "dataOnly": "Copy data from one source table into an existing target table. This does not create tables, migrate constraints or build a structure deployment plan.",
+    "sameTable": "Source and target must be different tables.",
+    "boundary": "Writes affect the displayed target, outside the query tab's transaction. Source and target metadata are rechecked before dispatch, but this is not a schema lock or a consistent data snapshot. Atomicity and type conversion depend on the actual engines. There is no in-flight cancellation.",
+    "metadataChanged": "Source or target structure changed after review. No write was dispatched. Reload the objects and review the mappings again.",
+    "unconfirmed": "Migration completion not confirmed",
+    "receiptScope": "The backend acknowledged this migration's row count. This receipt is kept in this window only; it is not a durable job or recovery record."
+  },
   "dbEditor": {
     "title": "SQL editor preferences",
     "scope": "Applies immediately to SQL editors on this device. Only preferences are saved, never SQL or connection data.",

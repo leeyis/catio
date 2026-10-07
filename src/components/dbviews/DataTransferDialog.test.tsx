@@ -1,307 +1,164 @@
-import { describe, it, expect, vi, beforeEach, beforeAll } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { act, render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import { LanguageProvider } from '../../state/LanguageContext'
 import i18n from '../../i18n'
 import { DataTransferDialog } from './DataTransferDialog'
 import { DatabaseWorkProvider, hasBusyDatabaseDraftWork } from '../../state/databaseDraftWork'
 
-// Mock the db service so the dialog runs without the Tauri runtime.
-const transferTable = vi.fn()
-const tableStructure = vi.fn()
-const getSchema = vi.fn()
+const transferTable = vi.fn(), tableStructure = vi.fn(), getSchema = vi.fn()
 vi.mock('../../services/db', () => ({
-  transferTable: (...a: unknown[]) => transferTable(...a),
-  tableStructure: (...a: unknown[]) => tableStructure(...a),
-  getSchema: (...a: unknown[]) => getSchema(...a),
-  dbErrMsg: (e: unknown) => (e instanceof Error ? e.message : String(e)),
+  transferTable: (...a: unknown[]) => transferTable(...a), tableStructure: (...a: unknown[]) => tableStructure(...a),
+  getSchema: (...a: unknown[]) => getSchema(...a), dbErrMsg: (e: unknown) => e instanceof Error ? e.message : String(e),
 }))
-
-const wrap = (ui: React.ReactNode) => render(<LanguageProvider>{ui}</LanguageProvider>)
-
-// 目标表是下拉框,选项要等 getSchema 异步加载后才出现 —— 先等选项,再选中。
-async function selectTargetTable(value: string) {
-  const sel = await screen.findByLabelText('transfer-target-table')
-  await waitFor(() =>
-    expect(within(sel as HTMLElement).queryByRole('option', { name: value })).toBeInTheDocument(),
-  )
-  await act(async () => { fireEvent.change(sel, { target: { value } }) })
-}
-
-const connections = [
-  { id: 'src', name: 'prod-pg', engine: 'postgres' },
-  { id: 'dst', name: 'analytics-ch', engine: 'clickhouse' },
+const columns = [
+  { name: 'user_id', type: 'int', nullable: false, default: null, key: 'PK', extra: '', comment: '' },
+  { name: 'display_name', type: 'text', nullable: true, default: null, key: '', extra: '', comment: '' },
 ]
+const structure = { columns, indexes: [], fks: [], comment: '' }
+const connections = [{ id: 'src', name: 'prod-pg', engine: 'postgres' }, { id: 'dst', name: 'analytics-ch', engine: 'clickhouse' }]
+const wrap = (ui: React.ReactNode) => render(<LanguageProvider>{ui}</LanguageProvider>)
+function mount(extra: Partial<React.ComponentProps<typeof DataTransferDialog>> = {}) {
+  return wrap(<DataTransferDialog connections={connections} initialSourceConnId="src" initialSourceSchema="public" initialSourceTable="users" onClose={() => {}} {...extra}/>)
+}
+async function target(value = 'users_copy') {
+  fireEvent.change(screen.getByLabelText('transfer-target-conn'), { target: { value: 'dst' } })
+  await waitFor(() => expect(within(screen.getByLabelText('transfer-target-table')).getByRole('option', { name: value })).toBeInTheDocument())
+  await act(async () => { fireEvent.change(screen.getByLabelText('transfer-target-table'), { target: { value } }) })
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled())
+}
+function next() { fireEvent.click(screen.getByRole('button', { name: 'Next' })) }
+async function review() { await target(); next(); next() }
+async function run() {
+  const button = screen.getByRole('button', { name: /Migrate 2 column/i })
+  await act(async () => { fireEvent.click(button); fireEvent.click(button) })
+}
+const noReplay = () => expect(screen.queryByRole('button', { name: /Migrate .*column/i })).not.toBeInTheDocument()
 
-describe('DataTransferDialog', () => {
-  beforeAll(async () => { await i18n.changeLanguage('en') })
-  beforeEach(() => {
+describe('data-only migration wizard', () => {
+  beforeEach(async () => {
+    await i18n.changeLanguage('en')
     transferTable.mockReset(); tableStructure.mockReset(); getSchema.mockReset()
-    // Target connection schema: a single namespace whose tables back the table dropdown.
-    getSchema.mockResolvedValue({
-      schemas: [{ name: 'analytics', tables: [{ name: 'users_copy' }, { name: 'users' }] }],
-    })
-    // Source table columns (user_id, display_name); target table same names.
-    tableStructure.mockResolvedValue({
-      comment: '', indexes: [], fks: [],
-      columns: [
-        { name: 'user_id', type: 'int', nullable: false, default: null, key: 'PK', extra: '', comment: '' },
-        { name: 'display_name', type: 'text', nullable: true, default: null, key: '', extra: '', comment: '' },
-      ],
-    })
+    tableStructure.mockResolvedValue(structure)
+    getSchema.mockResolvedValue({ schemas: [{ name: 'analytics', tables: [{ name: 'users_copy' }, { name: 'users' }] }] })
+    transferTable.mockResolvedValue({ rowsTransferred: 42 })
   })
-
-  it.each(['lost receipt', 'invalid receipt', 'success'])('never replays after %s and freezes the reviewed target', async outcome => {
-    let resolve!: (value: { rowsTransferred: number }) => void
-    let reject!: (error: Error) => void
-    transferTable.mockImplementation(() => new Promise((yes, no) => { resolve = yes; reject = no }))
-    wrap(<DataTransferDialog connections={connections} initialSourceConnId="src" initialSourceTable="users" onClose={() => {}} />)
-    fireEvent.change(screen.getByLabelText('transfer-target-conn'), { target: { value: 'dst' } })
-    await selectTargetTable('users_copy')
-    const apply = await screen.findByRole('button', { name: /Migrate 2 column/i })
-    await waitFor(() => expect(apply).toBeEnabled())
-    fireEvent.click(apply)
-    fireEvent.click(apply)
+  it('reviews source, target, mappings and data-only boundary before dispatching append', async () => {
+    mount(); await target()
+    expect(screen.getByLabelText('transfer-target-schema')).toHaveValue('analytics')
+    expect(screen.getByLabelText('transfer-target-table').tagName).toBe('SELECT')
+    expect(transferTable).not.toHaveBeenCalled()
+    next(); expect(screen.getByLabelText('map-user_id')).toHaveValue('user_id')
+    next(); expect(screen.getByTestId('dbtransfer-review')).toHaveTextContent('analytics-ch · analytics.users_copy')
+    expect(screen.getByTestId('dbtransfer-review')).toHaveTextContent('prod-pg · public.users')
+    expect(transferTable).not.toHaveBeenCalled()
+    await run()
     expect(transferTable).toHaveBeenCalledTimes(1)
-    expect(screen.getByLabelText('transfer-target-conn')).toBeDisabled()
-    expect(screen.getByLabelText('map-user_id')).toBeDisabled()
-    if (outcome === 'lost receipt') reject(new Error('Network disconnected'))
-    else resolve({ rowsTransferred: outcome === 'success' ? 2 : -1 })
+    expect(transferTable).toHaveBeenCalledWith({ sourceConnId: 'src', sourceSchema: 'public', sourceTable: 'users', targetConnId: 'dst', targetSchema: 'analytics', targetTable: 'users_copy', mode: 'append', mappings: [{ sourceColumn: 'user_id', targetColumn: 'user_id' }, { sourceColumn: 'display_name', targetColumn: 'display_name' }], upsertKeys: undefined, allowDestructive: undefined })
+    expect(tableStructure).toHaveBeenCalledTimes(4) // Two previews plus the pre-dispatch recheck.
+    await screen.findByText(/Migrated 42 row/i); noReplay()
+  })
+  it.each(['lost receipt', 'invalid receipt', 'success'])('never replays after %s', async outcome => {
+    let resolve!: (value: { rowsTransferred: number }) => void, reject!: (e: Error) => void
+    transferTable.mockImplementation(() => new Promise((yes, no) => { resolve = yes; reject = no }))
+    mount(); await review(); await run()
+    expect(transferTable).toHaveBeenCalledTimes(1)
+    expect(screen.queryByLabelText('transfer-target-conn')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('map-user_id')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Back' })).not.toBeInTheDocument()
+    await act(async () => { if (outcome === 'lost receipt') reject(new Error('Network disconnected')); else resolve({ rowsTransferred: outcome === 'success' ? 2 : -1 }) })
     if (outcome === 'success') await screen.findByText(/Migrated 2 row/i)
     else await screen.findByText(/Check the target before starting another migration/i)
-    expect(apply).toBeDisabled()
-    fireEvent.click(apply)
-    expect(transferTable).toHaveBeenCalledTimes(1)
+    noReplay(); expect(transferTable).toHaveBeenCalledTimes(1)
   })
-
-  it('keeps a successful write receipt when the refresh callback rejects', async () => {
-    transferTable.mockResolvedValue({ rowsTransferred: 3 })
-    wrap(<DataTransferDialog connections={connections} initialSourceConnId="src" initialSourceTable="users" onClose={() => {}}
-      onTransferred={async () => { throw new Error('Refresh failed') }} />)
-    fireEvent.change(screen.getByLabelText('transfer-target-conn'), { target: { value: 'dst' } })
-    await selectTargetTable('users_copy')
-    fireEvent.click(screen.getByRole('button', { name: /Migrate 2 column/i }))
-    await screen.findByText(/Migrated 3 row/i)
-    await screen.findByText(/Migration succeeded, but refreshing the view failed/i)
-    expect(screen.getByRole('button', { name: /Migrate 2 column/i })).toBeDisabled()
+  it('retains a confirmed write receipt when refreshing rejects', async () => {
+    mount({ onTransferred: async () => { throw new Error('Refresh failed') } }); await review(); await run()
+    await screen.findByText(/Migrated 42 row/i)
+    await screen.findByText(/Migration succeeded, but refreshing the view failed/i); noReplay()
   })
-
-  it('rejects duplicate target mappings', async () => {
-    wrap(<DataTransferDialog connections={connections} initialSourceConnId="src" initialSourceTable="users" onClose={() => {}} />)
-    fireEvent.change(screen.getByLabelText('transfer-target-conn'), { target: { value: 'dst' } })
-    await selectTargetTable('users_copy')
+  it('blocks duplicate mappings without hiding the reason', async () => {
+    mount(); await target(); next()
     fireEvent.change(screen.getByLabelText('map-display_name'), { target: { value: 'user_id' } })
-    expect(screen.getByRole('button', { name: /Migrate 2 column/i })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
+    expect(screen.getByRole('alert')).toHaveTextContent('Multiple source columns')
     expect(transferTable).not.toHaveBeenCalled()
   })
-
-  it('blocks submission while replacement target metadata is loading', async () => {
-    wrap(<DataTransferDialog connections={connections} initialSourceConnId="src" initialSourceTable="users" onClose={() => {}} />)
-    fireEvent.change(screen.getByLabelText('transfer-target-conn'), { target: { value: 'dst' } })
-    await selectTargetTable('users_copy')
-    await waitFor(() => expect(screen.getByRole('button', { name: /Migrate 2 column/i })).toBeEnabled())
+  it('blocks submission while replacement metadata is loading', async () => {
+    mount(); await target()
     tableStructure.mockImplementation(() => new Promise(() => {}))
-    await selectTargetTable('users')
-    expect(screen.getByRole('button', { name: /Migrate .*column/i })).toBeDisabled()
+    fireEvent.change(screen.getByLabelText('transfer-target-table'), { target: { value: 'users' } })
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
     expect(transferTable).not.toHaveBeenCalled()
   })
-
-  it('renders target schema and table as dropdowns populated from the target connection', async () => {
-    // 真机反馈:目标 Schema / 表应为下拉框(从目标连接内省得到),而非自由输入。
-    wrap(
-      <DataTransferDialog
-        connections={connections}
-        initialSourceConnId="src"
-        initialSourceSchema="public"
-        initialSourceTable="users"
-        onClose={() => {}}
-      />,
-    )
-    fireEvent.change(screen.getByLabelText('transfer-target-conn'), { target: { value: 'dst' } })
-
-    // 目标表必须是 <select>,选项来自目标连接 schema 的表(getSchema)。
-    const tableSelect = await screen.findByLabelText('transfer-target-table')
-    expect(tableSelect.tagName).toBe('SELECT')
-    await waitFor(() =>
-      expect(within(tableSelect as HTMLElement).getByRole('option', { name: 'users_copy' })).toBeInTheDocument(),
-    )
-    // 目标 Schema 也必须是 <select>(单一命名空间时自动选中)。
-    const schemaSelect = screen.getByLabelText('transfer-target-schema')
-    expect(schemaSelect.tagName).toBe('SELECT')
-    expect((schemaSelect as HTMLSelectElement).value).toBe('analytics')
-  })
-
-  it('registers pending transfer work and prevents closing until its receipt arrives', async () => {
+  it('registers busy work and blocks Escape/header/footer close until the actual receipt', async () => {
     let finish!: (value: { rowsTransferred: number }) => void
     transferTable.mockImplementation(() => new Promise(resolve => { finish = resolve }))
     const close = vi.fn()
-    const view = wrap(<DatabaseWorkProvider owner={{ ownerId: 'transfer-owner', workbenchId: 'transfer-workbench', profileId: 'src' }}>
-      <DataTransferDialog connections={connections} initialSourceConnId="src" initialSourceSchema="public" initialSourceTable="users" onClose={close} />
-    </DatabaseWorkProvider>)
-    fireEvent.change(screen.getByLabelText('transfer-target-conn'), { target: { value: 'dst' } })
-    await selectTargetTable('users_copy')
-    fireEvent.click(await screen.findByRole('button', { name: /Migrate 2 column/i }))
-    await waitFor(() => expect(hasBusyDatabaseDraftWork({ workbenchId: 'transfer-workbench' })).toBe(true))
-    const cancel = screen.getByRole('button', { name: 'Cancel' })
-    expect(cancel).toBeDisabled()
-    fireEvent.click(cancel)
+    const view = wrap(<DatabaseWorkProvider owner={{ ownerId: 'owner', workbenchId: 'workbench', profileId: 'src' }}><DataTransferDialog connections={connections} initialSourceConnId="src" initialSourceTable="users" onClose={close}/></DatabaseWorkProvider>)
+    await review(); await run()
+    expect(hasBusyDatabaseDraftWork({ workbenchId: 'workbench' })).toBe(true)
+    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' })
+    screen.getAllByRole('button', { name: 'Close' }).forEach(button => { expect(button).toBeDisabled(); fireEvent.click(button) })
     expect(close).not.toHaveBeenCalled()
-    finish({ rowsTransferred: 2 })
-    await screen.findByText(/Migrated 2 row/i)
-    await waitFor(() => expect(hasBusyDatabaseDraftWork({ workbenchId: 'transfer-workbench' })).toBe(false))
-    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    await act(async () => finish({ rowsTransferred: 2 }))
+    expect(hasBusyDatabaseDraftWork({ workbenchId: 'workbench' })).toBe(false)
+    fireEvent.click(screen.getAllByRole('button', { name: 'Close' }).at(-1)!)
     expect(close).toHaveBeenCalledTimes(1)
-    view.unmount()
-    expect(hasBusyDatabaseDraftWork({ workbenchId: 'transfer-workbench' })).toBe(false)
+    view.unmount(); expect(hasBusyDatabaseDraftWork({ workbenchId: 'workbench' })).toBe(false)
   })
-
-  it('auto-maps matching columns and migrates with append by default', async () => {
-    transferTable.mockResolvedValue({ rowsTransferred: 42 })
-
-    wrap(
-      <DataTransferDialog
-        connections={connections}
-        initialSourceConnId="src"
-        initialSourceSchema="public"
-        initialSourceTable="users"
-        onClose={() => {}}
-      />,
-    )
-
-    // Pick a target connection + table.
-    fireEvent.change(screen.getByLabelText('transfer-target-conn'), { target: { value: 'dst' } })
-    await selectTargetTable('users_copy')
-
-    // Target columns load → auto-map matches both → migrate enabled (2 columns).
-    const apply = await screen.findByRole('button', { name: /Migrate 2 column/i })
-    expect(apply).not.toBeDisabled()
-
-    fireEvent.click(apply)
-
-    await waitFor(() => expect(transferTable).toHaveBeenCalledTimes(1))
-    expect(transferTable).toHaveBeenCalledWith({
-      sourceConnId: 'src', sourceSchema: 'public', sourceTable: 'users',
-      targetConnId: 'dst', targetSchema: 'analytics', targetTable: 'users_copy',
-      mode: 'append',
-      mappings: [
-        { sourceColumn: 'user_id', targetColumn: 'user_id' },
-        { sourceColumn: 'display_name', targetColumn: 'display_name' },
-      ],
-      upsertKeys: undefined,
-    })
-    await waitFor(() => expect(screen.getByText(/Migrated 42 row/i)).toBeInTheDocument())
-    // 成功后取消按钮变「关闭」—— i18n key 必须存在(回归:此前 dbviews.close 缺失显示原文)。
-    expect(screen.getByRole('button', { name: 'Close' })).toBeInTheDocument()
-    expect(screen.queryByText('dbviews.close')).not.toBeInTheDocument()
+  it('requires exact destructive confirmation on review and clears it after going back', async () => {
+    mount(); await target(); next()
+    fireEvent.click(screen.getByRole('button', { name: 'Truncate first' })); next()
+    const button = () => screen.getByRole('button', { name: /Migrate 2 column/i })
+    expect(button()).toBeDisabled()
+    fireEvent.change(screen.getByLabelText('transfer-destructive-confirm'), { target: { value: 'users_copy ' } }); expect(button()).toBeDisabled()
+    fireEvent.change(screen.getByLabelText('transfer-destructive-confirm'), { target: { value: 'users_copy' } }); expect(button()).toBeEnabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Back' })); next()
+    expect(screen.getByLabelText('transfer-destructive-confirm')).toHaveValue('')
+    fireEvent.change(screen.getByLabelText('transfer-destructive-confirm'), { target: { value: 'users_copy' } }); await run()
+    expect(transferTable.mock.calls[0][0]).toMatchObject({ mode: 'overwrite', allowDestructive: true })
   })
-
-  it('requires typing the target table name to confirm a destructive overwrite, and sends allowDestructive', async () => {
-    transferTable.mockResolvedValue({ rowsTransferred: 7 })
-
-    wrap(
-      <DataTransferDialog
-        connections={connections}
-        initialSourceConnId="src"
-        initialSourceSchema="public"
-        initialSourceTable="users"
-        onClose={() => {}}
-      />,
-    )
-
-    fireEvent.change(screen.getByLabelText('transfer-target-conn'), { target: { value: 'dst' } })
-    await selectTargetTable('users_copy')
-
-    // Switch to the destructive overwrite mode (label = "Truncate first").
-    fireEvent.click(await screen.findByRole('button', { name: 'Truncate first' }))
-
-    // Migrate stays disabled until the user retypes the exact target table name.
-    const apply = await screen.findByRole('button', { name: /Migrate \d+ column/i })
-    expect(apply).toBeDisabled()
-
-    // Wrong confirmation text keeps it disabled.
-    const confirmInput = screen.getByLabelText('transfer-destructive-confirm')
-    fireEvent.change(confirmInput, { target: { value: 'users_cop' } })
-    expect(screen.getByRole('button', { name: /Migrate \d+ column/i })).toBeDisabled()
-
-    // Exact match enables it.
-    fireEvent.change(confirmInput, { target: { value: 'users_copy' } })
-    const enabled = screen.getByRole('button', { name: /Migrate \d+ column/i })
-    expect(enabled).not.toBeDisabled()
-
-    fireEvent.click(enabled)
-    await waitFor(() => expect(transferTable).toHaveBeenCalledTimes(1))
-    const arg = transferTable.mock.calls[0][0]
-    expect(arg.mode).toBe('overwrite')
-    expect(arg.allowDestructive).toBe(true)
-  })
-
-  it('does not send allowDestructive for non-destructive append', async () => {
-    transferTable.mockResolvedValue({ rowsTransferred: 1 })
-    wrap(
-      <DataTransferDialog
-        connections={connections}
-        initialSourceConnId="src"
-        initialSourceSchema="public"
-        initialSourceTable="users"
-        onClose={() => {}}
-      />,
-    )
-    fireEvent.change(screen.getByLabelText('transfer-target-conn'), { target: { value: 'dst' } })
-    await selectTargetTable('users_copy')
-    fireEvent.click(await screen.findByRole('button', { name: /Migrate 2 column/i }))
-    await waitFor(() => expect(transferTable).toHaveBeenCalledTimes(1))
-    expect(transferTable.mock.calls[0][0].allowDestructive).toBeUndefined()
-  })
-
-  it('hides the upsert mode when the target engine has no native upsert', async () => {
-    wrap(
-      <DataTransferDialog
-        connections={connections}
-        initialSourceConnId="src"
-        initialSourceSchema="public"
-        initialSourceTable="users"
-        onClose={() => {}}
-      />,
-    )
-    // Target = clickhouse (no native upsert) → only append + overwrite buttons.
-    fireEvent.change(screen.getByLabelText('transfer-target-conn'), { target: { value: 'dst' } })
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Append' })).toBeInTheDocument())
+  it('does not offer upsert for an unsupported target', async () => {
+    mount(); await target(); next()
+    expect(screen.getByRole('button', { name: 'Append' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Upsert' })).not.toBeInTheDocument()
   })
-
-  it('requires an upsert key and passes it when target supports upsert', async () => {
-    transferTable.mockResolvedValue({ rowsTransferred: 3 })
-    // Make BOTH connections postgres so the target supports native upsert.
-    const pgConns = [
-      { id: 'src', name: 'prod-pg', engine: 'postgres' },
-      { id: 'dst', name: 'staging-pg', engine: 'postgres' },
-    ]
-    wrap(
-      <DataTransferDialog
-        connections={pgConns}
-        initialSourceConnId="src"
-        initialSourceSchema="public"
-        initialSourceTable="users"
-        onClose={() => {}}
-      />,
-    )
-    fireEvent.change(screen.getByLabelText('transfer-target-conn'), { target: { value: 'dst' } })
-    await selectTargetTable('users')
-
-    // Switch to upsert mode.
-    fireEvent.click(await screen.findByRole('button', { name: 'Upsert' }))
-
-    // Without a key chosen, migrate stays disabled.
-    const apply = screen.getByRole('button', { name: /Migrate \d+ column/i })
-    expect(apply).toBeDisabled()
-
-    // Choose user_id as the upsert key.
-    fireEvent.click(await screen.findByLabelText('upsert-key-user_id'))
-    expect(screen.getByRole('button', { name: /Migrate \d+ column/i })).not.toBeDisabled()
-
-    fireEvent.click(screen.getByRole('button', { name: /Migrate \d+ column/i }))
-    await waitFor(() => expect(transferTable).toHaveBeenCalledTimes(1))
-    const arg = transferTable.mock.calls[0][0]
-    expect(arg.mode).toBe('upsert')
-    expect(arg.upsertKeys).toEqual(['user_id'])
+  it('requires a mapped key for upsert and preserves it in the reviewed request', async () => {
+    mount({ connections: connections.map(c => ({ ...c, engine: 'postgres' })) }); await target(); next()
+    fireEvent.click(screen.getByRole('button', { name: 'Upsert' })); expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
+    fireEvent.click(screen.getByLabelText('upsert-key-user_id')); next(); await run()
+    expect(transferTable.mock.calls[0][0]).toMatchObject({ mode: 'upsert', upsertKeys: ['user_id'] })
+  })
+  it('refuses stale structure before any write and requires a new review', async () => {
+    mount(); await review()
+    tableStructure.mockResolvedValue({ ...structure, columns: [...columns, { ...columns[1], name: 'added' }] })
+    await run()
+    await screen.findByText(/structure changed after review/i)
+    expect(screen.getByLabelText('transfer-target-table')).toHaveValue('')
+    expect(transferTable).not.toHaveBeenCalled()
+  })
+  it('allows a safe preflight retry when metadata recheck failed before dispatch', async () => {
+    mount(); await review()
+    tableStructure.mockRejectedValueOnce(new Error('Metadata denied'))
+    await run(); await screen.findByText('Metadata denied')
+    expect(transferTable).not.toHaveBeenCalled()
+    expect(screen.queryByText(/Check the target before starting/i)).not.toBeInTheDocument()
+    await run(); expect(transferTable).toHaveBeenCalledTimes(1)
+  })
+  it('blocks self-copy when the source and target are the same object', async () => {
+    mount({ initialSourceSchema: 'analytics' })
+    fireEvent.change(screen.getByLabelText('transfer-target-conn'), { target: { value: 'src' } })
+    await screen.findByRole('option', { name: 'users' })
+    await act(async () => { fireEvent.change(screen.getByLabelText('transfer-target-table'), { target: { value: 'users' } }) })
+    expect(screen.getByRole('alert')).toHaveTextContent('Source and target must be different tables')
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
+    expect(transferTable).not.toHaveBeenCalled()
+  })
+  it('shows source metadata errors and allows explicit reload', async () => {
+    tableStructure.mockRejectedValueOnce(new Error('Source denied'))
+    mount(); await screen.findByText('Source denied')
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Reload target columns' }))
+    await waitFor(() => expect(screen.queryByText('Source denied')).not.toBeInTheDocument())
+    await target(); expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled()
   })
 })
