@@ -8,13 +8,14 @@ export interface DatabaseEditorPreferences {
   completionKey: 'Ctrl-Space' | 'Alt-Space'
   functionParameters: boolean
   signatureHelp: boolean
+  referenceDiagnostics: boolean
   lineWrapping: boolean
   foldGutter: boolean
 }
 export const DEFAULT_DATABASE_EDITOR_PREFERENCES: Readonly<DatabaseEditorPreferences> = Object.freeze({
   keywordCase: 'upper', commaPosition: 'after', tabWidth: 2,
   completionOnTyping: true, completionKey: 'Ctrl-Space', functionParameters: true,
-  signatureHelp: true, lineWrapping: false, foldGutter: true,
+  signatureHelp: true, referenceDiagnostics: true, lineWrapping: false, foldGutter: true,
 })
 const KEY = 'catio:database:editor-preferences:v1'
 const EVENT = 'catio:database:editor-preferences-changed'
@@ -32,7 +33,7 @@ export function normalizeDatabaseEditorPreferences(value: unknown): DatabaseEdit
     tabWidth: input.tabWidth === 4 || input.tabWidth === 8 ? input.tabWidth : 2,
     completionKey: input.completionKey === 'Alt-Space' ? 'Alt-Space' : 'Ctrl-Space',
     completionOnTyping: bool('completionOnTyping'), functionParameters: bool('functionParameters'),
-    signatureHelp: bool('signatureHelp'), lineWrapping: bool('lineWrapping'), foldGutter: bool('foldGutter'),
+    signatureHelp: bool('signatureHelp'), referenceDiagnostics: bool('referenceDiagnostics'), lineWrapping: bool('lineWrapping'), foldGutter: bool('foldGutter'),
   }
 }
 export function readDatabaseEditorPreferences(): DatabaseEditorPreferences {

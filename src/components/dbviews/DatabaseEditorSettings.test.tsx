@@ -32,6 +32,15 @@ it('reconfigures live editors without losing text, selection or undo history', (
   expect(view.contentDOM).not.toHaveClass('cm-lineWrapping')
   expect(view.state.tabSize).toBe(2)
 })
+it('lets users disable catalog-based table/column hints without storing SQL or metadata',()=>{
+  render(<DatabaseEditorSettings onClose={()=>{}}/>)
+  const toggle=screen.getByRole('checkbox',{name:'Table and column hints'})
+  expect(toggle).toBeChecked();fireEvent.click(toggle)
+  expect(readDatabaseEditorPreferences().referenceDiagnostics).toBe(false)
+  expect(JSON.parse(localStorage.getItem('catio:database:editor-preferences:v1')!).referenceDiagnostics).toBe(false)
+  fireEvent.click(screen.getByRole('button',{name:'Restore defaults'}))
+  expect(toggle).toBeChecked()
+})
 it('reports unavailable storage instead of claiming a successful save', () => {
   readDatabaseEditorPreferences()
   vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('denied') })

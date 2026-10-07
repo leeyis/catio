@@ -9,7 +9,7 @@ export function DatabaseEditorSettings({ onClose }: { onClose: () => void }) {
   const settings = useDatabaseEditorPreferences()
   const [memoryOnly, setMemoryOnly] = useState(false)
   function update(patch: Partial<DatabaseEditorPreferences>) { setMemoryOnly(!updateDatabaseEditorPreferences(patch)) }
-  const toggles = ['completionOnTyping', 'functionParameters', 'signatureHelp', 'lineWrapping', 'foldGutter'] as const
+  const toggles = ['completionOnTyping', 'functionParameters', 'signatureHelp', 'referenceDiagnostics', 'lineWrapping', 'foldGutter'] as const
   return <DatabaseFileFlow title={t('dbEditor.title')} target={t('dbEditor.scope')} steps={[]} step={0} busy={false} onClose={onClose}
     footer={<><Btn variant="secondary" onClick={() => update({ ...DEFAULT_DATABASE_EDITOR_PREFERENCES })}>{t('dbEditor.reset')}</Btn><Btn variant="primary" onClick={onClose}>{t('dbviews.close')}</Btn></>}>
     <h3>{t('dbEditor.formatting')}</h3>
@@ -31,6 +31,7 @@ export function DatabaseEditorSettings({ onClose }: { onClose: () => void }) {
         <option value="Ctrl-Space">Ctrl + Space</option><option value="Alt-Space">Alt + Space</option>
       </select></label>
     </div>
+    <p className="db-flow-muted">{t('dbEditor.referenceDiagnosticsHint')}</p>
     <p className="db-flow-muted">{t('dbEditor.shortcuts')}</p>
     {memoryOnly && <p role="alert" className="db-flow-notice">{t('dbEditor.memoryOnly')}</p>}
   </DatabaseFileFlow>

@@ -12,6 +12,7 @@ export interface SqlDiagnostic extends SqlIssue {
 type SqlDiagnosticTextKey=SqlDiagnosticCode|'replacePunctuation'
 export interface SqlDiagnosticOptions {
   engine?:string
+  checkReferences?:boolean
   translate?:(code:SqlDiagnosticTextKey,values?:SqlIssue['values'])=>string
 }
 const text=(code:SqlDiagnosticTextKey,values:SqlIssue['values'],options:SqlDiagnosticOptions)=>options.translate?.(code,values)??i18n.t('dbviews.sqlDiagnostics.'+code,values??{})
@@ -32,7 +33,7 @@ export function sqlDiagnostics(sql:string,schema:SqlDiagnosticSchema,options:Sql
     return [{...notice,message:message(notice,options),startLine:1,startColumn:1,endLine:1,endColumn:2}]
   }
   const state=EditorState.create({doc:sql,extensions:[dialectFor(options.engine).language]})
-  return sqlIssuesAt(state,schema,options.engine).map(d=>{
+  return sqlIssuesAt(state,schema,options.engine,options.checkReferences).map(d=>{
     const from=state.doc.lineAt(d.from),to=state.doc.lineAt(d.to)
     return {...d,message:message(d,options),startLine:from.number,startColumn:d.from-from.from+1,endLine:to.number,endColumn:d.to-to.from+1}
   })
@@ -43,13 +44,13 @@ export function sqlDiagnostics(sql:string,schema:SqlDiagnosticSchema,options:Sql
 export function sqlLinter(getSchema:()=>SqlDiagnosticSchema,options:SqlDiagnosticOptions={}):(view:EditorView)=>Diagnostic[] {
   return view=>{
     const selection=view.state.selection.main,caret=selection.head
-    return sqlIssuesAt(view.state,getSchema(),options.engine).filter(d=>{
+    return sqlIssuesAt(view.state,getSchema(),options.engine,options.checkReferences).filter(d=>{
       // Parser/catalog capability notices are not mistakes in the user's SQL.
       // Preserve them in the analysis API, but don't underline the first letter
       // or show an unactionable tooltip. No diagnostics is not a validation pass.
       if(d.severity==='info')return false
       if(!selection.empty)return true
-      if((d.code.startsWith('unclosed')||d.code==='unknownTable')&&caret>=d.from&&caret<=d.to)return false
+      if((d.code.startsWith('unclosed')||d.code==='unknownTable'||d.code==='unknownColumn'||d.code==='ambiguousColumn')&&caret>=d.from&&caret<=d.to)return false
       if(d.code==='unclosedParen'&&view.state.doc.lineAt(caret).number===view.state.doc.lineAt(d.from).number)return false
       return true
     }).map((d):Diagnostic=>{

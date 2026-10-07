@@ -9,7 +9,13 @@ import { sqlColumnContext } from './sqlColumnContext'
 import { sqlWriteContext } from './sqlWriteCompletion'
 
 type Id = { name: string; quoted: boolean }
-type Binding = { id: Id; columns: Completion[]; qualifier?: string }
+type Binding = { id: Id; columns: Completion[]; qualifier?: string; physical?:Id[]; qualification?:Id[] }
+/** Identity evidence only. Completion columns are deliberately not a proof that
+ * a relation's full output is known (CTEs, functions and derived tables may be partial). */
+export interface SqlColumnScope {
+  relations:{id:Id;physical?:Id[];qualification?:Id[];local:boolean}[]
+  column:boolean;clause:ReturnType<typeof sqlColumnContext>['clause'];compoundOrder:boolean
+}
 type Bindings = Map<string, Binding>
 interface Scope {
   relations: Bindings; ctes: Bindings; output: Completion[]; childOuter: Bindings
@@ -24,7 +30,7 @@ const tableHints = new Set('nolock holdlock updlock rowlock paglock tablock tabl
  * Only projected identifiers, explicit aliases/lists and resolvable stars are inferred.
  * Unknown expressions are left unknown instead of inventing output column names.
  */
-export function scopedSchemaCompletion(schema: SQLNamespace, defaultSchema?: string, engine?: string): CompletionSource {
+export function scopedSchemaCompletion(schema: SQLNamespace, defaultSchema?: string, engine?: string, inspectScope?:(scope:SqlColumnScope)=>void): CompletionSource {
   const dialect = dialectFor(engine)
   const sqlServer = dialect === dialectFor('sqlserver')
   const supportsLateral = ['postgres','mysql','mariadb','oracle'].some(id=>dialect===dialectFor(id))
@@ -208,6 +214,7 @@ export function scopedSchemaCompletion(schema: SQLNamespace, defaultSchema?: str
             argumentScope=new Map(lateral||supportsLateral||dialect===dialectFor('sqlite')?relations:outer)
             childOuter=argumentScope
           }
+          let physical=!nested&&!functionArgs&&!(names.length===1&&ctes.has(key(names[0])))?names:undefined
           let cols = nested ? analyze(nested, ctes, depth + 1,undefined,accessible).output
             : functionArgs ? [] : names.length === 1 && ctes.has(key(names[0])) ? ctes.get(key(names[0]))!.columns : physicalColumns(names)
           if(functionArgs||hint(tokens[i+1]))i++
@@ -218,6 +225,7 @@ export function scopedSchemaCompletion(schema: SQLNamespace, defaultSchema?: str
           if(word(tokens[i+1])==='with'&&hint(tokens[i+2]))i+=2
           else if(hint(tokens[i+1]))i++
           else if(tokens[i+1]?.name==='Parens'&&(!sqlServer||nested)) {
+            physical=undefined // An explicit column list changes the physical names.
             const names=children(tokens[++i]);budget-=names.length
             const renamed=names.flatMap(n=>id(n)?[projected(id(n)!)]:[])
             if(renamed.length)cols=cols.length&&renamed.length>cols.length?[]:[...renamed,...cols.slice(renamed.length)]
@@ -225,7 +233,7 @@ export function scopedSchemaCompletion(schema: SQLNamespace, defaultSchema?: str
           const binding = alias ?? names.at(-1)
           if (binding) {
             const qualifier=(alias?[alias]:names).map(n=>n.quoted?completionIdentifier(n.name,engine):n.name).join('.')
-            const value={id:binding,columns:locals.has(key(binding))?[]:cols,qualifier}
+            const value={id:binding,columns:locals.has(key(binding))?[]:cols,qualifier,physical:locals.has(key(binding))?undefined:physical,qualification:alias?[alias]:names}
             locals.set(key(binding),value);relations.set(key(binding),value);group.set(key(binding),value);joinRight=value
           }
           lateral=false
@@ -268,6 +276,10 @@ export function scopedSchemaCompletion(schema: SQLNamespace, defaultSchema?: str
       if(budget<0)break
     }
     if (budget < 0) return null
+    if(inspectScope){
+      inspectScope({relations:[...scope.relations].map(([name,binding])=>({id:binding.id,physical:binding.physical,qualification:binding.qualification,local:scope.locals.get(name)===binding})),column:scope.context.column,clause:scope.context.clause,compoundOrder:!!scope.compoundOrder})
+      return null
+    }
     // Bindings include only lexically visible correlations. An unresolved alias
     // must never fall back to lang-sql's statement-wide scanner across boundaries.
     if (leaf.name === '⚠' && leaf.prevSibling) leaf = leaf.prevSibling

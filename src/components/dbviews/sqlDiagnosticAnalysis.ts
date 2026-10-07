@@ -3,11 +3,12 @@ import {ensureSyntaxTree} from '@codemirror/language'
 import type {SyntaxNode} from '@lezer/common'
 import {dialectFor} from './sqlDialect'
 import {sqlIdentifierKey,sqlIdentifierMatches,sqlIdentifierSearch,type SqlIdentifier} from './sqlIdentifiers'
+import {sqlColumnIssues} from './sqlColumnDiagnostics'
 
-export type SqlDiagnosticCode = 'unclosedString'|'unclosedIdentifier'|'unclosedComment'|'unclosedParen'|'unexpectedClose'|'unknownTable'|'confusablePunctuation'|'limited'|'notReady'|'referenceSkipped'
+export type SqlDiagnosticCode = 'unclosedString'|'unclosedIdentifier'|'unclosedComment'|'unclosedParen'|'unexpectedClose'|'unknownTable'|'unknownColumn'|'ambiguousColumn'|'confusablePunctuation'|'limited'|'notReady'|'referenceSkipped'
 export interface SqlIssue {
   from:number; to:number; severity:'error'|'warning'|'info'; code:SqlDiagnosticCode
-  values?:{name?:string;namespace?:string;replacement?:string}
+  values?:{name?:string;namespace?:string;replacement?:string;sources?:string}
 }
 export interface SqlDiagnosticNamespace {
   name:string; tables:{name:string}[]; views:{name:string}[]
@@ -18,6 +19,8 @@ export interface SqlDiagnosticSchema {
   tables?:string[]
   namespaces?:SqlDiagnosticNamespace[]
   defaultSchema?:string
+  /** Complete, current per-namespace catalogs only. Missing is unknown, not empty. */
+  columnCatalogs?:Record<string,Record<string,readonly string[]>>
 }
 export const SQL_DIAGNOSTIC_MAX_CHARS=200_000
 const MAX_NODES=8_000,MAX_ISSUES=100
@@ -28,11 +31,11 @@ const modifiers=new Set('lateral only left right full inner outer cross natural'
 interface Token { node:SyntaxNode; from:number; to:number; kind:string; raw:string; id?:SqlIdentifier }
 export const diagnosticNotice=(code:SqlDiagnosticCode,length:number):SqlIssue=>({from:0,to:Math.min(1,length),severity:'info',code})
 
-/** This checks only local delimiters and resolvable table references. It is NOT
- * server SQL validation, column inference, an execution gate, or a privilege check.
+/** Local delimiters and evidence-backed catalog references only. This is NOT
+ * server validation, type/derived-column inference, an execution gate, or a privilege check.
  * The live path shares the editor's dialect and bounded incremental parse context.
  */
-export function sqlIssuesAt(state:EditorState,schema:SqlDiagnosticSchema,engine?:string):SqlIssue[] {
+export function sqlIssuesAt(state:EditorState,schema:SqlDiagnosticSchema,engine?:string,checkReferences=true):SqlIssue[] {
   if(state.doc.length>SQL_DIAGNOSTIC_MAX_CHARS)return [diagnosticNotice('limited',state.doc.length)]
   const tree=ensureSyntaxTree(state,state.doc.length,20)
   if(!tree||tree.length<state.doc.length)return [diagnosticNotice('notReady',state.doc.length)]
@@ -108,6 +111,7 @@ export function sqlIssuesAt(state:EditorState,schema:SqlDiagnosticSchema,engine?
   }
   if(parens.length)syntax.push(issue('unclosedParen',parens.at(-1)!,parens.at(-1)!+1))
   if(syntax.length)return syntax.sort((a,b)=>a.from-b.from).slice(0,MAX_ISSUES)
+  if(!checkReferences)return []
 
   let work=MAX_NODES
   const cache=new Map<number,Token[]>()
@@ -240,5 +244,6 @@ export function sqlIssuesAt(state:EditorState,schema:SqlDiagnosticSchema,engine?
   }
   if(limited)results.push(diagnosticNotice('limited',state.doc.length))
   else if(unsupported)results.push(diagnosticNotice('referenceSkipped',state.doc.length))
-  return results
+  else results.push(...sqlColumnIssues(state,tree,schema,engine))
+  return results.slice(0,MAX_ISSUES)
 }

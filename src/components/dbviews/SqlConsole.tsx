@@ -84,6 +84,9 @@ export interface SqlConsoleProps {
 }
 
 type CompletedStatement = QueryStatementReceipt
+type ColumnMap=Record<string,Record<string,string[]>>
+interface ColumnSnapshot {connId:string;revision:number;namespaces:string;values:ColumnMap;complete:ColumnMap}
+const EMPTY_COLUMNS:ColumnMap={}
 
 export function SqlConsole({ density, fresh, connId, initialCode, initialDefaultSchema, autoRun, active, engine, engineId, connName, profileId, onFullscreenChange, querySessions = false, workbenchId, sessionOwnerId }: SqlConsoleProps) {
   const { t } = useTranslation()
@@ -141,7 +144,8 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
   const [metadataRevision,setMetadataRevision]=useState(0)
   const [completionErrors,setCompletionErrors]=useState<Record<string,string>>({})
   // Live columns per schema namespace: { [schemaName]: { [table]: columns } }.
-  const [liveColumns, setLiveColumns] = useState<Record<string, Record<string, string[]>>>({})
+  const [columnSnapshot,setColumnSnapshot]=useState<ColumnSnapshot|null>(null)
+  const columnGeneration=useRef(0)
   // Live foreign-key relations per schema namespace (S3 外键 JOIN 建议的数据源)。
   // 形如 { [schemaName]: ErRelation[] }(from.fromCol → to.toCol)。
   const [liveRelations, setLiveRelations] = useState<Record<string, ErRelation[]>>({})
@@ -243,6 +247,8 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
     let timer:ReturnType<typeof setTimeout>|undefined
     const changed=(event:Event)=>{const detail=(event as CustomEvent<{connId?:string}>).detail
       if(detail?.connId&&detail.connId!==connId)return
+      // Stop treating old columns as evidence before the catalog reload debounce.
+      columnGeneration.current++;setColumnSnapshot(null)
       clearTimeout(timer);timer=setTimeout(()=>{setCompletionErrors({});setMetadataRevision(v=>v+1);load()},100)
     }
     window.addEventListener(SCHEMA_INVALIDATED_EVENT,changed)
@@ -277,14 +283,6 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
   const completionNamespace = supportsDefaultNamespace
     ? defaultNamespace || initialDefaultSchema || liveSchema?.defaultNamespace
     : liveSchema?.defaultNamespace
-  // Diagnostics share the actual dialect/namespace and object-loading state.
-  // A changed connection never borrows an old catalog for even one render; a
-  // fresh source also schedules lint after metadata/locale changes without edits.
-  const lintSource = useMemo(() => engine === 'redis' ? redisLinter : plain ? undefined : sqlLinter(
-    () => ({defaultSchema:completionNamespace,namespaces:connId
-      ? liveSchema?.db===connId ? liveSchema.schemas : [] : D.schema.schemas}),
-    {engine:engineId??engine,translate:(code,values)=>t('dbviews.sqlDiagnostics.'+code,values??{})},
-  ), [engine,engineId,plain,connId,liveSchema,D.schema,completionNamespace,t])
   const namespaceNames = useMemo(
     () => (liveSchema ? referencedNamespaces(plain ? '' : code, liveSchema.schemas.map(ns => ns.name), completionNamespace, engineId ?? engine) : []),
     [liveSchema, code, completionNamespace, engineId, engine, plain],
@@ -345,13 +343,15 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
   // Best-effort: on rejection we leave that namespace out (editor falls back to
   // table-names-only). Re-runs only when connId or the namespace list changes.
   useEffect(() => {
-    if (!connId || plain || namespaceNames.length === 0) { setLiveColumns({}); return }
+    const generation=++columnGeneration.current
+    if (!connId || plain || namespaceNames.length === 0) { setColumnSnapshot(null); return }
     let alive = true
+    const current=()=>alive&&generation===columnGeneration.current
     Promise.all(
       namespaceNames.map(name =>
         schemaColumnCatalog(connId, name)
           .then(catalog => {
-            if (alive) setCompletionErrors(current => {
+            if (current()) setCompletionErrors(current => {
               const next = { ...current }
               const errors = catalog.errors.map(error => error.schema + ': ' + error.message)
               if (catalog.truncated) errors.push(t('workbench.columnMetadataTruncated', { schema: name }))
@@ -359,17 +359,31 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
               else delete next['columns:' + name]
               return next
             })
-            return [name, Object.fromEntries(catalog.tables)] as const
+            return [name, Object.fromEntries(catalog.tables),!catalog.truncated&&catalog.errors.length===0] as const
           })
-          .catch(e => {if(alive)setCompletionErrors(current=>({...current,['columns:'+name]:name+': '+dbErrMsg(e)}));return [name, {} as Record<string, string[]>] as const}),
+          .catch(e => {if(current())setCompletionErrors(current=>({...current,['columns:'+name]:name+': '+dbErrMsg(e)}));return [name, {} as Record<string, string[]>,false] as const}),
       ),
     )
-      .then(entries => { if (alive) setLiveColumns(Object.fromEntries(entries)) })
-      .catch(() => { if (alive) setLiveColumns({}) })
+      .then(entries => { if (current()) setColumnSnapshot({connId,revision:metadataRevision,namespaces:namespaceKey,
+        values:Object.fromEntries(entries.map(([name,columns])=>[name,columns])),
+        complete:Object.fromEntries(entries.filter(([, ,complete])=>complete).map(([name,columns])=>[name,columns])),
+      }) })
+      .catch(() => { if (current()) setColumnSnapshot(null) })
     return () => { alive = false }
     // namespaceKey captures the namespace-name identity; intentionally not on liveSchema object.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connId, plain, namespaceKey, metadataRevision])
+
+  const currentColumns=columnSnapshot&&columnSnapshot.connId===connId&&columnSnapshot.revision===metadataRevision&&columnSnapshot.namespaces===namespaceKey?columnSnapshot:null
+  const liveColumns=currentColumns?.values??EMPTY_COLUMNS
+  // Names and complete columns carry the same connection/namespace/revision.
+  // Fresh metadata or locale changes schedule lint without changing the document.
+  const lintSource = useMemo(() => engine === 'redis' ? redisLinter : plain ? undefined : sqlLinter(
+    () => ({defaultSchema:completionNamespace,namespaces:connId
+      ? liveSchema?.db===connId ? liveSchema.schemas : [] : D.schema.schemas,
+      columnCatalogs:connId?currentColumns?.complete:undefined}),
+    {engine:engineId??engine,checkReferences:editorPreferences.referenceDiagnostics,translate:(code,values)=>t('dbviews.sqlDiagnostics.'+code,values??{})},
+  ), [engine,engineId,plain,connId,liveSchema,D.schema,completionNamespace,currentColumns,editorPreferences.referenceDiagnostics,t])
 
   // S3:每个库/Schema 的外键关系(JOIN 建议数据源)。复用 ER 图的 erRelations
   // (每库一次调用,廉价)。best-effort:失败的库留空,JOIN 建议对其降级为无候选。
