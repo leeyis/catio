@@ -31,7 +31,7 @@ async function candidates(view: EditorView) {
 
 describe('live SQL dialect and namespace completion', () => {
   it.each([
-    ['mysql', MySQL], ['tidb', MySQL], ['sqlite', SQLite], ['rqlite', SQLite],
+    ['mysql', MySQL], ['tidb', MySQL], ['sqlite', {spec:{...SQLite.spec,identifierQuotes:'`"['}}], ['rqlite', {spec:{...SQLite.spec,identifierQuotes:'`"['}}],
     ['duckdb', PostgreSQL], ['sqlserver', {spec:{...MSSQL.spec,specialVar:'@#'}}], ['oracle', {spec:{...PLSQL.spec,doubleQuotedStrings:false,identifierQuotes:'"'}}], ['jdbc', StandardSQL],
   ])('selects an explicit parser for %s', (engine, dialect) => expect(dialectFor(engine).spec).toMatchObject(dialect.spec))
 

@@ -9,11 +9,13 @@ export type {SqlDiagnosticSchema} from './sqlDiagnosticAnalysis'
 export interface SqlDiagnostic extends SqlIssue {
   startLine:number; startColumn:number; endLine:number; endColumn:number; message:string
 }
+type SqlDiagnosticTextKey=SqlDiagnosticCode|'replacePunctuation'
 export interface SqlDiagnosticOptions {
   engine?:string
-  translate?:(code:SqlDiagnosticCode,values?:SqlIssue['values'])=>string
+  translate?:(code:SqlDiagnosticTextKey,values?:SqlIssue['values'])=>string
 }
-const message=(d:SqlIssue,options:SqlDiagnosticOptions)=>options.translate?.(d.code,d.values)??i18n.t('dbviews.sqlDiagnostics.'+d.code,d.values??{})
+const text=(code:SqlDiagnosticTextKey,values:SqlIssue['values'],options:SqlDiagnosticOptions)=>options.translate?.(code,values)??i18n.t('dbviews.sqlDiagnostics.'+code,values??{})
+const message=(d:SqlIssue,options:SqlDiagnosticOptions)=>text(d.code,d.values,options)
 
 /** Compatibility helper for non-editor callers. Live diagnostics must keep
  * namespace/loading identity instead of treating this flattened list as complete. */
@@ -42,10 +44,29 @@ export function sqlLinter(getSchema:()=>SqlDiagnosticSchema,options:SqlDiagnosti
   return view=>{
     const selection=view.state.selection.main,caret=selection.head
     return sqlIssuesAt(view.state,getSchema(),options.engine).filter(d=>{
+      // Parser/catalog capability notices are not mistakes in the user's SQL.
+      // Preserve them in the analysis API, but don't underline the first letter
+      // or show an unactionable tooltip. No diagnostics is not a validation pass.
+      if(d.severity==='info')return false
       if(!selection.empty)return true
       if((d.code.startsWith('unclosed')||d.code==='unknownTable')&&caret>=d.from&&caret<=d.to)return false
       if(d.code==='unclosedParen'&&view.state.doc.lineAt(caret).number===view.state.doc.lineAt(d.from).number)return false
       return true
-    }).map(d=>({from:d.from,to:d.to,severity:d.severity,message:message(d,options),source:'SQL'}))
+    }).map((d):Diagnostic=>{
+      const diagnostic:Diagnostic={from:d.from,to:d.to,severity:d.severity,message:message(d,options),source:'SQL'}
+      const name=d.values?.name,replacement=d.values?.replacement
+      if(d.code==='confusablePunctuation'&&name&&replacement)diagnostic.actions=[{
+        name:text('replacePunctuation',d.values,options),
+        apply(current,from,to){
+          // CodeMirror maps the range while typing. Recheck the live syntax too:
+          // an old repair must not rewrite text that has since become a literal.
+          if(current.state.readOnly||current.state.sliceDoc(from,to)!==name)return
+          if(!sqlIssuesAt(current.state,getSchema(),options.engine).some(issue=>issue.code===d.code&&issue.from===from&&issue.to===to&&issue.values?.name===name))return
+          current.dispatch({changes:{from,to,insert:replacement},selection:{anchor:from+replacement.length},userEvent:'input'})
+          current.focus()
+        },
+      }]
+      return diagnostic
+    })
   }
 }

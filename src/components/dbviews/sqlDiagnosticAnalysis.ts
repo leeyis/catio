@@ -4,10 +4,10 @@ import type {SyntaxNode} from '@lezer/common'
 import {dialectFor} from './sqlDialect'
 import {sqlIdentifierKey,sqlIdentifierMatches,sqlIdentifierSearch,type SqlIdentifier} from './sqlIdentifiers'
 
-export type SqlDiagnosticCode = 'unclosedString'|'unclosedIdentifier'|'unclosedComment'|'unclosedParen'|'unexpectedClose'|'unknownTable'|'limited'|'notReady'|'referenceSkipped'
+export type SqlDiagnosticCode = 'unclosedString'|'unclosedIdentifier'|'unclosedComment'|'unclosedParen'|'unexpectedClose'|'unknownTable'|'confusablePunctuation'|'limited'|'notReady'|'referenceSkipped'
 export interface SqlIssue {
   from:number; to:number; severity:'error'|'warning'|'info'; code:SqlDiagnosticCode
-  values?:{name?:string;namespace?:string}
+  values?:{name?:string;namespace?:string;replacement?:string}
 }
 export interface SqlDiagnosticNamespace {
   name:string; tables:{name:string}[]; views:{name:string}[]
@@ -21,6 +21,7 @@ export interface SqlDiagnosticSchema {
 }
 export const SQL_DIAGNOSTIC_MAX_CHARS=200_000
 const MAX_NODES=8_000,MAX_ISSUES=100
+const punctuationReplacements:Record<string,string>={'；':';','，':',','（':'(','）':')','＝':'='}
 const identifiers=new Set(['Identifier','QuotedIdentifier','Keyword','Builtin','Type'])
 const stops=new Set('where group having order limit offset fetch returning union intersect except qualify window for'.split(' '))
 const modifiers=new Set('lateral only left right full inner outer cross natural'.split(' '))
@@ -43,6 +44,14 @@ export function sqlIssuesAt(state:EditorState,schema:SqlDiagnosticSchema,engine?
   do {
     if(++visited>MAX_NODES)return [diagnosticNotice('limited',state.doc.length)]
     const kind=cursor.name
+    // Diagnose only standalone punctuation in parser error nodes. Do not scan
+    // literals/comments/quoted names, or rewrite opaque Unicode identifiers.
+    if(cursor.type.isError) {
+      const raw=text(cursor)
+      if(/^[；，（）＝]+$/.test(raw))for(let i=0;i<raw.length&&syntax.length<MAX_ISSUES;i++) {
+        syntax.push({code:'confusablePunctuation',from:cursor.from+i,to:cursor.from+i+1,severity:'warning',values:{name:raw[i],replacement:punctuationReplacements[raw[i]]}})
+      }
+    }
     const hidden=['String','QuotedIdentifier','LineComment','BlockComment'].includes(kind)
     const raw=hidden?text(cursor):''
     if(hidden) {

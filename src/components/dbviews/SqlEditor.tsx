@@ -10,7 +10,7 @@ import { EditorState, Compartment, Prec, type Extension } from '@codemirror/stat
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
 import { search,searchKeymap,openSearchPanel,closeSearchPanel,searchPanelOpen } from '@codemirror/search'
 import { autocompletion, completionKeymap, closeBrackets, closeBracketsKeymap, acceptCompletion, startCompletion, type CompletionSource } from '@codemirror/autocomplete'
-import { linter, lintGutter, type Diagnostic } from '@codemirror/lint'
+import { linter, lintGutter, lintKeymap, type Diagnostic } from '@codemirror/lint'
 import { LanguageSupport, syntaxHighlighting, bracketMatching, indentOnInput, indentUnit, foldGutter, foldKeymap } from '@codemirror/language'
 import { useDatabaseEditorPreferences } from '../../state/databaseEditorPreferences'
 import { guardedSqlKeywordCompletion, readySqlCompletion } from './sqlKeywordCompletion'
@@ -18,6 +18,7 @@ import type { SQLNamespace } from '@codemirror/lang-sql'
 import { scopedSchemaCompletion } from './sqlScopeCompletion'
 import { sqlDataTypeCompletion } from './sqlWriteCompletion'
 import { sqlSignatureTooltip } from './sqlSignatureTooltip'
+import { sqlEditorTheme } from './sqlEditorTheme'
 import { dialectFor } from './sqlDialect'
 export { dialectFor } from './sqlDialect'
 import { catioTheme, catioHighlight } from '../editor/editorTheme'
@@ -121,7 +122,7 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
       return exts
     }
     const dialect = dialectFor(engine)
-    const exts: Extension[] = [new LanguageSupport(dialect.language,
+    const exts: Extension[] = [Prec.high(sqlEditorTheme),new LanguageSupport(dialect.language,
       dialect.language.data.of({autocomplete:guardedSqlKeywordCompletion(dialect)})), autocompletion({ activateOnTyping: preferences.completionOnTyping }),
       EditorView.theme({
         '.cm-tooltip-autocomplete, .cm-tooltip-autocomplete > ul': { maxWidth: 'min(680px, calc(100vw - 32px))' },
@@ -139,8 +140,10 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
     if (extraCompletion) exts.push(dialect.language.data.of({ autocomplete: readySqlCompletion(
       extraCompletion,
     ) }))
-    // SQL 诊断(未闭合括号/字符串、未知表名)+ gutter 标记,与 redis 控制台一致。
-    if (lintSource) exts.push(linter(view => lintSource(view)), lintGutter())
+    // SQL problems belong at their exact text range, not in a permanently
+    // reserved icon column. Standard lint keys also expose repairs without hover.
+    if (lintSource) exts.push(linter(view => lintSource(view),{needsRefresh:update=>update.selectionSet}), keymap.of(lintKeymap),
+      EditorState.phrases.of({Diagnostics:tr('dbviews.sqlDiagnostics.panelTitle'),'No diagnostics':tr('dbviews.sqlDiagnostics.noIssues')}))
     return exts
   }
   // Keep the latest callbacks without re-running the mount effect.
