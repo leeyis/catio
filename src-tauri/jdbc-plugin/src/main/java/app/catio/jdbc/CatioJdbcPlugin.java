@@ -635,9 +635,11 @@ public final class CatioJdbcPlugin {
     }
 
     private static JsonNode listSchemas(JsonNode connection, String database) throws SQLException {
+        return listSchemas(openConnection(connection), database, driverQuirks(connection));
+    }
+
+    static JsonNode listSchemas(Connection conn, String database, JdbcDriverQuirks quirks) throws SQLException {
         ArrayNode result = MAPPER.createArrayNode();
-        Connection conn = openConnection(connection);
-        JdbcDriverQuirks quirks = driverQuirks(connection);
         String catalog = metadataCatalog(database, quirks);
         if (quirks.useOracleMetadata()) {
             return oracleListSchemas(conn);
@@ -646,27 +648,31 @@ public final class CatioJdbcPlugin {
         if (quirks.caseInsensitiveSchemaMetadata()) {
             try (ResultSet rs = meta.getSchemas(catalog, null)) {
                 appendSchemas(result, rs, true);
-            } catch (SQLException ignored) {
+            } catch (SQLException | UnsupportedOperationException | AbstractMethodError ignored) {
                 try (ResultSet rs = meta.getSchemas()) {
                     appendSchemas(result, rs, true);
+                } catch (SQLFeatureNotSupportedException | UnsupportedOperationException | AbstractMethodError ignoredLegacy) {
+                    // Both overloads may be absent on legacy drivers; try the actual default schema below.
                 }
             }
             try (ResultSet rs = meta.getSchemas(null, null)) {
                 appendSchemas(result, rs, true);
-            } catch (SQLException ignored) {
+            } catch (SQLException | UnsupportedOperationException | AbstractMethodError ignored) {
             }
         } else {
             try (ResultSet rs = meta.getSchemas(catalog, null)) {
                 appendSchemas(result, rs, false);
-            } catch (SQLFeatureNotSupportedException ignored) {
+            } catch (SQLFeatureNotSupportedException | UnsupportedOperationException | AbstractMethodError ignored) {
                 try (ResultSet rs = meta.getSchemas()) {
                     appendSchemas(result, rs, false);
+                } catch (SQLFeatureNotSupportedException | UnsupportedOperationException | AbstractMethodError ignoredLegacy) {
+                    // Unsupported capability is not a permission/query error; other SQLExceptions still propagate.
                 }
             }
             if (result.isEmpty() && catalog != null) {
                 try (ResultSet rs = meta.getSchemas(null, null)) {
                     appendSchemas(result, rs, false);
-                } catch (SQLFeatureNotSupportedException ignored) {
+                } catch (SQLFeatureNotSupportedException | UnsupportedOperationException | AbstractMethodError ignored) {
                 }
             }
         }
@@ -856,7 +862,7 @@ public final class CatioJdbcPlugin {
                 }
             }
             return fallback;
-        } catch (SQLFeatureNotSupportedException ignored) {
+        } catch (SQLFeatureNotSupportedException | UnsupportedOperationException | AbstractMethodError ignored) {
             return null;
         }
     }
