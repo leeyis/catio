@@ -34,11 +34,11 @@ export function DatabaseFileFlow({ title, target, steps, step, busy, onClose, ch
       <header className="db-file-flow-header"><div><h2 id={id}>{title}</h2><p className="mono">{target}</p></div>
         <button className="icon-btn bare" aria-label={t('dbviews.close')} title={t('dbviews.close')} disabled={busy} onClick={onClose}><Icon name="x" size={15}/></button>
       </header>
-      <ol className="db-file-flow-steps" aria-label={t('dbflow.steps')}>
+      {steps.length > 0 && <ol className="db-file-flow-steps" aria-label={t('dbflow.steps')}>
         {steps.map((name, index) => <li key={index} aria-current={index === step ? 'step' : undefined} data-complete={index < step}>
           <span aria-hidden="true">{index + 1}</span>{name}
         </li>)}
-      </ol>
+      </ol>}
       <div className="db-file-flow-body" ref={body} tabIndex={-1}>{children}</div>
       <footer className="db-file-flow-footer">{footer}</footer>
     </div>

@@ -6,6 +6,7 @@ import { completionIdentifier } from './sqlCompletionSchema'
 import { dialectFor } from './sqlDialect'
 import { sqlIdentifierKey,sqlIdentifierMatches } from './sqlIdentifiers'
 import { sqlColumnContext } from './sqlColumnContext'
+import { sqlWriteContext } from './sqlWriteCompletion'
 
 type Id = { name: string; quoted: boolean }
 type Binding = { id: Id; columns: Completion[]; qualifier?: string }
@@ -103,6 +104,12 @@ export function scopedSchemaCompletion(schema: SQLNamespace, defaultSchema?: str
     if (ancestors[0].to - ancestors[0].from > 200_000) return null
 
     let budget = 4000
+    const writeContext = sqlWriteContext(context)
+    if (writeContext?.kind === 'type') return null
+    if (writeContext?.kind === 'columns') {
+      const options = physicalColumns(writeContext.table).filter(c => !writeContext.used.some(used => sqlIdentifierMatches(used, c.label, engine)) && c.label.toLowerCase().startsWith(writeContext.prefix.toLowerCase()))
+      return { from: writeContext.from, to: writeContext.to, options, filter: false }
+    }
     const derivedQuery = (node:SyntaxNode):SyntaxNode|undefined => {
       for(let depth=0;depth<=12;depth++) {
         if(queryNode(node))return node

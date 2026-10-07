@@ -9,6 +9,7 @@
  */
 import { snippetCompletion, type CompletionContext, type CompletionResult, type Completion } from '@codemirror/autocomplete'
 import { dialectFor } from './sqlDialect'
+import { sqlWriteContext } from './sqlWriteCompletion'
 import { joinCompletion, type JoinTable } from './sqlJoinCompletion'
 export { joinSuggestions } from './sqlJoinCompletion'
 export type { JoinTable, JoinForeignKey, JoinSuggestionItem } from './sqlJoinCompletion'
@@ -228,7 +229,7 @@ function matchesPrefix(name: string, prefix: string): boolean {
  * 函数名补全候选:按前缀(大小写不敏感)给出函数,apply 携带占位参数模板。
  * apply 保留纯文本接口；template 给实际编辑器提供可跳转的 CodeMirror 字段。
  */
-export function functionCompletions(prefix: string, engine?: string): FunctionCompletionItem[] {
+export function functionCompletions(prefix: string, engine?: string, includeParameters = true): FunctionCompletionItem[] {
   const sigs = functionSignatures(engine)
   const items: FunctionCompletionItem[] = []
   for (const name of Object.keys(sigs)) {
@@ -236,7 +237,7 @@ export function functionCompletions(prefix: string, engine?: string): FunctionCo
     const params = sigs[name]
     const signature = `${name}(${params.join(', ')})`
     const fields = params.map(param => param.split(/( AS | FROM )/).map(part => /^( AS | FROM )$/.test(part) ? part : '${' + part + '}').join('')).join(', ')
-    items.push({ label: name, apply: signature, template: `${name}(${fields})${params.length ? '${}' : ''}`, detail: signature })
+    items.push({ label: name, apply: includeParameters ? signature : `${name}()`, template: includeParameters ? `${name}(${fields})${params.length ? '${}' : ''}` : `${name}(${'${}'})`, detail: signature })
   }
   // 稳定排序:与前缀完全匹配/更短者优先,其余按字母序。
   items.sort((a, b) => a.label.length - b.label.length || a.label.localeCompare(b.label))
@@ -257,10 +258,11 @@ export function sqlAdvancedCompletion(
   getEngine: () => string | undefined,
   getJoinTables: () => JoinTable[],
   getDefaultSchema: () => string | undefined = () => undefined,
+  getIncludeParameters: () => boolean = () => true,
 ) {
   return (context: CompletionContext): CompletionResult | null => {
     const tree = ensureSyntaxTree(context.state, context.pos, 10)
-    if (!tree) return null
+    if (!tree || sqlWriteContext(context)) return null
     const joins = joinCompletion(context, getJoinTables(), getEngine(), getDefaultSchema())
     if (joins) return joins
     for (let node = tree.resolveInner(context.pos, -1); ; ) {
@@ -276,7 +278,7 @@ export function sqlAdvancedCompletion(
 
     // 函数名补全:仅当正在输入一个裸标识符(有前缀)时给,避免空白处刷出整库函数。
     if (word && word.text) {
-      for (const f of functionCompletions(word.text, engine)) {
+      for (const f of functionCompletions(word.text, engine, getIncludeParameters())) {
         options.push(snippetCompletion(f.template, { label: f.label, detail: f.detail, type: 'function' }))
       }
     }

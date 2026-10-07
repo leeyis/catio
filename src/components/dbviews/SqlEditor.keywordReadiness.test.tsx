@@ -35,7 +35,7 @@ async function names(input:string,withExtra=false){
   published.tree=new Tree(ready!.type,[],[],view.state.doc.length)
   const c=new CompletionContext(view.state,pos,true)
   const sources=view.state.languageDataAt<CompletionSource>('autocomplete',pos)
-  expect(sources).toHaveLength(withExtra?3:2) // never pass by accidentally removing language data
+  expect(sources).toHaveLength(withExtra?4:3) // keywords, datatype slots, scoped schema, optional caller source
   const results=await Promise.all(sources.map(source=>source(c)))
   return results.flatMap(r=>r?.options.map(o=>o.label)??[])
 }

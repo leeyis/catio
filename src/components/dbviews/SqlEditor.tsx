@@ -9,12 +9,14 @@ import { EditorView, keymap, placeholder as cmPlaceholder, lineNumbers, highligh
 import { EditorState, Compartment, Prec, type Extension } from '@codemirror/state'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
 import { search,searchKeymap,openSearchPanel,closeSearchPanel,searchPanelOpen } from '@codemirror/search'
-import { autocompletion, completionKeymap, closeBrackets, closeBracketsKeymap, acceptCompletion, type CompletionSource } from '@codemirror/autocomplete'
+import { autocompletion, completionKeymap, closeBrackets, closeBracketsKeymap, acceptCompletion, startCompletion, type CompletionSource } from '@codemirror/autocomplete'
 import { linter, lintGutter, type Diagnostic } from '@codemirror/lint'
-import { LanguageSupport, syntaxHighlighting, bracketMatching, indentOnInput } from '@codemirror/language'
+import { LanguageSupport, syntaxHighlighting, bracketMatching, indentOnInput, indentUnit, foldGutter, foldKeymap } from '@codemirror/language'
+import { useDatabaseEditorPreferences } from '../../state/databaseEditorPreferences'
 import { guardedSqlKeywordCompletion, readySqlCompletion } from './sqlKeywordCompletion'
 import type { SQLNamespace } from '@codemirror/lang-sql'
 import { scopedSchemaCompletion } from './sqlScopeCompletion'
+import { sqlDataTypeCompletion } from './sqlWriteCompletion'
 import { sqlSignatureTooltip } from './sqlSignatureTooltip'
 import { dialectFor } from './sqlDialect'
 export { dialectFor } from './sqlDialect'
@@ -97,6 +99,17 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
   const viewRef = useRef<EditorView | null>(null)
   const sqlCompartment = useRef(new Compartment())
   const searchUiCompartment = useRef(new Compartment())
+  const preferencesCompartment = useRef(new Compartment())
+  const preferences = useDatabaseEditorPreferences()
+  function preferencesExt(): Extension {
+    if (plain) return keymap.of(completionKeymap.filter(binding => binding.key === 'Ctrl-Space'))
+    return [
+      EditorState.tabSize.of(preferences.tabWidth), indentUnit.of(' '.repeat(preferences.tabWidth)),
+      ...(preferences.lineWrapping ? [EditorView.lineWrapping] : []),
+      ...(preferences.foldGutter ? [foldGutter(), keymap.of(foldKeymap)] : []),
+      Prec.high(keymap.of([{ key: preferences.completionKey, run: view => !imeKey.current && !view.composing && !view.compositionStarted && startCompletion(view) }])),
+    ]
+  }
   // Build the language/completion extension for the SQL compartment. Plain mode
   // (mongo/es) drops lang-sql; it gets a custom completion source when provided.
   function langExt(): Extension {
@@ -109,12 +122,13 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
     }
     const dialect = dialectFor(engine)
     const exts: Extension[] = [new LanguageSupport(dialect.language,
-      dialect.language.data.of({autocomplete:guardedSqlKeywordCompletion(dialect)})), autocompletion(),
+      dialect.language.data.of({autocomplete:guardedSqlKeywordCompletion(dialect)})), autocompletion({ activateOnTyping: preferences.completionOnTyping }),
       EditorView.theme({
         '.cm-tooltip-autocomplete, .cm-tooltip-autocomplete > ul': { maxWidth: 'min(680px, calc(100vw - 32px))' },
         '.cm-tooltip-autocomplete > ul > li': { whiteSpace: 'normal', overflowWrap: 'anywhere' },
       }),
-      sqlSignatureTooltip(engine, tr('dbviews.functionParameters'), tr('dbviews.functionSignatureHint'))]
+      ...(preferences.signatureHelp ? [sqlSignatureTooltip(engine, tr('dbviews.functionParameters'), tr('dbviews.functionSignatureHint'))] : [])]
+    exts.push(dialect.language.data.of({ autocomplete: readySqlCompletion(sqlDataTypeCompletion(engine)) }))
     // lang-sql's schema source is not suppressed in comments/literals on explicit invocation.
     // Wrap it ourselves while retaining its alias and quoted-identifier support.
     if (schema) exts.push(dialect.language.data.of({ autocomplete: readySqlCompletion(
@@ -187,11 +201,12 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
         { key:'Alt-Shift-Enter', run:view=>{if(imeKey.current||view.composing||view.compositionStarted)return false;onRunAllRef.current?.();return true} },
         { key: 'Tab', run: view => !imeKey.current && !view.composing && !view.compositionStarted && acceptCompletion(view) },
         ...closeBracketsKeymap,
-        ...completionKeymap,
+        ...completionKeymap.filter(binding => binding.key !== 'Ctrl-Space'),
         ...historyKeymap,
         ...searchKeymap,...defaultKeymap,
         indentWithTab,
       ]),
+      preferencesCompartment.current.of(preferencesExt()),
       sqlCompartment.current.of(langExt()),
       EditorView.updateListener.of(update => {
         if (update.docChanged) {
@@ -241,7 +256,11 @@ export const SqlEditor = forwardRef<SqlEditorHandle, SqlEditorProps>(function Sq
     if (!view) return
     view.dispatch({ effects: sqlCompartment.current.reconfigure(langExt()) })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [schema, engine, defaultSchema, plain, completion, lintSource, extraCompletion, tr])
+  }, [schema, engine, defaultSchema, plain, completion, lintSource, extraCompletion, tr, preferences.completionOnTyping, preferences.signatureHelp])
+
+  useEffect(() => {
+    viewRef.current?.dispatch({ effects: preferencesCompartment.current.reconfigure(preferencesExt()) })
+  }, [preferences, plain])
 
   useEffect(()=>{
     const view=viewRef.current;if(!view)return

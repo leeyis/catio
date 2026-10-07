@@ -1,5 +1,6 @@
 import { EditorState } from '@codemirror/state'
 import { sql } from '@codemirror/lang-sql'
+import { ensureSyntaxTree } from '@codemirror/language'
 import { sqlExecutionTarget } from './sqlExecutionTarget'
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest'
 import { forwardRef, useImperativeHandle } from 'react'
@@ -20,7 +21,14 @@ vi.mock('./SqlEditor', () => ({
   // 同时暴露 getSelectedText 句柄,模拟用户选中片段的场景。
   SqlEditor: forwardRef<{ getSelectedText: () => string }, { code?: string; onRunSelection?: (sql: string) => void }>((props, ref) => {
     useImperativeHandle(ref, () => ({
-      getExecutionTarget:(scope:'current'|'selection'|'all')=>(scope==='selection'||scope==='current'&&!!stubSelectedText)?(stubSelectedText?{target:{sql:stubSelectedText,from:0,to:stubSelectedText.length,kind:'selection'}}:{target:null,reason:'empty'}):sqlExecutionTarget(EditorState.create({doc:props.code??'',extensions:[sql()]}),scope),getSelectedText: () => stubSelectedText,
+      getExecutionTarget:(scope:'current'|'selection'|'all') => {
+        if (scope === 'selection' || scope === 'current' && !!stubSelectedText) return stubSelectedText ? {target:{sql:stubSelectedText,from:0,to:stubSelectedText.length,kind:'selection'}} : {target:null,reason:'empty'}
+        const state = EditorState.create({doc:props.code??'',extensions:[sql()]})
+        // This stub tests console dispatch, not the production parser's short scheduling budget.
+        ensureSyntaxTree(state, state.doc.length, 100)
+        return sqlExecutionTarget(state, scope)
+      },
+      getSelectedText: () => stubSelectedText,
       insertAtCursor: (t: string) => t,
     }), [props.code])
     return <>

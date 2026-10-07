@@ -1,4 +1,35 @@
 {
+  "resultInsights": {
+    "title": "Result analysis", "views": "Result analysis views", "profile": "Column profile", "transpose": "Transpose", "chart": "Distribution",
+    "scope": "Read-only initial execution snapshot: analyzing {{rows}} / {{totalRows}} returned rows and {{columns}} / {{totalColumns}} columns. Subsequent grid paging, filtering and drafts are not included. No query is executed and no results are persisted.",
+    "truncated": "The query result itself was truncated; these are not whole-table statistics.",
+    "numericBoundary": "Numeric min/max only include finite JSON numbers. Decimal strings, large integers represented as text, binary and complex values are not coerced to numbers.",
+    "column": "Column", "type": "Type", "nulls": "NULL", "empty": "Empty text", "binary": "Binary", "numbers": "Numeric values", "min": "Minimum", "max": "Maximum", "row": "Row {{n}}",
+    "chartColumn": "Distribution column", "chartScope": "Frequency of up to 12 distinct scalar values in this sample. Text is quoted to distinguish it from numeric values and NULL. {{skipped}} binary, complex, non-finite or long-text values were excluded.", "chartLabel": "Value frequency chart", "other": "Other values", "noChart": "No supported scalar values in this sample."
+  },
+  "dbEditor": {
+    "title": "SQL editor preferences",
+    "scope": "Applies immediately to SQL editors on this device. Only preferences are saved, never SQL or connection data.",
+    "formatting": "Formatting",
+    "keywordCase": "Keyword case",
+    "upper": "UPPER CASE",
+    "lower": "lower case",
+    "preserve": "Preserve original case",
+    "commaPosition": "Multiline comma position",
+    "commaBefore": "Leading (before the next item)",
+    "commaAfter": "Trailing (after the item)",
+    "tabWidth": "Indent width (spaces)",
+    "input": "Input and navigation",
+    "completionOnTyping": "Suggest completions while typing",
+    "functionParameters": "Insert function parameter placeholders",
+    "signatureHelp": "Show function signature help",
+    "lineWrapping": "Wrap long lines",
+    "foldGutter": "Show code folding controls",
+    "completionKey": "Explicit completion shortcut",
+    "shortcuts": "Alt+Enter: run current statement or selection. Alt+Shift+Enter: run script. Ctrl/Cmd+F: find. Folding uses CodeMirror shortcuts. OS-reserved shortcuts may need to be changed.",
+    "reset": "Restore defaults",
+    "memoryOnly": "Applied for this session, but browser storage is unavailable. These preferences may not survive a restart."
+  },
   "runtimeError": {
     "title": "The interface encountered an error",
     "description": "Reload the interface. If it happens again, use the diagnostic logs or the tray log shortcut to help troubleshoot.",

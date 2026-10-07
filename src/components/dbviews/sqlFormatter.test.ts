@@ -14,7 +14,9 @@ describe('formatterLanguage — 引擎 → sql-formatter 方言映射', () => {
   it('未知/缺省引擎回落到通用 sql 方言', () => {
     expect(formatterLanguage(undefined)).toBe('sql')
     expect(formatterLanguage('jdbc')).toBe('sql')
-    expect(formatterLanguage('rqlite')).toBe('sql')
+    expect(formatterLanguage('rqlite')).toBe('sqlite')
+    expect(formatterLanguage('oracle')).toBe('plsql')
+    expect(formatterLanguage('tidb')).toBe('mysql')
   })
 })
 

@@ -2,6 +2,7 @@ import { ensureSyntaxTree } from '@codemirror/language'
 import { keywordCompletionSource, type SQLDialect } from '@codemirror/lang-sql'
 import type { CompletionSource } from '@codemirror/autocomplete'
 import type { SyntaxNode } from '@lezer/common'
+import { sqlWriteContext } from './sqlWriteCompletion'
 
 /** Completion sources must not infer context from a lagging published tree. */
 export function readySqlCompletion(source: CompletionSource, excluded: readonly string[] = []): CompletionSource {
@@ -21,5 +22,6 @@ export function readySqlCompletion(source: CompletionSource, excluded: readonly 
  * bounded tree. Qualified identifiers are reserved for schema/field completion.
  */
 export function guardedSqlKeywordCompletion(dialect: SQLDialect): CompletionSource {
-  return readySqlCompletion(keywordCompletionSource(dialect, true), ['QuotedIdentifier', 'CompositeIdentifier', '.'])
+  const source = readySqlCompletion(keywordCompletionSource(dialect, true), ['QuotedIdentifier', 'CompositeIdentifier', '.'])
+  return context => sqlWriteContext(context) ? null : source(context)
 }

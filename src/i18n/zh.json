@@ -1,4 +1,35 @@
 {
+  "resultInsights": {
+    "title": "结果分析", "views": "结果分析视图", "profile": "列统计", "transpose": "转置", "chart": "分布图",
+    "scope": "初次执行结果的只读快照：分析返回数据中的 {{rows}} / {{totalRows}} 行、{{columns}} / {{totalColumns}} 列。不包含网格后续翻页、筛选或草稿修改；不会执行查询或持久化结果。",
+    "truncated": "查询结果本身已截断，不能当作整表统计。",
+    "numericBoundary": "数值最小／最大值只统计有限 JSON number，不把精确小数字符串、以文本表示的大整数、二进制或复杂值强转成浮点数。",
+    "column": "列", "type": "类型", "nulls": "NULL", "empty": "空文本", "binary": "二进制", "numbers": "数值个数", "min": "最小值", "max": "最大值", "row": "第 {{n}} 行",
+    "chartColumn": "分布列", "chartScope": "展示当前样本中最多 12 个不同标量值的频次。文本加引号，与数值和 NULL 区分；已排除 {{skipped}} 个二进制、复杂、非有限数值或长文本。", "chartLabel": "值频次图", "other": "其余值", "noChart": "当前样本没有可统计的标量值。"
+  },
+  "dbEditor": {
+    "title": "SQL 编辑器偏好",
+    "scope": "立即应用到本机 SQL 编辑器。只保存偏好，不保存 SQL 或连接数据。",
+    "formatting": "格式化",
+    "keywordCase": "关键字大小写",
+    "upper": "大写",
+    "lower": "小写",
+    "preserve": "保留原始大小写",
+    "commaPosition": "多行逗号位置",
+    "commaBefore": "行首（下一项之前）",
+    "commaAfter": "行尾（当前项之后）",
+    "tabWidth": "缩进宽度（空格）",
+    "input": "输入与导航",
+    "completionOnTyping": "输入时自动补全",
+    "functionParameters": "插入函数参数占位示例",
+    "signatureHelp": "显示函数签名提示",
+    "lineWrapping": "长行自动换行",
+    "foldGutter": "显示代码折叠控件",
+    "completionKey": "手动触发补全快捷键",
+    "shortcuts": "Alt+Enter 执行当前语句或选区；Alt+Shift+Enter 执行脚本；Ctrl/Cmd+F 查找。折叠使用 CodeMirror 快捷键。系统占用的快捷键可能需要调整。",
+    "reset": "恢复默认",
+    "memoryOnly": "已在当前会话应用，但本地存储不可用，重启后可能不会保留。"
+  },
   "runtimeError": {
     "title": "界面遇到异常",
     "description": "请重新加载界面。若再次出现，可通过诊断日志或托盘中的日志入口协助排查。",

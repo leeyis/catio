@@ -2,6 +2,7 @@ import { expect, it } from 'vitest'
 import { EditorState } from '@codemirror/state'
 import { CompletionContext } from '@codemirror/autocomplete'
 import { sql } from '@codemirror/lang-sql'
+import { ensureSyntaxTree } from '@codemirror/language'
 import { dialectFor } from './sqlDialect'
 import { sqlAdvancedCompletion, type JoinTable } from './sqlAdvancedCompletion'
 const tables: JoinTable[] = [
@@ -15,6 +16,8 @@ const tables: JoinTable[] = [
 function complete(marked: string, catalog = tables, engine = 'postgres', defaultSchema = 'app') {
   const pos = marked.indexOf('|'), doc = marked.replace('|', '')
   const state = EditorState.create({ doc, extensions: [sql({ dialect: dialectFor(engine) })] })
+  // Semantic fixture preparation; exhausted parser budgets have separate fail-closed tests.
+  expect(ensureSyntaxTree(state, state.doc.length, 100)).not.toBeNull()
   const result = sqlAdvancedCompletion(() => engine, () => catalog, () => defaultSchema)(new CompletionContext(state, pos, true))
   const joins = result?.options.filter(option => option.detail?.startsWith('FK JOIN')) ?? []
   return { result, joins, insert: (index = 0) => result && joins[index] ? doc.slice(0, result.from) + joins[index].apply + doc.slice(result.to ?? pos) : doc }

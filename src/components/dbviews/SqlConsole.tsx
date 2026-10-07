@@ -18,6 +18,9 @@ import { redisCompletion } from './redisCompletion'
 import { redisLinter } from './redisDiagnostics'
 import { sqlLinter } from './sqlDiagnostics'
 import { formatSql } from './sqlFormatter'
+import { DatabaseEditorSettings } from './DatabaseEditorSettings'
+import { ResultInsights } from './ResultInsights'
+import { useDatabaseEditorPreferences } from '../../state/databaseEditorPreferences'
 import type { SQLNamespace } from '@codemirror/lang-sql'
 import { DataGrid } from './DataGrid'
 import { useQuerySession } from './useQuerySession'
@@ -126,7 +129,7 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
   const canExplain = !!connId && supportsExplainPlan(engine as DbType | undefined)
   // 编辑区是否需要让出空间给下方结果区:普通运行(phase!=='idle')或正在/已展示执行计划。
   const hasResults = !plain || phase !== 'idle' || !!explain
-  const [outputView,setOutputView]=useState<'result'|'messages'|'plan'>('result')
+  const [outputView,setOutputView]=useState<'result'|'messages'|'plan'|'insights'>('result')
   const [splitAxis,setSplitAxis]=useState<'rows'|'columns'>('rows')
   // 每次出结果(成功或失败)自增,用作 DataGrid 的 key:换 key → 重新挂载 →
   // 清掉上一次查询残留的分页(serverRows)/编辑/排序状态。
@@ -144,6 +147,9 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
   const [liveRelations, setLiveRelations] = useState<Record<string, ErRelation[]>>({})
   // Imperative handle to the CodeMirror editor for cursor-aware insertion.
   const editorRef = useRef<SqlEditorHandle>(null)
+  const editorPreferences = useDatabaseEditorPreferences()
+  const editorPreferencesRef = useRef(editorPreferences); editorPreferencesRef.current = editorPreferences
+  const [editorSettingsOpen, setEditorSettingsOpen] = useState(false)
   const [hasSelection, setHasSelection] = useState(false)
   const [editorTarget,setEditorTarget]=useState<SqlTargetResult|null>(null)
   const [scopeError,setScopeError]=useState<string|null>(null)
@@ -409,7 +415,7 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
   // 高级 SQL 补全源(函数签名补全 + 外键 JOIN 建议)。plain 引擎不挂(无 SQL 语义)。
   // 标识稳定:惰性读取 engine/joinTables,故 schema/外键加载不触发编辑器重建。
   const advancedCompletion = useMemo(
-    () => (plain ? undefined : sqlAdvancedCompletion(() => engineRef.current, () => joinTablesRef.current, () => completionNamespaceRef.current)),
+    () => (plain ? undefined : sqlAdvancedCompletion(() => engineRef.current, () => joinTablesRef.current, () => completionNamespaceRef.current, () => editorPreferencesRef.current.functionParameters)),
     [plain],
   )
 
@@ -608,8 +614,9 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
     ...(canExplain?[{id:'analyze',label:t('dbviews.analyze'),icon:'git-branch',disabled:!code.trim()||actionBusy,action:runExplainPlan}]:[]),
     {id:'all',label:t('dbviews.runEntireScript'),icon:'play',disabled:!code.trim()||actionBusy,action:()=>runScope('all')},
     {id:'find',label:t('dbviews.findReplace'),icon:'search',action:()=>editorRef.current?.openSearch?.()},
+    ...(!plain ? [{ id:'editorSettings', label:t('dbEditor.title'), icon:'settings', action:()=>setEditorSettingsOpen(true) }] : []),
     ...(!plain&&connId?[{id:'peek',label:t('dbviews.structurePeek'),icon:'columns',disabled:!schemaOptions.length,action:()=>setPeekOpen(true)}]:[]),
-    ...(!plain?[{id:'format',label:t('dbviews.format'),icon:'wrench',disabled:!code.trim()||actionBusy,action:()=>setCode(previous=>formatSql(previous,engineId??engine))}]:[]),
+    ...(!plain?[{id:'format',label:t('dbviews.format'),icon:'wrench',disabled:!code.trim()||actionBusy,action:()=>setCode(previous=>formatSql(previous,engineId??engine,editorPreferences))}]:[]),
     {id:'save',label:t('dbviews.saveQuery'),icon:'save',disabled:!code.trim()||savingQuery,action:()=>{void saveQuery()}},
     ...(connId&&!plain?[{id:'file',label:t('dbviews.sqlFileRunFile'),icon:'file-code',testId:'sql-run-file',disabled:actionBusy,action:()=>setSqlFileOpen(true)}]:[]),
     {id:'clear',label:t('dbviews.clearEditor'),icon:'eraser',danger:true,disabled:!code.trim()||actionBusy,action:()=>setClearConfirm(true)},
@@ -617,6 +624,7 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
   const menuOwner=JSON.stringify([connId,active,code,phase,defaultNamespace,engineId??engine,editorTarget?.target?.from,editorTarget?.target?.to])
   return (
     <div className="col db-sql-console" style={{ position:'relative', height: '100%', width: '100%', minHeight: 0, minWidth: 0 }}>
+      {editorSettingsOpen && active !== false && <DatabaseEditorSettings onClose={() => setEditorSettingsOpen(false)}/>}
       {peekOpen&&active!==false&&connId&&<DatabaseStructurePeek key={connId} connId={connId} schemas={schemaOptions} defaultSchema={completionNamespace} onClose={()=>setPeekOpen(false)}/>}
       {Object.keys(completionErrors).length>0&&<details style={{padding:'5px 12px',fontSize:11.5,color:'var(--signal-amber)'}}>
         <summary>{t('workbench.completionMetadataNotices',{count:Object.keys(completionErrors).length})}</summary>
@@ -650,7 +658,7 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
           )}
           <div style={{ width: 1, height: 18, background: 'var(--border-hairline)' }} />
           <button className="btn btn-secondary sm db-secondary-action" aria-label={t('dbviews.format')} title={t('dbviews.format')} disabled={plain || !code.trim() || actionBusy}
-            onClick={() => setCode(prev => formatSql(prev, engine))}><Icon name="wrench" size={15} /><span className="db-action-label">{t('dbviews.format')}</span></button>
+            onClick={() => setCode(prev => formatSql(prev, engineId ?? engine, editorPreferences))}><Icon name="wrench" size={15} /><span className="db-action-label">{t('dbviews.format')}</span></button>
           <button className="btn btn-secondary sm db-secondary-action" aria-label={t('dbviews.saveQuery')} title={t('dbviews.saveQuery')} disabled={savingQuery||!code.trim()} onClick={()=>{void saveQuery()}}><Icon name="save" size={14}/><span className="db-action-label">{t('dbviews.saveQuery')}</span></button>
           <MetadataNodeActions className="db-action-menu" ownerKey={menuOwner} items={editorMenu.filter(item=>!['current','selection','all','analyze','format','save'].includes(item.id))} title={t('dbviews.moreActions')} triggerLabel={t('dbviews.moreActions')}><span/></MetadataNodeActions>
         </div>
@@ -728,6 +736,7 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
           <nav className="db-output-nav" aria-label={t('dbviews.workspace.outputs')}>
             <button aria-pressed={outputView==='result'} onClick={()=>setOutputView('result')}><Icon name="table-2" size={13}/>{t('dbviews.workspace.results')}</button>
             <button aria-label={t('dbviews.workspace.messages')} aria-pressed={outputView==='messages'} onClick={()=>setOutputView('messages')}><Icon name="terminal" size={13}/>{t('dbviews.workspace.messages')}{statementResults.length>0&&<span className="db-output-count">{statementResults.length}</span>}</button>
+            {!plain && <button disabled={!result?.columns.length || result.rowsAffected != null || phase === 'running' || !!runErr} aria-pressed={outputView === 'insights'} onClick={() => setOutputView('insights')}><Icon name="columns" size={13}/>{t('resultInsights.title')}</button>}
             <button disabled={!explain} aria-pressed={outputView==='plan'} onClick={()=>setOutputView('plan')}><Icon name="git-branch" size={13}/>{t('dbviews.workspace.plan')}</button>
           </nav>
           <div className="db-output-tools">
@@ -753,6 +762,7 @@ export function SqlConsole({ density, fresh, connId, initialCode, initialDefault
           </div>}
 
         <div style={{flex:1,minHeight:0,minWidth:0}}>
+          {outputView === 'insights' && result && <ResultInsights key={runSeq} result={result}/>}
           {outputView==='messages'&&<QueryExecutionLog entries={statementResults} running={phase==='running'} error={runErr} total={statementProgress.total} document={code} onLocate={locateSource}/>}
           {explain&&<div style={{height:'100%',display:outputView==='plan'?'block':'none'}}><ExplainPlanViewer plan={explain.plan} loading={explain.loading} error={explain.error} sourceSql={explain.source?.target.sql} onLocateSource={explain.source?.document===code?()=>{const source=explain.source;if(source)locateSource({document:source.document,from:source.target.from,to:source.target.to})}:undefined} onClose={()=>setOutputView('result')}/></div>}
           <div style={{height:'100%',minHeight:0,display:outputView==='result'?'block':'none'}}>
