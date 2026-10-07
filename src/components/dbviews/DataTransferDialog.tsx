@@ -1,5 +1,5 @@
 import { useReportDatabaseWork } from '../../state/databaseDraftWork'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import { Icon } from '../Icon'
@@ -57,11 +57,12 @@ export function DataTransferDialog({
   // 破坏性 Overwrite 的二次确认：用户须重新输入目标表名，匹配才放行（不可绕过）。
   const [destructiveConfirm, setDestructiveConfirm] = useState('')
   const [busy, setBusy] = useState(false)
+  const submitted = useRef(false)
+  const [finished, setFinished] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [summary, setSummary] = useState<number | null>(null)
-  useReportDatabaseWork('transfer',!!targetTable,busy)
-  // 迁移进度(后端 db://transfer-progress 事件):total 可能未知(COUNT 失败)→ 无百分比。
-  const [progress, setProgress] = useState<{ transferred: number; total: number | null } | null>(null)
+  useReportDatabaseWork('transfer', !!targetTable && summary == null, busy)
+  const [targetLoaded, setTargetLoaded] = useState(false)
 
   const targetEngine = useMemo(
     () => connections.find(c => c.id === targetConnId)?.engine,
@@ -110,13 +111,15 @@ export function DataTransferDialog({
     return ns?.tables ?? []
   }, [targetNamespaces, targetSchema])
 
-  // 加载目标表列（用于映射下拉 + upsert 键候选）。失败不阻断——用户仍可手填目标列。
+  // 目标切换时使旧映射和破坏性确认失效；元数据加载失败不允许提交。
   useEffect(() => {
     let alive = true
-    if (!targetConnId || !targetTable.trim()) { setTargetColumns([]); return }
+    setTargetLoaded(false); setTargetColumns([]); setMapping({})
+    setUpsertKeys([]); setDestructiveConfirm(''); setUserEdited(false)
+    if (!targetConnId || !targetTable.trim()) return
     tableStructure(targetConnId, targetSchema, targetTable)
-      .then(st => { if (alive) setTargetColumns(st.columns.map(c => c.name)) })
-      .catch(() => { if (alive) setTargetColumns([]) })
+      .then(st => { if (alive) { setTargetColumns(st.columns.map(c => c.name)); setTargetLoaded(true) } })
+      .catch(e => { if (alive) { setTargetColumns([]); setErr(dbErrMsg(e)) } })
     return () => { alive = false }
   }, [targetConnId, targetSchema, targetTable])
 
@@ -136,8 +139,10 @@ export function DataTransferDialog({
   // Overwrite 是破坏性操作：除常规就绪外，还要求确认输入精确等于目标表名。
   const destructiveConfirmed = mode !== 'overwrite' || destructiveConfirm.trim() === targetTable.trim()
   const ready = useMemo(
-    () => transferReady({ targetTable, mapping, mode, upsertKeys }) && destructiveConfirmed,
-    [targetTable, mapping, mode, upsertKeys, destructiveConfirmed],
+    () => !!targetConnId && targetLoaded && mappedTargets.every(col => targetColumns.includes(col))
+      && new Set(mappedTargets).size === mappedTargets.length
+      && transferReady({ targetTable, mapping, mode, upsertKeys }) && destructiveConfirmed,
+    [targetConnId, targetLoaded, targetColumns, mappedTargets, targetTable, mapping, mode, upsertKeys, destructiveConfirmed],
   )
 
   function setTargetFor(source: string, target: string) {
@@ -150,20 +155,12 @@ export function DataTransferDialog({
   }
 
   async function runTransfer() {
-    if (!ready) return
+    if (!ready || submitted.current) return
+    submitted.current = true
     setErr(null)
-    setProgress(null)
     setBusy(true)
-    // 订阅后端进度事件(仅 Tauri 运行时;jsdom/测试下跳过,不影响行为)。
-    let unlisten: (() => void) | null = null
+    // Legacy progress events lack an operation ID. Do not show another migration's counts.
     try {
-      if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
-        const { listen } = await import('@tauri-apps/api/event')
-        unlisten = await listen<{ transferred: number; total: number | null; done: boolean }>(
-          'db://transfer-progress',
-          e => setProgress({ transferred: e.payload.transferred, total: e.payload.total ?? null }),
-        )
-      }
       const mappings: TransferColumnMapping[] = Object.entries(mapping)
         .filter(([, target]) => target.trim() !== '')
         .map(([sourceColumn, targetColumn]) => ({ sourceColumn, targetColumn }))
@@ -179,13 +176,15 @@ export function DataTransferDialog({
         upsertKeys: mode === 'upsert' ? upsertKeys : undefined,
         allowDestructive: mode === 'overwrite' ? true : undefined,
       })
+      if (!Number.isSafeInteger(res?.rowsTransferred) || res.rowsTransferred < 0) throw new Error(t('dbflow.noReceipt'))
       setSummary(res.rowsTransferred)
-      onTransferred?.(res.rowsTransferred)
+      try { await onTransferred?.(res.rowsTransferred) } catch {
+        setErr(t('dbviews.transferRefreshFailed'))
+      }
     } catch (e) {
-      setErr(dbErrMsg(e))
+      setErr(`${dbErrMsg(e)} ${t('dbviews.transferCheckOutcome')}`)
     } finally {
-      if (unlisten) unlisten()
-      setProgress(null)
+      setFinished(true)
       setBusy(false)
     }
   }
@@ -225,7 +224,7 @@ export function DataTransferDialog({
         {/* body — 外层不滚动:只让列映射区滚动,模式+进度固定在底部始终可见 */}
         <div className="col" style={{ flex: 1, minHeight: 0 }}>
           {/* 可滚动区:源/目标选择 + 列映射 */}
-          <div className="col" style={{ gap: 14, padding: '16px 20px', overflow: 'auto', flex: 1, minHeight: 0 }}>
+          <fieldset disabled={busy || finished} className="col" style={{ margin: 0, border: 0, gap: 14, padding: '16px 20px', overflow: 'auto', flex: 1, minHeight: 0 }}>
           {/* source (read-only summary) + target pickers */}
           <div className="row" style={{ gap: 12, alignItems: 'flex-start' }}>
             <div className="col" style={{ gap: 6, flex: 1, minWidth: 0 }}>
@@ -241,7 +240,7 @@ export function DataTransferDialog({
             <div className="col" style={{ gap: 6, flex: 1, minWidth: 0 }}>
               <span style={labelStyle}>{t('dbviews.transferTarget')}</span>
               <select aria-label="transfer-target-conn" value={targetConnId}
-                onChange={e => { setTargetConnId(e.target.value); setUserEdited(false) }}
+                onChange={e => { setTargetConnId(e.target.value); setTargetNamespaces([]); setTargetSchema(''); setTargetTable(''); setUserEdited(false) }}
                 style={{ ...inputStyle, cursor: 'pointer' }}>
                 <option value="">{t('dbviews.transferSelectConnection')}</option>
                 {connections.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
@@ -324,7 +323,7 @@ export function DataTransferDialog({
               <div className="row" style={{ flexWrap: 'wrap', gap: 6 }}>
                 {mappedTargets.map(col => (
                   <label key={col} aria-label={`upsert-key-${col}`} className="row"
-                    onClick={() => toggleUpsertKey(col)}
+                    onClick={() => { if (!submitted.current) toggleUpsertKey(col) }}
                     style={{ gap: 5, padding: '4px 10px', borderRadius: 7, cursor: 'pointer', fontSize: 12, border: `1px solid ${upsertKeys.includes(col) ? 'var(--accent-primary)' : 'var(--border-hairline-alt)'}`, background: upsertKeys.includes(col) ? 'var(--accent-soft)' : 'transparent', color: upsertKeys.includes(col) ? 'var(--accent-primary)' : 'var(--text-secondary)' }}>
                     <Icon name={upsertKeys.includes(col) ? 'check' : 'circle'} size={12} />
                     <span className="mono">{col}</span>
@@ -334,7 +333,7 @@ export function DataTransferDialog({
             </div>
           )}
 
-          </div>{/* /可滚动区(源/目标 + 列映射 + 模式 + upsert) */}
+          </fieldset>{/* /可滚动区(源/目标 + 列映射 + 模式 + upsert) */}
 
           {/* 固定状态区:错误 / 进度 / 结果 —— 始终钉在底部,列再多也不会把进度条挤出视口。
               无内容时不占位、不显示分隔线。 */}
@@ -343,32 +342,10 @@ export function DataTransferDialog({
           {err && (
             <div className="row gap8" style={{ alignItems: 'center', color: 'var(--danger, #d9534f)', fontSize: 12 }}>
               <Icon name="alert-triangle" size={14} />
-              <span>{t('dbviews.transferError', { message: err })}</span>
+              <span role="alert">{summary != null ? err : t('dbviews.transferError', { message: err })}</span>
             </div>
           )}
-          {busy && (() => {
-            const t0 = progress?.transferred ?? 0
-            const total = progress?.total ?? null
-            const pct = total && total > 0 ? Math.min(100, Math.round((t0 / total) * 100)) : null
-            return (
-              <div className="col" style={{ gap: 6 }}>
-                <div className="row" style={{ alignItems: 'center', gap: 8, fontSize: 12.5, color: 'var(--text-secondary)' }}>
-                  <Icon name="loader" size={14} style={{ animation: 'spin 1s linear infinite', flex: 'none' }} />
-                  <span>{pct != null
-                    ? t('dbviews.transferProgress', { transferred: t0, total, pct })
-                    : t('dbviews.transferProgressUnknown', { transferred: t0 })}</span>
-                </div>
-                {/* 已知总数时显示百分比进度条;未知时显示不确定态(满宽淡色)。 */}
-                <div style={{ height: 6, borderRadius: 999, background: 'var(--surface-sunken)', overflow: 'hidden' }}>
-                  <div style={{
-                    height: '100%', borderRadius: 999, background: 'var(--accent-primary)',
-                    width: pct != null ? `${pct}%` : '100%', opacity: pct != null ? 1 : 0.35,
-                    transition: 'width 0.2s ease',
-                  }} />
-                </div>
-              </div>
-            )
-          })()}
+          {busy && <div role="status" style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{t('dbflow.waitReceipt')}</div>}
           {summary != null && (
             <div className="row gap8" style={{ alignItems: 'center', color: 'var(--accent-primary)', fontSize: 12.5 }}>
               <Icon name="circle-check" size={14} />
@@ -383,7 +360,7 @@ export function DataTransferDialog({
           <Btn variant="ghost" disabled={busy} onClick={onClose}>{summary != null ? t('dbviews.close') : t('dbviews.cancel')}</Btn>
           <Btn variant="primary" icon="arrow-up-down"
             onClick={runTransfer}
-            disabled={busy || !ready}>
+            disabled={busy || finished || !ready}>
             {busy ? t('dbviews.transferring') : t('dbviews.transferApply', { count: mappedCount })}
           </Btn>
         </div>

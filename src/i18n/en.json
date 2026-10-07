@@ -538,6 +538,8 @@
     "importing": "Importing…",
     "importDone": "Imported {{count}} row(s).",
     "importError": "Import failed: {{message}}",
+    "transferCheckOutcome": "Check the target before starting another migration. Changes may have committed; an error does not prove rollback. This dialog will not replay the write.",
+    "transferRefreshFailed": "Migration succeeded, but refreshing the view failed. Refresh the view; do not repeat the migration.",
     "transferTitle": "Migrate data",
     "transferSource": "Source",
     "transferTarget": "Target",

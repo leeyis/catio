@@ -538,6 +538,8 @@
     "importing": "导入中…",
     "importDone": "已导入 {{count}} 行。",
     "importError": "导入失败：{{message}}",
+    "transferCheckOutcome": "再次迁移前请核验目标数据库。部分变更可能已提交，报错不代表已回滚；此窗口不会重复执行写入。",
+    "transferRefreshFailed": "迁移已成功，但视图刷新失败。请刷新视图，不要重复迁移。",
     "transferTitle": "迁移数据",
     "transferSource": "源",
     "transferTarget": "目标",
