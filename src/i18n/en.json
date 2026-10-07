@@ -7,6 +7,15 @@
     "column": "Column", "type": "Type", "nulls": "NULL", "empty": "Empty text", "binary": "Binary", "numbers": "Numeric values", "min": "Minimum", "max": "Maximum", "row": "Row {{n}}",
     "chartColumn": "Distribution column", "chartScope": "Frequency of up to 12 distinct scalar values in this sample. Text is quoted to distinguish it from numeric values and NULL. {{skipped}} binary, complex, non-finite or long-text values were excluded.", "chartLabel": "Value frequency chart", "other": "Other values", "noChart": "No supported scalar values in this sample."
   },
+  "compareChanges": {
+    "title": "Row and cell differences", "count": "{{selected}} / {{total}} eligible rows selected",
+    "selectAll": "Select all eligible rows", "clear": "Clear row selection", "include": "Sync", "kind": "Change", "key": "Matching key", "details": "Details",
+    "inserts": "Insert", "updates": "Update", "deletes": "Delete", "suppressed": "Excluded: truncated comparison",
+    "selectRow": "Sync {{kind}} row {{n}}", "inspectRow": "Inspect {{kind}} row {{n}}", "changed": "{{count}} changed field(s)",
+    "pages": "Difference pages", "cellDiff": "Cell differences", "column": "Column", "before": "Target before", "after": "Source value", "changedCell": "Changed", "missing": "(row absent)",
+    "scope": "This is the loaded comparison window, not a consistent snapshot. Selection applies to whole rows; updates write all non-key fields shown in SQL. Review SQL and verify the target has not changed before executing. Binary values are marked HEX; quoted text, NULL and absent rows are distinct.",
+    "noSelection": "-- No eligible changes selected. Differences still exist."
+  },
   "dbTransfer": {
     "dataOnly": "Copy data from one source table into an existing target table. This does not create tables, migrate constraints or build a structure deployment plan.",
     "sameTable": "Source and target must be different tables.",
@@ -724,7 +733,7 @@
     "executeHint": "Run the sync SQL on the target in a transaction; rolls back on error",
     "confirmTitle": "Confirm data synchronization",
     "confirmTarget": "Target: {{connection}} · {{table}}",
-    "confirmExec": "Execute {{n}} sync statement(s) on the target? (transactional — rolls back on error)",
+    "confirmExec": "Execute {{n}} selected sync statement(s) on the target? Transaction support is checked by the backend. An error or lost receipt does not prove rollback; verify the target before retrying.",
     "executed": "Done — {{n}} row(s) affected",
     "executedPartial": "Ran {{n}} row(s), but DELETEs were skipped due to truncation — the target may still hold extra rows; narrow the range and re-compare to finish syncing",
     "execFailed": "Synchronization failed or its outcome is unconfirmed: {{msg}}. Compare again to verify the target before retrying.",

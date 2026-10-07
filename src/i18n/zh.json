@@ -7,6 +7,15 @@
     "column": "列", "type": "类型", "nulls": "NULL", "empty": "空文本", "binary": "二进制", "numbers": "数值个数", "min": "最小值", "max": "最大值", "row": "第 {{n}} 行",
     "chartColumn": "分布列", "chartScope": "展示当前样本中最多 12 个不同标量值的频次。文本加引号，与数值和 NULL 区分；已排除 {{skipped}} 个二进制、复杂、非有限数值或长文本。", "chartLabel": "值频次图", "other": "其余值", "noChart": "当前样本没有可统计的标量值。"
   },
+  "compareChanges": {
+    "title": "逐行与单元格差异", "count": "已选择 {{selected}} / {{total}} 个可同步行",
+    "selectAll": "选择全部可同步行", "clear": "清空行选择", "include": "同步", "kind": "变更", "key": "匹配键", "details": "详情",
+    "inserts": "新增", "updates": "更新", "deletes": "删除", "suppressed": "对比已截断，不允许删除",
+    "selectRow": "同步{{kind}}第 {{n}} 行", "inspectRow": "查看{{kind}}第 {{n}} 行", "changed": "{{count}} 个字段变化",
+    "pages": "差异分页", "cellDiff": "单元格差异", "column": "列", "before": "目标原值", "after": "源值", "changedCell": "已变化", "missing": "（整行不存在）",
+    "scope": "这里只比较已加载窗口，不是一致性快照。按整行选择同步；更新会写入 SQL 所示的全部非键字段。执行前请审阅 SQL 并核验目标未发生并发变化。二进制显示 HEX 标记；带引号文本、NULL 和不存在的行明确区分。",
+    "noSelection": "-- 未选择可执行的变更，表之间仍存在差异。"
+  },
   "dbTransfer": {
     "dataOnly": "将一张源表的数据复制到已有目标表。本流程不创建表、不迁移约束，也不生成结构部署计划。",
     "sameTable": "源表与目标表不能是同一张表。",
@@ -724,7 +733,7 @@
     "executeHint": "在目标连接上以事务执行同步 SQL,出错自动回滚",
     "confirmTitle": "确认数据同步",
     "confirmTarget": "目标：{{connection}} · {{table}}",
-    "confirmExec": "确认在目标库执行 {{n}} 条同步语句?(事务执行,出错自动回滚)",
+    "confirmExec": "确认在目标库执行所选的 {{n}} 条同步语句？事务支持由后端核验。报错或丢失回执不代表已回滚，重试前必须核验目标结果。",
     "executed": "执行成功,影响 {{n}} 行",
     "executedPartial": "已执行 {{n}} 行,但因数据截断省略了 DELETE,目标仍可能有多余行未删除;请缩小范围后重新对比再同步",
     "execFailed": "同步失败或执行结果未确认：{{msg}}。请重新对比并核对目标数据后再重试。",

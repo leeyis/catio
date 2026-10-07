@@ -9,7 +9,10 @@ import { Icon } from '../Icon'
 import { ConfirmModal } from '../modals/ConfirmModal'
 import { queryPage, tableStructure, getSchema, execSyncBatch, preferredNamespace, dbErrMsg } from '../../services/db'
 import { listActiveDbConnections } from '../../state/dbConnections'
-import { computeDiff, genSyncStatements, qtable, qid } from './compareTables'
+import { computeDiff, genSyncStatements, qtable, qid, type CompareDiff } from './compareTables'
+import { CompareChanges } from './CompareChanges'
+import { compareChanges, selectedCompareDiff } from './compareSelection'
+import { useCopyFeedback } from '../useCopyFeedback'
 import type { SchemaNamespace } from '../../services/types'
 import { useReportDatabaseWork } from '../../state/databaseDraftWork'
 
@@ -66,6 +69,10 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
   const [summary, setSummary] = useState<Summary | null>(null)
   const [sql, setSql] = useState('')
   const [statements, setStatements] = useState<string[]>([])
+  const [difference, setDifference] = useState<CompareDiff | null>(null)
+  const [selectedChanges, setSelectedChanges] = useState<Set<string>>(new Set())
+  const [replayBlocked, setReplayBlocked] = useState(false)
+  const { copy: copySql, copied, copying, copyError } = useCopyFeedback(sql)
   const [executing, setExecuting] = useState(false)
   const [confirmVersion, setConfirmVersion] = useState<number | null>(null)
   const [execMsg, setExecMsg] = useState<{ ok: boolean; text: string } | null>(null)
@@ -80,6 +87,7 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
   useLayoutEffect(() => {
     operation.current++
     setSql(''); setStatements([]); setSummary(null); setExecMsg(null); setError(null); setBusy(false); setConfirmVersion(null)
+    setDifference(null); setSelectedChanges(new Set()); setReplayBlocked(false)
     return () => { operation.current++ }
   }, [connId, srcSchema, srcTable, tgtConnId, tgtSchema, tgtTable])
 
@@ -122,6 +130,7 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
     const version = ++operation.current
     readLock.current = version
     setBusy(true); setError(null); setSummary(null); setSql(''); setStatements([]); setExecMsg(null)
+    setDifference(null); setSelectedChanges(new Set()); setReplayBlocked(false); setConfirmVersion(null)
     try {
       const st = await tableStructure(connId, srcSchema, srcTable)
       if (version !== operation.current) return
@@ -157,6 +166,8 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
       const stmts = genSyncStatements(diff, tgtSchema, tgtTable, { engine: tgtEngine, allowDelete: !truncated })
       setStatements(stmts)
       setSql(stmts.join('\n'))
+      setDifference(diff)
+      setSelectedChanges(new Set(compareChanges(diff).filter(item => !truncated || item.kind !== 'deletes').map(item => item.id)))
     } catch (e) {
       if (version === operation.current) setError(dbErrMsg(e))
     } finally {
@@ -165,7 +176,16 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
     }
   }
 
-  function copySql() { if (sql && navigator.clipboard) navigator.clipboard.writeText(sql).catch(() => {}) }
+  function selectChanges(selection: Set<string>) {
+    if (!difference || !summary || writeLock.current || busy || executing || replayBlocked) return
+    operation.current++
+    setConfirmVersion(null); setExecMsg(null)
+    const allowed = new Set(compareChanges(difference).filter(item => !summary.truncated || item.kind !== 'deletes').map(item => item.id))
+    const selected = new Set([...selection].filter(id => allowed.has(id)))
+    setSelectedChanges(selected)
+    const next = genSyncStatements(selectedCompareDiff(difference, selected, !summary.truncated), tgtSchema, tgtTable, { engine: tgtEngine, allowDelete: !summary.truncated })
+    setStatements(next); setSql(next.join('\n'))
+  }
 
   async function execute() {
     if (!statements.length || writeLock.current || busy || confirmVersion !== operation.current) return
@@ -188,6 +208,7 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
       if (refreshVersion === operation.current) {
         // A transport failure can lose the commit receipt. Never claim rollback or replay this batch.
         setStatements([])
+        setReplayBlocked(true)
         setExecMsg({ ok: false, text: t('compare.execFailed', { msg: dbErrMsg(e) }) })
       }
     } finally {
@@ -274,6 +295,8 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
           <Icon name={execMsg.ok ? 'check' : 'alert-triangle'} size={13} /> <span>{execMsg.text}</span>
         </div>
       )}
+      {difference && <CompareChanges diff={difference} selected={selectedChanges} allowDelete={!summary?.truncated} disabled={busy || executing || replayBlocked || confirmVersion !== null} onSelect={selectChanges}/>}
+      {copyError && <p role="alert">{t('panels.copyReceiptFailed')}</p>}
       {summary && (
         <div className="col" style={{ gap: 6, flex: 1, minHeight: 0 }}>
           <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
@@ -283,12 +306,12 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
                 style={{ height: 26, padding: '0 12px', borderRadius: 7, border: 'none', background: 'var(--accent-primary)', color: '#fff', fontSize: 12, fontWeight: 600, cursor: statements.length && !executing ? 'pointer' : 'default', opacity: statements.length && !executing ? 1 : 0.5 }}>
                 <Icon name="play" size={12} /> {executing ? t('compare.executing') : t('compare.execute')}
               </button>
-              <button onClick={copySql} disabled={!sql} style={{ height: 26, padding: '0 10px', borderRadius: 7, border: '1px solid var(--border-hairline)', background: 'var(--surface-subtle)', color: 'var(--text-secondary)', fontSize: 12, cursor: sql ? 'pointer' : 'default' }}>
-                <Icon name="copy" size={12} /> {t('compare.copy')}
+              <button onClick={() => void copySql()} disabled={!sql || copying} style={{ height: 26, padding: '0 10px', borderRadius: 7, border: '1px solid var(--border-hairline)', background: 'var(--surface-subtle)', color: 'var(--text-secondary)', fontSize: 12, cursor: sql ? 'pointer' : 'default' }}>
+                <Icon name={copied ? 'check' : 'copy'} size={12} /> {t(copied ? 'panels.copied' : 'compare.copy')}
               </button>
             </div>
           </div>
-          <textarea aria-label={t('compare.syncSql')} readOnly value={sql || t('compare.identical')} onFocus={e => sql && e.currentTarget.select()}
+          <textarea aria-label={t('compare.syncSql')} readOnly value={sql || t(summary.inserts + summary.updates + summary.deletes > 0 ? 'compareChanges.noSelection' : 'compare.identical')} onFocus={e => sql && e.currentTarget.select()}
             style={{ flex: 1, minHeight: 160, width: '100%', boxSizing: 'border-box', padding: 10, borderRadius: 8, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', color: 'var(--text-primary)', fontFamily: 'monospace', fontSize: 11.5, resize: 'vertical' }} />
         </div>
       )}

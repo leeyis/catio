@@ -11,7 +11,7 @@ export interface CompareInput {
 }
 export interface CompareDiff {
   colNames:string[];pkNames:string[]
-  inserts:unknown[][];updates:{src:unknown[]}[];deletes:unknown[][]
+  inserts:unknown[][];updates:{src:unknown[];tgt?:unknown[];changedColumns?:number[];targetBinary?:number[]}[];deletes:unknown[][]
   binary?:{inserts:BinaryCell[];updates:BinaryCell[];deletes:BinaryCell[]}
   error?:'columns-mismatch'|'pk-missing'|'unsafe-key'|'duplicate-key'|'invalid-binary'
 }
@@ -77,7 +77,9 @@ export function computeDiff(input:CompareInput):CompareDiff {
     if(!previous){mark('inserts',out.inserts.length,binary);out.inserts.push(row)}
     else if(colNames.some((_,c)=>binary.has(c)!==previous.binary.has(c)||
       (binary.has(c)?String(row[c]).toLowerCase()!==String(previous.row[c]).toLowerCase():!valuesEqual(row[c],previous.row[c])))){
-      mark('updates',out.updates.length,binary);out.updates.push({src:row})
+      const changedColumns = colNames.flatMap((_,c) => binary.has(c) !== previous.binary.has(c) ||
+        (binary.has(c) ? String(row[c]).toLowerCase() !== String(previous.row[c]).toLowerCase() : !valuesEqual(row[c], previous.row[c])) ? [c] : [])
+      mark('updates',out.updates.length,binary);out.updates.push({src:row,tgt:previous.row,changedColumns,targetBinary:[...previous.binary]})
     }
   }
   for(const [key,item] of targetMap)if(!sourceKeys.has(key)){mark('deletes',out.deletes.length,item.binary);out.deletes.push(item.row)}

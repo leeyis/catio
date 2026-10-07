@@ -1,0 +1,15 @@
+.db-compare-changes { flex:none; border:1px solid var(--border-hairline); border-radius:6px; color:var(--text-primary); font-size:12px; overflow:hidden; }
+.db-compare-changes header { display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:8px; background:var(--surface-subtle); }
+.db-compare-changes header strong { margin-right:auto; }
+.db-compare-changes header span { color:var(--text-tertiary); }
+.db-compare-note { padding:0 10px; line-height:1.6; color:var(--text-tertiary); font-size:11px; }
+.db-compare-scroll { max-height:280px; overflow:auto; }
+.db-compare-changes table { width:100%; border-collapse:collapse; text-align:left; }
+.db-compare-changes th,.db-compare-changes td { padding:6px 10px; border-block:1px solid var(--border-hairline); }
+.db-compare-changes thead th { position:sticky; top:0; background:var(--surface-subtle); z-index:1; }
+.db-compare-changes td { overflow-wrap:anywhere; max-width:440px; }
+.db-compare-changes pre { margin:0; white-space:pre-wrap; overflow-wrap:anywhere; max-height:180px; overflow:auto; font-size:11px; }
+.db-compare-changes [data-changed=true] { background:var(--accent-soft); }
+.db-compare-changes [data-changed=true] th span,.db-compare-changes small { color:var(--text-tertiary); font-size:10px; }
+.db-compare-changes [data-active=true] { outline:1px solid var(--accent-primary); outline-offset:-1px; }
+.db-compare-changes nav { display:flex; align-items:center; justify-content:flex-end; gap:8px; padding:4px 8px; }
