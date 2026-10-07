@@ -9,6 +9,15 @@
     "structureChanged": "Source or target structure changed after comparison. Compare again before synchronizing.",
     "precheckFailed": "No write was sent. Preflight failed: {{msg}}"
   },
+  "dbExportOptions": {
+    "loadingTables": "Loading tables for export…",
+    "tablesUnavailable": "The export table catalog could not be loaded.",
+    "reloadTables": "Reload tables",
+    "remember": "On review, remember structure/data and row/batch options on this device. Table selections, connection details, SQL and file paths are not saved.",
+    "memoryOnly": "Export preferences could not be saved on this device. The current export can still continue.",
+    "reveal": "Show in folder",
+    "revealFailed": "The file was saved, but its location could not be shown: {{error}}"
+  },
   "resultInsights": {
     "title": "Result analysis", "views": "Result analysis views", "profile": "Column profile", "transpose": "Transpose", "chart": "Distribution",
     "scope": "Read-only initial execution snapshot: analyzing {{rows}} / {{totalRows}} returned rows and {{columns}} / {{totalColumns}} columns. Subsequent grid paging, filtering and drafts are not included. No query is executed and no results are persisted.",

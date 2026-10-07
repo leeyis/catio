@@ -9,6 +9,7 @@ const h = vi.hoisted(() => ({
   list: vi.fn(() => [] as import('../../state/dbConnections').ActiveDbConnection[]),
   tablePreview: vi.fn(),
   getSchema: vi.fn(),
+  loadNamespace: vi.fn(),
   runQuery: vi.fn(),
   objectSource: vi.fn(),
   // 默认给安全的 resolved 值,避免别的 describe(渲染 Structure tab / 不导出)在
@@ -32,7 +33,7 @@ vi.mock('../../state/dbConnections', async (importOriginal) => {
 vi.mock('../../services/db', async (importOriginal) => {
   const mod = await importOriginal<typeof import('../../services/db')>()
   return {
-    ...mod, tablePreview: h.tablePreview, getSchema: h.getSchema, runQuery: h.runQuery, objectSource: h.objectSource,
+    ...mod, tablePreview: h.tablePreview, getSchema: h.getSchema, loadSchemaNamespace:(...args:Parameters<typeof mod.loadSchemaNamespace>)=>h.loadNamespace(...args) ?? mod.loadSchemaNamespace(...args), runQuery: h.runQuery, objectSource: h.objectSource,
     tableStructure: h.tableStructure, exportDatabaseSql: h.exportDatabaseSql, exportFile: h.exportFile,
     transferTable: h.transferTable,
   }
@@ -73,6 +74,7 @@ async function openTable(schema = 'public', table = 'orders') {
   return screen.findByTestId(`wbtab-table:${schema}.${table}`)
 }
 
+beforeEach(()=>{localStorage.clear();h.loadNamespace.mockReset()})
 const CONN = DATA.byId['d-orders'] // has id: 'd-orders', kind: 'db'
 
 /** A minimal real schema (public.orders) the backend `getSchema` would return. */
@@ -634,6 +636,7 @@ describe('DbWorkbench 整库导出 — 引擎门控 + DDL 失败上报', () => {
   beforeEach(() => {
     h.list.mockReset(); h.tablePreview.mockReset(); h.getSchema.mockReset(); h.runQuery.mockReset(); h.objectSource.mockReset()
     h.tableStructure.mockReset(); h.exportDatabaseSql.mockReset(); h.exportFile.mockReset(); h.save.mockReset()
+    h.loadNamespace.mockReset();h.loadNamespace.mockResolvedValue({...SCHEMA.schemas[0],status:'loaded'})
     h.getSchema.mockResolvedValue(SCHEMA)
     h.tablePreview.mockResolvedValue({ columns: [], rows: [] })
     h.runQuery.mockResolvedValue({ columns: [], rows: [] })
@@ -672,6 +675,22 @@ describe('DbWorkbench 整库导出 — 引擎门控 + DDL 失败上报', () => {
     expect(screen.queryByText('整库导出')).not.toBeInTheDocument()
   })
 
+  it('未展开的 namespace 直接导出时加载真实表清单，失败可重试', async () => {
+    h.list.mockReturnValue([ACTIVE('postgres')])
+    h.getSchema.mockResolvedValue({db:'conn',schemas:[{...SCHEMA.schemas[0],status:'unloaded',tables:[]}]})
+    h.loadNamespace.mockRejectedValueOnce(new Error('catalog denied'))
+    wrap(<DbWorkbench conn={DATA.byId['d-orders']} />)
+    await screen.findByTestId('schema-node:public')
+    fireEvent.click(screen.getAllByTitle('Schema 操作')[0]);fireEvent.click(screen.getByText('整库导出'))
+    const dialog=screen.getByRole('dialog')
+    expect(within(dialog).queryByText('没有可导出的表')).not.toBeInTheDocument()
+    await waitFor(()=>expect(within(dialog).getByRole('alert')).toHaveTextContent('catalog denied'))
+    expect(screen.getByTestId('dbflow-next')).toBeDisabled()
+    fireEvent.click(within(dialog).getByRole('button',{name:'重新加载表'}))
+    expect(await screen.findByTestId('dbexport-tbl:orders')).toHaveAttribute('aria-pressed','true')
+    expect(h.loadNamespace).toHaveBeenCalledWith('conn-x','public')
+    expect(screen.getByTestId('dbflow-next')).toBeEnabled()
+  })
   it('取消桌面保存后不读取导出数据，也不冒充保存成功', async () => {
     h.list.mockReturnValue([ACTIVE('postgres')]); h.save.mockResolvedValue(null)
     wrap(<DbWorkbench conn={DATA.byId['d-orders']} />)

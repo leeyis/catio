@@ -159,6 +159,11 @@ export function DbWorkbench({ conn, density, active: shown = true, workspaceTabI
     return D.schema.schemas
   }, [connId, liveSchema, D.schema])
 
+  const exportNamespace=namespaces.find(ns=>ns.name===exportSchema)
+  useEffect(()=>{
+    if(exportSchema!=null && exportNamespace?.status==='unloaded')void metadata.loadNamespace(exportSchema)
+  },[exportSchema,exportNamespace?.status,metadata.loadNamespace])
+
   // ---- tab 操作 ----
 
   /** 同身份 tab 已开 → 激活复用;否则追加并激活。 */
@@ -556,7 +561,10 @@ export function DbWorkbench({ conn, density, active: shown = true, workspaceTabI
           <DatabaseExportDialog
             connId={connId} connectionName={conn.name}
             schema={exportSchema}
-            allTables={(namespaces.find(n => n.name === exportSchema)?.tables ?? []).map(t => t.name)}
+            allTables={(exportNamespace?.tables ?? []).map(t => t.name)}
+            tablesState={!exportNamespace || exportNamespace.error || exportNamespace.status==='error' ? 'error' : exportNamespace.status && exportNamespace.status!=='loaded' ? 'loading' : 'ready'}
+            tableError={exportNamespace?.error}
+            onReloadTables={()=>void metadata.loadNamespace(exportSchema,true)}
             onClose={() => setExportSchema(null)}
             onExport={req => runDatabaseExport(exportSchema, req)}
           />

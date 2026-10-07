@@ -9,6 +9,15 @@
     "structureChanged": "对比后源或目标结构发生变化，请重新对比再同步。",
     "precheckFailed": "尚未发送写入，执行前检查失败：{{msg}}"
   },
+  "dbExportOptions": {
+    "loadingTables": "正在加载导出表清单…",
+    "tablesUnavailable": "导出表清单加载失败。",
+    "reloadTables": "重新加载表",
+    "remember": "进入确认页时记住本机的结构／数据、批次和行数选项。不保存选中表、连接信息、SQL 或文件路径。",
+    "memoryOnly": "导出偏好未能保存到本机，本次导出仍可继续。",
+    "reveal": "在文件夹中显示",
+    "revealFailed": "文件已保存，但未能显示所在位置：{{error}}"
+  },
   "resultInsights": {
     "title": "结果分析", "views": "结果分析视图", "profile": "列统计", "transpose": "转置", "chart": "分布图",
     "scope": "初次执行结果的只读快照：分析返回数据中的 {{rows}} / {{totalRows}} 行、{{columns}} / {{totalColumns}} 列。不包含网格后续翻页、筛选或草稿修改；不会执行查询或持久化结果。",

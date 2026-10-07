@@ -17,6 +17,7 @@
     "dialog:default",
     "dialog:allow-open",
     "dialog:allow-save",
+    "opener:allow-reveal-item-in-dir",
     {
       "identifier": "opener:allow-open-path",
       "comment": "允许关于页使用系统文件管理器打开本机应用日志目录，与 app_log_dir() 一致。",

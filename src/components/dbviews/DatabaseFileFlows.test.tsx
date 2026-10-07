@@ -20,7 +20,7 @@ async function choose() {
 }
 async function reviewImport() { await choose(); next(); next() }
 beforeEach(async () => {
-  await i18n.changeLanguage('en'); vi.clearAllMocks()
+  await i18n.changeLanguage('en'); vi.clearAllMocks(); localStorage.clear()
   h.structure.mockResolvedValue({ columns: [{ name: 'id', type: 'int' }, { name: 'name', type: 'text' }] })
   h.open.mockResolvedValue('/qa/rows.csv')
   h.preview.mockResolvedValue({ fileName: 'rows.csv', fileType: 'csv', sizeBytes: 20, columns: ['id', 'name'], rows: [['1', 'Ada']], totalRows: 1, truncated: false })

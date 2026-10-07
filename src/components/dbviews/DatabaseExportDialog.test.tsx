@@ -1,9 +1,10 @@
 import { render, screen, fireEvent, act } from '@testing-library/react'
-import { describe, it, expect, vi } from 'vitest'
+import { beforeEach, describe, it, expect, vi } from 'vitest'
 import { LanguageProvider } from '../../state/LanguageContext'
 import { DatabaseExportDialog } from './DatabaseExportDialog'
 
 const TABLES = ['orders', 'order_items', 'customers']
+beforeEach(()=>localStorage.clear())
 
 function renderDialog(overrides: Omit<Partial<React.ComponentProps<typeof DatabaseExportDialog>>, 'onExport'> = {}) {
   const onExport = vi.fn().mockResolvedValue({ kind: 'saved', name: '/qa/public.sql' })
@@ -93,6 +94,6 @@ describe('DatabaseExportDialog', () => {
     expect(arg.includeStructure).toBe(true)
     expect(arg.includeData).toBe(false)
     // Review fixes an explicit list, even when every currently listed table was selected.
-    expect(arg.selectedTables).toEqual(TABLES)
+    expect(arg.selectedTables).toEqual(['customers','order_items','orders'])
   })
 })
