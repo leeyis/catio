@@ -56,16 +56,46 @@ fn value_ref_to_json(val: ValueRef<'_>) -> serde_json::Value {
 }
 
 fn sqlite_query_on_conn(conn: &Connection, sql: &str, max_rows: u32) -> Result<QueryResult, DbError> {
-        let mut stmt = conn.prepare(sql)
-            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        // Classify the engine's top-level write during preparation, not a SQL prefix
+        // (WITH/EXPLAIN/comments make prefix checks unreliable). Shadow-table writes
+        // performed later by virtual-table DDL must not become an affected-row receipt.
+        // All callers own the connection mutex; no other authorizer is installed here.
+        let dml = Arc::new(AtomicBool::new(false));
+        let observed = dml.clone();
+        let command = Arc::new(AtomicBool::new(false));
+        let observed_command = command.clone();
+        conn.authorizer(Some(move |context: AuthContext<'_>| {
+            if context.accessor.is_none() {
+                match context.action {
+                    AuthAction::Insert { table_name } | AuthAction::Delete { table_name }
+                    | AuthAction::Update { table_name, .. } => {
+                        if !table_name.starts_with("sqlite_") { observed.store(true, Ordering::Relaxed); }
+                    }
+                    AuthAction::Read { .. } | AuthAction::Select | AuthAction::Function { .. } | AuthAction::Recursive => {}
+                    _ => { observed_command.store(true, Ordering::Relaxed); }
+                }
+            }
+            Authorization::Allow
+        }));
+        let prepared = conn.prepare(sql);
+        // Clear on prepare errors as well as success. Never leave a callback on the connection.
+        conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+        let mut stmt = prepared.map_err(|e| DbError::QueryFailed(e.to_string()))?;
 
         let col_count = stmt.column_count();
 
         // Non-row-returning statement (DDL, INSERT, UPDATE, DELETE)
-        // Use the already-prepared statement to avoid recompiling the SQL.
+        // Do not confuse command completion with directly affected user rows.
         if col_count == 0 {
-            let affected = stmt.execute([])
+            // sqlite3_changes is unchanged by DDL/session commands. Only trust the
+            // statement's direct change count when this execution changed total_changes.
+            // Do not report the delta itself: it also includes trigger/FK side effects.
+            let before = conn.total_changes();
+            let direct = stmt.execute([])
                 .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+            let affected = if dml.load(Ordering::Relaxed) && !command.load(Ordering::Relaxed) && conn.total_changes() != before { direct } else { 0 };
             return Ok(QueryResult {
                 binary_cells: Vec::new(),
                 columns: vec![],
@@ -375,5 +405,50 @@ impl Driver for SqliteDriver {
             }
         }
         Ok(ErRelation::complete_groups(relations))
+    }
+}
+
+#[cfg(test)]
+mod receipt_tests {
+    use super::*;
+
+    fn affected(conn: &Connection, sql: &str) -> Option<u64> {
+        sqlite_query_on_conn(conn, sql, 100).unwrap().rows_affected
+    }
+
+    #[test]
+    fn commands_do_not_inherit_previous_dml_changes() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert_eq!(affected(&conn, "CREATE TABLE t(id INTEGER PRIMARY KEY, value TEXT)"), Some(0));
+        assert_eq!(affected(&conn, "INSERT INTO t VALUES (1,'a'), (2,'b')"), Some(2));
+        for sql in ["CREATE INDEX idx ON t(value)", "PRAGMA user_version=3", "BEGIN", "SAVEPOINT s", "RELEASE s", "COMMIT", "CREATE TABLE copy AS SELECT * FROM t", "DROP TABLE copy"] {
+            assert_eq!(affected(&conn, sql), Some(0), "stale receipt for {sql}");
+        }
+        assert_eq!(affected(&conn, "UPDATE t SET value='none' WHERE id=999"), Some(0));
+        assert_eq!(affected(&conn, "UPDATE t SET value='changed' WHERE id=1"), Some(1));
+        assert_eq!(affected(&conn, "DELETE FROM t WHERE id=2"), Some(1));
+    }
+
+    #[test]
+    fn virtual_table_commands_do_not_report_shadow_table_changes() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE t(id INTEGER); INSERT INTO t VALUES(1),(2);").unwrap();
+        assert_eq!(affected(&conn, "CREATE VIRTUAL TABLE search USING fts5(body)"), Some(0));
+        assert_eq!(affected(&conn, "INSERT INTO search VALUES('hello')"), Some(1));
+        assert_eq!(affected(&conn, "DROP TABLE search"), Some(0));
+        assert_eq!(affected(&conn, "WITH values_to_add(id) AS (SELECT 3) INSERT INTO t SELECT id FROM values_to_add"), Some(1));
+        assert!(sqlite_query_on_conn(&conn, "INSERT invalid SQL", 10).is_err());
+        assert_eq!(affected(&conn, "INSERT INTO t VALUES(4)"), Some(1));
+    }
+
+    #[test]
+    fn row_count_excludes_trigger_side_effects() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE t(id INTEGER); CREATE TABLE audit(id INTEGER); CREATE TRIGGER tr AFTER INSERT ON t BEGIN INSERT INTO audit VALUES(new.id); INSERT INTO audit VALUES(new.id); END;").unwrap();
+        assert_eq!(affected(&conn, "INSERT INTO t VALUES(1),(2)"), Some(2));
+        assert_eq!(affected(&conn, "CREATE TABLE another(id INTEGER)"), Some(0));
+        let result = sqlite_query_on_conn(&conn, "SELECT count(*) FROM audit", 100).unwrap();
+        assert_eq!(result.rows_affected, None);
+        assert_eq!(result.rows[0][0], serde_json::json!(4));
     }
 }
