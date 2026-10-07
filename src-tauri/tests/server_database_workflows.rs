@@ -53,6 +53,45 @@ async fn browser_import_has_confirmation_and_whole_file_rollback() {
 }
 
 #[tokio::test]
+async fn reviewed_csv_options_reach_http_writes_and_mismatches_never_delete() {
+    let (rig, client) = Rig::start().await;
+    let conn = rig.connection(&client).await;
+    rig.sql(&client, &conn, "CREATE TABLE reviewed(id INTEGER PRIMARY KEY, name TEXT)").await;
+    rig.sql(&client, &conn, "INSERT INTO reviewed VALUES(9,'original')").await;
+    let bytes = "1;\"  文;字\nline  \"\n2;\"\"\n3";
+    let payload = json!({"fileName":"rows.csv","dataBase64":STANDARD.encode(bytes),
+        "parseOptions":{"delimiter":";","headerRow":0,"dataStartRow":1,"trimValues":true,"emptyStringAsNull":false}});
+    let (status, preview) = rig.call(&client, "db_import_preview_bytes", payload.clone()).await;
+    assert_eq!(status, 200, "{preview}");
+    assert_eq!(preview["columns"], json!(["column_1","column_2"]));
+    assert_eq!(preview["rows"], json!([["1","文;字\nline"],["2",""],["3",null]]));
+    assert_eq!(preview["totalRows"], 3);
+    let mut request = payload.clone();
+    request["connId"] = json!(conn); request["table"] = json!("reviewed");
+    request["mode"] = json!("truncate"); request["allowDestructive"] = json!(true);
+    request["sourceFingerprint"] = preview["sourceFingerprint"].clone();
+    request["mappings"] = json!([{"sourceColumn":"column_1","targetColumn":"id"},{"sourceColumn":"column_2","targetColumn":"name"}]);
+    for change in 0..5 {
+        let mut bad = request.clone();
+        match change {
+            0 => bad["dataBase64"] = json!(STANDARD.encode("1;changed")),
+            1 => bad["parseOptions"]["trimValues"] = json!(false),
+            2 => bad["sourceFingerprint"] = Value::Null,
+            3 => bad["sourceFingerprint"] = json!(1),
+            _ => bad["parseOptions"]["sheetName"] = json!("unsupported"),
+        }
+        assert_eq!(rig.call(&client, "db_import_table_bytes", bad).await.0, 400);
+        assert_eq!(rig.sql(&client, &conn, "SELECT id,name FROM reviewed").await["rows"], json!([[9,"original"]]));
+    }
+    let bob = Rig::client();
+    assert_eq!(rig.call(&bob, "auth_register", json!({"username":"import-bob","password":"fixture-only-123"})).await.0, 200);
+    assert_eq!(rig.call(&bob, "db_import_table_bytes", request.clone()).await.0, 400);
+    let (status, result) = rig.call(&client, "db_import_table_bytes", request).await;
+    assert_eq!(status, 200, "{result}"); assert_eq!(result["rowsImported"], 3);
+    assert_eq!(rig.sql(&client, &conn, "SELECT id,name FROM reviewed ORDER BY id").await["rows"], json!([[1,"文;字\nline"],[2,""],[3,null]]));
+}
+
+#[tokio::test]
 async fn ambiguous_hex_keys_never_modify_another_sqlite_row() {
     let (rig, client) = Rig::start().await;
     let conn = rig.connection(&client).await;

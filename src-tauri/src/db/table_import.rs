@@ -343,6 +343,157 @@ pub fn parse_import_bytes(kind: ImportFileKind, bytes: &[u8], preview_limit: usi
     }
 }
 
+/// CSV record numbers, not physical lines: quoted newlines stay inside one record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImportParseOptions {
+    pub delimiter: Option<String>,
+    pub header_row: usize,
+    pub data_start_row: Option<usize>,
+    pub trim_values: bool,
+    pub empty_string_as_null: bool,
+}
+impl Default for ImportParseOptions {
+    fn default() -> Self {
+        Self { delimiter: None, header_row: 1, data_start_row: None, trim_values: false, empty_string_as_null: true }
+    }
+}
+
+pub fn resolve_import_options(kind: ImportFileKind, options: Option<&ImportParseOptions>) -> Result<Option<ImportParseOptions>, String> {
+    if !matches!(kind, ImportFileKind::Csv | ImportFileKind::Tsv) {
+        if options.is_some() { return Err("Parsing options are currently available for CSV/TSV only".into()); }
+        return Ok(None);
+    }
+    let mut o = options.cloned().unwrap_or_default();
+    let delimiter = o.delimiter.get_or_insert_with(|| if kind == ImportFileKind::Tsv { "\t".into() } else { ",".into() });
+    if delimiter.len() != 1 || !delimiter.is_ascii() || matches!(delimiter.as_bytes()[0], 0 | b'\r' | b'\n' | b'"') {
+        return Err("Delimiter must be one ASCII character other than a quote, newline or NUL".into());
+    }
+    if o.header_row > 1_000_000 { return Err("Header record must be between 0 and 1000000".into()); }
+    let start = o.data_start_row.unwrap_or(o.header_row + 1);
+    if start == 0 || start > 1_000_001 || start <= o.header_row {
+        return Err("Data start record must follow the header record (or start at 1 without a header)".into());
+    }
+    o.data_start_row = Some(start);
+    Ok(Some(o))
+}
+
+pub fn parse_import_bytes_with_options(kind: ImportFileKind, bytes: &[u8], preview_limit: usize, options: Option<&ImportParseOptions>) -> Result<ParsedImportFile, String> {
+    let Some(o) = resolve_import_options(kind, options)? else { return parse_import_bytes(kind, bytes, preview_limit); };
+    // Do not accept invalid UTF-8 even in skipped records or beyond the preview.
+    std::str::from_utf8(bytes).map_err(|_| "CSV/TSV must be valid UTF-8 (BOM is allowed)")?;
+    let mut reader = csv::ReaderBuilder::new().delimiter(o.delimiter.as_ref().unwrap().as_bytes()[0])
+        .has_headers(false).flexible(true).from_reader(bytes);
+    let mut columns = Vec::new();
+    let mut rows = Vec::new();
+    let mut total_rows = 0;
+    for (index, record) in reader.records().enumerate() {
+        let number = index + 1;
+        // Avoid leaking cell contents through parser error text.
+        let record = record.map_err(|_| format!("Cannot parse CSV/TSV record {number}"))?;
+        if number == o.header_row {
+            columns = record.iter().enumerate().map(|(i,h)| normalize_header(h,i)).collect();
+            if columns.iter().collect::<HashSet<_>>().len() != columns.len() {
+                return Err("Duplicate source headers; correct the header record or use no-header mode".into());
+            }
+        }
+        if number < o.data_start_row.unwrap() { continue; }
+        if o.header_row == 0 && columns.is_empty() {
+            columns = (0..record.len()).map(|i| format!("column_{}", i+1)).collect();
+        }
+        if record.len() > columns.len() {
+            return Err(format!("Record {number} has more fields than the reviewed columns; refusing to discard data"));
+        }
+        total_rows += 1;
+        if rows.len() < preview_limit {
+            rows.push((0..columns.len()).map(|i| record.get(i).map(|value| {
+                let value = if o.trim_values { value.trim() } else { value };
+                if value.is_empty() && o.empty_string_as_null { Value::Null } else { Value::String(value.to_string()) }
+            }).unwrap_or(Value::Null)).collect());
+        }
+    }
+    if columns.is_empty() { return Err("No columns at the selected header/data record".into()); }
+    Ok(ParsedImportFile { columns, rows, total_rows, binary_cells:None })
+}
+
+/// Binds a review to bytes, format and canonical options, not to a mutable file path.
+/// This is an integrity check, not a persisted job, authentication token or target lock.
+pub fn import_fingerprint(kind: ImportFileKind, bytes: &[u8], options: Option<&ImportParseOptions>) -> Result<String, String> {
+    let effective = resolve_import_options(kind, options)?;
+    let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
+    digest.update(b"catio-import-review-v1\0");
+    digest.update(kind.label().as_bytes());
+    digest.update(&[0]);
+    digest.update(&serde_json::to_vec(&effective).map_err(|e| e.to_string())?);
+    digest.update(&[0]);
+    digest.update(bytes);
+    Ok(digest.finish().as_ref().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+#[cfg(test)]
+mod options_tests {
+    use super::*;
+    use serde_json::json;
+    fn parse(bytes: &[u8], o: ImportParseOptions, limit: usize) -> ParsedImportFile {
+        parse_import_bytes_with_options(ImportFileKind::Csv, bytes, limit, Some(&o)).unwrap()
+    }
+    #[test]
+    fn headerless_does_not_lose_first_record_or_quoted_newlines() {
+        let data = parse(b"1;\"hello;\nworld\"\n2;\"\"", ImportParseOptions { delimiter: Some(";".into()), header_row: 0, empty_string_as_null: false, ..Default::default() }, 1);
+        assert_eq!(data.columns, vec!["column_1", "column_2"]);
+        assert_eq!(data.rows, vec![vec![json!("1"), json!("hello;\nworld")]]);
+        assert_eq!(data.total_rows, 2);
+    }
+    #[test]
+    fn selects_header_and_data_records_and_retains_empty_text() {
+        let data = parse(b"report\nid,name\nunits,ignored\n1,  Ada  \n2,", ImportParseOptions { header_row: 2, data_start_row: Some(4), trim_values: true, empty_string_as_null: false, ..Default::default() }, 10);
+        assert_eq!(data.columns, vec!["id", "name"]);
+        assert_eq!(data.rows, vec![vec![json!("1"), json!("Ada")], vec![json!("2"), json!("")]]);
+    }
+    #[test]
+    fn rejects_data_loss_and_bad_options_even_beyond_preview() {
+        for bytes in [b"id\n1\n2,extra".as_slice(), b"id,id\n1,2"] {
+            assert!(parse_import_bytes_with_options(ImportFileKind::Csv, bytes, 1, None).is_err());
+        }
+        let duplicate = b",column_1\na,b";
+        assert!(parse_import_bytes_with_options(ImportFileKind::Csv, duplicate, 1, None).is_err());
+        for delimiter in ["", "||", "\"", "\n", "\r", "\0", "，"] {
+            assert!(resolve_import_options(ImportFileKind::Csv, Some(&ImportParseOptions { delimiter:Some(delimiter.into()), ..Default::default() })).is_err());
+        }
+        assert!(resolve_import_options(ImportFileKind::Csv, Some(&ImportParseOptions { header_row:2, data_start_row:Some(2), ..Default::default() })).is_err());
+        assert!(parse_import_bytes_with_options(ImportFileKind::Json, b"[]", 1, Some(&Default::default())).is_err());
+        assert!(parse_import_bytes_with_options(ImportFileKind::Csv, b"id\n1", 1, Some(&ImportParseOptions { header_row:3, ..Default::default() })).is_err());
+    }
+    #[test]
+    fn fingerprints_bind_format_bytes_and_effective_options() {
+        let bytes=b"id\n1";
+        let fingerprint=import_fingerprint(ImportFileKind::Csv,bytes,None).unwrap();
+        let canonical=resolve_import_options(ImportFileKind::Csv,None).unwrap();
+        assert_eq!(fingerprint,import_fingerprint(ImportFileKind::Csv,bytes,canonical.as_ref()).unwrap());
+        assert_ne!(fingerprint,import_fingerprint(ImportFileKind::Csv,b"id\n2",None).unwrap());
+        assert_ne!(fingerprint,import_fingerprint(ImportFileKind::Tsv,bytes,None).unwrap());
+        assert_ne!(fingerprint,import_fingerprint(ImportFileKind::Csv,bytes,Some(&ImportParseOptions{trim_values:true,..Default::default()})).unwrap());
+        assert_eq!(fingerprint.len(),64);
+    }
+    #[test]
+    fn bom_and_whitespace_are_explicit_and_invalid_utf8_is_rejected() {
+        let data=parse(b"\xef\xbb\xbfid,name\n1,  \n2,  Ada  ", ImportParseOptions{trim_values:true,..Default::default()}, 5);
+        assert_eq!(data.columns,vec!["id","name"]);
+        assert_eq!(data.rows,vec![vec![json!("1"),Value::Null],vec![json!("2"),json!("Ada")]]);
+        assert!(parse_import_bytes_with_options(ImportFileKind::Csv,b"id\n1\n\xff",1,None).is_err());
+    }
+    #[test]
+    fn defaults_are_compatible_and_missing_fields_are_null() {
+        let bytes = b"id,name\n1,  Ada  \n2,\n3";
+        assert_eq!(parse_import_bytes_with_options(ImportFileKind::Csv, bytes, 50, None).unwrap(), parse_csv_bytes(bytes, 50).unwrap());
+        let data = parse(bytes, ImportParseOptions { empty_string_as_null:false, ..Default::default() }, 50);
+        assert_eq!(data.rows[1][1], json!(""));
+        assert_eq!(data.rows[2][1], Value::Null);
+        let tsv = parse_import_bytes_with_options(ImportFileKind::Tsv, b"id\tname\n1\tAda", 50, None).unwrap();
+        assert_eq!(tsv.columns, vec!["id", "name"]);
+    }
+}
+
 /// 校验并解析列映射 → (源列下标, 目标列名) 列表。
 ///
 /// - 目标列为空串的映射视为「跳过」，直接忽略（对齐 dbx 前端 IMPORT_SKIP_TARGET）。

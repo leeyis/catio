@@ -24,7 +24,7 @@ describe('TableImportDialog',()=>{
   })
   it('previews, reviews the mapping, and imports exactly the mapped pairs',async()=>{
     dialogOpen.mockResolvedValue('/data/users.csv')
-    importPreview.mockResolvedValue({fileName:'users.csv',fileType:'csv',sizeBytes:100,columns:['user_id','display_name'],rows:[['1','Ada'],['2','Linus']],totalRows:2,truncated:false})
+    importPreview.mockResolvedValue({fileName:'users.csv',fileType:'csv',sourceFingerprint:'a'.repeat(64),parseOptions:{delimiter:',',headerRow:1,dataStartRow:2,trimValues:false,emptyStringAsNull:true},sizeBytes:100,columns:['user_id','display_name'],rows:[['1','Ada'],['2','Linus']],totalRows:2,truncated:false})
     importTable.mockResolvedValue({rowsImported:2,totalRows:2})
     wrap(<TableImportDialog connId="c1" schema="public" table="users" onClose={()=>{}} />)
     expect(screen.getByTestId('dbflow-next')).toBeDisabled()
@@ -32,12 +32,12 @@ describe('TableImportDialog',()=>{
     next();expect(screen.getByLabelText('Map user_id')).toHaveValue('user_id');expect(screen.getByLabelText('Map display_name')).toHaveValue('display_name')
     next();const run=screen.getByRole('button',{name:/Import 2 column/i});expect(run).toBeEnabled();fireEvent.click(run)
     await waitFor(()=>expect(importTable).toHaveBeenCalledTimes(1))
-    expect(importTable).toHaveBeenCalledWith({connId:'c1',schema:'public',table:'users',filePath:'/data/users.csv',mode:'append',mappings:[{sourceColumn:'user_id',targetColumn:'user_id'},{sourceColumn:'display_name',targetColumn:'display_name'}]})
+    expect(importTable).toHaveBeenCalledWith({connId:'c1',schema:'public',table:'users',filePath:'/data/users.csv',mode:'append',sourceFingerprint:'a'.repeat(64),parseOptions:{delimiter:',',headerRow:1,dataStartRow:2,trimValues:false,emptyStringAsNull:true},mappings:[{sourceColumn:'user_id',targetColumn:'user_id'},{sourceColumn:'display_name',targetColumn:'display_name'}]})
     expect(await screen.findByText(/Imported 2 row/i)).toBeInTheDocument()
   })
   it('skips unmapped columns and requires exact target confirmation for replacement',async()=>{
     dialogOpen.mockResolvedValue('/data/x.csv')
-    importPreview.mockResolvedValue({fileName:'x.csv',fileType:'csv',sizeBytes:50,columns:['user_id','junk'],rows:[['1','z']],totalRows:1,truncated:false})
+    importPreview.mockResolvedValue({fileName:'x.csv',fileType:'csv',sourceFingerprint:'a'.repeat(64),parseOptions:{delimiter:',',headerRow:1,dataStartRow:2,trimValues:false,emptyStringAsNull:true},sizeBytes:50,columns:['user_id','junk'],rows:[['1','z']],totalRows:1,truncated:false})
     importTable.mockResolvedValue({rowsImported:1,totalRows:1})
     wrap(<TableImportDialog connId="c1" schema="public" table="users" onClose={()=>{}} />)
     fireEvent.click(screen.getByRole('button',{name:'Choose file'}));await screen.findByText('z');next()

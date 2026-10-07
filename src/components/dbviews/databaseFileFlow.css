@@ -53,4 +53,7 @@
 .db-flow-checkmark { width:14px; height:14px; display:grid; place-items:center; border:1px solid var(--border-hairline-alt); border-radius:3px; flex:none; }
 [aria-pressed=true] > .db-flow-checkmark { color:var(--on-accent); background:var(--accent-primary); border-color:var(--accent-primary); }
 .db-flow-fields { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:12px; }
+.db-file-flow .db-import-check { flex-direction:row; align-items:center; }
+.db-import-check input { accent-color:var(--accent-primary); }
+.db-import-parsing { margin:16px 0; }
 @media (max-width:600px) { .db-file-flow-backdrop { padding:8px; } .db-file-flow { max-height:calc(100dvh - 16px); } .db-file-flow-steps { gap:8px; padding-inline:12px; font-size:11px; } .db-file-flow-steps li { gap:4px; } .db-file-flow-body { padding:14px 12px; } .db-flow-fields { grid-template-columns:1fr; } .db-flow-summary { grid-template-columns:90px minmax(0,1fr); } }

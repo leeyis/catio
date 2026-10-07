@@ -1,4 +1,20 @@
 {
+  "dbimport": {
+    "parsing": "解析选项",
+    "delimiter": "分隔符",
+    "comma": "逗号（,）", "tab": "制表符", "semicolon": "分号（;）", "pipe": "竖线（|）",
+    "headerRow": "标题记录（0 表示无标题）", "dataStartRow": "首条数据记录",
+    "trim": "去除值两端空白", "keepEmpty": "将空字段保留为空字符串",
+    "keepWhitespace": "保留值两端空白", "emptyNull": "空字段转为 NULL",
+    "recordHint": "当前支持 UTF-8 CSV/TSV。记录从 1 开始计数，不计空行；引号内的换行仍属于同一条记录。无标题时按首条数据确定列数。缺少的字段补 NULL，多出的字段会报错，不会静默丢弃。",
+    "invalidOptions": "请输入整数记录号：标题为 0–1000000，数据起点须在标题之后，最大为 1000001。",
+    "previewRequired": "解析选项已改变或尚无有效预览。请更新预览后继续，字段映射将重新生成。",
+    "updatePreview": "更新预览",
+    "incompatiblePreview": "服务端未确认源文件指纹或指定的解析选项。请更新服务端并重新预览，当前禁止导入。",
+    "byPosition": "按位置映射", "positionHint": "将按目标列顺序覆盖当前映射，多出的源列会跳过。导入前请逐项核对。",
+    "noHeader": "无标题", "headerSummary": "第 {{row}} 条为标题", "dataSummary": "从第 {{row}} 条开始导入",
+    "integrity": "写入前，服务端会校验源文件字节与解析选项是否仍与本次预览一致；变化则拒绝写入。这不是目标结构锁或可恢复的持久任务。"
+  },
   "compareKeys": {
     "mode": "匹配键", "primary": "使用一致的主键", "custom": "自定义匹配列", "columns": "匹配列",
     "scope": "选择双方共有、用于识别一行的字段。这些字段视为不变的行身份；键值变化会识别成新增／删除。加载窗口中的 NULL 或重复键会被拒绝。配置仅保留在当前标签。",
@@ -655,8 +671,8 @@
     "rows": "解析行数",
     "format": "文件格式",
     "chooseSource": "选择文件并预览",
-    "webSource": "文件将上传到当前连接的服务器解析（最大 8 MiB）。CSV / TSV 当前须包含表头行。预览不会写入数据库。",
-    "desktopSource": "执行导入时会重新读取本地文件，预览后请勿修改文件。CSV / TSV 当前须包含表头行。",
+    "webSource": "文件将上传到当前连接的服务器解析（最大 8 MiB）。CSV / TSV 可设置标题或无标题模式，预览不会写入数据库。",
+    "desktopSource": "执行导入时会重新读取本地文件；若文件字节或解析选项与预览不一致，将拒绝写入，请重新预览并确认。",
     "preparing": "正在读取并准备文件…",
     "loadingColumns": "正在加载目标列…",
     "noTargetColumns": "未返回可用的目标列。",

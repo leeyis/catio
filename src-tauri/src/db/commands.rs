@@ -758,6 +758,8 @@ pub(crate) async fn export_database_core(
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportPreview {
+    pub parse_options: Option<crate::db::table_import::ImportParseOptions>,
+    pub source_fingerprint: String,
     pub binary_cells: Option<Vec<[usize; 2]>>,
     pub file_name: String,
     pub file_type: String,
@@ -771,31 +773,14 @@ pub struct ImportPreview {
 
 /// 读取并预览导入文件。读文件 I/O 在此接线，解析为纯函数（table_import,已单测）。
 #[tauri::command]
-pub async fn db_import_preview(file_path: String) -> Result<ImportPreview, DbError> {
+pub async fn db_import_preview(file_path: String, parse_options: Option<crate::db::table_import::ImportParseOptions>) -> Result<ImportPreview, DbError> {
     use crate::db::table_import as ti;
-    let kind = ti::import_file_kind(&file_path).map_err(DbError::QueryFailed)?;
+    ti::import_file_kind(&file_path).map_err(DbError::QueryFailed)?;
     // 读盘前先按元数据校验大小,超限直接拒绝（避免把过大文件读入内存导致 OOM）。
     let meta = tokio::fs::metadata(&file_path).await.map_err(|e| DbError::Io(e.to_string()))?;
     ti::check_import_size(meta.len() as usize).map_err(DbError::QueryFailed)?;
     let bytes = tokio::fs::read(&file_path).await.map_err(|e| DbError::Io(e.to_string()))?;
-    let size_bytes = bytes.len() as u64;
-    let parsed = ti::parse_import_bytes(kind, &bytes, ti::DEFAULT_PREVIEW_LIMIT).map_err(DbError::QueryFailed)?;
-    let file_name = std::path::Path::new(&file_path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(&file_path)
-        .to_string();
-    let truncated = parsed.total_rows > parsed.rows.len();
-    Ok(ImportPreview {
-        binary_cells: parsed.binary_cells,
-        file_name,
-        file_type: kind.label().to_string(),
-        size_bytes,
-        columns: parsed.columns,
-        rows: parsed.rows,
-        total_rows: parsed.total_rows,
-        truncated,
-    })
+    crate::db::write_ops::import_preview_with_options(&file_path, &bytes, parse_options.as_ref())
 }
 
 /// 导入执行结果。
@@ -816,14 +801,15 @@ pub struct ImportSummary {
 pub async fn db_import_table(
     conn_id: String, schema: Option<String>, table: String, file_path: String,
     mappings: Vec<crate::db::table_import::ImportColumnMapping>, mode: String,
-    batch_size: Option<usize>, allow_destructive: Option<bool>, mgr: tauri::State<'_, ConnManager>,
+    batch_size: Option<usize>, allow_destructive: Option<bool>,
+    parse_options: Option<crate::db::table_import::ImportParseOptions>, source_fingerprint: Option<String>, mgr: tauri::State<'_, ConnManager>,
 ) -> Result<ImportSummary, DbError> {
     let drv = mgr.get(&conn_id).await.ok_or(DbError::NotFound(conn_id))?;
     let meta = tokio::fs::metadata(&file_path).await.map_err(|e| DbError::Io(e.to_string()))?;
     crate::db::table_import::check_import_size(meta.len() as usize).map_err(DbError::QueryFailed)?;
     let bytes = tokio::fs::read(&file_path).await.map_err(|e| DbError::Io(e.to_string()))?;
-    crate::db::write_ops::import_bytes(drv.as_ref(), schema.as_deref(), &table, &file_path, &bytes,
-        &mappings, &mode, batch_size.unwrap_or(500), allow_destructive.unwrap_or(false)).await
+    crate::db::write_ops::import_bytes_reviewed(drv.as_ref(), schema.as_deref(), &table, &file_path, &bytes,
+        &mappings, &mode, batch_size.unwrap_or(500), allow_destructive.unwrap_or(false), parse_options.as_ref(), source_fingerprint.as_deref()).await
 }
 
 // ── 跨库/跨表数据迁移（源表 → 列映射 → 按模式写目标表）──────────────────────────

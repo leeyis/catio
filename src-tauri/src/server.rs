@@ -958,15 +958,17 @@ async fn dispatch(st: &AppState, actor: &User, cmd: &str, args: Value) -> Result
             let bytes = B64.decode(encoded).map_err(|_| "Invalid import file encoding")?;
             if bytes.len() > MAX_WEB_IMPORT { return Err("Browser imports are limited to 8 MiB".into()); }
             let name = require(&args, "fileName")?;
+            let options: Option<crate::db::table_import::ImportParseOptions> = serde_json::from_value(args.get("parseOptions").cloned().unwrap_or(Value::Null)).map_err(estr)?;
+            let fingerprint: Option<String> = serde_json::from_value(args.get("sourceFingerprint").cloned().unwrap_or(Value::Null)).map_err(estr)?;
             if cmd == "db_import_preview_bytes" {
-                return serde_json::to_value(crate::db::write_ops::import_preview(name, &bytes).map_err(estr)?).map_err(estr);
+                return serde_json::to_value(crate::db::write_ops::import_preview_with_options(name, &bytes, options.as_ref()).map_err(estr)?).map_err(estr);
             }
             let drv = conns.get(require(&args, "connId")?).await.ok_or("connection not found")?;
             let mappings = from_arg::<Vec<crate::db::table_import::ImportColumnMapping>>(&args, "mappings")?;
-            let result = crate::db::write_ops::import_bytes(drv.as_ref(), opt_str(&args, "schema"),
+            let result = crate::db::write_ops::import_bytes_reviewed(drv.as_ref(), opt_str(&args, "schema"),
                 require(&args, "table")?, name, &bytes, &mappings, require(&args, "mode")?,
                 u32_or(&args, "batchSize", 500) as usize,
-                args.get("allowDestructive").and_then(Value::as_bool).unwrap_or(false)).await.map_err(estr)?;
+                args.get("allowDestructive").and_then(Value::as_bool).unwrap_or(false), options.as_ref(), fingerprint.as_deref()).await.map_err(estr)?;
             serde_json::to_value(result).map_err(estr)
         }
         "db_transfer_table" => {

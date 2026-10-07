@@ -23,7 +23,7 @@ beforeEach(async () => {
   await i18n.changeLanguage('en'); vi.clearAllMocks(); localStorage.clear()
   h.structure.mockResolvedValue({ columns: [{ name: 'id', type: 'int' }, { name: 'name', type: 'text' }] })
   h.open.mockResolvedValue('/qa/rows.csv')
-  h.preview.mockResolvedValue({ fileName: 'rows.csv', fileType: 'csv', sizeBytes: 20, columns: ['id', 'name'], rows: [['1', 'Ada']], totalRows: 1, truncated: false })
+  h.preview.mockResolvedValue({ fileName: 'rows.csv', fileType: 'csv',sourceFingerprint:'a'.repeat(64),parseOptions:{delimiter:',',headerRow:1,dataStartRow:2,trimValues:false,emptyStringAsNull:true}, sizeBytes: 20, columns: ['id', 'name'], rows: [['1', 'Ada']], totalRows: 1, truncated: false })
   h.write.mockResolvedValue({ rowsImported: 1, totalRows: 1 })
 })
 
@@ -32,7 +32,7 @@ afterEach(() => { delete (window as unknown as Record<string,unknown>).__CATIO_S
 describe('database file workflow gates', () => {
   it('imports exactly the bytes previewed in Web mode and preserves typed preview markers', async () => {
     ;(window as unknown as Record<string,unknown>).__CATIO_SERVER__ = true
-    h.previewBytes.mockResolvedValue({fileName:'typed.json',fileType:'json',sizeBytes:20,columns:['id','name'],rows:[['900719925474099312345',''],['0x0001',null]],binaryCells:[[1,0]],totalRows:2,truncated:false})
+    h.previewBytes.mockResolvedValue({fileName:'typed.json',fileType:'json',sourceFingerprint:'a'.repeat(64),parseOptions:null,sizeBytes:20,columns:['id','name'],rows:[['900719925474099312345',''],['0x0001',null]],binaryCells:[[1,0]],totalRows:2,truncated:false})
     h.writeBytes.mockResolvedValue({rowsImported:2,totalRows:2})
     wrap(<TableImportDialog connId="c" table="target" onClose={vi.fn()} />)
     const file = new File(['[]'],'typed.json',{type:'application/json'})

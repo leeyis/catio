@@ -1,4 +1,20 @@
 {
+  "dbimport": {
+    "parsing": "Parsing options",
+    "delimiter": "Delimiter",
+    "comma": "Comma (,)", "tab": "Tab", "semicolon": "Semicolon (;)", "pipe": "Pipe (|)",
+    "headerRow": "Header record (0 = no header)", "dataStartRow": "First data record",
+    "trim": "Trim surrounding whitespace", "keepEmpty": "Preserve empty fields as empty strings",
+    "keepWhitespace": "Preserve surrounding whitespace", "emptyNull": "Empty fields become NULL",
+    "recordHint": "UTF-8 CSV/TSV only. Record numbers start at 1, excluding empty lines; quoted newlines stay inside one record. Without a header, the first data record determines column count. Missing fields become NULL. Extra fields are rejected rather than silently discarded.",
+    "invalidOptions": "Use whole record numbers: header 0–1000000; data starts after it, up to 1000001.",
+    "previewRequired": "Options changed or no valid preview is available. Update the preview before continuing; mappings will be rebuilt.",
+    "updatePreview": "Update preview",
+    "incompatiblePreview": "The server did not confirm the source fingerprint and requested parsing options. Update the server and preview again; importing is disabled.",
+    "byPosition": "Map by position", "positionHint": "Replaces the current mapping using target column order. Extra source columns are skipped. Review every mapping before importing.",
+    "noHeader": "No header", "headerSummary": "Header record {{row}}", "dataSummary": "Data from record {{row}}",
+    "integrity": "Before writing, the server checks the source bytes and parsing options against this preview. A mismatch is rejected; this does not lock target structure or create a recoverable job."
+  },
   "compareKeys": {
     "mode": "Matching keys", "primary": "Use matching primary keys", "custom": "Choose matching columns", "columns": "Matching columns",
     "scope": "Choose shared columns that identify a row. They are treated as immutable keys; changing a key value produces an insert/delete pair. NULL or duplicate keys in the loaded window are rejected. Settings stay in this tab only.",
@@ -655,8 +671,8 @@
     "rows": "Parsed rows",
     "format": "Format",
     "chooseSource": "Choose a file to preview",
-    "webSource": "Files are uploaded to this connected server for parsing (maximum 8 MiB). CSV / TSV currently require a header row. No data is written during preview.",
-    "desktopSource": "The local file is read again when importing. Do not change it after preview. CSV / TSV currently require a header row.",
+    "webSource": "Files are uploaded to this connected server for parsing (maximum 8 MiB). CSV / TSV support header and no-header modes. No data is written during preview.",
+    "desktopSource": "The local file is read again when importing. If its bytes or parsing options differ from this preview, writing is rejected; preview and review it again.",
     "preparing": "Reading and preparing the file…",
     "loadingColumns": "Loading target columns…",
     "noTargetColumns": "No usable target columns were returned.",

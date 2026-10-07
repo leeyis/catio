@@ -5,10 +5,12 @@ import { useActiveDbConnections } from '../../state/dbConnections'
 import { Icon } from '../Icon'
 import { Btn } from '../atoms'
 import { importPreview, importTable, importPreviewBytes, importTableBytes, tableStructure, dbErrMsg,
-  type ImportPreview, type BrowserImportFile, type ImportSummary } from '../../services/db'
+  type ImportPreview, type BrowserImportFile, type ImportSummary, type ImportParseOptions } from '../../services/db'
 import { isServer } from '../../services/transport'
 import { autoMapImportColumns, engineSupportsImportTransaction } from './tableImport'
 import { DatabaseFileFlow } from './DatabaseFileFlow'
+import {defaultImportOptions, validImportOptions, importPreviewMatches, mapImportByPosition} from './importParsing'
+import {ImportParsingOptions, ImportParsingSummary} from './ImportParsingOptions'
 
 export interface TableImportDialogProps {
   connId: string
@@ -33,12 +35,13 @@ function TableImportFlow({ connId, schema, table, engine, transactions, onClose,
   const [step, setStep] = useState(0)
   const [filePath, setFilePath] = useState<string | null>(null)
   const [preview, setPreview] = useState<ImportPreview | null>(null)
+  const [parseOptions, setParseOptions] = useState<ImportParseOptions>()
   const [webFile, setWebFile] = useState<BrowserImportFile | null>(null)
   const fileInput = useRef<HTMLInputElement>(null)
   const [targetColumns, setTargetColumns] = useState<{name:string;type:string}[]>([])
   const [metadata, setMetadata] = useState<'loading'|'ready'|'error'>('loading')
   const [metadataError, setMetadataError] = useState(''), [reload, setReload] = useState(0)
-  const [mapping, setMapping] = useState<Record<string,string>>({})
+  const [mapping, setMapping] = useState<Record<string,string>>(()=>Object.create(null))
   const [mode, setMode] = useState<'append'|'truncate'>('append')
   const [confirmation, setConfirmation] = useState('')
   const [busy, setBusy] = useState(false), lock = useRef(false), generation = useRef(0)
@@ -46,7 +49,7 @@ function TableImportFlow({ connId, schema, table, engine, transactions, onClose,
   const [summary, setSummary] = useState<ImportSummary | null>(null)
   const [refreshError, setRefreshError] = useState<string | null>(null)
   useEffect(() => () => { generation.current++ }, [])
-  useReportDatabaseWork('import', !!preview && step !== 3, busy)
+  useReportDatabaseWork('import', !!filePath && step !== 3, busy)
   useEffect(() => {
     let alive = true
     setMetadata('loading'); setMetadataError(''); setTargetColumns([])
@@ -70,20 +73,35 @@ function TableImportFlow({ connId, schema, table, engine, transactions, onClose,
   const canRun = mappingReady && (mode !== 'truncate' || confirmation === table)
 
   function close() { if (!lock.current) onClose() }
-  async function prepare(read: () => Promise<{path:string;web?:BrowserImportFile;preview:ImportPreview} | null>) {
+  async function prepare(read: () => Promise<{path:string;web?:BrowserImportFile} | null>, requested?: ImportParseOptions) {
     if (lock.current || step !== 0) return
     lock.current = true; setBusy(true); setErr(null)
     const token = ++generation.current
     try {
       const source = await read()
       if (token !== generation.current || !source) return
-      setFilePath(source.path); setWebFile(source.web ?? null); setPreview(source.preview)
-      setConfirmation(''); setSummary(null)
+      // Keep the selected bytes/path after parse failure, so settings can be corrected.
+      const options = requested ?? defaultImportOptions(source.path)
+      setFilePath(source.path); setWebFile(source.web ?? null); setPreview(null); setParseOptions(options)
+      setMapping(Object.create(null)); setConfirmation(''); setSummary(null)
+      if (!validImportOptions(options)) throw new Error(t('dbimport.invalidOptions'))
+      const result = source.web ? await importPreviewBytes(source.web, options) : await importPreview(source.path, options)
+      if (token !== generation.current) return
+      if (!importPreviewMatches(result, options)) throw new Error(t('dbimport.incompatiblePreview'))
+      setPreview(result)
     } catch (error) {
-      if (token === generation.current) { setPreview(null); setFilePath(null); setWebFile(null); setErr(dbErrMsg(error)) }
+      if (token === generation.current) { setPreview(null); setErr(dbErrMsg(error)) }
     } finally {
       if (token === generation.current) { lock.current = false; setBusy(false) }
     }
+  }
+  function changeParsing(options: ImportParseOptions) {
+    if (lock.current || step !== 0) return
+    generation.current++; setParseOptions(options); setPreview(null); setMapping(Object.create(null)); setConfirmation(''); setErr(null)
+  }
+  function reloadPreview() {
+    if (!filePath || !validImportOptions(parseOptions)) return
+    void prepare(async()=>({path:filePath,...(webFile?{web:webFile}:{})}), parseOptions)
   }
   function pickFile() {
     if (lock.current) return
@@ -93,7 +111,7 @@ function TableImportFlow({ connId, schema, table, engine, transactions, onClose,
       const picked = await open({ multiple:false, filters:[{name:t('dbviews.importFileFilter'),extensions:['csv','tsv','json','xlsx','xlsm','xls']}] })
       const path = Array.isArray(picked) ? picked[0] : picked
       if (!path) return null
-      return {path, preview:await importPreview(path)}
+      return {path}
     })
   }
   function pickBrowserFile(file?: File) {
@@ -104,7 +122,7 @@ function TableImportFlow({ connId, schema, table, engine, transactions, onClose,
       let binary = ''
       for (let offset = 0; offset < bytes.length; offset += 32768) binary += String.fromCharCode(...bytes.subarray(offset, offset + 32768))
       const web = {fileName:file.name, dataBase64:btoa(binary)}
-      return {path:file.name, web, preview:await importPreviewBytes(web)}
+      return {path:file.name, web}
     })
   }
   async function runImport() {
@@ -112,7 +130,7 @@ function TableImportFlow({ connId, schema, table, engine, transactions, onClose,
     lock.current = true; setBusy(true); setStep(3); setErr(null)
     const token = ++generation.current
     try {
-      const args = {connId, schema, table, mappings:pairs, mode, ...(mode === 'truncate' ? {allowDestructive:true} : {})}
+      const args = {connId, schema, table, mappings:pairs, mode, parseOptions:preview.parseOptions ?? undefined, sourceFingerprint:preview.sourceFingerprint, ...(mode === 'truncate' ? {allowDestructive:true} : {})}
       const result = webFile ? await importTableBytes({...args,...webFile}) : await importTable({...args,filePath})
       if (token !== generation.current) return
       if (!Number.isSafeInteger(result?.rowsImported) || result.rowsImported < 0) throw new Error(t('dbflow.noReceipt'))
@@ -133,11 +151,17 @@ function TableImportFlow({ connId, schema, table, engine, transactions, onClose,
     </>}>
     {step === 0 && <>
       <h3>{t('dbflow.source')}</h3>
-      <div className="db-flow-file"><Icon name="file" size={24}/><div><strong>{preview?.fileName ?? t('dbflow.chooseSource')}</strong>
+      <div className="db-flow-file"><Icon name="file" size={24}/><div><strong>{preview?.fileName ?? filePath?.split(/[\\/]/).pop() ?? t('dbflow.chooseSource')}</strong>
         <p className="db-flow-muted">{preview ? `${preview.fileType.toUpperCase()} · ${preview.sizeBytes} bytes · ${t('dbviews.importRowCount',{count:preview.totalRows})}` : t('dbviews.importSupported')}</p></div>
         <Btn size="sm" variant="secondary" icon="upload" onClick={pickFile} disabled={busy}>{t('dbviews.importChooseFile')}</Btn>
         {isServer() && <input ref={fileInput} type="file" hidden accept=".csv,.tsv,.json,.xlsx,.xlsm,.xls" data-testid="browser-import-file" onChange={e => { const file=e.currentTarget.files?.[0]; e.currentTarget.value=''; pickBrowserFile(file) }}/>}</div>
       <p className="db-flow-muted">{isServer() ? t('dbflow.webSource') : t('dbflow.desktopSource')}</p>
+      {filePath && <div className="db-import-parsing">
+        {parseOptions && <ImportParsingOptions value={parseOptions} onChange={changeParsing} busy={busy}/>}
+        {!validImportOptions(parseOptions) && <p role="alert" className="db-flow-notice" data-danger="true">{t('dbimport.invalidOptions')}</p>}
+        {!preview && <p className="db-flow-muted">{t('dbimport.previewRequired')}</p>}
+        <Btn size="sm" variant="secondary" disabled={busy || !validImportOptions(parseOptions)} onClick={reloadPreview}>{t('dbimport.updatePreview')}</Btn>
+      </div>}
       {busy && <p role="status">{t('dbflow.preparing')}</p>}
       {metadata === 'loading' && <p role="status" className="db-flow-muted">{t('dbflow.loadingColumns')}</p>}
       {(metadata === 'error' || (metadata === 'ready' && !targetColumns.length)) && <div className="db-flow-notice" role="alert" data-danger="true">{metadataError || t('dbflow.noTargetColumns')} <Btn size="sm" disabled={busy} onClick={() => setReload(v=>v+1)}>{t('dbflow.reloadColumns')}</Btn></div>}
@@ -149,6 +173,8 @@ function TableImportFlow({ connId, schema, table, engine, transactions, onClose,
     </>}
     {step === 1 && preview && <>
       <h3>{t('dbviews.importMapping')}</h3>
+      <Btn size="sm" variant="secondary" onClick={()=>{setMapping(mapImportByPosition(preview.columns,targetColumns.map(c=>c.name)));setConfirmation('')}}>{t('dbimport.byPosition')}</Btn>
+      <p className="db-flow-muted">{t('dbimport.positionHint')}</p>
       <div className="db-flow-scroll"><table className="db-flow-mapping"><thead><tr><th>{t('dbviews.importSourceColumn')}</th><th>{t('dbviews.importTargetColumn')}</th></tr></thead><tbody>
         {preview.columns.map(src=><tr key={src}><td className="mono">{src}</td><td><select aria-label={t('dbflow.mapColumn',{column:src})} value={mapping[src] ?? ''} onChange={e=>setMapping(m=>({...m,[src]:e.target.value}))}>
           <option value="">{t('dbviews.importSkipColumn')}</option>{targetColumns.map(c=><option key={c.name} value={c.name}>{c.name} · {c.type}</option>)}</select></td></tr>)}
@@ -162,6 +188,8 @@ function TableImportFlow({ connId, schema, table, engine, transactions, onClose,
     {step === 2 && preview && <section data-testid="dbimport-review"><h3>{t('dbflow.review')}</h3>
       <dl className="db-flow-summary"><dt>{t('dbviews.importFile')}</dt><dd>{preview.fileName} · {preview.fileType.toUpperCase()}</dd><dt>{t('dbflow.target')}</dt><dd className="mono">{target}</dd><dt>{t('dbviews.importMode')}</dt><dd>{mode === 'append' ? t('dbviews.importModeAppend') : t('dbflow.replaceMode')}</dd><dt>{t('dbflow.rows')}</dt><dd>{preview.totalRows}</dd><dt>{t('dbviews.importMapping')}</dt><dd>{t('dbflow.mappingCount',{mapped:pairs.length,skipped:preview.columns.length-pairs.length})}</dd></dl>
       <div className="db-flow-scroll"><table><tbody>{pairs.map(p=><tr key={p.sourceColumn}><td className="mono">{p.sourceColumn}</td><td aria-hidden="true">→</td><td className="mono">{p.targetColumn}</td></tr>)}</tbody></table></div>
+      {preview.parseOptions && <ImportParsingSummary value={preview.parseOptions}/>}
+      <p className="db-flow-muted">{t('dbimport.integrity')}</p>
       <p className="db-flow-notice">{t('dbflow.importBoundary')}</p>
       {!isServer() && <p className="db-flow-muted">{t('dbflow.desktopSource')}</p>}
       {mode === 'truncate' && <><p className="db-flow-notice" data-danger="true">{t('dbflow.replaceWarning')}</p><label>{t('dbviews.importConfirmTable',{table})}<input aria-label={t('dbviews.importConfirmTable',{table})} value={confirmation} onChange={e=>setConfirmation(e.target.value)}/></label></>}

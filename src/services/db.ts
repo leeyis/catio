@@ -386,8 +386,19 @@ export async function exportDatabaseSql(args: {
 /** 一对源列→目标列映射（目标为空串=跳过该列）。 */
 export interface ImportColumnMapping { sourceColumn: string; targetColumn: string }
 
+export interface ImportParseOptions {
+  delimiter: string
+  headerRow: number
+  dataStartRow: number
+  trimValues: boolean
+  emptyStringAsNull: boolean
+}
+
 /** 导入文件预览：列 + 样本行（后端按 50 行截断）+ 总行数。 */
 export interface ImportPreview {
+  /** SHA-256 of source bytes, format and canonical parsing options; not a saved job. */
+  sourceFingerprint?: string
+  parseOptions?: ImportParseOptions | null
   binaryCells?: import('./types').BinaryCell[] | null
   fileName: string
   fileType: string
@@ -401,15 +412,16 @@ export interface ImportPreview {
 export interface ImportSummary { rowsImported: number; totalRows: number }
 
 /** 读取并预览导入文件（解析在后端 table_import，纯函数已单测）。 */
-export async function importPreview(filePath: string): Promise<ImportPreview> {
+export async function importPreview(filePath: string, parseOptions?: ImportParseOptions): Promise<ImportPreview> {
   if (!isTauri()) throw new Error('importPreview requires the Tauri runtime')
-  return rpc<ImportPreview>('db_import_preview', { filePath })
+  return rpc<ImportPreview>('db_import_preview', { filePath, parseOptions })
 }
 
 /** 按列映射把文件导入目标表。mode: 'append' | 'truncate'。 */
 export async function importTable(args: {
   connId: string; schema?: string; table: string; filePath: string;
   mappings: ImportColumnMapping[]; mode: 'append' | 'truncate'; batchSize?: number;
+  allowDestructive?: boolean; parseOptions?: ImportParseOptions; sourceFingerprint?: string;
 }): Promise<ImportSummary> {
   if (!isTauri()) throw new Error('importTable requires the Tauri runtime')
   return rpc<ImportSummary>('db_import_table', args)
@@ -417,13 +429,14 @@ export async function importTable(args: {
 
 /** Browser import sends bounded file bytes to the current authenticated server, never a server path. */
 export interface BrowserImportFile { fileName: string; dataBase64: string }
-export async function importPreviewBytes(file: BrowserImportFile): Promise<ImportPreview> {
+export async function importPreviewBytes(file: BrowserImportFile, parseOptions?: ImportParseOptions): Promise<ImportPreview> {
   if (!isServer()) throw new Error('Browser import requires server mode')
-  return rpc<ImportPreview>('db_import_preview_bytes', { ...file })
+  return rpc<ImportPreview>('db_import_preview_bytes', { ...file, parseOptions })
 }
 export async function importTableBytes(args: BrowserImportFile & {
   connId: string; schema?: string; table: string; mappings: ImportColumnMapping[];
   mode: 'append' | 'truncate'; batchSize?: number; allowDestructive?: boolean;
+  parseOptions?: ImportParseOptions; sourceFingerprint?: string;
 }): Promise<ImportSummary> {
   if (!isServer()) throw new Error('Browser import requires server mode')
   return rpc<ImportSummary>('db_import_table_bytes', { ...args })

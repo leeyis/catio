@@ -38,10 +38,15 @@ pub async fn apply_edits(driver: &dyn Driver, edits: &[EditRequest]) -> Result<u
 }
 
 pub fn import_preview(file_name: &str, bytes: &[u8]) -> Result<ImportPreview, DbError> {
+    import_preview_with_options(file_name, bytes, None)
+}
+pub fn import_preview_with_options(file_name: &str, bytes: &[u8], options: Option<&ti::ImportParseOptions>) -> Result<ImportPreview, DbError> {
     ti::check_import_size(bytes.len()).map_err(DbError::QueryFailed)?;
     let kind = ti::import_file_kind(file_name).map_err(DbError::QueryFailed)?;
-    let parsed = ti::parse_import_bytes(kind, bytes, ti::DEFAULT_PREVIEW_LIMIT).map_err(DbError::QueryFailed)?;
+    let parsed = ti::parse_import_bytes_with_options(kind, bytes, ti::DEFAULT_PREVIEW_LIMIT, options).map_err(DbError::QueryFailed)?;
     Ok(ImportPreview {
+        parse_options: ti::resolve_import_options(kind, options).map_err(DbError::QueryFailed)?,
+        source_fingerprint: ti::import_fingerprint(kind, bytes, options).map_err(DbError::QueryFailed)?,
         binary_cells: parsed.binary_cells,
         file_name: file_name.rsplit(['/', '\\']).next().unwrap_or(file_name).to_string(),
         file_type: kind.label().to_string(), size_bytes: bytes.len() as u64,
@@ -65,8 +70,16 @@ pub async fn import_bytes(
     driver: &dyn Driver, schema: Option<&str>, table: &str, file_name: &str, bytes: &[u8],
     mappings: &[ImportColumnMapping], mode: &str, batch_size: usize, allow_destructive: bool,
 ) -> Result<ImportSummary, DbError> {
+    import_bytes_reviewed(driver, schema, table, file_name, bytes, mappings, mode, batch_size, allow_destructive, None, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn import_bytes_reviewed(
+    driver: &dyn Driver, schema: Option<&str>, table: &str, file_name: &str, bytes: &[u8],
+    mappings: &[ImportColumnMapping], mode: &str, batch_size: usize, allow_destructive: bool,
+    options: Option<&ti::ImportParseOptions>, source_fingerprint: Option<&str>,
+) -> Result<ImportSummary, DbError> {
     sql_writer(driver)?;
-    if driver.capabilities().transactions { driver.ensure_atomic_table(schema, table).await?; }
     if !matches!(mode, "append" | "truncate") {
         return Err(DbError::QueryFailed("Import mode must be append or truncate".into()));
     }
@@ -75,11 +88,19 @@ pub async fn import_bytes(
     }
     ti::check_import_size(bytes.len()).map_err(DbError::QueryFailed)?;
     let kind = ti::import_file_kind(file_name).map_err(DbError::QueryFailed)?;
-    let parsed = ti::parse_import_bytes(kind, bytes, usize::MAX).map_err(DbError::QueryFailed)?;
+    if options.is_some() && source_fingerprint.is_none() {
+        return Err(DbError::QueryFailed("Parsing options require a preview fingerprint; preview and review before importing".into()));
+    }
+    let fingerprint = ti::import_fingerprint(kind, bytes, options).map_err(DbError::QueryFailed)?;
+    if source_fingerprint.is_some_and(|expected| expected != fingerprint) {
+        return Err(DbError::QueryFailed("Import source or parsing options changed after preview; no write was sent. Preview and review again.".into()));
+    }
+    let parsed = ti::parse_import_bytes_with_options(kind, bytes, usize::MAX, options).map_err(DbError::QueryFailed)?;
     let total_rows = parsed.total_rows;
     let schema = schema.filter(|s| !s.trim().is_empty());
     let batches = ti::build_import_insert_batches(driver.db_type(), true, schema, table, &parsed,
         mappings, batch_size.clamp(1, 1000)).map_err(DbError::QueryFailed)?;
+    if driver.capabilities().transactions { driver.ensure_atomic_table(schema, table).await?; }
     // Parse and map first, then compose the replacement in the same physical transaction.
     let mut statements = Vec::with_capacity(batches.len() + 1);
     if mode == "truncate" { statements.push(replacement_sql(driver, schema, table)?); }
