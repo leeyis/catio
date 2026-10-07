@@ -1,4 +1,14 @@
 {
+  "compareKeys": {
+    "mode": "Matching keys", "primary": "Use matching primary keys", "custom": "Choose matching columns", "columns": "Matching columns",
+    "scope": "Choose shared columns that identify a row. They are treated as immutable keys; changing a key value produces an insert/delete pair. NULL or duplicate keys in the loaded window are rejected. Settings stay in this tab only.",
+    "chooseTables": "Choose both tables to load matching columns.", "noCommon": "These tables have no shared columns.",
+    "invalid": "Choose distinct columns that exist in both current tables.",
+    "readOnly": "Read-only comparison: the selected columns do not contain both tables' complete primary keys. Window-local uniqueness and legacy index descriptions do not prove global uniqueness; SQL generation and synchronization are disabled.",
+    "noSync": "-- Synchronization disabled: matching-key uniqueness is not proven.",
+    "structureChanged": "Source or target structure changed after comparison. Compare again before synchronizing.",
+    "precheckFailed": "No write was sent. Preflight failed: {{msg}}"
+  },
   "resultInsights": {
     "title": "Result analysis", "views": "Result analysis views", "profile": "Column profile", "transpose": "Transpose", "chart": "Distribution",
     "scope": "Read-only initial execution snapshot: analyzing {{rows}} / {{totalRows}} returned rows and {{columns}} / {{totalColumns}} columns. Subsequent grid paging, filtering and drafts are not included. No query is executed and no results are persisted.",

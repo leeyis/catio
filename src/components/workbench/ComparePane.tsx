@@ -11,6 +11,8 @@ import { queryPage, tableStructure, getSchema, execSyncBatch, preferredNamespace
 import { listActiveDbConnections } from '../../state/dbConnections'
 import { computeDiff, genSyncStatements, qtable, qid, type CompareDiff } from './compareTables'
 import { CompareChanges } from './CompareChanges'
+import { CompareKeyPicker } from './CompareKeyPicker'
+import { compareKeyStatus, comparisonStructureFingerprint } from './compareKeys'
 import { compareChanges, selectedCompareDiff } from './compareSelection'
 import { useCopyFeedback } from '../useCopyFeedback'
 import type { SchemaNamespace } from '../../services/types'
@@ -63,6 +65,12 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
   const [tgtSchemas, setTgtSchemas] = useState<SchemaNamespace[]>(schemas)
   const [tgtSchema, setTgtSchema] = useState(preferredNamespace(schemas.map(s => s.name)))
   const [tgtTable, setTgtTable] = useState('')
+  const [keyMode,setKeyMode] = useState<'primary'|'custom'>('primary')
+  const [keyColumns,setKeyColumns] = useState<string[]>([])
+  const [syncSafe,setSyncSafe] = useState(true)
+  const structureAtComparison = useRef<{source:string;target:string}|null>(null)
+  const targetIdentity=JSON.stringify([connId,srcSchema,srcTable,tgtConnId,tgtSchema,tgtTable])
+  useLayoutEffect(()=>{setKeyColumns([])},[targetIdentity])
 
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -87,9 +95,9 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
   useLayoutEffect(() => {
     operation.current++
     setSql(''); setStatements([]); setSummary(null); setExecMsg(null); setError(null); setBusy(false); setConfirmVersion(null)
-    setDifference(null); setSelectedChanges(new Set()); setReplayBlocked(false)
+    setDifference(null); setSelectedChanges(new Set()); setReplayBlocked(false); setSyncSafe(true); structureAtComparison.current=null
     return () => { operation.current++ }
-  }, [connId, srcSchema, srcTable, tgtConnId, tgtSchema, tgtTable])
+  }, [connId, srcSchema, srcTable, tgtConnId, tgtSchema, tgtTable, keyMode, keyColumns])
 
   useEffect(() => {
     let alive = true
@@ -130,16 +138,18 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
     const version = ++operation.current
     readLock.current = version
     setBusy(true); setError(null); setSummary(null); setSql(''); setStatements([]); setExecMsg(null)
-    setDifference(null); setSelectedChanges(new Set()); setReplayBlocked(false); setConfirmVersion(null)
+    setDifference(null); setSelectedChanges(new Set()); setReplayBlocked(false); setConfirmVersion(null); setSyncSafe(true); structureAtComparison.current=null
     try {
       const st = await tableStructure(connId, srcSchema, srcTable)
       if (version !== operation.current) return
-      const pkCols = st.columns.filter(c => c.key === 'PK').map(c => c.name)
-      if (pkCols.length === 0) throw new Error(t('compare.noPk'))
+      const pkCols = keyMode==='custom' ? [...keyColumns] : st.columns.filter(c => c.key === 'PK').map(c => c.name)
+      if (pkCols.length === 0) throw new Error(t(keyMode==='custom'?'compareKeys.invalid':'compare.noPk'))
       const target = await tableStructure(tgtConnId, tgtSchema, tgtTable)
       if (version !== operation.current) return
       const targetPk = target.columns.filter(c => c.key === 'PK').map(c => c.name)
-      if (targetPk.length !== pkCols.length || pkCols.some(name => !targetPk.includes(name))) throw new Error(t('compare.keyMismatch'))
+      if (keyMode==='primary' && (targetPk.length !== pkCols.length || pkCols.some(name => !targetPk.includes(name)))) throw new Error(t('compare.keyMismatch'))
+      const keyStatus=compareKeyStatus(st,target,pkCols)
+      if(!keyStatus.valid)throw new Error(t('compareKeys.invalid'))
 
       const srcOrder = pkCols.map(c => qid(c, engine)).join(', ')
       const tgtOrder = pkCols.map(c => qid(c, tgtEngine)).join(', ')
@@ -163,11 +173,12 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
       const truncated = srcQ.truncated === true || tgtQ.truncated === true
       const deleteSuppressed = truncated && diff.deletes.length > 0
       setSummary({ inserts: diff.inserts.length, updates: diff.updates.length, deletes: diff.deletes.length, truncated, deleteSuppressed })
-      const stmts = genSyncStatements(diff, tgtSchema, tgtTable, { engine: tgtEngine, allowDelete: !truncated })
+      const stmts = keyStatus.unique ? genSyncStatements(diff, tgtSchema, tgtTable, { engine: tgtEngine, allowDelete: !truncated }) : []
       setStatements(stmts)
       setSql(stmts.join('\n'))
-      setDifference(diff)
-      setSelectedChanges(new Set(compareChanges(diff).filter(item => !truncated || item.kind !== 'deletes').map(item => item.id)))
+      setDifference(diff); setSyncSafe(keyStatus.unique)
+      structureAtComparison.current={source:comparisonStructureFingerprint(st),target:comparisonStructureFingerprint(target)}
+      setSelectedChanges(new Set(keyStatus.unique ? compareChanges(diff).filter(item => !truncated || item.kind !== 'deletes').map(item => item.id) : []))
     } catch (e) {
       if (version === operation.current) setError(dbErrMsg(e))
     } finally {
@@ -177,7 +188,7 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
   }
 
   function selectChanges(selection: Set<string>) {
-    if (!difference || !summary || writeLock.current || busy || executing || replayBlocked) return
+    if (!difference || !summary || !syncSafe || writeLock.current || busy || executing || replayBlocked) return
     operation.current++
     setConfirmVersion(null); setExecMsg(null)
     const allowed = new Set(compareChanges(difference).filter(item => !summary.truncated || item.kind !== 'deletes').map(item => item.id))
@@ -188,7 +199,7 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
   }
 
   async function execute() {
-    if (!statements.length || writeLock.current || busy || confirmVersion !== operation.current) return
+    if (!statements.length || !syncSafe || !structureAtComparison.current || writeLock.current || busy || confirmVersion !== operation.current) return
     writeLock.current = true
     setConfirmVersion(null)
     // Truncation suppressed DELETEs, so this only syncs the INSERT/UPDATE subset.
@@ -196,7 +207,14 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
     const version = operation.current
     let refreshVersion = version
     setExecuting(true); setExecMsg(null)
+    const expectedStructure=structureAtComparison.current
+    let dispatched=false
     try {
+      const [source,target]=await Promise.all([tableStructure(connId,srcSchema,srcTable),tableStructure(tgtConnId,tgtSchema,tgtTable)])
+      if(version!==operation.current)return
+      if(comparisonStructureFingerprint(source)!==expectedStructure.source || comparisonStructureFingerprint(target)!==expectedStructure.target)throw new Error(t('compareKeys.structureChanged'))
+      // This narrows the stale-schema window; it is not an engine lock or data snapshot.
+      dispatched=true
       const affected = await execSyncBatch(tgtConnId, statements)
       if (version !== operation.current) return
       if (!Number.isSafeInteger(affected) || affected < 0) throw new Error(t('dbflow.noReceipt'))
@@ -209,7 +227,7 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
         // A transport failure can lose the commit receipt. Never claim rollback or replay this batch.
         setStatements([])
         setReplayBlocked(true)
-        setExecMsg({ ok: false, text: t('compare.execFailed', { msg: dbErrMsg(e) }) })
+        setExecMsg({ ok: false, text: t(dispatched ? 'compare.execFailed' : 'compareKeys.precheckFailed', { msg: dbErrMsg(e) }) })
       }
     } finally {
       writeLock.current = false
@@ -218,7 +236,7 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
   }
 
   const selectStyle: CSSProperties = { height: 32, width: '100%', boxSizing: 'border-box', padding: '0 8px', borderRadius: 8, fontSize: 12.5, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', color: 'var(--text-primary)', outline: 'none', minWidth: 0 }
-  const canCompare = !!srcTable && !!tgtTable && !busy && !executing
+  const canCompare = !!srcTable && !!tgtTable && !busy && !executing && (keyMode==='primary' || keyColumns.length>0)
 
   return (
     <div className="col" style={{ height: '100%', width: '100%', minHeight: 0, overflow: 'auto', padding: 14, gap: 14 }}>
@@ -264,6 +282,12 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
         </Field>
       </div>
 
+      <div className="row" style={{maxWidth:340,flex:'none'}}><Field label={t('compareKeys.mode')}>
+        <select disabled={busy || executing} style={selectStyle} value={keyMode} onChange={e=>{setKeyMode(e.target.value==='custom'?'custom':'primary');setKeyColumns([])}}>
+          <option value="primary">{t('compareKeys.primary')}</option><option value="custom">{t('compareKeys.custom')}</option>
+        </select>
+      </Field></div>
+      {keyMode==='custom'&&<CompareKeyPicker key={targetIdentity} source={{connId,schema:srcSchema,table:srcTable}} target={{connId:tgtConnId,schema:tgtSchema,table:tgtTable}} selected={keyColumns} disabled={busy||executing} onSelect={setKeyColumns}/>}
       <div className="row" style={{ gap: 10, alignItems: 'center' }}>
         <button onClick={() => void compare()} disabled={!canCompare}
           style={{ height: 32, padding: '0 16px', borderRadius: 8, background: 'var(--accent-primary)', color: '#fff', border: 'none', fontSize: 13, fontWeight: 600, cursor: canCompare ? 'pointer' : 'default', opacity: canCompare ? 1 : 0.5 }}>
@@ -295,7 +319,8 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
           <Icon name={execMsg.ok ? 'check' : 'alert-triangle'} size={13} /> <span>{execMsg.text}</span>
         </div>
       )}
-      {difference && <CompareChanges diff={difference} selected={selectedChanges} allowDelete={!summary?.truncated} disabled={busy || executing || replayBlocked || confirmVersion !== null} onSelect={selectChanges}/>}
+      {difference && !syncSafe && <p role="status" className="db-compare-note">{t('compareKeys.readOnly')}</p>}
+      {difference && <CompareChanges diff={difference} selected={selectedChanges} allowSync={syncSafe} allowDelete={!summary?.truncated} disabled={busy || executing || replayBlocked || confirmVersion !== null} onSelect={selectChanges}/>}
       {copyError && <p role="alert">{t('panels.copyReceiptFailed')}</p>}
       {summary && (
         <div className="col" style={{ gap: 6, flex: 1, minHeight: 0 }}>
@@ -311,7 +336,7 @@ export function ComparePane({ connId, engine, schemas }: ComparePaneProps) {
               </button>
             </div>
           </div>
-          <textarea aria-label={t('compare.syncSql')} readOnly value={sql || t(summary.inserts + summary.updates + summary.deletes > 0 ? 'compareChanges.noSelection' : 'compare.identical')} onFocus={e => sql && e.currentTarget.select()}
+          <textarea aria-label={t('compare.syncSql')} readOnly value={sql || t(!syncSafe ? 'compareKeys.noSync' : summary.inserts + summary.updates + summary.deletes > 0 ? 'compareChanges.noSelection' : 'compare.identical')} onFocus={e => sql && e.currentTarget.select()}
             style={{ flex: 1, minHeight: 160, width: '100%', boxSizing: 'border-box', padding: 10, borderRadius: 8, border: '1px solid var(--border-hairline-alt)', background: 'var(--surface-sunken)', color: 'var(--text-primary)', fontFamily: 'monospace', fontSize: 11.5, resize: 'vertical' }} />
         </div>
       )}
