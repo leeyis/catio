@@ -1,0 +1,9 @@
+.db-clause-input{flex:1;min-width:0;position:relative;display:flex;flex-direction:column}
+.db-clause-input>input{width:100%;min-width:0;border:1px solid var(--border-hairline);border-radius:7px;padding:4px 8px;background:var(--surface-card);color:var(--text-primary);font:inherit;font-size:12px;outline:none}
+.db-clause-input>input:focus-visible{border-color:var(--accent-primary)}
+.db-clause-options{position:absolute;top:calc(100% + 4px);left:0;z-index:70;width:max-content;min-width:min(180px,100%);max-width:min(480px,100%);max-height:220px;overflow:auto;background:var(--surface-card);border:1px solid var(--border-hairline);border-radius:8px;box-shadow:var(--shadow-window);padding:4px}
+.db-clause-options>button{display:flex;align-items:center;width:100%;gap:8px;padding:4px 8px;border:0;background:transparent;cursor:pointer;text-align:left;font-size:12px;color:var(--text-primary);border-radius:6px}
+.db-clause-options>button[aria-selected=true]{background:var(--accent-soft)}
+.db-clause-options>button>svg{color:var(--accent-primary);flex:none}
+.db-clause-options>button>span{overflow-wrap:anywhere;min-width:0}
+.db-clause-options small{color:var(--text-secondary);font-size:11px;white-space:nowrap}

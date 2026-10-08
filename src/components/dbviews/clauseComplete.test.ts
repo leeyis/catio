@@ -52,16 +52,16 @@ describe('applyClauseItem', () => {
   it('用候选替换光标处 token,光标移到插入末尾', () => {
     const value = 'org_code = 1 AND sec'
     const sug = clauseSuggest(value, value.length, COLS, 'where')
-    const r = applyClauseItem(value, sug, { label: 'security_code', insert: 'security_code', kind: 'column' })
-    expect(r.value).toBe('org_code = 1 AND security_code')
+    const r = applyClauseItem(value, sug, sug.items.find(i=>i.label==='security_code')!)
+    expect(r.value).toBe('org_code = 1 AND "security_code"')
     expect(r.cursor).toBe(r.value.length)
   })
 
   it('替换发生在中间 token 时保留其后文本', () => {
     const value = 'sec = 1'
     const sug = clauseSuggest(value, 3, COLS, 'where')
-    const r = applyClauseItem(value, sug, { label: 'secucode', insert: 'secucode', kind: 'column' })
-    expect(r.value).toBe('secucode = 1')
-    expect(r.cursor).toBe('secucode'.length)
+    const r = applyClauseItem(value, sug, sug.items.find(i=>i.label==='secucode')!)
+    expect(r.value).toBe('"secucode" = 1')
+    expect(r.cursor).toBe('"secucode"'.length)
   })
 })

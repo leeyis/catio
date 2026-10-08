@@ -697,7 +697,7 @@ describe('DataGrid generic rows', () => {
       const idOpt = screen.getAllByText('id').find(el => el.closest('button'))!
       expect(idOpt).toBeTruthy()
       fireEvent.mouseDown(idOpt)
-      expect(where.value).toBe('id')
+      expect(where.value).toBe('"id"')
     })
 
     it('非 SQL 引擎(mongodb/redis/es)即使 livePreview 也不显示 WHERE / ORDER BY 输入框', () => {
@@ -738,6 +738,22 @@ describe('DataGrid generic rows', () => {
       // 返回的服务端行替换网格内容
       expect(await screen.findByText('bob')).toBeInTheDocument()
       expect(screen.queryByText('alice')).toBeNull()
+    })
+
+    it('补全只改草稿，明确提交完整条件时才发起 tableQuery', async () => {
+      tableQuery.mockResolvedValue({columns,rows:[[2,'bob']]})
+      wrap(<DataGrid columns={columns} rows={rows} connId="c1" table="orders" schema="public" engine="postgres" livePreview />)
+      const where=screen.getByPlaceholderText('WHERE') as HTMLInputElement
+      fireEvent.change(where,{target:{value:'name li'}})
+      expect(screen.getByRole('option',{name:'LIKE'})).toBeInTheDocument()
+      fireEvent.keyDown(where,{key:'Enter'})
+      expect(where.value).toBe('name LIKE');expect(tableQuery).not.toHaveBeenCalled()
+      fireEvent.change(where,{target:{value:"name LIKE 'b%'"}})
+      fireEvent.keyDown(where,{key:'Enter',keyCode:229})
+      expect(tableQuery).not.toHaveBeenCalled()
+      fireEvent.keyDown(where,{key:'Enter'})
+      await waitFor(()=>expect(tableQuery).toHaveBeenCalledTimes(1))
+      expect(tableQuery.mock.calls[0].slice(0,5)).toEqual(['c1','public','orders',"name LIKE 'b%'",undefined])
     })
 
     it('清空 WHERE/ORDER BY 提交回落 tablePreview(无条件全量)', async () => {

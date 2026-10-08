@@ -1,0 +1,60 @@
+import {describe,it,expect} from 'vitest'
+import {clauseSuggest,applyClauseItem} from './clauseComplete'
+const columns=['id','score','status','deleted_at','code','name','name_long','order value','MixedCase','中文列','a"b']
+const labels=(text:string,mode:'where'|'order'='where',engine='postgres')=>clauseSuggest(text,text.length,columns,mode,engine).items.map(i=>i.label)
+describe('context-aware clause suggestions',()=>{
+ it.each(["name = 'sta","name = 'a''sta","name = $$sta","name = $tag$sta","name = E'a\\'sta","name = q'[a'sta","score = 1 -- sta","score = 1 /* sta","score = 1 /* a /* b */ sta"] as const)('does not suggest inside literal/comment: %s',sql=>expect(labels(sql)).toEqual([]))
+ it.each(['score = sta','score >= sta','score <> sta','score LIKE sta','score IN (sta','score IN (1, sta','score NOT IN (sta','score BETWEEN sta','score BETWEEN 1 AND sta','id = (sta','score + (SELECT sta'])('does not replace a value/subquery with a column: %s',sql=>expect(labels(sql)).toEqual([]))
+ it('offers operators without irrelevant columns',()=>{
+  expect(labels('score betw')).toEqual(['BETWEEN'])
+  expect(labels('name li')).toEqual(['LIKE'])
+  expect(labels('deleted_at is')).toEqual(['IS NULL','IS NOT NULL'])
+  expect(labels('score not betw')).toEqual(['BETWEEN'])
+  expect(labels('score BETWEEN 1 a')).toEqual(['AND'])
+  expect(labels('score BETWEEN 1.5 a')).toEqual(['AND'])
+  expect(labels('score BETWEEN -1 a')).toEqual(['AND'])
+ })
+ it('distinguishes IS values, connectors and field slots',()=>{
+  expect(labels('deleted_at IS nu')).toEqual(['NULL'])
+  expect(labels('deleted_at IS NOT nu')).toEqual(['NULL'])
+  expect(labels('score = 1 a')).toEqual(['AND'])
+  expect(labels('score = 1 AND sta')).toEqual(['status'])
+  expect(labels('NOT sta')).toEqual(['status'])
+  expect(labels('score NOT sta')).toEqual([])
+  expect(labels('(score = 1 OR sta')).toEqual(['status'])
+  expect(labels('score BETWEEN 1 AND 2 AND sta')).toEqual(['status'])
+  expect(labels('COALESCE(score, 0) betw')).toEqual(['BETWEEN'])
+ })
+ it('limits dialect-specific operators',()=>{
+  expect(labels('name ili','where','postgres')).toEqual(['ILIKE'])
+  expect(labels('name ili','where','sqlite')).toEqual([])
+  expect(labels('name reg','where','mysql')).toEqual(['REGEXP'])
+  expect(labels('name reg','where','postgres')).toEqual([])
+  expect(labels('deleted_at IS tr','where','sqlserver')).toEqual([])
+ })
+ it('keeps ORDER BY directions separate from fields',()=>{
+  expect(labels('score st','order')).toEqual([])
+  expect(labels('score de','order')).toEqual(['DESC'])
+  expect(labels('score DESC, sta','order')).toEqual(['status'])
+  expect(labels('score DESC sta','order')).toEqual([])
+ })
+ it('replaces the entire current token, including its suffix, without touching other SQL',()=>{
+  const value='score = 1 AND statux = 2',s=clauseSuggest(value,value.indexOf('statux')+3,columns,'where','postgres')
+  expect(applyClauseItem(value,s,s.items[0])).toEqual({value:'score = 1 AND "status" = 2',cursor:22})
+ })
+ it('quotes physical names, preserves Unicode and escapes the active quote style',()=>{
+  const s=clauseSuggest('ord',3,columns,'where','mysql');expect(s.items[0].insert).toBe('`order value`')
+  expect(labels('中')).toEqual(['中文列'])
+  const q=clauseSuggest('"a""',4,columns,'where','postgres');expect(q.items[0].insert).toBe('"a""b"')
+  const b=clauseSuggest('[ord',4,columns,'where','sqlserver');expect(b.items[0].insert).toBe('[order value]')
+  expect(clauseSuggest('ord',3,columns,'where','sqlserver').items[0].insert).toBe('[order value]')
+  expect(labels('name = "sta','where','mysql')).toEqual([])
+  expect(labels("name = 'a\\'sta",'where','mysql')).toEqual([])
+ })
+ it('rejects stale replacements and bounds work',()=>{
+  const s=clauseSuggest('sta',3,columns,'where','postgres')
+  expect(applyClauseItem('other',s,s.items[0]).value).toBe('other')
+  expect(labels(' '.repeat(17000)+'sta')).toEqual([])
+  expect(clauseSuggest('c',1,Array.from({length:20000},(_,i)=>'c'+i),'where').items).toHaveLength(50)
+ })
+})

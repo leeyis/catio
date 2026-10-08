@@ -501,6 +501,7 @@
     "discardChanges": "Discard changes",
     "revertCell": "Revert to original",
     "filter": "Filter",
+    "clauseSuggestions": "Clause suggestions",
     "whereClause": "WHERE clause",
     "orderByClause": "ORDER BY clause",
     "applyServerFilter": "Apply",
