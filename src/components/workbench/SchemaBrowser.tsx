@@ -138,7 +138,9 @@ export function SchemaBrowser({ visible = true, width=216, connId, onLoadNamespa
 
   return (
     <div className="col db-explorer" style={{ width, flex: 'none', borderRight: '1px solid var(--border-hairline)' }}>
-      <div className="db-explorer-caption"><Icon name="database" size={12}/>{t('dbviews.workspace.explorer')}</div>
+      <div className="db-explorer-caption"><Icon name="database" size={12}/>{t('dbviews.workspace.explorer')}
+        {onOpenCommands&&<button type="button" className="icon-btn bare db-explorer-commands" data-testid="wb-commands" aria-label={t('dbviews.commands')} title={`${t('dbviews.commands')} · Ctrl / ⌘ + Shift + P`} aria-keyshortcuts="Control+Shift+P Meta+Shift+P" onClick={onOpenCommands}><Icon name="command" size={13}/></button>}
+      </div>
       {/* header */}
       <div className="row" style={{ padding: '10px 10px 8px', justifyContent: 'space-between' }}>
         <div className="row gap6" style={{ minWidth: 0 }}><ConnGlyph conn={headerGlyph} size={24} radius={7} /><div className="col" style={{ lineHeight: 1.2, minWidth: 0 }}><span className="ell" style={{ fontSize: 12.5, fontWeight: 700 }}>{headerName}</span><span className="mono ell" style={{ fontSize: 9.5, color: 'var(--text-faint)' }}>{headerEngine}</span></div></div>
@@ -156,11 +158,6 @@ export function SchemaBrowser({ visible = true, width=216, connId, onLoadNamespa
       </div>
       <div className="db-explorer-actions">
         <button className="btn btn-secondary sm db-new-query" data-testid="wb-new-query" title={t('workbench.newQuery')} disabled={!canSqlConsole} onClick={()=>onNewQuery()}><Icon name="plus" size={14}/>{t('workbench.newQuery')}</button>
-        <MetadataNodeActions className="db-action-menu" ownerKey={JSON.stringify([connId??connKey,visible])} title={t('dbviews.workspace.databaseTools')} triggerLabel={t('dbviews.workspace.toolsShort')} triggerIcon="chevron-down" items={[
-          ...(live&&canSqlConsole&&onOpenCompare?[{id:'compare',label:t('compare.title'),icon:'git-compare',testId:'wb-compare',action:onOpenCompare}]:[]),
-          ...(canEr?[{id:'er',label:t('workbench.erDiagram'),icon:'network',action:()=>onOpenER()}]:[]),
-          ...(onOpenCommands?[{id:'commands',label:t('dbviews.commands'),icon:'search',action:onOpenCommands}]:[]),
-        ]}><span/></MetadataNodeActions>
       </div>
       {/* search + schema/database visibility filter */}
       <div className="row gap6" style={{ margin: '0 10px 8px', position: 'relative' }}>
@@ -236,7 +233,7 @@ export function SchemaBrowser({ visible = true, width=216, connId, onLoadNamespa
           </div>
         ) : visibleNamespaces.map(ns => (
           <SchemaNode key={ns.name} connId={connId} engine={conn?.engineId??conn?.engine} ownerKey={JSON.stringify([connId ?? connKey,visible,!globalSearch])} ns={ns} query={query} active={active} onPick={onPick} onPickObject={onPickObject} onPin={onPin} onPinObject={onPinObject} live={!!live}
-            onNewQuery={onNewQuery} onOpenER={onOpenER} onNewObjectTemplate={onNewObjectTemplate} onRefresh={onRefresh} onObjectAdmin={onObjectAdmin} onTransferData={onTransferData} onExportDatabase={onExportDatabase}
+            onNewQuery={onNewQuery} onOpenER={onOpenER} onOpenCompare={onOpenCompare} onNewObjectTemplate={onNewObjectTemplate} onRefresh={onRefresh} onObjectAdmin={onObjectAdmin} onTransferData={onTransferData} onExportDatabase={onExportDatabase}
             sqlActive={sqlActive} canSqlConsole={canSqlConsole} canEr={canEr} canStructureEdit={canStructureEdit}
             canViews={canViews} canFunctions={canFunctions} onLoadNamespace={onLoadNamespace} />
         ))}
@@ -268,6 +265,7 @@ interface SchemaNodeProps {
   live: boolean
   onNewQuery: (schema?: string) => void
   onOpenER: (schema?: string) => void
+  onOpenCompare?: () => void
   onNewObjectTemplate?: (schema: string, kind: 'table' | 'view') => void
   onRefresh?: () => void
   onObjectAdmin?: (op: 'drop' | 'rename' | 'truncate' | 'duplicate', objectType: 'TABLE' | 'VIEW', schema: string, name: string) => void
@@ -282,7 +280,7 @@ interface SchemaNodeProps {
 }
 
 /** One schema namespace rendered as a collapsible DB tree node (Tables / Views / Functions). */
-function SchemaNode({ connId,engine,ownerKey, onLoadNamespace, ns, query, active, onPick, onPickObject, onPin, onPinObject, live, onNewQuery, onOpenER, onNewObjectTemplate, onRefresh, onObjectAdmin, onTransferData, onExportDatabase, sqlActive, canSqlConsole, canEr, canStructureEdit, canViews, canFunctions }: SchemaNodeProps) {
+function SchemaNode({ connId,engine,ownerKey, onLoadNamespace, ns, query, active, onPick, onPickObject, onPin, onPinObject, live, onNewQuery, onOpenER, onOpenCompare, onNewObjectTemplate, onRefresh, onObjectAdmin, onTransferData, onExportDatabase, sqlActive, canSqlConsole, canEr, canStructureEdit, canViews, canFunctions }: SchemaNodeProps) {
   const { t } = useTranslation()
   const D = useData()
   // Schemas start COLLAPSED — a freshly-connected DB shows nothing expanded until the
@@ -306,9 +304,10 @@ function SchemaNode({ connId,engine,ownerKey, onLoadNamespace, ns, query, active
   const keyTone: Record<string, string> = { PK: 'var(--signal-amber)', FK: 'var(--signal-blue)', UNI: 'var(--signal-violet)' }
 
   // 按引擎能力动态构建:不支持的项直接隐藏(而非禁用)。
-  const schemaItems: { icon: string; label: string; action: () => void }[] = [
+  const schemaItems: { icon: string; label: string; action: () => void; testId?: string }[] = [
     ...(canSqlConsole ? [{ icon: 'terminal', label: t('workbench.newQuery'), action: () => onNewQuery(ns.name) }] : []),
     ...(canEr ? [{ icon: 'network', label: t('workbench.erDiagram'), action: () => onOpenER(ns.name) }] : []),
+    ...(live&&canSqlConsole&&onOpenCompare ? [{ icon:'git-compare', label:t('compare.title'), testId:'wb-compare', action:onOpenCompare }] : []),
     ...(canStructureEdit && onNewObjectTemplate ? [
       { icon: 'table-2', label: t('workbench.newTable'), action: () => onNewObjectTemplate(ns.name, 'table') },
       ...(canViews ? [{ icon: 'eye', label: t('workbench.newView'), action: () => onNewObjectTemplate(ns.name, 'view') }] : []),

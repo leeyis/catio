@@ -9,7 +9,8 @@
 .db-document-tab:focus-visible { outline:2px solid var(--accent-primary); outline-offset:-3px; }
 .db-explorer { background:var(--surface-subtle); min-height:0; }
 .db-explorer-caption { display:flex; align-items:center; gap:7px; padding:12px 11px 2px; font-size:10.5px; font-weight:650; color:var(--text-tertiary); letter-spacing:.04em; }
-.db-explorer .db-new-query { min-width:0; flex:1; justify-content:flex-start; border-radius:5px; background:var(--accent-soft); border-color:color-mix(in srgb,var(--accent-primary) 22%,var(--border-hairline)); color:var(--accent-primary); }
+.db-explorer-caption .db-explorer-commands { width:22px; height:22px; flex:none; margin-left:auto; }
+.db-explorer .db-new-query { min-width:0; flex:1; justify-content:center; border-radius:5px; background:var(--accent-soft); border-color:color-mix(in srgb,var(--accent-primary) 22%,var(--border-hairline)); color:var(--accent-primary); }
 .db-welcome { display:flex; flex-direction:column; align-items:center; justify-content:center; height:100%; gap:14px; padding:32px; text-align:center; color:var(--text-tertiary); }
 .db-welcome > .db-welcome-mark { display:grid; place-items:center; width:52px; height:52px; background:var(--accent-soft); color:var(--accent-primary); border:1px solid var(--border-hairline); border-radius:12px; }
 .db-welcome h2 { margin:0; font-size:20px; font-weight:600; color:var(--text-primary); }
@@ -24,8 +25,12 @@
 .db-query-actions .btn.db-secondary-action:hover:not(:disabled) { background:var(--surface-sunken); }
 .db-run-group { display:flex; align-items:center; gap:0; --metadata-trigger-size:28px; }
 .db-query-actions .db-run-group > .btn.sm { border-radius:4px 0 0 4px; }
-.db-run-group .db-run-menu > button { border-radius:0 4px 4px 0; color:var(--on-accent); background:var(--accent-primary); border-left:1px solid color-mix(in srgb,var(--on-accent) 28%,transparent); }
-.db-run-group .db-run-menu > button:hover { filter:brightness(1.08); }
+/* Own every colored state so .icon-btn.bare:hover cannot wash out the arrow. */
+.db-run-group .db-run-menu > button,
+.db-run-group .db-run-menu > button:hover,
+.db-run-group .db-run-menu > button[aria-expanded="true"] { border-radius:0 4px 4px 0; color:var(--on-accent); background:var(--accent-primary); border-left:1px solid color-mix(in srgb,var(--on-accent) 28%,transparent); }
+.db-run-group .db-run-menu > button:hover:not(:disabled) { filter:brightness(1.08); }
+.db-run-group .db-run-menu > button:focus-visible { outline:2px solid var(--accent-primary); outline-offset:2px; }
 .db-transaction-control { display:flex; align-items:center; flex-wrap:wrap; gap:5px; margin-left:auto; }
 .db-transaction-control[data-state="active"] .btn,.db-transaction-control[data-state="manual"] .btn { color:var(--signal-amber); }
 .db-transaction-control[data-state="failed"] .btn,.db-transaction-control[data-error="true"] .btn { color:var(--danger-fg); }

@@ -51,6 +51,13 @@ it('keeps script execution only in Run options, not duplicated in More actions',
   fireEvent.click(screen.getByRole('button',{name:'Run options'}));expect(screen.getByRole('menuitem',{name:'Run entire script'})).toBeInTheDocument()
   expect(screen.getAllByRole('menuitem')).toHaveLength(1)
 })
+it('only opens the run dropdown on pointer interaction and restores focus on Escape',()=>{
+  mount();const trigger=screen.getByRole('button',{name:'Run options'})
+  fireEvent.mouseEnter(trigger);fireEvent.click(trigger)
+  expect(trigger).toHaveAttribute('aria-expanded','true');expect(screen.getByRole('menuitem',{name:'Run entire script'})).toHaveFocus()
+  expect(api.run).not.toHaveBeenCalled();expect(api.split).not.toHaveBeenCalled()
+  fireEvent.keyDown(screen.getByRole('menu'),{key:'Escape'});expect(trigger).toHaveFocus();expect(trigger).toHaveAttribute('aria-expanded','false')
+})
 it('groups file and clear actions in a keyboard dismissible menu',()=>{
   mount();fireEvent.click(screen.getByRole('button',{name:'More actions'}));expect(screen.getByRole('menu')).toBeInTheDocument();expect(screen.getByRole('menuitem',{name:'Run SQL file'})).toBeInTheDocument();fireEvent.keyDown(screen.getByRole('menu'),{key:'Escape'});expect(screen.queryByRole('menu')).not.toBeInTheDocument()
 })
