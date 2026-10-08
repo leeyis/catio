@@ -40,7 +40,10 @@ fn canned_monitor_output(cmd: &str) -> Option<String> {
              intr 123456789\n\
              ctxt 987654321\n"
         }
-        "cat /proc/meminfo" => {
+        // Composite monitor command: meminfo + `__CATIO_MEMORY_PSI__` marker +
+        // /proc/pressure/memory (upstream e454e0e). starts_with so both the
+        // bare `cat /proc/meminfo` and the composite form are covered.
+        command if command.starts_with("cat /proc/meminfo") => {
             "MemTotal:       16384000 kB\n\
              MemFree:         4096000 kB\n\
              MemAvailable:    8192000 kB\n\
@@ -48,7 +51,10 @@ fn canned_monitor_output(cmd: &str) -> Option<String> {
              Cached:          2048000 kB\n\
              SReclaimable:     256000 kB\n\
              SwapTotal:       4194304 kB\n\
-             SwapFree:        3145728 kB\n"
+             SwapFree:        3145728 kB\n\
+             __CATIO_MEMORY_PSI__\n\
+             some avg10=0.18 avg60=0.12 avg300=0.08 total=1234\n\
+             full avg10=0.03 avg60=0.01 avg300=0.00 total=456\n"
         }
         "cat /proc/net/dev" => {
             "Inter-|   Receive                                                |  Transmit\n\
