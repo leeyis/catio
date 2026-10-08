@@ -110,26 +110,37 @@ async fn list_tools_round_trips_over_local_http() {
     let addr = listener.local_addr().unwrap();
 
     let handle = tokio::spawn(async move {
-        let (mut sock, _) = listener.accept().await.unwrap();
-        let mut buf = vec![0u8; 4096];
-        let _ = sock.read(&mut buf).await.unwrap();
-        // Assert the client sent the auth/accept headers we expect.
-        let req = String::from_utf8_lossy(&buf);
-        assert!(
-            req.to_lowercase()
-                .contains("accept: application/json, text/event-stream"),
-            "missing accept header: {req}"
-        );
-        let body = r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"ping"}]}}"#;
-        let resp = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        let _ = sock.write_all(resp.as_bytes()).await;
+        // Two sequential POSTs per call: the best-effort `initialize`
+        // handshake, then the real `tools/list`.
+        for _ in 0..2 {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = sock.read(&mut buf).await.unwrap();
+            // Assert the client sent the auth/accept headers we expect.
+            let req = String::from_utf8_lossy(&buf);
+            assert!(
+                req.to_lowercase()
+                    .contains("accept: application/json, text/event-stream"),
+                "missing accept header: {req}"
+            );
+            let body = r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"ping"}]}}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+        }
     });
 
-    let client = McpClient::new(reqwest::Client::new());
+    // no_proxy: loopback requests must never traverse a system proxy (macOS
+    // system-configuration support in reqwest routes them through e.g. Clash).
+    let client = McpClient::new(
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("loopback http client"),
+    );
     let tools = client
         .list_tools(&conn(&format!("http://{addr}")))
         .await
@@ -145,28 +156,37 @@ async fn list_tools_sends_bearer_credential() {
     let addr = listener.local_addr().unwrap();
 
     let handle = tokio::spawn(async move {
-        let (mut sock, _) = listener.accept().await.unwrap();
-        let mut buf = vec![0u8; 4096];
-        let _ = sock.read(&mut buf).await.unwrap();
-        let req = String::from_utf8_lossy(&buf);
-        assert!(
-            req.to_lowercase()
-                .contains("authorization: bearer sk-secret"),
-            "missing bearer auth: {req}"
-        );
-        let body = r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}"#;
-        let resp = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        let _ = sock.write_all(resp.as_bytes()).await;
+        // Two sequential POSTs per call: the best-effort `initialize`
+        // handshake, then the real `tools/list`.
+        for _ in 0..2 {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = sock.read(&mut buf).await.unwrap();
+            let req = String::from_utf8_lossy(&buf);
+            assert!(
+                req.to_lowercase()
+                    .contains("authorization: bearer sk-secret"),
+                "missing bearer auth: {req}"
+            );
+            let body = r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+        }
     });
 
     let mut c = conn(&format!("http://{addr}"));
     c.auth = McpAuth::Bearer;
     c.credential = ApiCredential::from("sk-secret".to_string());
-    let client = McpClient::new(reqwest::Client::new());
+    let client = McpClient::new(
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("loopback http client"),
+    );
     let _ = client.list_tools(&c).await.unwrap();
     handle.await.unwrap();
 }
