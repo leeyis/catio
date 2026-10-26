@@ -129,9 +129,8 @@ impl McpInfo {
 
 // ---- server context shared across connections ----
 
-#[derive(Clone)]
-struct ServerCtx {
-    app: AppHandle,
+struct ServerCtx<R: tauri::Runtime = tauri::Wry> {
+    app: AppHandle<R>,
     conns: Arc<StdMutex<Vec<ConnMeta>>>,
     hosts: Arc<StdMutex<Vec<HostMeta>>>,
     token: String,
@@ -144,6 +143,21 @@ struct ServerCtx {
     inflight: Arc<StdMutex<HashMap<String, Arc<AtomicBool>>>>,
 }
 
+// AppHandle is cloneable without requiring the runtime itself to implement Clone.
+impl<R: tauri::Runtime> Clone for ServerCtx<R> {
+    fn clone(&self) -> Self {
+        Self {
+            app: self.app.clone(),
+            conns: self.conns.clone(),
+            hosts: self.hosts.clone(),
+            token: self.token.clone(),
+            whitelist: self.whitelist.clone(),
+            live_log_subscribers: self.live_log_subscribers.clone(),
+            inflight: self.inflight.clone(),
+        }
+    }
+}
+
 fn request_key(id: &Value) -> Option<String> {
     if id.is_null() {
         None
@@ -152,7 +166,7 @@ fn request_key(id: &Value) -> Option<String> {
     }
 }
 
-fn cancel_request(ctx: &ServerCtx, id: &Value) {
+fn cancel_request<R: tauri::Runtime>(ctx: &ServerCtx<R>, id: &Value) {
     let Some(key) = request_key(id) else { return };
     if let Some(flag) = ctx.inflight.lock().unwrap().get(&key) {
         flag.store(true, Ordering::Relaxed);
@@ -214,7 +228,7 @@ fn query_param(query: &str, key: &str) -> Option<String> {
 
 // ---- accept loop ----
 
-async fn serve(listener: TcpListener, ctx: ServerCtx, mut shutdown: watch::Receiver<bool>) {
+async fn serve<R: tauri::Runtime>(listener: TcpListener, ctx: ServerCtx<R>, mut shutdown: watch::Receiver<bool>) {
     loop {
         tokio::select! {
             _ = shutdown.changed() => break,
@@ -229,7 +243,7 @@ async fn serve(listener: TcpListener, ctx: ServerCtx, mut shutdown: watch::Recei
     }
 }
 
-async fn handle_conn(mut stream: TcpStream, ctx: ServerCtx, client_ip: String) {
+async fn handle_conn<R: tauri::Runtime>(mut stream: TcpStream, ctx: ServerCtx<R>, client_ip: String) {
     let mut buf: Vec<u8> = Vec::with_capacity(4096);
     let mut tmp = [0u8; 4096];
 
@@ -384,9 +398,9 @@ async fn write_simple(
 ///
 /// 顺序：Origin（DNS rebinding，spec MUST）→ Accept → 解析 → dispatch。
 /// 通知（无 `id`）按 spec 回 `202 Accepted` 且无 body。
-async fn handle_streamable(
+async fn handle_streamable<R: tauri::Runtime>(
     stream: &mut TcpStream,
-    ctx: &ServerCtx,
+    ctx: &ServerCtx<R>,
     origin: Option<&str>,
     accept: Option<&str>,
     body: &[u8],
@@ -467,7 +481,7 @@ async fn write_json(
 
 // ---- JSON-RPC dispatch (desktop-specific: file log + mcp://log emit gate) ----
 
-async fn dispatch(ctx: &ServerCtx, req: &Value, client_ip: &str) -> Option<Value> {
+async fn dispatch<R: tauri::Runtime>(ctx: &ServerCtx<R>, req: &Value, client_ip: &str) -> Option<Value> {
     let id = req.get("id").cloned();
     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
     let params = req.get("params").cloned().unwrap_or(Value::Null);
@@ -593,14 +607,14 @@ impl core::McpTargets for DesktopTargets {
 
 /// Desktop tool entry: assemble the live managers + a Tauri progress sink over this server's
 /// frontend-synced visible set, then hand off to the shared cancellable core.
-async fn call_tool(
-    ctx: &ServerCtx,
+async fn call_tool<R: tauri::Runtime>(
+    ctx: &ServerCtx<R>,
     name: &str,
     args: &Value,
     cancel: Arc<AtomicBool>,
 ) -> Result<String, String> {
     let cm = ctx.app.state::<crate::db::manager::ConnManager>();
-    let sm = ctx.app.state::<crate::ssh::manager::SessionManager>();
+    let sm = ctx.app.state::<Arc<crate::ssh::manager::SessionManager>>();
     let targets = DesktopTargets { conns: ctx.conns.clone(), hosts: ctx.hosts.clone() };
     let sink: Arc<dyn crate::events::EventSink> = Arc::new(crate::events::TauriSink(ctx.app.clone()));
     core::call_tool_cancellable(
@@ -731,7 +745,7 @@ impl McpLogEntry {
 
 /// Emit one structured live-log entry while at least one desktop listener owns a subscription.
 /// File logging remains separate and unconditional (done by log_event), which also backs replay.
-fn emit_log(ctx: &ServerCtx, kind: &str, ip: &str, detail: Value) {
+fn emit_log<R: tauri::Runtime>(ctx: &ServerCtx<R>, kind: &str, ip: &str, detail: Value) {
     if ctx.live_log_subscribers.load(Ordering::Relaxed) == 0 {
         return;
     }
@@ -1000,6 +1014,47 @@ pub fn mcp_token_refresh(state: State<'_, McpState>) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn desktop_tools_use_registered_shared_session_manager() {
+        // Match run(): SSH sessions are shared with the Agent and scheduler via Arc.
+        // Testing only core::call_tool bypasses the desktop state lookup that crashed.
+        let app = tauri::test::mock_builder()
+            .manage(Arc::new(crate::ssh::manager::SessionManager::default()))
+            .manage(crate::db::manager::ConnManager::default())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let ctx = ServerCtx {
+            app: app.handle().clone(),
+            conns: Arc::new(StdMutex::new(Vec::new())),
+            hosts: Arc::new(StdMutex::new(vec![HostMeta {
+                session_id: "ssh-test".into(),
+                name: "test-server".into(),
+                host: "example.test".into(),
+            }])),
+            token: "test-token".into(),
+            whitelist: Arc::new(StdMutex::new(Vec::new())),
+            live_log_subscribers: Arc::new(AtomicUsize::new(0)),
+            inflight: Arc::new(StdMutex::new(HashMap::new())),
+        };
+
+        // Repeat calls on the same desktop context, as an external deployment Agent does.
+        for id in 1..=3 {
+            let response = dispatch(&ctx, &json!({
+                "jsonrpc": "2.0", "id": id, "method": "tools/call",
+                "params": { "name": "list_hosts", "arguments": {} }
+            }), "127.0.0.1").await.unwrap();
+            assert_eq!(response["id"], id);
+            assert_eq!(response["result"]["isError"], false);
+            let hosts: Value = serde_json::from_str(
+                response["result"]["content"][0]["text"].as_str().unwrap()
+            ).unwrap();
+            assert_eq!(hosts, json!({ "hosts": [{
+                "sessionId": "ssh-test", "name": "test-server", "host": "example.test"
+            }] }));
+            assert!(ctx.inflight.lock().unwrap().is_empty());
+        }
+    }
 
     #[test]
     fn parses_live_log_replay_entry() {

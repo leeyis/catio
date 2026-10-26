@@ -16,9 +16,9 @@ pub trait EventSink: Send + Sync {
 
 /// Desktop sink: forward to the Tauri webview event bus. Compiled into `catio_lib` (which always
 /// depends on `tauri`); the web `catio-server` binary links it but never constructs it.
-pub struct TauriSink(pub tauri::AppHandle);
+pub struct TauriSink<R: tauri::Runtime = tauri::Wry>(pub tauri::AppHandle<R>);
 
-impl EventSink for TauriSink {
+impl<R: tauri::Runtime> EventSink for TauriSink<R> {
     fn emit(&self, topic: &str, payload: Value) {
         use tauri::Emitter;
         let _ = self.0.emit(topic, payload);

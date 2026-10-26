@@ -105,6 +105,8 @@ opt-level = "s"
 strip = true
 
 [dev-dependencies]
+# Exercise the desktop MCP adapter with real managed state, without opening a WebView.
+tauri = { version = "2", features = ["test"] }
 base64 = "0.22.1"
 parking_lot = "0.12"
 tempfile = "3"
